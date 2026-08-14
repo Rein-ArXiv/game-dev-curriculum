@@ -1,0 +1,26 @@
+# 빌드 산출물
+build/
+out/
+*.obj
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.exp
+
+# 게임이 생성하는 런타임 아티팩트
+*.ppm
+*.wal
+*.spv
+
+# 검사 스크립트 부산물
+__pycache__/
+*.pyc
+
+# IDE
+.vs/
+.vscode/
+.idea/
+CMakeSettings.json
+CMakeUserPresets.json

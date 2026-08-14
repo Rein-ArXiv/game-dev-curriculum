@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (CMake, Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Test (ctest)
+        run: ctest --test-dir build -C Release --output-on-failure
+
+# Vulkan SDK가 없는 러너에서는 GDI 표시 경로만 빌드된다. CI는 창을 열지 않고
+# mega_defense --selftest와 엔진·게임 테스트를 실행한다.

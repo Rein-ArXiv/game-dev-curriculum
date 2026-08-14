@@ -1,0 +1,704 @@
+## 들어가며
+
+system_kernel_lab은 backend·sync·sched·ctx·workers 다섯 토글을 가진 측정 도구가 됐다. IO 모델 5종, 동기화 4종, 스케줄링 4종, 컨텍스트 모델 2종을 같은 워크로드 위에서 바꿀 수 있다. 그러나 측정 채널은 *cycle ms · throughput* 두 가지뿐이다. 토글이 *어떻게* ms를 바꾸는지는 그래프에 나오지만, 그 변화의 *원인 — 시스템 콜 횟수, 컨텍스트 스위치, 페이지 폴트 — 은 측정에 보이지 않는다*.
+
+이 단계의 목표는 *측정 채널 확장* 이다. `getrusage(RUSAGE_SELF)` 로 매 사이클 *컨텍스트 스위치 수* 와 *페이지 폴트 수* 를 직접 측정하고, HUD에 두 그래프를 추가한다. 사용자가 토글을 바꾸면 *이 두 채널이 어느 토글에 어떻게 반응하는지* 가 같은 화면에 그려진다. 마지막으로 *전체 사용 시나리오 + perf/strace/ftrace 외부 도구 결합 + 측정 정직성* 을 정리한다.
+
+이 단계의 결과물은 다음 다섯 가지다.
+
+1. `ProcCounters` + `ReadProcCounters` / `DiffCounters` (`measure/proc_counters.h`).
+2. `FrameTimer` 슬라이딩 윈도우에 ctxSwitches / pageFaults 채널 두 개 추가.
+3. main 루프에서 사이클 시작·끝에 카운터 읽고 delta를 FrameTimer에 push.
+4. HUD에 두 stats 라인 + 두 그래프 추가, 패널 높이 200 → 240.
+5. 도구 사용 시나리오 + 외부 도구 결합 + 측정 정직성 정리.
+
+코드 스니펫은 핵심 경로만 보인다. 오류 처리와 보조 함수는 통합 코드에 있다.
+
+---
+
+## 목차
+
+1. 왜 cycle ms 외에 직접 카운터가 필요한가
+2. getrusage vs perf_event_open
+3. ProcCounters와 사이클 단위 delta
+4. FrameTimer 채널 확장
+5. HUD 그래프 네 개와 패널 재배치
+6. 도구 사용 시나리오 — 어떤 토글로 무엇을 보는가
+7. 외부 도구 결합 — strace · perf · ftrace
+8. 측정의 정직성 — 도구가 알려주지 않는 것
+9. 최종 코드의 계약 — 폴백 보고 · 워커 오류 전파 · 자동 테스트
+10. 결론
+
+---
+
+## 1. 왜 cycle ms 외에 직접 카운터가 필요한가
+
+cycle ms 그래프는 *결과* 를 보여 준다. *원인* 은 그래프에 안 나온다.
+
+같은 cycle ms 18 ms 가 다음 두 가지에서 모두 나올 수 있다.
+
+- 시나리오 A: 시스템 콜 100 회 + 컨텍스트 스위치 거의 없음 + 페이지 폴트 4096
+- 시나리오 B: 시스템 콜 30 회 + 컨텍스트 스위치 200 + 페이지 폴트 100
+
+같은 ms지만 *왜 그 ms가 나오는지* 가 다르다. cycle ms만 보면 두 시나리오를 구분 못 한다. 토글 변경의 *원인* 을 추적하려면 *원인 채널* 도 함께 봐야 한다.
+
+### 이 lab이 추가하는 두 채널
+
+- **ctx switches per cycle**: 한 사이클 동안 발생한 컨텍스트 스위치 수 (voluntary + involuntary 합산).
+- **page faults per cycle**: 한 사이클 동안 발생한 페이지 폴트 수 (minor + major 합산). minor fault는 COW, zero-fill, page-cache 매핑처럼 디스크 IO 없이 처리된 fault도 포함한다.
+
+이 둘이 토글에 어떻게 반응하는지를 본다.
+
+| 토글 변경 | cycle ms | ctx switches | page faults |
+|---|---|---|---|
+| backend: read → mmap | 비슷 | 비슷 | *증가* (mmap 접근이 page fault 경로를 거침) |
+| backend: read → io_uring | 비슷 또는 ↓ | 비슷 | 비슷 |
+| sync: mutex → spinlock | 비슷 | *감소 가능* (futex wait를 피할 수 있지만 yield 비용이 섞임) |
+| sched: default → SCHED_FIFO + 부하 | ↓ | *감소* (선점 안 당함) | 비슷 |
+| workers: 1 → 4 | ↓ | *증가* (4 스레드 간 스케줄러 전환) | 비슷 |
+| ctx: pthread → coroutine | *증가* | *대폭 감소* (커널 스케줄러 안 거침) | 비슷 |
+
+*같은 ms* 라도 *원인 분포* 가 다르다는 게 두 채널이 보여 주는 정보다.
+
+특히 **ctx: pthread → coroutine** 케이스는 두 채널이 *반대 방향* 으로 움직이는 가장 명확한 사례다. cycle ms는 *증가* (코루틴이 더 느림) 하지만 ctx switches per cycle은 *대폭 감소* (커널 스케줄러를 거의 안 거침). 이게 *코루틴의 본질을 측정으로 드러내는* 신호다 — 컨텍스트 스위치는 싸지만 단일 스레드 직렬이라 처리량이 손해.
+
+## 2. getrusage vs perf_event_open
+
+Linux에서 *프로세스 단위 카운터* 를 얻는 두 가지 표준 방법.
+
+### getrusage(2)
+
+```cpp
+#include <sys/resource.h>
+struct rusage r;
+getrusage(RUSAGE_SELF, &r);
+// r.ru_nvcsw, r.ru_nivcsw, r.ru_minflt, r.ru_majflt, ...
+```
+
+- 장점: 모든 사용자, 모든 환경에서 동작. 권한 부담 없음.
+- 단점: 카운터 종류 제한적 (ctx-sw, page faults, max RSS 등). 하드웨어 카운터(IPC, 캐시 미스) 없음.
+
+### perf_event_open(2)
+
+```cpp
+#include <linux/perf_event.h>
+perf_event_attr attr{};
+attr.type   = PERF_TYPE_HARDWARE;
+attr.config = PERF_COUNT_HW_INSTRUCTIONS;
+int fd = syscall(SYS_perf_event_open, &attr, 0, -1, -1, 0);
+```
+
+- 장점: 풍부한 카운터(instructions, cycles, cache-misses, branch-misses, ...).
+- 단점: `/proc/sys/kernel/perf_event_paranoid` 가 2 이하여야 일반 사용자가 자기 프로세스 측정 가능. Ubuntu 22.04 기본값은 4라 *기본은 막혀 있다*.
+
+### 이 lab의 선택: getrusage
+
+이 lab은 *환경 호환성* 을 우선해 getrusage를 쓴다. 모든 사용자가 권한 셋업 없이 측정 가능. perf_event_open은 *외부 perf 도구* 와 결합해 더 풍부한 분석을 보충하는 패턴으로 둔다.
+
+```cpp
+// src/measure/proc_counters.h
+
+struct ProcCounters {
+    long voluntaryCtxSw    = 0;  // ru_nvcsw
+    long involuntaryCtxSw  = 0;  // ru_nivcsw
+    long minorFaults       = 0;  // ru_minflt: 디스크 IO 없는 fault
+    long majorFaults       = 0;  // ru_majflt: 디스크 IO가 필요한 fault
+};
+
+ProcCounters ReadProcCounters();
+
+inline ProcCounters DiffCounters(const ProcCounters& a, const ProcCounters& b) {
+    auto d = [](long x, long y) -> long { return (y > x) ? (y - x) : 0; };
+    return ProcCounters{
+        d(a.voluntaryCtxSw,    b.voluntaryCtxSw),
+        d(a.involuntaryCtxSw,  b.involuntaryCtxSw),
+        d(a.minorFaults,       b.minorFaults),
+        d(a.majorFaults,       b.majorFaults),
+    };
+}
+```
+
+### 두 가지 ctx switch의 의미
+
+`ru_nvcsw` 와 `ru_nivcsw` 는 다음을 구분한다.
+
+- **voluntary**: 스레드가 *스스로 양보* — IO 대기, mutex/futex wait, sleep, yield.
+- **involuntary**: 스케줄러가 *시간 다 됐다고 빼앗음* — time slice 만료, 더 높은 우선순위 스레드가 들어옴.
+
+이 lab의 워크로드는 IO 대기 + sync wait가 많아 *voluntary가 압도적*. SCHED_FIFO + 부하 시나리오에서는 *involuntary가 줄어드는* (선점 안 당함) 변화가 보일 수 있다.
+
+표시는 *합산값* 한 라인. 더 자세한 분석은 *외부 perf* 로.
+
+## 3. ProcCounters와 사이클 단위 delta
+
+main 루프의 측정 패턴.
+
+```cpp
+// src/main.cpp 일부
+
+timer.BeginCycle();
+const skl::ProcCounters before = skl::ReadProcCounters();
+const std::uint64_t bytes = workload.RunCycle();
+const skl::ProcCounters after = skl::ReadProcCounters();
+const skl::ProcCounters delta = skl::DiffCounters(before, after);
+const std::uint64_t ctxSwTotal = static_cast<std::uint64_t>(
+    delta.voluntaryCtxSw + delta.involuntaryCtxSw);
+const std::uint64_t faultsTotal = static_cast<std::uint64_t>(
+    delta.minorFaults + delta.majorFaults);
+timer.EndCycle(bytes, ctxSwTotal, faultsTotal);
+```
+
+세 가지 결정 포인트.
+
+1. **사이클 시작·끝 두 번 읽기**: 카운터의 절대값이 아니라 *delta* 를 본다. 프로세스 시작부터 누적된 카운터에서 *이 사이클 동안 늘어난 분* 만 추출.
+2. **ReadProcCounters 비용**: `getrusage` 호출 한 번. 사이클당 두 번 추가되며 보통 마이크로초 단위라 프레임 단위 cycle ms 측정에는 영향이 작다.
+3. **합산 표시**: voluntary + involuntary, minor + major를 *합산* 해 단순화. minor fault는 COW, zero-fill, page-cache 매핑 등을 포함하므로 “mmap 데이터 적재” 하나로만 해석하지 않는다. 분리 표시는 *외부 perf 도구* 가 더 적합.
+
+### 측정 시점의 일관성
+
+`ReadProcCounters` 호출이 정확히 *RunCycle 직전·직후* 라 사이클 ms 측정과 *같은 구간* 의 카운터 delta를 얻는다. ImGui 렌더링이나 SDL 이벤트 폴링은 사이클 밖이라 카운터에 안 들어간다.
+
+## 4. FrameTimer 채널 확장
+
+`FrameTimer` 가 두 추가 채널을 슬라이딩 윈도우로 보관.
+
+```cpp
+// src/measure/frame_timer.h 일부
+
+class FrameTimer {
+public:
+    void BeginCycle();
+    void EndCycle(std::uint64_t bytesProcessed,
+                  std::uint64_t ctxSwitchesDelta = 0,
+                  std::uint64_t pageFaultsDelta  = 0);
+
+    const std::array<float, kCapacity>& CycleMs()       const;
+    const std::array<float, kCapacity>& ThroughputMBs() const;
+    const std::array<float, kCapacity>& CtxSwitches()   const;
+    const std::array<float, kCapacity>& PageFaults()    const;
+
+    float LastCtxSwitches() const;
+    float LastPageFaults()  const;
+    // ...
+};
+```
+
+기본 인자 0이라 *step01의 호출 형태(`EndCycle(bytes)`)도 그대로* 컴파일된다 — 호환성 유지. 새 코드만 추가 인자를 채운다.
+
+```cpp
+// src/measure/frame_timer.cpp 일부
+
+void FrameTimer::EndCycle(std::uint64_t bytesProcessed,
+                            std::uint64_t ctxSwitchesDelta,
+                            std::uint64_t pageFaultsDelta) {
+    const auto end = Clock::now();
+    const auto ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        end - cycleStart_).count();
+    const float ms = static_cast<float>(ns) / 1.0e6f;
+
+    lastCycleMs_     = ms;
+    lastBytes_       = bytesProcessed;
+    lastThroughputMBs_ = (ms > 0.0f)
+        ? static_cast<float>(bytesProcessed) / ms / 1000.0f : 0.0f;
+    lastCtxSwitches_ = static_cast<float>(ctxSwitchesDelta);
+    lastPageFaults_  = static_cast<float>(pageFaultsDelta);
+
+    cycleMs_[head_]       = lastCycleMs_;
+    throughputMBs_[head_] = lastThroughputMBs_;
+    ctxSwitches_[head_]   = lastCtxSwitches_;
+    pageFaults_[head_]    = lastPageFaults_;
+    head_ = (head_ + 1) % kCapacity;
+    if (filled_ < kCapacity) ++filled_;
+
+    ++totalCycles_;
+    totalBytes_ += bytesProcessed;
+}
+```
+
+float로 보관하는 이유는 *PlotLines가 float 배열을 받기* 때문. 정수 카운터지만 그래프 표시용 float 배열에 그대로 저장.
+
+## 5. HUD 그래프 네 개와 패널 재배치
+
+HUD 패널 높이를 200 → 240 px로 늘려 그래프 네 개가 들어가도록 한다.
+
+```cpp
+constexpr float kPanelH = 240.0f;
+```
+
+stats 영역에 두 라인 추가.
+
+```text
+backend     : read
+sync        : mutex
+sched req   : default
+sched apply : yes
+ctx         : pthread
+workers     : 4
+files       : 16  x  1.05 MB
+cycle ms    :   8.124
+throughput  :  2065.4 MB/s
+ctx-sw/cyc  :     128
+faults/cyc  :       8
+total cycles: 312
+total MB    : 5236.5
+fixture dir : /tmp/system_kernel_lab_data
+```
+
+### 그래프 영역
+
+기존 두 그래프(cycle ms, throughput)에 두 그래프(ctx switches, page faults)를 더해 네 개. 각 그래프 높이를 70 → 38 px로 줄여 240 px 패널에 들어가게 한다.
+
+```cpp
+// src/ui/hud.cpp 일부
+
+ImGui::PlotLines("cycle ms",     msSeries, ..., 0.0f, FLT_MAX, ImVec2(0, 38));
+ImGui::PlotLines("throughput",   tpSeries, ..., 0.0f, FLT_MAX, ImVec2(0, 38));
+ImGui::PlotLines("ctx switches", csSeries, ..., 0.0f, FLT_MAX, ImVec2(0, 38));
+ImGui::PlotLines("page faults",  pfSeries, ..., 0.0f, FLT_MAX, ImVec2(0, 38));
+```
+
+각 그래프의 overlay 텍스트가 *현재 값* 을 보여 주므로 그래프가 작아져도 정확한 수치를 본다.
+
+```mermaid
+flowchart LR
+    L["좌 340px<br/>stats 텍스트<br/>14 줄"]
+    M["중 260px<br/>5개 콤보"]
+    R["우 나머지<br/>4 그래프<br/>각 38px"]
+    L --- M --- R
+```
+
+## 6. 도구 사용 시나리오
+
+이 절은 system_kernel_lab을 *어떻게 쓸 것인가* 의 시나리오. 토글 5축을 모두 곱하면 가짓수가 너무 많아 *축 하나만 바꾸는* 시나리오들이 의미 있는 비교다.
+
+### 시나리오 A — IO 모델의 시스템 콜 비용
+
+```text
+backend    = read → pread → mmap → io_uring
+sync       = mutex
+sched      = default
+ctx        = pthread
+workers    = 1
+```
+
+cycle ms와 ctx-sw 두 채널을 본다. read와 pread는 거의 같다 (같은 시스템 콜 코드 경로). mmap은 *page faults 채널이 증가* — 매핑된 페이지를 처음 만질 때 fault 경로를 거친다. io_uring은 제출·완료 경계를 묶어 시스템 콜 전환을 줄일 수 있지만, 이 lab의 작은 워크로드에서는 cycle ms 차이가 미세할 수 있다.
+
+### 시나리오 B — 동기화 4종
+
+```text
+backend    = read
+sync       = mutex → spinlock → futex → atomic CAS
+sched      = default
+ctx        = pthread
+workers    = 4
+```
+
+cycle ms는 거의 같다 (uncontended fast path). ctx-sw 채널을 보면 *spinlock + atomic CAS* 가 *mutex + futex* 보다 살짝 적을 수 있다. 다만 이 lab의 spin/CAS 구현은 contended path에서 `yield` 를 쓰므로 순수 busy spin 비용만 보이지 않는다. uncontended가 대부분이라 차이가 노이즈에 묻히기 쉽다.
+
+### 시나리오 C — 워커 수와 컨텍스트 스위치
+
+```text
+backend    = read
+sync       = mutex
+sched      = default
+ctx        = pthread
+workers    = 1 → 2 → 4 → 8
+```
+
+cycle ms는 워커 수에 따라 *감소* (병렬 효과). ctx-sw 채널은 *증가* — 4 워커 + driver thread가 코어를 나눠 받느라 컨텍스트 스위치가 늘어난다. workers = 8에서는 *코어 수보다 워커가 많아* 추가 ctx-sw가 발생.
+
+### 시나리오 D — pthread vs coroutine
+
+```text
+backend    = read
+sync       = mutex
+sched      = default
+ctx        = pthread → coroutine
+workers    = 4
+```
+
+cycle ms는 *증가* (코루틴 모드는 단일 스레드 직렬). 그러나 ctx-sw 채널은 *대폭 감소* — 코루틴 swap이 커널을 안 거치고 유저 공간 register save/restore 만으로 끝난다. 이 *반대 방향 변화* 가 코루틴의 본질을 가장 명확히 드러낸다.
+
+이 시나리오를 그래프로 보면 cycle ms는 위로, ctx-sw는 아래로 *X자로 갈라진다*. cycle ms만 볼 때보다 *왜* 코루틴이 다른지가 한 화면에 나온다.
+
+### 시나리오 E — 부하 환경에서 sched 비교
+
+```bash
+# 별도 터미널에서 부하 생성
+stress-ng --cpu $(nproc) --timeout 60s &
+
+# 도구 실행 (CAP_SYS_NICE 필요)
+sudo setcap cap_sys_nice+ep ./build/system_kernel_lab
+./build/system_kernel_lab
+```
+
+```text
+backend    = read
+sync       = mutex
+sched      = default → nice +10 → SCHED_FIFO
+ctx        = pthread
+workers    = 4
+```
+
+부하 상태에서 sched 토글 변화.
+
+- **default + 부하**: cycle ms 증가, *involuntary ctx-sw 증가* (CFS가 stress-ng와 워커를 번갈아 돌림).
+- **nice +10 + 부하**: cycle ms 더 증가 (양보 많이).
+- **SCHED_FIFO + 부하**: 권한과 코어 상황이 맞으면 cycle ms가 부하 없을 때에 가까워질 수 있다. ctx-sw가 *감소* (SCHED_FIFO가 stress-ng보다 우선 실행). page faults 거의 변화 없음.
+
+세 토글이 *같은 부하* 에서 *cycle ms와 ctx-sw 채널이 같이* 변하는 모습이 한 그래프에 보인다.
+
+### 시나리오 F — backend × workers 동시 변경
+
+```text
+backend    = io_uring
+sync       = mutex
+ctx        = pthread
+workers    = 1 → 4
+```
+
+io_uring은 여러 read 요청의 *제출 경계* 를 묶을 수 있다. workers = 1 일 때 한 ring에서 여러 SQE를 제출하고 완료를 회수한다. workers = 4 일 때는 *워커당 자기 ring 4 개* 를 쓰므로 제출·완료 대기 지점이 워커 수만큼 늘어난다. ctx-sw도 그 영향을 받는다.
+
+이 시나리오는 io_uring 자체의 한계라기보다 *워커당 ring* 구조의 비용을 보여 준다. 같은 워크로드를 *공유 ring + 다중 워커가 같은 ring에 SQE submit* 하는 패턴으로 바꾸면 제출·완료 경계가 줄어들 수 있다. 이 lab은 단순성을 위해 *워커당 ring* 패턴을 쓴다.
+
+## 7. 외부 도구 결합 — strace · perf · ftrace
+
+이 lab의 두 채널 (ctx-sw, page faults) 은 *대표 카운터* 다. 더 깊은 분석은 외부 도구로 보충한다.
+
+### strace — 시스템 콜 카운트 + 시간
+
+```bash
+# 실행 중인 도구의 PID 찾기
+PID=$(pgrep system_kernel_lab)
+
+# 30초 동안 시스템 콜 통계
+sudo strace -c -p $PID -f &
+sleep 30
+kill %1
+```
+
+출력:
+
+```text
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+ 35.21    0.124851           4     27840           futex
+ 22.10    0.078341           5     14080           read
+ 18.55    0.065772           4     14080           openat
+ 12.87    0.045621           3     14080           close
+  ...
+```
+
+이 표가 *각 시스템 콜의 호출 횟수와 누적 시간* 을 보여 준다. 토글 변경 직후 30초 측정하면 *어느 시스템 콜이 늘었는지* 정확히 안다. read/pread/mmap/aio/io_uring 비교의 *원인 분석* 에 강력.
+
+다만 strace 자체가 *ptrace 기반이라 도구 실행을 느리게 한다* — strace 부착 상태에서 측정한 cycle ms는 신뢰하지 않는다. *카운트만* 본다.
+
+### perf stat — 하드웨어 카운터
+
+```bash
+sudo perf stat -p $PID -e cycles,instructions,cache-misses,branch-misses sleep 30
+```
+
+```text
+       8,128,475,290      cycles
+      12,058,213,887      instructions    #    1.48  insn per cycle
+         128,471,002      cache-misses
+          24,156,883      branch-misses
+```
+
+IPC, 캐시 미스, 분기 미스 같은 *마이크로아키텍처 지표*. 우리 도구의 ctx-sw / page-faults 채널이 *시스템 단위* 라면 perf는 *CPU 단위*. 두 차원이 보충적이다.
+
+### perf record + perf report — 시간이 어디 가는지
+
+```bash
+sudo perf record -p $PID -F 99 sleep 30
+sudo perf report --stdio
+```
+
+함수별 *소요 시간* 분포가 트리로 나온다. cycle ms가 늘어났을 때 *어느 함수* 가 늘었는지 즉시 안다.
+
+### trace-cmd / ftrace — 스케줄링 이벤트 타임라인
+
+```bash
+sudo trace-cmd record -e sched_switch -p $PID sleep 5
+sudo trace-cmd report > trace.txt
+```
+
+`sched_switch` 이벤트가 *어느 시점에 어느 워커가 코어에 올라갔는지* 의 타임라인. SCHED_FIFO 시나리오에서 *워커가 stress-ng를 선점하는 순간* 이 timestamps로 나온다.
+
+WSL2의 ftrace는 *커널 빌드 옵션* 에 따라 일부 트레이서가 빠져 있을 수 있다. `cat /sys/kernel/debug/tracing/available_tracers` 로 확인. 안 되면 perf record로 대체 가능.
+
+### 도구 결합 패턴
+
+이 lab의 cycle ms 그래프에서 *변화 시점* 을 본다 → 그 시점에 strace/perf 로 *어떤 시스템 콜·함수* 가 변했는지 확인 → 분석 근거로 남긴다.
+
+```mermaid
+flowchart LR
+    Lab[system_kernel_lab<br/>cycle ms · ctx-sw · faults] --> Where[변화 시점 포착]
+    Where --> Strace[strace -c<br/>시스템 콜 카운트]
+    Where --> Perf[perf stat<br/>IPC · 캐시 미스]
+    Where --> Trace[trace-cmd<br/>스케줄링 타임라인]
+    Strace --> Article[분석 근거]
+    Perf --> Article
+    Trace --> Article
+```
+
+## 8. 측정의 정직성 — 도구가 알려주지 않는 것
+
+system_kernel_lab을 다 만들고 나면 도구가 *말해주는 것* 만 보고 결론을 낸다. 그러나 측정은 늘 *어떤 차원* 만 본다. 이 절은 도구가 *말해주지 않는* 것들의 목록.
+
+### 도구가 보는 것 vs 못 보는 것
+
+| 차원 | 보는가 | 보는 채널 |
+|---|---|---|
+| 사이클 ms · throughput | O | cycle ms / throughput |
+| 컨텍스트 스위치 카운트 | O | ctx switches per cycle |
+| 페이지 폴트 카운트 | O | page faults per cycle |
+| 시스템 콜 카운트 | X | 외부 strace -c |
+| 시스템 콜별 시간 | X | 외부 strace -c |
+| IPC · 캐시 미스 | X | 외부 perf stat |
+| 함수별 시간 분포 | X | 외부 perf record |
+| 스케줄링 타임라인 | X | 외부 ftrace / trace-cmd |
+| 디스크 IO 큐 깊이 | X | 외부 iostat / blktrace |
+| 네트워크 (이 도구 무관) | - | - |
+
+이 lab은 *시스템 단위 카운터* 까지가 책임. *CPU 단위 마이크로아키텍처* · *스케줄링 타임라인* · *함수 hot path* 는 외부 도구로.
+
+### 워크로드의 인공성
+
+이 lab의 워크로드는 *16 파일 × 1 MB read + sampled checksum* 으로 고정. 실제 시스템 환경의 IO 패턴과 다르다.
+
+- **파일 수가 작다** — 16 개. 게임 엔진의 에셋 로딩은 수백~수만 파일.
+- **파일 크기 균일** — 모두 1 MB. 실제는 수 KB ~ 수백 MB 분포.
+- **순차 read 후 종료** — 패턴이 단조롭다. 실제는 random access, partial read 등 복잡.
+- **가공이 매우 가볍다** — 4 KB stride 한 바이트 합산. 실제는 압축 해제, 파싱 등.
+
+도구의 측정값을 *실제 시스템에 그대로 적용* 하지 않는다. *상대 비교 + 방향성* 만 인용한다.
+
+### 페이지 캐시 효과
+
+워크로드가 16 MB 라 페이지 캐시에 모두 들어간다. 첫 사이클은 콜드 IO, 두 번째 사이클부터 *캐시 hit*. 측정값은 *캐시 hit 시나리오* 의 결과다.
+
+캐시 영향을 깨려면:
+
+```bash
+# 페이지 캐시 비우기 (root 필요)
+sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
+./build/system_kernel_lab
+```
+
+도구를 시작한 직후 몇 사이클에는 *디스크 IO 비용* 이 측정에 들어올 수 있고, 두 번째 사이클부터는 페이지 캐시 hit가 지배할 수 있다.
+
+현재 도구는 파일 크기로 페이지 캐시 용량을 확실히 넘기는 조건을 자동으로 만들지 않는다. 콜드 IO를 주장하려면 캐시 상태와 작업 집합 크기를 별도로 통제하고 기록해야 한다.
+
+### 단일 머신 단일 빌드
+
+이 lab의 측정값은 *이 머신 + 이 빌드* 결과다. WSL2 vs native Linux, Intel vs AMD, 커널 5.15 vs 6.5 모두 결과가 다를 수 있다.
+
+대응: *벤치는 타깃에서 잰다*. 도구가 어디서나 빌드되는 게 가치인 이유 — 사용자 자신의 머신에서 자신의 워크로드로 직접 측정.
+
+### 측정의 측정 비용
+
+`getrusage` 호출이 마이크로초 단위 비용. 사이클당 두 번 = 2 마이크로초가 cycle ms에 더해진다. cycle ms가 5 ms 정도면 측정 비용은 *0.04% 노이즈* — 무시할 수준. 그러나 cycle ms가 *0.1 ms 이하* 인 마이크로 측정에서는 측정 비용이 *측정값의 일부* 가 된다.
+
+도구는 *프레임 단위 측정* 이 목적이라 이 정도 오차는 허용. 진짜 마이크로 벤치는 *RDTSC* 같은 사이클 카운터를 직접 쓰거나 Google Benchmark 같은 도구.
+
+### 카운터 정확성
+
+`ru_nvcsw` / `ru_nivcsw` 가 *모든 컨텍스트 스위치* 를 정확히 카운트하는가? 커널 구현에 따라 미세한 차이가 있고, 일부 트레이스 이벤트(예: signal delivery 동안의 짧은 ctx-sw)가 빠질 수 있다. perf stat의 `context-switches` 와 비교하면 *대체로 같지만 완전히 일치하지는 않을* 수 있다.
+
+이 lab의 측정은 *상대 비교* 가 핵심이라 절대값의 미세한 차이는 무시한다. 토글 A → B의 ctx-sw 변화가 *방향성과 비율* 로 의미가 있다.
+
+### 측정 자체가 시스템에 영향
+
+WSL2의 GUI 도구가 도는 것 자체가 *시스템 부하* 다. 다른 *측정 외 작업* 이 같은 시스템에서 돌면 측정에 영향. 가장 깨끗한 측정은:
+
+- 다른 GUI 앱 모두 종료.
+- 백그라운드 인덱싱·업데이트 끄기.
+- WSL2면 다른 distribution 종료.
+- 전원 어댑터 연결 (배터리 모드는 CPU 클럭 다운).
+
+다만 *완벽한 격리* 는 비용이 크다. 도구는 *상대 비교* 가 본질이라 일반 사용 환경에서도 의미 있는 결과가 나온다.
+
+### 도구가 깨질 수 있는 시나리오
+
+워크로드 + 토글 조합에서 도구가 *측정 못 하는* 케이스.
+
+- **io_uring + workers = 8**: 워커당 ring 8 개. 시스템 file descriptor 한도 초과 가능.
+- **mmap + 1 GB 파일**: 파일이 페이지 캐시에 안 들어가 *major page fault 폭증* — page faults 채널이 정상 영역을 벗어나 그래프 자동 스케일이 깨질 수 있음.
+- **SCHED_FIFO + workers = 8 + busy polling**: 워커 8 개가 *시스템을 점유* 해 GUI 메인 freeze. 도구가 응답 안 함.
+
+대응은 *워커 수 제한 + idle 구간의 짧은 sleep* 이지만, 모든 조합에서 안전을 보장하지는 않는다. *위험 조합* 은 글로 안내.
+
+## 9. 최종 코드의 계약 — 폴백 보고 · 워커 오류 전파 · 자동 테스트
+
+앞 절들이 스니펫으로 보인 것 외에, 최종 코드에는 *측정 결과의 해석에 직접 영향을 주는* 세 가지 계약이 있다.
+
+### CreateBackend는 실제로 만들어진 backend를 돌려준다
+
+factory는 요청한 backend를 만들지 못하면 `ReadBackend` 로 폴백한다. 폴백이 일어났는데 HUD가 *요청 값* 을 그대로 표시하면, 사용자는 read로 돈 결과를 io_uring 결과로 읽는다. 그래서 시그니처가 out 파라미터를 갖는다.
+
+```cpp
+// src/io/io_backend_factory.h
+
+// type에 해당하는 backend 인스턴스를 만든다. 요청한 backend가 런타임에
+// 초기화되지 않으면 ReadBackend로 폴백하고 actualType에 실제 타입을 쓴다.
+// 호출자는 요청 타입이 아니라 actualType을 HUD와 측정 메타데이터에 기록해야 한다.
+std::unique_ptr<IIoBackend> CreateBackend(
+    BackendType type, BackendType* actualType = nullptr);
+```
+
+워크로드는 backend를 만들 때마다 이 out 값을 자기 상태에 되반영한다. 단일 모드·워커 풀·코루틴 풀 세 곳이 같은 헬퍼를 쓴다.
+
+```cpp
+// src/workload/file_io_workload.cpp
+
+std::unique_ptr<IIoBackend> FileIoWorkload::CreateEffectiveBackend() {
+    BackendType actual = backendType_;
+    auto backend = CreateBackend(backendType_, &actual);
+    backendType_ = actual;
+    return backend;
+}
+```
+
+`Backend()` 가 돌려주는 값이 *요청* 이 아니라 *실제* 라서, HUD의 `backend` 라인은 io_uring을 골랐어도 폴백이 일어나면 `read` 로 바뀐다.
+
+### 워커 스레드의 예외는 메인으로 전파된다
+
+워커 루프에서 backend가 던진 예외를 그 자리에서 놓치면 사이클은 조용히 짧은 결과를 내고 그래프는 *더 빨라진 것처럼* 보인다. 워커는 예외를 잡아 보관하고, 사이클을 기다리던 메인이 다시 던진다.
+
+```cpp
+// src/workload/file_io_workload.cpp
+
+void FileIoWorkload::ClearWorkerError() {
+    std::lock_guard<std::mutex> lock(workerErrorMutex_);
+    workerError_ = nullptr;
+}
+
+void FileIoWorkload::RecordWorkerError(std::exception_ptr error) {
+    std::lock_guard<std::mutex> lock(workerErrorMutex_);
+    if (!workerError_) workerError_ = std::move(error);
+}
+
+void FileIoWorkload::RethrowWorkerError() {
+    std::exception_ptr error;
+    {
+        std::lock_guard<std::mutex> lock(workerErrorMutex_);
+        error = workerError_;
+    }
+    if (error) std::rethrow_exception(error);
+}
+```
+
+`RunCycleMulti` / `RunCycleCoroutine` 은 시작에서 `ClearWorkerError()`, 완료 대기 후 `RethrowWorkerError()` 를 호출한다. 첫 오류만 보관하는 이유는 워커 N개가 같은 원인으로 동시에 실패했을 때 마지막 것이 원인을 덮지 않게 하기 위해서다.
+
+### 자동 테스트 타깃과 실행
+
+측정 도구라도 *계산이 맞는지* 는 GUI 없이 검사할 수 있어야 한다. 테스트 타깃은 SDL2·OpenGL·ImGui를 링크하지 않고 코어 TU만 모아 빌드한다.
+
+```cmake
+# CMakeLists.txt 일부
+
+enable_testing()
+add_executable(system_core_tests
+    tests/system_core_tests.cpp
+    src/io/aio_backend.cpp
+    src/io/io_backend_factory.cpp
+    src/io/mmap_backend.cpp
+    src/io/pread_backend.cpp
+    src/io/read_backend.cpp
+    src/io/uring_backend.cpp
+    src/sched/sched_policy.cpp
+    src/sync/sync_factory.cpp
+    src/workload/file_io_workload.cpp
+)
+target_include_directories(system_core_tests PRIVATE src)
+target_link_libraries(system_core_tests PRIVATE
+    Threads::Threads
+    ${CMAKE_DL_LIBS}
+)
+add_test(NAME system_core_tests COMMAND system_core_tests)
+set_tests_properties(system_core_tests PROPERTIES TIMEOUT 30)
+```
+
+`SKL_HAS_POSIX_AIO` / `SKL_HAS_LIBURING` 정의와 라이브러리 링크는 GUI 타깃과 테스트 타깃에 *같이* 걸어야 한다. 한쪽만 걸면 테스트가 도는 backend 집합이 실제 도구와 달라진다.
+
+`TIMEOUT 30` 은 단순한 안전장치가 아니다. 이 lab의 워커 풀은 카운터 기반 완료 대기(`while (remaining_ > 0) yield();`)를 쓰므로, 동기화가 깨지면 *실패* 가 아니라 *멈춤* 으로 나타난다. 타임아웃이 없으면 그 종류의 회귀가 테스트에서 영원히 매달린다.
+
+`tests/system_core_tests.cpp` 는 세 가지를 검사한다.
+
+- `TestIoBackends` — 컴파일에 들어간 모든 backend가 같은 총 바이트와 같은 체크섬을 돌려주는지.
+- `TestSyncPrimitives` — 4종 동기화가 4스레드 × 20000회 증가에서 상호배제를 지키는지.
+- `TestWorkloadExecutionModels` — 단일 / 워커 풀 / 코루틴 풀 세 실행 모델이 같은 결과를 내는지.
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+```text
+Test project .../system_kernel_lab/build
+    Start 1: system_core_tests
+1/1 Test #1: system_core_tests ................   Passed    2.31 sec
+
+100% tests passed, 0 tests failed out of 1
+```
+
+이 테스트가 검사하는 것은 *결과의 동등성* 이지 *성능* 이 아니다. 성능 수치는 환경마다 달라 회귀 판정 기준이 될 수 없다.
+
+## 결론
+
+system_kernel_lab은 여기서 마무리한다. 여덟 구현 단계에 걸쳐 토글 기반 시스템 측정 도구의 골격을 세웠고, 마지막 구현에서 *카운터 채널 확장 + 시각화 마무리* 를 끌어왔다.
+
+도구가 가진 것:
+
+- 5 축 토글로 IO 모델 / 동기화 / 스케줄링 / 컨텍스트 / 워커 수를 *런타임에* 갈아 끼운다.
+- 4 측정 채널(cycle ms · throughput · ctx-sw · page faults)을 슬라이딩 윈도우로 본다.
+- 세 모드(단일 스레드 / 워커 풀 / 코루틴 풀)가 한 워크로드 위에서 비교된다.
+- WSL2 / native Linux 모두에서 *권한 셋업 없이* 동작.
+
+도구가 없는 것:
+
+- 시스템 콜 카운트 (외부 strace -c).
+- 하드웨어 카운터 (외부 perf stat).
+- 함수별 hot path (외부 perf record).
+- 스케줄링 타임라인 (외부 ftrace / trace-cmd).
+
+없는 것은 *외부 도구* 로 보완한다. 도구는 만능을 약속하지 않는다 — *자기 차원* 만 정직하게 보여주고, *다른 차원이 필요할 때를 명시적으로 알려주는* 게 도구의 책임이다.
+
+```mermaid
+flowchart LR
+    T[system_kernel_lab<br/>5축 토글 + 4채널] --> Q1[가설 1: io_uring이 제출 경계 줄임]
+    T --> Q2[가설 2: futex≈mutex fast path]
+    T --> Q3[가설 3: SCHED_FIFO가 부하 시 선점]
+    T --> Q4[가설 4: coroutine은 동기 IO에서 손해]
+    Q1 --> V[측정 → 결과]
+    Q2 --> V
+    Q3 --> V
+    Q4 --> V
+    V --> A1[가설 살아남음]
+    V --> A2[가설 깨짐 → 받아들임]
+    A2 --> NM[다음 가설로]
+```
+
+네 가설이 모두 이 도구만으로 판정되는 것은 아니다. 가설 1(제출 경계)은 시스템 콜 횟수가 4개 채널 어디에도 없어 이 도구 단독으로는 참·거짓을 가릴 수 없다 — cycle ms 차이는 제출 경계 외의 원인으로도 생기므로 `strace -c` 를 함께 붙여야 한다. 나머지 셋은 4개 채널로 판정된다.
+
+*가설 깨짐을 받아들임* 이 도구의 가치다. futex가 mutex보다 별로 안 빠르더라도, SCHED_FIFO가 부하 없을 때 효과 없더라도, 코루틴이 동기 IO에서 더 느리더라도 — 그게 *이 환경의 진실*. 도구가 *통념을 부정* 하는 결과를 내놓을 때 그 자체가 측정 정보다.
+
+system_kernel_lab은 시스템 글에서 다룬 개념을 본인 머신에서 직접 재현하는 측정 환경이다. 읽은 내용을 측정으로 검증하고, 가설이 깨지는 지점까지 기록하는 것이 이 도구의 목적이다.
+
+---
+
+## 더 읽을거리
+
+- Brendan Gregg, *Systems Performance*, 2nd ed. — 시스템 측정 방법론의 표준 레퍼런스
+- Brendan Gregg 블로그 — perf, ftrace, BPF의 실용 예제 다수
+- [Linux man page: getrusage(2)](https://man7.org/linux/man-pages/man2/getrusage.2.html)
+- [Linux man page: perf_event_open(2)](https://man7.org/linux/man-pages/man2/perf_event_open.2.html)
+- [Linux Kernel ftrace 문서](https://www.kernel.org/doc/html/latest/trace/ftrace.html)
+- [Brendan Gregg, "Linux Performance"](https://www.brendangregg.com/linuxperf.html) — 도구 그림 한 장
+- Robert Love, *Linux Kernel Development*, 3rd ed. — 커널 내부 구조 이해
+- Jens Axboe, "Efficient IO with io_uring" — io_uring 백서
+- Ulrich Drepper, "Futexes Are Tricky" — 동기화 프리미티브의 정확성
+- W. Richard Stevens & Stephen Rago, *Advanced Programming in the UNIX Environment* — 시스템 콜 표준

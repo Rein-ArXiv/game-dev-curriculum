@@ -1,0 +1,76 @@
+// 매치메이킹 검증: 레이팅 윈도우 내 세션 형성·host 선정·잔여 큐.
+#include "mp/matchmaking.hpp"
+#include "test_util.h"
+
+#include <vector>
+
+using namespace mega::mp;
+
+static void TestBasicForm() {
+    Matchmaker mm;
+    mm.Init(/*teamSize*/ 2, /*window*/ 100);
+    mm.Enqueue({1, 1000});
+    mm.Enqueue({2, 1050});      // 1,2 → 매치(차 50)
+    mm.Enqueue({3, 1500});
+    mm.Enqueue({4, 1520});      // 3,4 → 매치(차 20)
+    auto matches = mm.FormMatches();
+    CHECK_EQ(matches.size(), (size_t)2);
+    for (const auto& m : matches) {
+        CHECK_EQ(m.players.size(), (size_t)2);
+        CHECK(m.maxRating - m.minRating <= 100);        // 윈도우 내
+        // host 는 매치 멤버 중 하나.
+        bool hostInMatch = false;
+        for (auto id : m.players) if (id == m.hostId) hostInMatch = true;
+        CHECK(hostInMatch);
+    }
+    CHECK_EQ(mm.QueueSize(), (size_t)0);                // 전부 매칭됨
+}
+
+static void TestOutsideWindowStays() {
+    Matchmaker mm;
+    mm.Init(2, 100);
+    mm.Enqueue({1, 1000});
+    mm.Enqueue({2, 1300});      // 차 300 > 100 → 못 묶임
+    auto matches = mm.FormMatches();
+    CHECK_EQ(matches.size(), (size_t)0);
+    CHECK_EQ(mm.QueueSize(), (size_t)2);                // 둘 다 큐 유지
+
+    // 비슷한 레이팅이 더 오면 묶인다.
+    mm.Enqueue({3, 1020});      // 1(1000),3(1020) → 매치
+    auto m2 = mm.FormMatches();
+    CHECK_EQ(m2.size(), (size_t)1);
+    CHECK_EQ(m2[0].players.size(), (size_t)2);
+    CHECK_EQ(mm.QueueSize(), (size_t)1);                // 1300 만 남음
+}
+
+static void TestInsufficientQueue() {
+    Matchmaker mm;
+    mm.Init(4, 500);
+    mm.Enqueue({1, 1000});
+    mm.Enqueue({2, 1100});      // 4명 필요한데 2명 → 매치 없음
+    auto matches = mm.FormMatches();
+    CHECK_EQ(matches.size(), (size_t)0);
+    CHECK_EQ(mm.QueueSize(), (size_t)2);
+}
+
+static void TestTeamOfFour() {
+    Matchmaker mm;
+    mm.Init(4, 300);
+    for (uint32_t i = 0; i < 8; ++i) mm.Enqueue({i + 1, 1000 + (int)i * 30});   // 1000..1210
+    auto matches = mm.FormMatches();
+    CHECK_EQ(matches.size(), (size_t)2);                // 8명 → 4인 매치 2개
+    for (const auto& m : matches) {
+        CHECK_EQ(m.players.size(), (size_t)4);
+        CHECK(m.maxRating - m.minRating <= 300);
+    }
+    CHECK_EQ(mm.QueueSize(), (size_t)0);
+}
+
+static void RunTests() {
+    TestBasicForm();
+    TestOutsideWindowStays();
+    TestInsufficientQueue();
+    TestTeamOfFour();
+}
+
+TEST_MAIN("mp_matchmaking")

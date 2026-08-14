@@ -1,0 +1,6 @@
+# count hp speed reward interval enemy_type
+10 12 30 5 0.35 normal
+16 14 34 5 0.22 fast
+6 40 30 8 0.45 tank
+26 10 36 4 0.14 swarm
+1 60 30 50 1.00 boss

@@ -1,0 +1,5 @@
+start_gold = 420
+core_hp = 260
+enemy_hp_multiplier = 1.0
+enemy_speed_multiplier = 1.0
+reward_multiplier = 1.0
