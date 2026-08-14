@@ -22,3 +22,11 @@ jobs:
 
 # Vulkan SDK가 없는 러너에서는 GDI 표시 경로만 빌드된다. CI는 창을 열지 않고
 # mega_defense --selftest와 엔진·게임 테스트를 실행한다.
+#
+# GPU 표시 경로(mega_defense_gpu_selftest)도 ctest 목록에 있지만, 이런 러너에서는
+# 실행 파일이 종료 코드 77로 빠져나오고 CTest가 그것을 Skipped로 센다. 즉 이 잡의
+# green 은 "GPU 경로가 검증됐다"는 뜻이 아니다 — 그 항목이 Passed로 셌을 때만 그렇다.
+#
+# 이 파일은 저장소 루트가 아니라 projects/mega/ 아래에 있다. GitHub Actions는 루트의
+# .github/workflows/ 만 읽으므로 이 워크플로는 자동 실행되지 않는다. 지금은 위 세
+# 단계가 로컬 재현 절차의 기계 판독 가능한 형태로만 존재한다.

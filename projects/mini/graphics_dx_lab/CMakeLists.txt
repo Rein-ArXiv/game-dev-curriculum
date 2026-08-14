@@ -1,3 +1,4 @@
+# snippet-begin: build-setup
 cmake_minimum_required(VERSION 3.20)
 project(graphics_dx_lab CXX)
 
@@ -62,7 +63,9 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(directxmath)
+# snippet-end: build-setup
 
+# snippet-begin: app-target
 add_executable(${PROJECT_NAME} WIN32
     src/main.cpp
     src/app/app.cpp
@@ -92,12 +95,28 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     d3dcompiler
     dxguid)
 
-# Shaders 디렉토리 복사.
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    UNICODE _UNICODE
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+    DXLAB_WINDOWS=1)
+
+if(MSVC)
+    target_compile_options(${PROJECT_NAME} PRIVATE /W4 /permissive- /utf-8)
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        $<$<CONFIG:Release>:/O2>
+        $<$<CONFIG:Release>:/Oi>)
+endif()
+
+# Shaders 디렉토리 복사. HLSL 은 런타임에 D3DCompileFromFile 로 읽으므로
+# 실행 파일 옆에 shaders/ 가 있어야 한다.
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_CURRENT_SOURCE_DIR}/shaders
             $<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders)
+# snippet-end: app-target
 
+# snippet-begin: contract-tests
 enable_testing()
 # 계약 테스트는 *제품 TU 를 그대로 링크* 한다. 여기 나열된 파일들은 디바이스
 # 생성·스왑체인·ImGui 에 의존하지 않으므로 GPU 없이 헤드리스로 검증된다.
@@ -117,17 +136,8 @@ target_compile_definitions(graphics_dx_contract_tests PRIVATE
 target_link_libraries(graphics_dx_contract_tests PRIVATE d3d12 dxguid)
 add_test(NAME graphics_dx_contract_tests COMMAND graphics_dx_contract_tests)
 
-target_compile_definitions(${PROJECT_NAME} PRIVATE
-    UNICODE _UNICODE
-    NOMINMAX
-    WIN32_LEAN_AND_MEAN
-    DXLAB_WINDOWS=1)
-
 if(MSVC)
-    target_compile_options(${PROJECT_NAME} PRIVATE /W4 /permissive- /utf-8)
-    target_compile_options(${PROJECT_NAME} PRIVATE
-        $<$<CONFIG:Release>:/O2>
-        $<$<CONFIG:Release>:/Oi>)
     target_compile_options(graphics_dx_contract_tests PRIVATE
         /W4 /permissive- /utf-8)
 endif()
+# snippet-end: contract-tests

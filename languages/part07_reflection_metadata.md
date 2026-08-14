@@ -121,17 +121,31 @@ dynamic_cast<Derived*>(basePtr);
 ### 기본 구조
 
 ```cpp
-// 1) 타입 정보를 담을 클래스
+// 1) 프로퍼티 하나를 기술하는 정보
+enum class PropertyType { Unknown, Bool, Int, Float };
+
+class PropertyInfo {
+public:
+    const char* name;
+    size_t offset;
+    size_t size;
+    PropertyType type;
+    const char* description;
+};
+
+// 2) 타입 정보를 담을 클래스
 class TypeInfo {
 public:
     const char* name;
     TypeInfo* parent;
     std::vector<PropertyInfo*> properties;
 
+    void AddProperty(const char* name, size_t offset, size_t size,
+                     PropertyType type, const char* description);
     static TypeInfo* Find(const char* name);
 };
 
-// 2) 기본 클래스
+// 3) 기본 클래스
 class Object {
 public:
     virtual TypeInfo* GetTypeInfo() const = 0;
@@ -152,7 +166,7 @@ public:
 ### 매크로로 등록하기
 
 ```cpp
-// 3) 헤더에서 선언
+// 4) 헤더에서 선언
 class Character : public Actor {
 public:
     DECLARE_CLASS(Character, Actor)
@@ -174,7 +188,7 @@ public: \
 ```
 
 ```cpp
-// 4) cpp에서 프로퍼티 등록
+// 5) cpp에서 프로퍼티 등록
 IMPLEMENT_CLASS(Character) {
     REGISTER_PROPERTY(Character, Health, "Health displayed in editor");
     REGISTER_PROPERTY(Character, Ammo, "Current ammo count");
@@ -188,11 +202,18 @@ IMPLEMENT_CLASS(Character) {
     static ClassName##_Registration s_##ClassName##_Registration; \
     ClassName##_Registration::ClassName##_Registration()
 
+// 멤버 타입 → PropertyType 매핑
+template<typename T> constexpr PropertyType PropertyTypeOf() { return PropertyType::Unknown; }
+template<> constexpr PropertyType PropertyTypeOf<bool>()  { return PropertyType::Bool; }
+template<> constexpr PropertyType PropertyTypeOf<int>()   { return PropertyType::Int; }
+template<> constexpr PropertyType PropertyTypeOf<float>() { return PropertyType::Float; }
+
 #define REGISTER_PROPERTY(Class, Member, Description) \
     Class::StaticType()->AddProperty( \
         #Member, \
         offsetof(Class, Member), \
         sizeof(Class::Member), \
+        PropertyTypeOf<decltype(Class::Member)>(), \
         Description \
     )
 ```

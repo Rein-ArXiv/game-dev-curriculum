@@ -429,7 +429,7 @@ struct AssetRef {
 struct ValidationIssue {
     Severity    level;       // Error(빌드 차단) / Warning / Info
     AssetId     asset;
-    std::string rule;        // "texture.power_of_two"
+    std::string rule;        // "texture.block_multiple"
     std::string message;
 };
 

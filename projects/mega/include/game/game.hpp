@@ -50,7 +50,13 @@ inline EnemyMod EnemyModFor(EnemyType t) {
 }
 
 // --- 타워 타게팅 모드 ---
-enum class TargetMode { Nearest, First, Strongest };
+// 기반 타입을 고정한다. 이 값은 와이어를 건너오고(스냅샷의 targetMode, Target
+// 명령의 argument), ReadSnapshot 은 신뢰할 수 없는 바이트를 이 타입으로 캐스트한
+// 뒤에 범위를 본다. 기반 타입이 없으면 열거 범위는 {0..3} 이라 200 같은 값의
+// 캐스트 결과가 unspecified 가 되고, 그 뒤의 비교는 무엇도 보장하지 못한다.
+// 와이어를 건너는 다른 열거형(TowerType·EnemyType·TileType·CommandType·
+// PacketType)은 모두 이미 uint8_t 로 고정돼 있다 — 이것만 빠져 있었다.
+enum class TargetMode : uint8_t { Nearest, First, Strongest };
 
 enum class TileType : uint8_t { Buildable, Path, Spawn, Core, Blocked };
 
@@ -276,6 +282,20 @@ struct WaveDef {
 
 // 엔드리스/난이도 스케일링: 웨이브 인덱스가 오를수록 어려워지는 웨이브를 생성한다.
 // 적 종류는 로테이션하고, 5의 배수 웨이브마다 보스가 등장한다(tower defense 관용구).
+//
+// **제품은 이 함수를 부르지 않는다. 그것이 설계다** (감사 #29). 제품의 웨이브는
+// 콘텐츠다 — `assets/waves.txt` 를 읽고, 없거나 검증에 실패하면 파일 전체를
+// `defense::DefaultWaves()` 로 폴백한다. 난이도 곡선을 코드가 소유하면 재빌드
+// 없이 밸런스를 바꾼다는 계약이 깨지므로, 코드가 웨이브를 만드는 경로는 제품에
+// 두지 않는다.
+//
+// 그래서 이 둘의 소비자는 테스트다. 콘텐츠 파일과 무관하게 **길이와 강도를 마음대로
+// 정한 웨이브 열**이 필요한 자리에서 쓴다 — `tests/test_defense_soak.cpp` 가 매 회차
+// 다른 길이의 웨이브 열로 반복 매치의 유한성·ID 유일성을 재고,
+// `tests/test_game_expansion.cpp` 가 곡선 자체(단조 증가·보스 주기·종류 로테이션)를
+// 단언한다. 죽은 코드가 아니라 시험 장치이고, 그 사실을 여기 적어 두는 것이 등재를
+// 대신한다 — `docs/LAB_ONLY.md` 는 헤더 단위 등재부라 제품 도달 헤더인 game.hpp 안의
+// 함수는 담을 수 없다.
 inline WaveDef GenerateWave(int index) {
     if (index < 0) index = 0;
     float scale = 1.0f + index * 0.22f;          // 난이도 곡선
@@ -315,6 +335,11 @@ inline int ComputeScore(int waveReached, int gold, bool cleared) {
 
 class GameWorld {
 public:
+    // 게임플레이 상한. 한 판에 세울 수 있는 타워 수의 디자인 규칙이며 와이어
+    // 포맷과는 별개다(프로토콜 쪽 상한은 wire::kSnapshotMaxTowers). 두 값은 지금
+    // 같지만 이유가 다르다 — 여기는 밸런스, 저기는 패킷 예산이다. 이 값을 올릴
+    // 때 스냅샷이 담을 수 있는지는 defense_protocol.hpp 의 static_assert 가
+    // 빌드 시점에 막는다.
     static constexpr size_t kMaxTowers = 16;
     // 기본 게임 구성(테스트·데모 공용). 인자로 난이도 조절.
     void Init(const math::Vec2& corePos, const math::Vec2& spawnPos,

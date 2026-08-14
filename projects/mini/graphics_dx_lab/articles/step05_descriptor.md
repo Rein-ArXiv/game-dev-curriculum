@@ -7,6 +7,19 @@
 
 현재 장면은 텍스처를 읽지 않는다. 따라서 null SRV 표를 사용해 `CreateShaderResourceView`의 CPU 비용만 분리한다. 이 실험은 bindless 렌더링의 GPU 성능을 측정하지 않으며, descriptor를 생성하는 정책과 descriptor를 셰이더에서 찾는 정책을 구분한다.
 
+시작 상태 — heap 은 `HeapManager::Init` 이 만든 채로 바인딩만 되고 내용은 비어 있다. 종료 상태 — 패널의 `heap` 콤보가 `descriptorWrites` 를 매 프레임 N 과 0 사이에서 바꾼다.
+
+## 이 step 이 추가·변경하는 파일
+
+| 파일 | 상태 | 역할 |
+|---|---|---|
+| `src/descriptor/heap_manager.h` | 변경 | `HeapPolicy`, 구획 수식(`NullSrvSliceSize` · `PlanNullSrvWrites`), virtual 작성 지점 |
+| `src/descriptor/heap_manager.cpp` | 변경 | heap 생성, null SRV 작성, 계획 실행 |
+| `src/app/app.cpp` | 변경 | 프레임 루프의 descriptor workload + heap 바인딩 |
+| `src/ui/panel.cpp` | 변경 | `heap` 콤보 + `Descriptor writes` 줄 |
+| `tests/graphics_dx_contract_tests.cpp` | 변경 | 구간 불변식 + 계획·실행 일치 |
+| `CMakeLists.txt` | 변경 | 계약 테스트 소스에 `src/descriptor/heap_manager.cpp` 추가 |
+
 ---
 
 ## 목차
@@ -39,15 +52,22 @@ GPU 시간은 이 실험의 핵심 관측값이 아니다. 셰이더가 workload
 
 ## 2. Shader-visible heap의 수명
 
-D3D12의 CBV/SRV/UAV descriptor heap은 CPU handle과 GPU handle을 함께 제공한다.
+D3D12의 CBV/SRV/UAV descriptor heap은 CPU handle과 GPU handle을 함께 제공한다. 이 lab 은 `SHADER_VISIBLE` 플래그로 하나를 만들고, 핸들 간격을 하드웨어에서 물어본다.
 
+<!-- snippet: src/descriptor/heap_manager.cpp#HeapManager::Init -->
 ```cpp
-D3D12_DESCRIPTOR_HEAP_DESC desc{};
-desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-desc.NumDescriptors = capacity;
-desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-
-device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&srvHeap));
+void HeapManager::Init(ID3D12Device* device, UINT capacity) {
+    D3D12_DESCRIPTOR_HEAP_DESC desc{};
+    desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    desc.NumDescriptors = capacity;
+    desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&srvHeap_)))) {
+        throw std::runtime_error("CreateDescriptorHeap(SRV) failed");
+    }
+    increment_ = device->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    capacity_ = capacity;
+}
 ```
 
 CPU는 `CreateShaderResourceView` 같은 함수로 descriptor 내용을 쓴다. GPU는 command list에 설정된 heap과 root descriptor table을 통해 그 내용을 읽는다.
@@ -63,17 +83,29 @@ cmd->SetDescriptorHeaps(1, heaps);
 
 리소스가 없는 null SRV도 view description을 완전히 지정하면 유효한 descriptor다. 이 성질을 이용하면 텍스처 메모리와 업로드 비용을 섞지 않고 descriptor write 호출만 반복할 수 있다.
 
+<!-- snippet: src/descriptor/heap_manager.cpp#HeapManager::WriteNullSrvs -->
 ```cpp
-D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-srv.Texture2D.MipLevels = 1;
+void HeapManager::WriteNullSrvs(ID3D12Device* device, UINT first, UINT count) {
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Texture2D.MipLevels = 1;
 
-device->CreateShaderResourceView(nullptr, &srv, cpuHandle);
+    auto cpu = srvHeap_->GetCPUDescriptorHandleForHeapStart();
+    cpu.ptr += static_cast<SIZE_T>(first) * increment_;
+    for (UINT i = 0; i < count; ++i) {
+        device->CreateShaderResourceView(nullptr, &srv, cpu);
+        cpu.ptr += increment_;
+    }
+}
 ```
 
 `nullptr`만 넘기고 `pDesc`까지 생략하는 것은 이 workload의 의도가 아니다. null resource에 대응하는 형식과 차원을 명시해야 셰이더가 접근했을 때 정의된 0 읽기 동작을 갖는 null descriptor가 된다.
+
+핸들 전진이 `increment_` 단위인 것도 중요하다. descriptor 크기는 하드웨어마다 다르므로 `sizeof` 로 계산할 수 없고, `GetDescriptorHandleIncrementSize` 가 준 값만 신뢰할 수 있다.
+
+이 함수는 `virtual` 이다. 그 이유는 §9 에 있다 — 헤드리스 검증이 이 지점을 가로채 계획과 실행이 일치하는지 본다.
 
 현재 셰이더는 이 descriptor를 실제로 접근하지 않는다. 그러므로 이 코드는 다음 비용을 측정한다.
 
@@ -98,14 +130,21 @@ $$
 S = \left\lfloor \frac{C}{F + 1} \right\rfloor
 $$
 
-frame index가 `i`일 때 transient 구간은 `[iS, (i+1)S)`이고, persistent 구간은 그 뒤 전부, 즉 `[FS, C)`다.
+frame index가 `i`일 때 transient 구간은 `[iS, (i+1)S)`이고, persistent 구간은 그 뒤 전부, 즉 `[FS, C)`다. 이 두 줄이 코드에서는 인라인 함수 두 개다.
 
+<!-- snippet: src/descriptor/heap_manager.h#NullSrvSliceSize -->
 ```cpp
-const UINT sliceSize = capacity / (framesInFlight + 1);
-const UINT slot = frameIndex % framesInFlight;
-const UINT first = slot * sliceSize;                 // transient
-const UINT persistentFirst = framesInFlight * sliceSize;
-const UINT persistentRoom  = capacity - persistentFirst;
+inline UINT NullSrvSliceSize(UINT framesInFlight, UINT capacity) {
+    if (framesInFlight == 0 || capacity == 0) return 0;
+    return capacity / (framesInFlight + 1);
+}
+```
+
+<!-- snippet: src/descriptor/heap_manager.h#NullSrvPersistentFirst -->
+```cpp
+inline UINT NullSrvPersistentFirst(UINT framesInFlight, UINT capacity) {
+    return framesInFlight * NullSrvSliceSize(framesInFlight, capacity);
+}
 ```
 
 `D3D12Context::BeginFrame`은 해당 frame slot의 fence 완료를 기다린 뒤 allocator와 command list를 재사용한다. descriptor 구간도 같은 slot에 묶으면 CPU가 그 구간을 다시 쓸 때 이전 GPU 작업은 완료된 상태다.
@@ -114,53 +153,79 @@ const UINT persistentRoom  = capacity - persistentFirst;
 
 ## 5. 두 갱신 정책
 
-### Transient rebuild
+두 정책의 차이는 함수 하나에 모여 있다. 이 함수는 순수 함수다 — 디바이스도 heap 도 건드리지 않고 *어디에 몇 개를 쓸 것인가* 만 계산한다.
 
-매 프레임 현재 slot의 구간을 다시 쓴다.
-
+<!-- snippet: src/descriptor/heap_manager.h#PlanNullSrvWrites -->
 ```cpp
-if (policy == HeapPolicy::RebuildEachFrame) {
-    const UINT slot = frameIndex % framesInFlight;
-    WriteNullSrvs(device, slot * sliceSize, count);
-    return count;
+inline DescriptorWritePlan PlanNullSrvWrites(
+        HeapPolicy policy, UINT frameIndex, UINT framesInFlight,
+        UINT requestedCount, UINT capacity, UINT previousPersistentCount,
+        HeapPolicy previousPolicy) {
+    if (framesInFlight == 0 || capacity == 0) return {};
+    const UINT sliceSize = NullSrvSliceSize(framesInFlight, capacity);
+    if (policy == HeapPolicy::RebuildEachFrame) {
+        const UINT count = (std::min)(requestedCount, sliceSize);
+        return {(frameIndex % framesInFlight) * sliceSize, count, count, 0};
+    }
+    const UINT persistentFirst = NullSrvPersistentFirst(framesInFlight, capacity);
+    const UINT persistentRoom  = capacity - persistentFirst;
+    const UINT count = (std::min)(requestedCount, persistentRoom);
+    const bool changed = previousPolicy != policy ||
+                         previousPersistentCount != count;
+    return {persistentFirst, count, changed ? count : 0, count};
 }
 ```
+
+### Transient rebuild
+
+매 프레임 현재 slot의 구간을 다시 쓴다. 위 코드의 첫 분기다 — 시작 오프셋이 `(frameIndex % framesInFlight) * sliceSize` 이고 `writes` 가 `count` 와 같다.
 
 오브젝트 수가 10,000이면 `descriptorWrites`도 매 프레임 10,000이다. 이 정책은 descriptor 내용이 프레임마다 실제로 달라지는 workload의 상한에 가깝다.
 
 ### Persistent table
 
-descriptor 수 또는 정책이 바뀔 때만 표를 만든다. 쓰는 위치는 transient 슬라이스 뒤의 예약 구간이다.
-
-```cpp
-if (lastPolicy_ != policy || persistentCount_ != count) {
-    WriteNullSrvs(device, persistentFirst, count);
-    persistentCount_ = count;
-    lastPolicy_ = policy;
-    return count;
-}
-return 0;
-```
+descriptor 수 또는 정책이 바뀔 때만 표를 만든다. 쓰는 위치는 transient 슬라이스 뒤의 예약 구간이다. 위 코드의 둘째 분기에서 `changed` 가 거짓이면 `writes` 가 0 이 된다 — 계획의 `count` 는 그대로 남지만 실제 작성은 일어나지 않는다.
 
 정적 texture와 sampler가 안정된 ID를 갖는다면 매 프레임 descriptor를 다시 쓸 이유가 없다. persistent 정책에서 오브젝트 수가 유지되는 동안 `descriptorWrites == 0`이 정상이다.
+
+계획을 실행에 옮기는 쪽은 짧다. 계획이 준 `writes` 가 0 이 아닐 때만 작성 지점을 부르고, 그 값을 그대로 돌려준다.
+
+<!-- snippet: src/descriptor/heap_manager.cpp#HeapManager::PrepareNullSrvWorkload -->
+```cpp
+UINT HeapManager::PrepareNullSrvWorkload(ID3D12Device* device,
+                                         HeapPolicy policy,
+                                         UINT frameIndex,
+                                         UINT framesInFlight,
+                                         UINT requestedCount) {
+    if (!device || framesInFlight == 0 || capacity_ == 0) return 0;
+
+    const DescriptorWritePlan plan = PlanNullSrvWrites(
+        policy, frameIndex, framesInFlight, requestedCount, capacity_,
+        persistentCount_, lastPolicy_);
+    if (plan.writes != 0) WriteNullSrvs(device, plan.first, plan.writes);
+    persistentCount_ = plan.persistentCount;
+    lastPolicy_ = policy;
+    return plan.writes;
+}
+```
 
 요청 수는 transient일 때 `S`로, persistent일 때 예약 구간 크기 `C - FS`로 잘린다. 이 lab의 실제 값(`C = 100000`, `F = 3`)에서는 `S = 25000`이므로 상한 32,768을 요청해도 25,000에서 멈춘다. 잘리는 것이 정상이다 — 살아 있는 남의 구간을 넘어가는 것보다 낫다.
 
 ## 6. 프레임 루프 통합
 
-실험 descriptor 수는 장면 오브젝트 수와 연결하되 한 frame에 32,768개로 제한한다.
+실험 descriptor 수는 장면 오브젝트 수와 연결하되 한 frame에 32,768개로 제한한다. heap 바인딩은 같은 자리에서 한 번 한다.
 
+<!-- snippet: src/app/app.cpp@descriptor-workload -->
 ```cpp
 const UINT descriptorWork =
     static_cast<UINT>(std::min(objectCount_, 32768));
-
 counters_.descriptorWrites += static_cast<int>(
-    heap_.PrepareNullSrvWorkload(
-        ctx_.Device(),
-        heapPolicy_,
-        frameIndex,
-        kFramesInFlight,
-        descriptorWork));
+    heap_.PrepareNullSrvWorkload(ctx_.Device(), heapPolicy_, f,
+                                 kFramesInFlight, descriptorWork));
+
+ID3D12DescriptorHeap* heaps[] = { heap_.SrvHeap() };
+cmd->SetDescriptorHeaps(1, heaps);
+counters_.descriptorHeapSets++;
 ```
 
 카운터는 프레임 시작에 초기화된다. 따라서 패널에 보이는 값은 누적 합이 아니라 현재 프레임에서 발생한 실제 write 수다.
@@ -233,8 +298,23 @@ ctest --test-dir build -C Release --output-on-failure
 - Transient 모드의 frame slot 시작 오프셋과 `sliceSize` 상한.
 - Persistent 모드의 최초 write 수가 N이고, 위치가 예약 구간 시작이다.
 - 정책과 count가 그대로면 persistent write 수가 0이다.
-- **구간 불변식** — `F`개 transient 구간이 서로 겹치지 않고, persistent 구간이 그 어느 것과도 겹치지 않으며, 모두 heap 용량 안에 있다. 위 §3 표의 실패 신호 “frame 구간이 겹침”을 육안이 아니라 CTest가 판정한다는 뜻이다. 앱이 실제로 쓰는 크기(`C = 100000`, `F = 3`, 요청 32,768)에 대해서도 같은 검사를 돌린다.
-- **계획과 실행의 일치** — `PrepareNullSrvWorkload`가 계획한 위치·개수 그대로 descriptor 작성 지점을 호출하는지. 작성 지점이 virtual이라 테스트가 파생 클래스로 가로채 호출 로그를 본다. 이 검사가 있으면 “계획 수식은 맞는데 실행이 그걸 안 쓰는” 상태가 통과하지 못한다.
+- **구간 불변식** — `F`개 transient 구간이 서로 겹치지 않고, persistent 구간이 그 어느 것과도 겹치지 않으며, 모두 heap 용량 안에 있다. 위 §1 표의 실패 신호 “frame 구간이 겹침”을 육안이 아니라 CTest가 판정한다는 뜻이다. 앱이 실제로 쓰는 크기(`C = 100000`, `F = 3`, 요청 32,768)에 대해서도 같은 검사를 돌린다.
+- **계획과 실행의 일치** — `PrepareNullSrvWorkload`가 계획한 위치·개수 그대로 descriptor 작성 지점을 호출하는지.
+
+마지막 항목이 §3 에서 말한 `virtual` 의 쓸모다. 테스트는 파생 클래스로 작성 지점을 가로채 호출 로그만 남기고, 디바이스 없이 초기화하는 경로로 용량과 핸들 간격을 주입한다.
+
+<!-- snippet: src/descriptor/heap_manager.h#HeapManager -->
+```cpp
+protected:
+    virtual void WriteNullSrvs(ID3D12Device* device, UINT first, UINT count);
+
+    void InitHeadless(UINT capacity, UINT increment) {
+        capacity_  = capacity;
+        increment_ = increment;
+    }
+```
+
+이 검사가 있으면 “계획 수식은 맞는데 실행이 그걸 안 쓰는” 상태가 통과하지 못한다.
 
 육안 체크리스트 — 실행 후 패널에서 확인한다.
 
@@ -250,6 +330,8 @@ ctest --test-dir build -C Release --output-on-failure
 ## 결론
 
 Descriptor heap 최적화의 첫 질문은 “bindless인가”가 아니라 “어떤 descriptor가 얼마나 자주 바뀌는가”다. frame fence와 수명을 맞춘 transient 구간은 동적 view를 안전하게 다시 쓸 수 있고, persistent table은 정적 자원의 반복 write를 제거한다. 이 단계는 두 정책을 실제 API 호출 수로 분리하면서도 bindless 렌더링을 구현했다고 과장하지 않는다.
+
+이 step 의 한계 — 셰이더가 이 표를 읽지 않으므로 “descriptor 를 만드는 비용”만 갈렸고, “descriptor 를 통해 자원을 읽는 비용”은 전혀 측정되지 않았다.
 
 ## 더 읽을거리
 

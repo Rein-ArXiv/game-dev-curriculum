@@ -12,11 +12,16 @@
   이 보고서의 지적을 본문에 반영했다.** 따라서 아래 각 항목의 "현재 코드는 …" 서술과 인용된
   코드·문장은 **2026-08 검수 시점의 상태**이며, 지금의 파일과 다를 수 있다. 인용문이 현재
   파일에서 검색되지 않는다면 대개 반영으로 그 줄이 바뀐 것이다.
-- 지적별 처리 결과와 **아직 남은 일**은 문서 끝 [반영 상태 (2026-08-13)](#반영-상태-2026-08-13) 절에 있다.
+- 지적별 처리 결과와 **아직 남은 일**은 문서 끝 [반영 상태 (2026-08-13)](#반영-상태-2026-08-13)과
+  [2차 반영 (2026-08-14)](#2차-반영-2026-08-14) 두 절에 있다. **후자가 최신이다.**
 
 > 총 **166건** — 치명 6 · 높음 54 · 중간 76 · 낮음 30
 >
 > 2026-08-13 기준 처리: **반영됨 157 · 이월 9 · 기반영 0 · 기각 0**
+>
+> 2026-08-14 기준 처리: **반영됨 160 · 부분 반영 1 · 이월 5 · 기반영 0 · 기각 0**
+> — 이월 9건 중 4건(`parts_perf_lab` #12 · `physics_lab` #10 · `graphics_dx_lab` #10 ·
+> `live_service_lab` #13)을 처리했고, 남은 5건은 전부 `system_kernel_lab`이며 **Linux 환경을 요구한다.**
 
 ## 총평
 
@@ -247,6 +252,16 @@ README와 step06이 출력물로 선언한 live/peak bytes가 실제 HUD에 표�
 ### 12. [중간] step 문서 완료 기준 4·7 미충족 — 스니펫 생략과 드리프트 허용 선언, 검증 장치 부재
 
 > **[이월 · 2026-08-13]** step02의 토글 패널 생략 블록과 step04의 SSE/AVX2 잔여 루프 생략 블록은 전문으로 채워졌다. 그러나 핵심인 **스니펫 검증 장치가 여전히 없고**, `step07_container.md:270`의 `// ... (기존 시뮬, allocator, EventBenchmark 초기화)` 생략과 여섯 문서가 공유하는 드리프트 허용 문장("디스크의 통합 코드는 누적되어 더 진행된 상태일 수 있다")도 그대로다.
+>
+> **[반영됨 · 2026-08-14]** 세 갈래 전부 닫혔다.
+> (a) `step07_container.md`의 생략 블록을 실제 소스로 채웠다 — 지적된 문자열
+> `// ... (기존 시뮬, allocator, EventBenchmark 초기화)`는 이제 lab 어디에도 없다.
+> (b) 드리프트 허용 문장을 **여섯 문서 전부에서 제거**했다. 백업본에는 step02~07 여섯 파일에
+> 모두 있었고, 지금 `projects/mini/` 전체에서 이 문장이 남은 곳은 이 보고서의 인용문뿐이다.
+> (c) 검증 장치는 `scripts/check_snippets.py`로 신설됐다(아래 [2차 반영](#2차-반영-2026-08-14) 참조).
+> 이 lab에 앵커 **13개**를 달았다 — `step04_simd.md` 2개(`src/platform.h` 파일 앵커,
+> `src/sim/soa.cpp#SoASimulation::UpdateSSE` 심볼 앵커), `step07_container.md` 11개.
+> 즉 위 "생략 블록을 채웠다"는 주장이 이제 검사기가 지키는 주장이다.
 
 <sub>분류: 문서오류</sub>
 
@@ -1285,6 +1300,27 @@ PROJECTS_PLAN.md:45 "2. 후속 step을 예고하지 않는다."
 ### 10. [중간] Step 8 종합 측정이 Step 6 응답 솔버를 쓰지 않고 접촉수집+SI+위치보정을 통째로 재구현
 
 > **[이월 · 2026-08-13]** `measure_scene.cpp`의 `StepSim`은 여전히 접촉 수집·SI·위치 보정을 자체 구현하고, 유효질량 리터럴 `2.0f`/`1.0f`(measure_scene.cpp:148-149, :157-158)도 그대로다. `response_scene`의 `GatherContacts`/`ApplySequentialImpulse`/`ApplyPositionCorrection`은 별개로 남아 있다. 공유 모듈로 올리는 구조 개편이 필요해 이월. 다만 두 경로 각각에는 이번에 자동 테스트가 붙었다(`physics_response_tests`, `physics_determinism_tests`).
+>
+> **[반영됨 · 2026-08-14]** 접촉 수집 / Sequential Impulse / 위치 보정을 `src/core/contact_solver.h`
+> (신설, 248줄)의 템플릿 함수 한 벌로 올렸고, `MeasureScene::StepSim`과 `ResponseScene`이 둘 다
+> 그것을 호출한다. `StepSim`은 이제 시나리오(중력 상수·반지름·shuffle 정책)만 정한다.
+>
+> **이 지적은 1건이었지만 실제 차이는 7군데였다.** 위 근거 블록이 잡은 것은 세 갈래(유효질량 리터럴,
+> 위치 보정 재구현, constexpr 고정)인데, 통합하면서 드러난 나머지 넷은 **임펄스 적용식에서
+> `* invMass`가 통째로 빠져 있던 것**이다 — body-body 양쪽 2곳, 벽 1곳, 그리고 유효질량 인자
+> 자체(`2.0f` / `1.0f` → `bi.invMass + bj.invMass` / `bi.invMass`). 이 워크로드는 `invMass`가 1이라
+> **일곱 군데 전부가 숫자로는 아무 차이도 내지 않았다.** 값이 맞아서가 아니라 가정이 우연히
+> 성립해서였고, 그래서 지적에도 실측에도 걸리지 않고 더 오래 숨어 있었다.
+>
+> **실측.** 통합 직전 두 Scene을 같은 조건(캔버스 400×320, body 24개, iteration 8, dt 1/120)으로
+> 240 스텝 돌리면 위치가 **0.557 px**, 속도가 **4.77 px/s** 벌어져 있었다. 통합 후에는 둘 다
+> 정확히 0 — **비트 일치**다. 갱신 순서가 바뀌었으므로 결정성 수치도 함께 갱신했다:
+> shuffled maxDelta **0.700067 → 0.399962**, 900 스텝 뒤 평균 침투 0.6946 → 0.6965,
+> 최저점 316.572 → 316.583, KE 3.26e-4 → 3.23e-4.
+>
+> **재발 방지.** `tests/physics_determinism_tests.cpp`에 `TestMeasureRunsTheResponseSolver`를 추가했다.
+> 두 Scene을 240 스텝 나란히 돌려 `CHECK(worstPos == 0.0f)` / `CHECK(worstVel == 0.0f)`로
+> 비트 일치를 단언하므로, 어느 한쪽이 다시 갈라지면 ctest가 잡는다.
 
 <sub>분류: 코드오류</sub>
 
@@ -2000,6 +2036,33 @@ PROJECTS_PLAN.md:45 "후속 step을 예고하지 않는다"에 정면으로 어�
 ### 10. [중간] step 문서 완료 기준 4(문서의 코드만 따라도 빌드) 미달
 
 > **[이월 · 2026-08-13]** 개별 드리프트(step03 루트 상수 오프셋, step07 Flush 등)는 고쳐졌지만 구조적 격차는 남았다 — 7편 어디에도 `D3D12Context` 코드·CMakeLists·진입점·셰이더 전문이 없고, step별 "추가/변경 파일 목록"도 없다. 마커 기반 스니펫 대조 검사도 미도입.
+>
+> **[부분 반영 · 2026-08-14]** 세 가지가 들어갔고, 두 가지는 여전히 남았다.
+>
+> 들어간 것 — (a) **7편 전부에 `## 이 step 이 추가·변경하는 파일` 표를 신설**했다(step01:9,
+> step02:7, step03:9, step04:9, step05:12, step06:9, step07:7). (b) 누락돼 있던 재현 코드를
+> 게재했다 — 본문이 **815줄 → 2,801줄**로 늘었고(step01 114→1044, step02 125→472,
+> step03 104→390, step04 68→211, step05 239→340, step06 89→223, step07 76→121),
+> `D3D12Context`·`CMakeLists.txt`·진입점·셰이더가 이제 문서 안에 있다. (c) **앵커 85개**를
+> 달았다(파일 6 / region 22 / 심볼 57) — 이 lab 한 곳이 저장소 118개 중 72%다. `check_snippets.py`가
+> 0 error로 통과하므로 step03 오프셋 같은 드리프트는 이제 기계가 잡는다.
+>
+> **여전히 남은 것 둘, 그리고 부분 처리로 판정한 근거.**
+>
+> 1. **테스트 대역 1,300줄이 미게재다.** `tests/d3d12_stubs.h` 442줄 + `tests/graphics_dx_contract_tests.cpp`
+>    859줄 = **1,301줄**인데, 문서에 실린 앵커는 `step04_rootsig.md:174`의
+>    `tests/graphics_dx_contract_tests.cpp#TestRootConstantBudget` **한 개**뿐이다. 나머지는
+>    "무엇을 검사하는지" 산문 서술과 CMake 타깃 정의로만 등장한다. 즉 **완료 기준 4를
+>    제품 코드에 대해서는 충족했지만 테스트 대역에 대해서는 충족하지 못했다** — 문서만 따라가면
+>    `graphics_dx_contract_tests`는 빌드할 수 없다. 이 lab의 #1이 "테스트가 제품 .cpp를 하나도
+>    링크하지 않는다"였던 만큼, 그 대역이 문서 밖에 있는 것은 사소한 잔여가 아니다.
+> 2. **고아 다이어그램 PNG 1개.** `articles/diagrams/step01_skeleton_diagram_01.png`가 `articles/`와
+>    `README.md` 어디에서도 참조되지 않는다(`grep`으로 참조 0건 확인). step01이 1044줄로 다시
+>    쓰이면서 그 그림을 부르던 자리가 사라졌는데 파일은 남았다.
+>
+> **남은 일**: 대역과 계약 테스트에 region 마커를 넣어 최소한 `d3d12_stubs.h`의 인터페이스 골격과
+> 각 `Test*` 함수를 문서에 싣거나, 문서가 "테스트 전문은 소스를 보라"고 명시적으로 선언한다.
+> PNG는 참조를 되살리거나 삭제한다.
 
 <sub>분류: 문서오류</sub>
 
@@ -3083,6 +3146,24 @@ try
 ### 13. [낮음] 완료 기준 7번이 요구하는 스니펫 검증 장치가 없음
 
 > **[이월 · 2026-08-13]** step01·04·05의 개별 스니펫은 실제 코드로 교체됐으나, 앵커 주석과 `check_project_docs.py`의 원문 대조 단계는 도입되지 않았다. 저장소 전체에 스니펫 검증 장치가 없는 것은 12개 lab 공통 잔여다.
+>
+> **[반영됨 · 2026-08-14]** 이 lab에 앵커 **16개**를 달았다(region 4 / 심볼 12). 대상은
+> `ControlPlane.cs`(`@state-maps`, `#GetTicket`, `#TryMatch`, `#Enqueue`, `#ResultFingerprint`,
+> `#RecordResult`), `TokenService.cs`(`@sign-body`, `#IssueGameToken`, `@verify-signature`,
+> `#TryValidateGameToken`), `Api/Program.cs`(`@results-endpoint`), `Tests/Program.cs`(`#IdempotentResult`)다.
+>
+> **앵커를 달자 드리프트 12건이 드러났고, 12건 전부가 문서 쪽 오류였다.** 소스는 한 줄도
+> 고치지 않았다 — `.cs` 파일에 들어간 변경은 `// snippet-begin:` / `// snippet-end:` 마커 주석
+> 8줄이 전부다(`TokenService.cs` 4, `Api/Program.cs` 2, `ControlPlane.cs` 2). 유형은 둘이다.
+>
+> - **컴파일 불가.** `step02_tokens.md`의 `new GamePayload(...)`는 대입 없는 bare `new`라
+>   C#에서 **CS0201**(식 문장으로 쓸 수 없는 식)이다. `var payload = new GamePayload(...)`로 정정했다.
+> - **존재하지 않는 식별자.** `step03_matching_fleet.md`가 대표적이다 — `playerId` →
+>   `request.PlayerId`, `ticket` → `existing`/`first`, `waited` → `waitedSeconds`,
+>   `players` → `[first.PlayerId, second.PlayerId]`. 문서 안에서만 통하던 이름들이었다.
+>
+> 이것이 이 지적("장치가 없으므로 드리프트 3건이 검사망을 그대로 통과한다")이 예상한 그대로다.
+> 장치를 켜자 보고서가 세었던 3건이 아니라 12건이 나왔다.
 
 <sub>분류: 문서코드드리프트</sub>
 
@@ -3402,6 +3483,10 @@ articles/step04_crash_test.md:27 "각 절단본을 Replay하면 파서·CRC·Com
 
 ### 이월 — 아직 남은 일 (9건)
 
+> **이 목록은 2026-08-13 시점이다.** 9건 중 4건(6·7·8·9번)은 2026-08-14에 처리됐다.
+> 각 항목 끝에 `→ [2026-08-14]` 줄로 결과를 적었고, 최신 상태는
+> [2차 반영 (2026-08-14)](#2차-반영-2026-08-14) 절에 있다.
+
 이 절만 읽어도 무엇이 남았는지 알 수 있도록 적는다. 앞의 `lab #번호`를 따라가면 원래 근거가 있다.
 
 1. **`system_kernel_lab` #1 [높음] — 부분 읽기·EINTR·취소 자동 검증 부재**
@@ -3412,6 +3497,8 @@ articles/step04_crash_test.md:27 "각 절단본을 Replay하면 파서·CRC·Com
    최소선은 `fileBytes`보다 작은 파일로 short-read 경로를 밟게 하는 것.
    **이월 사유**: Linux 전용 코드 신설이 필요한데 반영 환경에 WSL·POSIX 툴체인이 없어
    작성해도 실행 검증이 불가능했다.
+   → **[2026-08-14] 여전히 이월.** `tests/system_core_tests.cpp`는 백업본과 **바이트 단위로 동일**하다.
+   Linux 환경이 붙기 전에는 착수 자체가 무의미하다.
 
 2. **`system_kernel_lab` #2 [높음] — 실패 주입 수단 부재**
    `src/` 어디에도 fault injection seam이 없다. io_uring 런타임 폴백, aio의 cancel+수확 경로,
@@ -3419,6 +3506,7 @@ articles/step04_crash_test.md:27 "각 절단본을 Replay하면 파서·CRC·Com
    **남은 일**: `FaultingBackend` 데코레이터(첫 N회 성공 후 지정 errno) 또는 `SKL_FAULT=` 환경변수
    seam + `/proc/self/fd` 개수 비교로 fd 누수 검사.
    **이월 사유**: #1과 같다.
+   → **[2026-08-14] 여전히 이월.** `src/`에 fault injection seam은 아직 없다. #1과 같은 사유.
 
 3. **`system_kernel_lab` #3 [높음] — CTest 미실행, backend 폴백 시 조용한 통과**
    `VERIFY.md`의 `system_kernel_lab` 행은 여전히 "현재 환경에서 미검증"이다.
@@ -3426,12 +3514,19 @@ articles/step04_crash_test.md:27 "각 절단본을 Replay하면 파서·CRC·Com
    (b) 어느 backend가 실제로 실행됐는지 항상 요약 출력, (c) `TestWorkloadExecutionModels`를
    `BackendCompiledIn`인 모든 backend × {pthread, coroutine}로 확장, (d) WSL 또는 CI에서 Linux 실행 1회.
    **이월 사유**: (d)가 다른 환경을 요구한다.
+   → **[2026-08-14] 여전히 이월.** `projects/mini/VERIFY.md:46`의 `system_kernel_lab` 행은 지금도
+   "현재 환경에서 미검증 / CTest 1개 정의, Linux 실행 미검증"이고, :29는 이 lab을
+   `check_projects.ps1`에서 제외한다고 명시한다. 2026-08-14의 "mini 11개 lab 클린 재빌드"에서
+   **빠진 한 lab이 바로 이것**이다(12개 중 11개).
 
 4. **`system_kernel_lab` #8 [중간] — 시그널·io_uring 등록 자원·취소·IPC 대응 없음**
    **남은 일**: backend에 `registered files/buffers` 토글을 추가하면 part14의 등록 자원 주제와
    "조작 변수" 요구를 동시에 만족한다. 시그널·파이프는 새 backend가 아니라 테스트 전용 소스로
    도입해도 #1의 검증 공백과 함께 메워진다.
    **이월 사유**: 기능 증설.
+   → **[2026-08-14] 여전히 이월.** 기능 증설분은 그대로다. 다만 이 lab의 **문서 쪽**은 이번에도
+   손댔다 — step02·03·04 세 문서에 남아 있던 드리프트 허용 문장("디스크의 통합 코드는 누적되어
+   더 진행된 상태일 수 있다")과 후속 step 예고 표현을 제거했다. 코드·테스트는 미착수.
 
 5. **`system_kernel_lab` #10 [중간] — 재현 가능한 측정 경로 없음**
    `src/main.cpp`는 여전히 `argc`/`argv`를 무시하고, 측정값을 파일로 남기는 코드가 없다.
@@ -3439,6 +3534,8 @@ articles/step04_crash_test.md:27 "각 절단본을 Replay하면 파서·CRC·Com
    실행 파일을 추가한다. `FileIoWorkload`+`FrameTimer`가 이미 SDL2/ImGui와 분리돼 있어
    (`system_core_tests` 타깃이 증거) 새 타깃 하나면 된다.
    **이월 사유**: 새 실행 파일 신설.
+   → **[2026-08-14] 여전히 이월.** `src/main.cpp`는 백업본과 **바이트 단위로 동일**하다
+   (`argc`/`argv` 무시, 측정값 파일 출력 없음). headless 러너 미신설.
 
 6. **`parts_perf_lab` #12 [중간] — 스니펫 생략·드리프트 허용 선언·검증 장치 부재**
    반영된 것: step02의 토글 패널 생략 블록, step04의 SSE/AVX2 잔여 루프 생략 블록을 전문으로 채웠다.
@@ -3448,6 +3545,8 @@ articles/step04_crash_test.md:27 "각 절단본을 Replay하면 파서·CRC·Com
    드리프트 허용 문장 "디스크의 통합 코드는 누적되어 더 진행된 상태일 수 있다"를 걷어낸다.
    (c) 스니펫-소스 대조 장치를 둔다(아래 공통 잔여 참조).
    **이월 사유**: (c)가 저장소 도구 신설이라 lab 하나의 범위를 넘는다.
+   → **[2026-08-14] 해소.** (a) 생략 블록을 실제 소스로 채웠고, (b) 드리프트 허용 문장을 여섯 문서
+   전부에서 걷어냈으며, (c) `scripts/check_snippets.py`가 신설돼 이 lab 앵커 13개를 지킨다.
 
 7. **`physics_lab` #10 [중간] — Step 8 종합 측정이 Step 6 응답 솔버를 재구현**
    `measure_scene.cpp`의 `StepSim`은 여전히 접촉 수집·Sequential Impulse·위치 보정을 자체 구현하고,
@@ -3457,6 +3556,10 @@ articles/step04_crash_test.md:27 "각 절단본을 Replay하면 파서·CRC·Com
    **남은 일**: 세 함수를 `src/core/` 또는 `src/response/`의 공유 함수로 올리고 두 Scene이 모두 호출하게 한다.
    **이월 사유**: 구조 개편. 다만 두 경로 각각에는 이번에 자동 테스트가 붙었다
    (`physics_response_tests`, `physics_determinism_tests`).
+   → **[2026-08-14] 해소.** `src/core/contact_solver.h`(248줄, 신설)로 통합. **지적은 1건이었으나
+   실제 차이는 7군데**였고(유효질량 리터럴 2 + 임펄스 `* invMass` 누락 4 + 위치 보정 갱신 순서 1),
+   `invMass = 1` 워크로드라 일곱 군데 전부가 숫자로는 무해했다. 통합 직전 실측 차이는 240 스텝 뒤
+   위치 0.557 px / 속도 4.77 px/s, 통합 후 비트 일치. `TestMeasureRunsTheResponseSolver`로 고정.
 
 8. **`graphics_dx_lab` #10 [중간] — 문서의 코드만으로는 어떤 step도 빌드 불가**
    개별 드리프트(step03 루트 상수 오프셋 0/4/20, step07 Flush, LOC 비교 등)는 고쳐졌지만
@@ -3464,11 +3567,19 @@ articles/step04_crash_test.md:27 "각 절단본을 Replay하면 파서·CRC·Com
    step별 "이 step에서 추가/변경한 파일 목록"도 없다. ctest 명령이 들어간 step은 7편 중 3편이다.
    **남은 일**: 각 step에 변경 파일 목록 + 핵심 전문 스니펫을 싣고, 마커 주석 기반 추출·diff 검사를 붙인다.
    **이월 사유**: 문서 대량 증설 + 도구 신설.
+   → **[2026-08-14] 부분 해소.** 7편 전부에 `## 이 step 이 추가·변경하는 파일` 표가 생겼고, 본문이
+   815 → 2,801줄로 늘었으며, 앵커 85개가 붙었다. **남은 것 둘**: 테스트 대역 1,301줄
+   (`d3d12_stubs.h` 442 + `graphics_dx_contract_tests.cpp` 859) 미게재 — 실린 앵커는
+   `#TestRootConstantBudget` 하나뿐이다. 그리고 고아 PNG
+   `articles/diagrams/step01_skeleton_diagram_01.png` 1개(참조 0건).
 
 9. **`live_service_lab` #13 [낮음] — 스니펫 검증 장치 부재**
    step01(lock)·step04(`RecordedResult`)·step05(`/results` 핸들러)의 개별 스니펫은 실제 코드로 교체됐다.
    **남은 일**: `<!-- snippet: 파일경로:시작-끝 -->` 앵커와 `check_project_docs.py`의 원문 대조 단계.
    **이월 사유**: 저장소 도구 신설.
+   → **[2026-08-14] 해소.** 앵커 16개(region 4 / 심볼 12). 켜자마자 **드리프트 12건**이 드러났고
+   **전부 문서 쪽 오류**였다 — bare `new GamePayload(...)`(CS0201로 컴파일 불가), 존재하지 않는
+   식별자 다수. `.cs` 소스 변경은 마커 주석 8줄이 전부다.
 
 ### 반영됐지만 잔여가 남은 것
 
@@ -3489,6 +3600,10 @@ articles/step04_crash_test.md:27 "각 절단본을 Replay하면 파서·CRC·Com
 (2) `check_project_docs.py`의 전방 참조 정규식이 이번에 정리된 표현들(`이후 단계`, `Step N`)을
 여전히 인식하지 못한다. 문서를 다시 손대면 같은 위반이 통과된다.
 
+> **[2026-08-14] 공통 잔여 둘 다 닫혔다.** 자세한 내용과 이 장치가 어느 항목의 재발을 막는지는
+> 바로 아래 [2차 반영](#2차-반영-2026-08-14) 절의 "저장소 공통 2건" 항에 있다. 위 표에서
+> "대조 장치는 없음"·"가드가 못 잡는다"로 적힌 행들은 이제 **장치가 생겼다**로 읽어야 한다.
+
 ### 확인하지 못한 것
 
 - **실행 검증은 하지 않았다.** 이 절의 판정은 파일 내용 대조이지 빌드·`ctest` 재실행 결과가 아니다.
@@ -3501,3 +3616,184 @@ articles/step04_crash_test.md:27 "각 절단본을 Replay하면 파서·CRC·Com
   반영 뒤 그 변이들이 실제로 죽는지는 재확인하지 않았다. 새 테스트의 서술(예: `math_lab`
   step08의 "변이 주입으로 확인했다", `physics_lab` step05의 "옛 식으로 되돌리면 65개 CHECK가
   깨진다")은 반영 작업자의 주장이며 이 절이 독립적으로 확인한 것은 아니다.
+
+---
+
+## 2차 반영 (2026-08-14)
+
+앞 절이 남긴 **이월 9건 중 4건**을 처리하고, 그 4건이 공통으로 기다리던 **저장소 공통 2건**을
+닫은 기록이다. 판정 근거는 같다 — `VeLog_backup_2026-08-11/` 대비
+`diff -ru --strip-trailing-cr`(`-x "REVIEW_*" -x diagrams -x build`)와 파일의 현재 상태.
+집계 수치는 실제로 도구를 돌려 얻은 것이며, 출처는 각 항에 적었다.
+
+### 갱신된 집계
+
+| lab | 지적 | 08-13 이월 | 08-14 결과 |
+|---|---:|---:|---|
+| `parts_perf_lab` | 15 | 1 | #12 **완료** |
+| `physics_lab` | 14 | 1 | #10 **완료** |
+| `live_service_lab` | 15 | 1 | #13 **완료** |
+| `graphics_dx_lab` | 16 | 1 | #10 **부분 처리** — 잔여 2개(§2) |
+| `system_kernel_lab` | 13 | 5 | **5건 전부 이월 유지** — Linux 필요(§3) |
+| 나머지 7개 lab | 93 | 0 | — |
+| **합계** | **166** | **9** | **완료 3 · 부분 1 · 이월 유지 5** |
+
+전체로 보면 **반영됨 160 · 부분 반영 1 · 이월 5**다. 이월 5건은
+**전부 `system_kernel_lab`이고 전부 Linux를 요구한다.** 아래 §3 참조.
+
+### 1. 저장소 공통 2건 — 닫힘
+
+이 둘이 이월의 진짜 병목이었다. `parts_perf_lab` #12(c), `graphics_dx_lab` #10,
+`live_service_lab` #13이 전부 "저장소 도구 신설이 필요해서" 미뤄진 것이었기 때문이다.
+
+**(1) `scripts/check_snippets.py` 신설 (796줄).** 문서의 코드 펜스를 실제 소스와 대조한다.
+사용법은 `scripts/SNIPPETS.md`(139줄)에 있다. 설계의 핵심은 **opt-in**이다 — 모든 펜스를
+대조하면 안 되기 때문이다. step 문서의 스니펫 상당수는 *그 step 시점의 스냅숏*이고 디스크의
+코드는 더 진행돼 있다. 그래서 저자가 "이 펜스는 지금 소스와 같다"고 주장할 때만 앵커를 달고,
+**앵커를 다는 순간 그 주장을 검사기가 지킨다.**
+
+대상 지정은 네 가지이고 낡음에 대한 내성이 다르다.
+
+| 문법 | 의미 | 내성 |
+|---|---|---|
+| `src/platform.h` | 파일 전체 | 파일이 사라지면 error |
+| `src/sim/soa.cpp@sse-hot-loop` | 소스의 `// snippet-begin:` region 마커 | **가장 강함** — 마커가 코드와 함께 움직인다 |
+| `src/sim/soa.cpp#UpdateSSE` | 심볼 정의 블록 | 줄 이동에 면역, 이름이 바뀌면 error |
+| `src/sim/soa.cpp:107-146` | 줄 범위 | **가장 약함** — 항상 WARN |
+
+생략(`// ...`)·주석 번역·들여쓰기 차이는 기본 허용하고, **식별자·시그니처·리터럴·제어흐름의
+차이만 잡는다.** 이것이 이 보고서에서 반복 지적된 "문서가 존재하지 않는 식별자를 쓴다" 부류를
+정확히 겨냥한 지점이다.
+
+`check_project_docs.py`가 이것을 `import`해(:11, :181) **단일 진입점**이 됐고,
+`PROJECTS_PLAN.md`의 완료 기준 2번·7번이 각각 이 두 검사를 명시적으로 가리킨다.
+
+현재 상태 — `python scripts/check_project_docs.py`:
+
+```text
+Checked 80 project documents (118 snippet anchor(s)): 0 error(s), 0 warning(s).
+```
+
+`python scripts/check_snippets.py --stats`:
+
+```text
+앵커 종류: file 12, region 28, symbol 78
+```
+
+**줄범위 앵커는 0개다.** 가장 약한 형태를 하나도 쓰지 않았다는 뜻이고, 그래서 warning도 0이다.
+lab별 분포는 `graphics_dx_lab` 85 · `live_service_lab` 16 · `parts_perf_lab` 13 ·
+`physics_lab` 4 = 118.
+
+> 참고: 작업 중 메모에는 `parts_perf_lab` 앵커가 11개로 적혀 있으나, 그것은
+> `step07_container.md` 한 편의 수다. `check_snippets.py`로 lab 전체를 세면
+> `step04_simd.md`의 2개를 더해 **13개**다. 이 보고서는 도구 출력을 따른다.
+
+**이 장치가 재발을 막는 항목.** 아래 표의 지적들은 전부 "문서 스니펫이 소스와 다르다"였고,
+2026-08-13에 스니펫 자체는 고쳤지만 **재발을 막을 수단이 없다**고 기록됐던 것들이다.
+
+| 항목 | 원래 지적 | 지금 |
+|---|---|---|
+| `parts_perf_lab` #12 | 생략 블록 + 드리프트 허용 선언 + 장치 부재 | 앵커 13개가 지킴 |
+| `graphics_dx_lab` #10 · #4 | 문서 코드로 빌드 불가, 루트 상수 오프셋 1/17 vs 4/20 | 앵커 85개가 지킴 |
+| `live_service_lab` #13 · #8 · #9 · #12 | lock·`RecordedResult`·`/results` 스니펫이 컴파일 불가 | 앵커 16개가 지킴 |
+| `physics_lab` #7 · #8 | step04 본문 스니펫이 결론·실제 코드와 3곳 불일치 | 앵커 4개가 지킴 |
+| `languages_lab` #8 · `math_lab` #11 · `ai_lab` #11 · `game_network_lab` #6·#10 · `db_lab` #9 | 스니펫이 존재하지 않는 식별자·시그니처 사용 | **아직 앵커 0개** — 장치는 생겼으나 이 lab들은 아직 붙이지 않았다 |
+
+마지막 행이 정직한 한계다. 장치가 있다는 것과 그 lab이 장치를 켰다는 것은 다르다.
+`ai_lab`·`db_lab`·`game_network_lab`·`graphics_gl_lab`·`graphics_vk_lab`·`languages_lab`·
+`math_lab`·`system_kernel_lab` 8개 lab은 앵커가 0개이므로, 그 lab들의 스니펫 드리프트는
+여전히 사람이 봐야 잡힌다.
+
+**(2) `FORWARD_PROMISE_RE` 보강.** 완료 기준 2번(후속 step 예고 금지)의 가드가 이 보고서가
+정리한 표현들을 못 잡던 문제다 — `parts_perf_lab` #9 · `math_lab` #13 · `physics_lab` #9 ·
+`graphics_vk_lab` #9 · `system_kernel_lab` #12가 전부 같은 구멍을 지적했다. 추가된 규칙은 셋이다.
+
+- `(?:이후|추후)\s*(?:[^.\n]{0,25}?\s)?단계(?:는|가|를|의|에서|에|까지|부터)` — **조사를 요구해**
+  회고적 표현과 가른다. `이후 BVH 빌드 단계 시각화` 같은 조사 없는 명사 수식은 예고가 아니므로 일부러 뺐다.
+- `(?:다음|이후|후속|추후)\s*(?:스텝|step)\b` — 영어 단위 `Step`을 잡는다. 이것이
+  `physics_lab` #9가 "저장소 검사기가 'Step'이라는 영어 단위를 인식하지 못해 통과한다"고
+  지적한 바로 그 지점이다.
+- `STEP_NUMBER_RE` + `OWN_STEP_RE` — **자기 step 번호와 대조**한다. `Step 4 의 토픽`(예고)과
+  `Step 2 에서 만든 것`(회고)은 문법이 아니라 번호로 갈리기 때문이다. 자기 번호보다 큰 숫자를
+  가리키면 아직 없는 글이므로 error다.
+
+**보강 첫 실행에서 14건이 걸렸고, 그중 8건이 오탐이었다.** 오탐을 먼저 제거했다 —
+기존의 `~` 제거 코드가 `Step 1~7`을 `Step 17`로 만들어 버리던 버그가 하나였고, 나머지는
+세는 말(`step 4번 모이면`)이었다. 그래서 지금 부정 전방탐색이
+`(?!\s*(?:번|회|개|차례|차|줄|배|초|분|시간|프레임|픽셀|바이트|ms|Hz))`로 들어가 있다.
+남은 **진짜 6건은 전부 수정**했고, 현재 0 error다.
+
+### 2. 처리된 이월 3건 + 부분 1건
+
+각 항목의 자세한 결과는 본문 지적 아래 `> **[반영됨 · 2026-08-14]**` 줄에 있다. 요약만 둔다.
+
+| 항목 | 결과 | 한 줄 |
+|---|---|---|
+| `parts_perf_lab` #12 | 완료 | 생략 블록을 소스로 채움 · 드리프트 허용 문장 **6개 문서에서 제거** · 앵커 13개 |
+| `physics_lab` #10 | 완료 | `src/core/contact_solver.h`로 통합. **지적 1건 → 실제 차이 7군데.** 통합 전 240 스텝 뒤 위치 0.557 px / 속도 4.77 px/s → 통합 후 **비트 일치** |
+| `graphics_dx_lab` #10 | **부분** | 7편에 변경 파일 표 신설 · 본문 815 → 2,801줄 · 앵커 85개. **테스트 대역 1,301줄 미게재 + 고아 PNG 1개** |
+| `live_service_lab` #13 | 완료 | 앵커 16개. 켜자 **드리프트 12건**이 드러났고 **전부 문서 쪽 오류** |
+
+**`physics_lab` #10이 남긴 교훈을 따로 적어 둔다.** 이 보고서의 지적은 "차이 3갈래"였는데
+통합해 보니 7군데였다. 놓친 넷은 **임펄스 적용식에서 `* invMass`가 빠져 있던 것**이다.
+그런데 이 워크로드는 `invMass = 1`이라 일곱 군데 전부가 *숫자로는* 무해했다 — 값이 맞아서가
+아니라 가정이 우연히 성립해서다. 검수가 정적 대조로 세 갈래까지 짚었지만 나머지 넷은
+**실제로 통합해 두 경로를 나란히 돌려 보기 전에는 드러나지 않았다.** "지적 건수 = 결함 건수"가
+아니라는 사례로 남긴다.
+
+`graphics_dx_lab`을 **부분**으로 판정한 근거는 둘 다 실측이다.
+
+- `wc -l tests/*` → `d3d12_stubs.h` 442 + `graphics_dx_contract_tests.cpp` 859 = **1,301줄**.
+  문서에 실린 테스트 앵커는 `step04_rootsig.md:174`의 `#TestRootConstantBudget` **1개**뿐이고,
+  나머지는 산문 서술과 CMake 타깃 정의로만 나온다. 완료 기준 4를 제품 코드에 대해서는
+  충족했지만 테스트 대역에 대해서는 충족하지 못한 상태다. 이 lab의 #1이
+  "테스트가 제품 .cpp를 하나도 링크하지 않는다"였던 만큼 가벼운 잔여가 아니다.
+- `articles/diagrams/step01_skeleton_diagram_01.png`가 `articles/`·`README.md` 어디에서도
+  참조되지 않는다(참조 0건). step01이 114 → 1,044줄로 다시 쓰이면서 그림을 부르던 자리가
+  사라졌는데 파일만 남았다.
+
+### 3. `system_kernel_lab` 5건 — 여전히 Linux 필요
+
+**이월 5건은 상태가 바뀌지 않았다.** 착수하지 않은 것이 아니라 **착수할 수 없다.**
+
+| 이월 | 지적 | 현재 상태 |
+|---|---|---|
+| #1 [높음] | 부분 읽기·EINTR·취소 자동 검증 부재 | `tests/system_core_tests.cpp`가 백업본과 **바이트 단위로 동일** |
+| #2 [높음] | 실패 주입 수단 부재 | `src/`에 fault injection seam 없음 |
+| #3 [높음] | CTest 미실행, backend 폴백 시 조용한 통과 | `projects/mini/VERIFY.md:46` = "현재 환경에서 미검증" |
+| #8 [중간] | 시그널·io_uring 등록 자원·취소·IPC 대응 없음 | 기능 증설분 미착수 |
+| #10 [중간] | 재현 가능한 측정 경로 없음 | `src/main.cpp`가 백업본과 **바이트 단위로 동일** |
+
+배경을 분명히 해 둔다. 이 lab의 지적 13건 중 **문서 성격의 8건은 이미 반영됐고**(2026-08-13),
+남은 5건은 **전부 검증력** 항목이다. 즉 "문서는 정리됐는데 그 문서가 참이라고 확인해 줄
+실행 환경이 없다"가 지금의 정확한 상태다. 2026-08-14에도 이 lab의 문서는 손댔다 — step02·03·04
+세 문서에서 드리프트 허용 문장과 후속 step 예고 표현을 제거했다. 그러나 `tests/`와 `src/main.cpp`는
+그대로다.
+
+`projects/mini/VERIFY.md:29`가 이 lab을 `check_projects.ps1`에서 제외한다고 명시하고 있고,
+그래서 2026-08-14의 "mini 클린 재빌드"도 **12개 중 11개 lab**에서만 돌았다. 빠진 하나가 이것이다.
+
+**필요한 것은 하나뿐이다** — WSL 배포판 또는 별도 Linux 환경 1회. 그것이 붙기 전에는
+5건 모두 "코드를 써도 실행 검증이 불가능"하므로 이월 상태를 유지한다.
+
+### 4. 이번 절이 확인한 것과 확인하지 못한 것
+
+**확인한 것.**
+
+- `python scripts/check_project_docs.py` → 80개 문서 / 앵커 118개 / **0 error 0 warning** (직접 실행).
+- 앵커 종류별 분포와 lab별 분포 (`check_snippets.py --stats`, 직접 실행).
+- 백업본 대비 diff로 파일 신설·삭제·동일 여부 (`contact_solver.h` 신설,
+  `system_kernel_lab`의 `tests/`·`src/main.cpp` 동일, `.cs` 변경이 마커 주석뿐임).
+- `graphics_dx_lab`의 본문 줄 수 증가와 테스트 1,301줄, PNG 참조 0건 (직접 계수).
+- `TestMeasureRunsTheResponseSolver`가 `CHECK(worstPos == 0.0f)` / `CHECK(worstVel == 0.0f)`로
+  비트 일치를 단언한다는 것 (소스 확인).
+
+**확인하지 못한 것.**
+
+- **이 절도 빌드·ctest를 다시 돌리지 않았다.** "mini 11개 lab 클린 재빌드 통과"와
+  `physics_lab` ctest 6/6은 반영 작업자의 실행 결과이며, 이 절은 그 주장이 가리키는
+  **파일 상태**만 대조했다.
+- 문서에 실린 실측 수치(0.557 px / 4.77 px/s, shuffled maxDelta 0.700067 → 0.399962,
+  평균 침투 0.6946 → 0.6965 등)는 반영 작업자가 통합 전후로 측정한 값이다. 이 절은 그 수치가
+  문서와 소스에 일관되게 기록돼 있음을 확인했을 뿐 재측정하지 않았다.
+- **변이 테스트는 이번에도 다시 돌리지 않았다.** 앞 절의 같은 한계가 그대로 유효하다.

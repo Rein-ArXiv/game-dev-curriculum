@@ -121,8 +121,14 @@ public:
         bool externalMap = false, externalWaves = false, externalBalance = false;
         const DefenseMap map =
             defense::LoadMapFile(options_.assets + "/level.txt", &externalMap);
-        const defense::BalanceConfig balance =
-            defense::LoadBalanceScript(options_.assets + "/balance.script", &externalBalance);
+        // 클라이언트와 같은 규칙: 거부된 스크립트는 프로세스를 세우지 않고
+        // 기본 구성으로 흡수되며, 거부 사유는 표준 오류로 나간다.
+        std::string balanceError;
+        const defense::BalanceConfig balance = defense::LoadBalanceScript(
+            options_.assets + "/balance.script", &externalBalance, &balanceError);
+        if (!balanceError.empty())
+            std::fprintf(stderr, "[content] balance.script 거부, 기본 구성으로 진행: %s\n",
+                         balanceError.c_str());
         const std::vector<WaveDef> waves = defense::ApplyBalance(
             defense::LoadWaveFile(options_.assets + "/waves.txt",
                                   defense::DefaultWaves(), &externalWaves),

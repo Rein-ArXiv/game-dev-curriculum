@@ -65,14 +65,30 @@ class Finding:
     message: str
 
 
+# 검수 보고서는 기사가 아니다 — 들어가며·목차·더 읽을거리 절이 없고, H3 에 번호를 쓰고,
+# 다른 시리즈의 파일명을 인용하는 것이 이 문서들의 정상 형태다. 기사 규격으로 검사하면
+# 상시 ERROR 상태가 되어 진짜 스타일 위반이 그 안에 묻힌다.
+REPORT_PREFIXES = ("REVIEW_", "REDESIGN_")
+
+
+def is_report(path: Path) -> bool:
+    return path.name.startswith(REPORT_PREFIXES)
+
+
 def documents(args: list[str]) -> list[Path]:
     targets = args or DOC_DIRS
     result: list[Path] = []
     for target in targets:
         path = ROOT / target
         if path.is_dir():
-            result.extend(sorted(p for p in path.glob("*.md") if p.name != "README.md"))
+            result.extend(
+                sorted(
+                    p for p in path.glob("*.md")
+                    if p.name != "README.md" and not is_report(p)
+                )
+            )
         elif path.is_file() and path.suffix == ".md":
+            # 명시적으로 지정하면 보고서도 검사한다 (의도적 확인용)
             result.append(path)
     return result
 

@@ -26,6 +26,7 @@ const char* RootSigPolicyName(RootSigPolicy p);
 // 숫자를 쓰도록 한 곳에 모은다. cbuffer 패킹 규칙상 float4x4 가 16바이트
 // 경계에서 시작하므로 uint 뒤에 3 DWORD 패딩이 들어간다.
 //   [useInstancing(1) + pad(3)] [model mat4(16)] [color float4(4)] = 24 DWORD.
+// snippet-begin: root-const-slots
 constexpr UINT kRootConstUseInstancingOffset = 0;
 constexpr UINT kRootConstUseInstancingCount  = 1;
 constexpr UINT kRootConstModelOffset         = 4;
@@ -33,6 +34,7 @@ constexpr UINT kRootConstModelCount          = 16;
 constexpr UINT kRootConstColorOffset         = 20;
 constexpr UINT kRootConstColorCount          = 4;
 constexpr UINT kRootConstTotalDwords         = 24;
+// snippet-end: root-const-slots
 
 class RootSignatureCache {
 public:

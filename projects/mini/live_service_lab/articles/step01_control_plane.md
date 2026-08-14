@@ -40,14 +40,20 @@ allocation = endpoint + match_id + server_id + short_lived_game_token
 
 ## 상태 모델
 
-core는 server, ticket, match, result를 독립 상태로 둔다.
+core는 server, ticket, match, result를 독립 상태로 두고, 플레이어별 active ticket을 찾는 역색인을
+하나 더 가진다.
 
+<!-- snippet: src/LiveService.Core/ControlPlane.cs@state-maps -->
 ```csharp
-private readonly Dictionary<string, ServerState> servers = new();
-private readonly Dictionary<string, TicketState> tickets = new();
-private readonly Dictionary<string, MatchState> matches = new();
-private readonly Dictionary<string, RecordedResult> results = new();
+private readonly Dictionary<string, ServerState> servers = new(StringComparer.Ordinal);
+private readonly Dictionary<string, TicketState> tickets = new(StringComparer.Ordinal);
+private readonly Dictionary<string, string> playerTickets = new(StringComparer.Ordinal);
+private readonly Dictionary<string, MatchState> matches = new(StringComparer.Ordinal);
+private readonly Dictionary<string, RecordedResult> results = new(StringComparer.Ordinal);
 ```
+
+key 비교는 모두 `StringComparer.Ordinal`이다. 식별자는 표시용 문자열이 아니라 바이트 계약이므로
+문화권별 대소문자·정규화 규칙이 개입해서는 안 된다.
 
 server lifecycle은 `Ready`, `Draining`, `Unhealthy`다. draining 서버는 진행 중 매치를 끝낼 수 있지만
 새 allocation을 받지 않는다. unhealthy는 heartbeat timeout을 넘긴 상태다. 복구는 단순 heartbeat가
@@ -67,15 +73,15 @@ score key 집합도 allocation의 플레이어 집합과 같아야 한다.
 `DateTimeOffset.UtcNow`를 core 내부에서 직접 읽으면 token expiry와 heartbeat timeout 테스트가
 sleep에 의존한다. 대신 public 상태 전이는 `now`를 받는다.
 
+<!-- snippet: src/LiveService.Core/ControlPlane.cs#GetTicket -->
 ```csharp
-public TicketView? GetTicket(string ticketId, string playerId,
-                             DateTimeOffset now)
+public TicketView? GetTicket(string ticketId, string playerId, DateTimeOffset now)
 {
     lock (gate)
     {
         MarkUnhealthyServers(now);
         TryMatch(now);
-        // ownership check and projection
+        // ... 소유권 검사와 view 투영
     }
 }
 ```
@@ -89,6 +95,7 @@ public TicketView? GetTicket(string ticketId, string playerId,
 match 생성은 서버 capacity 증가, match 삽입, 두 ticket assignment를 같은 critical section에서
 수행한다. 중간 상태를 다른 요청이 관측하지 않는다.
 
+<!-- snippet: src/LiveService.Core/ControlPlane.cs#TryMatch -->
 ```csharp
 ServerState? server = servers.Values
     .Where(candidate =>

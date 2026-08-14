@@ -434,6 +434,26 @@ diff -ru --strip-trailing-cr VeLog_backup_2026-08-11/languages VeLog/languages \
    - 해야 할 일: `enum class PropertyType { Float, Int, Bool, ... }` 정의를 `### 기본 구조` 블록(L120~148)에 추가하고, `REGISTER_PROPERTY`가 `sizeof` 대신(또는 그와 함께) 타입 태그를 등록하도록 매크로를 고친다.
    - 참고: 이 절의 `PropertyInfo`/`AddProperty`에 정의가 없다는 점은 **기각 항목 9번**에서 "스케치 수준이므로 오류가 아니다"로 이미 판정됐다. 위 작업은 그 판정을 뒤집자는 게 아니라, 새로 도입한 `type` 필드만이라도 등록 경로를 갖추자는 뜻이다.
 
+**[2026-08-13 후속 처리]** (2026-08-14) — **잔여 2건 모두 닫혔다. 이 보고서에 남은 본문 작업은 0건이다.**
+
+1. **`part05_jit_compilation.md` 5절 — 로그를 한 이터레이션으로 맞췄다** (diff `@@ -591,17 +591,15 @@`).
+   서두가 "루프를 **한 번** 실행하며" → "루프를 **한 이터레이션만** 실행하며" 로 바뀌고, Recording 로그가
+   세 줄(i=1 / i=2 / i=3 + `...`)에서 두 줄(`i=2: is_prime(2) → true → sum = sum + 2` /
+   `i = i + 1 → 루프 시작점 복귀 → 기록 종료`)로 줄었다. false 였던 `i=1` 줄이 사라져,
+   2026-08-13 에 넣은 컴파일 단계 주석("기록된 경로에서는 true였으므로 그 경로만 남기고 guard 삽입")과
+   로그·서두가 모두 한 방향을 가리킨다. 위 "해야 할 일" 의 **첫째 갈래**를 택한 셈이다.
+2. **`part07_reflection_metadata.md` — 등록 측을 갖췄다. 소비하는 필드를 이제 등록 측이 채운다.**
+   `### 기본 구조` 블록에 `enum class PropertyType { Unknown, Bool, Int, Float };` 와
+   `PropertyInfo`(`name`/`offset`/`size`/`type`/`description`) 정의가 신설됐고, `TypeInfo::AddProperty` 선언에
+   `PropertyType` 인자가 들어갔다. 매크로 쪽에는 `PropertyTypeOf<T>()` 기본 템플릿 + `bool`/`int`/`float` 특수화가
+   추가되고 `REGISTER_PROPERTY` 가 `PropertyTypeOf<decltype(Class::Member)>()` 를 함께 넘긴다.
+   블록 주석 번호도 1~4 → 1~5 로 다시 매겨졌다 (diff `@@ -121,17 +121,31 @@` 외 4 hunk).
+   - `sizeof(Class::Member)` 인자는 **일부러 남겼다.** 기각 항목 9번의 "스케치 수준이라 오류가 아니다" 판정을
+     뒤집지 않기 위해서이고, `size` 는 타입 판별이 아니라 메모리 레이아웃 정보로 계속 쓰인다.
+     이번 작업의 범위는 위 "해야 할 일" 이 적은 대로 **새로 도입한 `type` 필드의 등록 경로**뿐이다.
+   - **이 코드는 이 머신의 MSVC 로 실제 컴파일·실행해 확인했다** — `PropertyTypeOf<decltype(Character::Health)>()` 가
+     `PropertyType::Float` 로 접히고 소비 측 분기가 그 값으로 갈리는 것까지 봤다.
+
 ### 보고서 범위를 넘어선 추가 변경 (1건)
 
 - `part05_jit_compilation.md` 8절 TurboFan 예제(구 L1021·L1023)의 `jz deopt` 2줄도 `jnz deopt`로 함께 고쳐졌다. 보고서 **5번 항목**(L822·823·826·827의 가드 극성)이 지적한 것과 **동일한 결함**이지만 해당 행번호는 보고서에 열거돼 있지 않았다. 같은 결함의 일관 적용이므로 회귀가 아니다.

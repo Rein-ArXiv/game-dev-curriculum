@@ -591,12 +591,10 @@ end
 
 Tracing JIT은 실행을 관찰하다가 "루프가 hot하다"고 판단하면:
 
-1. **Recording phase**: 루프를 한 번 실행하며 실제로 실행된 경로를 기록
+1. **Recording phase**: 루프를 한 이터레이션만 실행하며 실제로 실행된 경로를 기록
  ```
- i=1: is_prime(1) → false → skip
  i=2: is_prime(2) → true → sum = sum + 2
- i=3: is_prime(3) → true → sum = sum + 3
-...
+ i = i + 1 → 루프 시작점 복귀 → 기록 종료
  ```
 
 2. **Compilation**: 기록된 linear trace를 최적화

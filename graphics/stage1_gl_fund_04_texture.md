@@ -780,7 +780,7 @@ GLuint LoadTexture2D(const char* path, bool sRGB = true) {
 }
 ```
 
-`stbi_load`의 마지막 인자에 4를 줘 *항상 RGBA 4채널* 로 강제 디코드했다. 이러면 원본이 RGB 3채널이든 그레이스케일이든 GPU 측은 일관되게 `GL_RGBA`로 받고, 행 바이트가 항상 4의 배수가 되어 unpack alignment 문제도 사라진다. `glGenerateMipmap`은 base level 업로드 *뒤* 에 부른 점에 유의한다 — 순서가 바뀌면 빈 밉맵이 생긴다.
+`stbi_load`의 마지막 인자에 4를 줘 *항상 RGBA 4채널* 로 강제 디코드했다. 이러면 원본이 RGB 3채널이든 그레이스케일이든 GPU 측은 일관되게 `GL_RGBA`로 받고, 행 바이트가 항상 4의 배수가 되어 unpack alignment 문제도 사라진다. `glGenerateMipmap`은 base level 업로드 *뒤* 에 부른 점에 유의한다 — 순서가 바뀌면 빈 밉맵이 생긴다. 이 예제는 `sRGB = true` 경로에도 `glGenerateMipmap`을 그대로 쓰는데 이는 흐름을 한 함수로 보이기 위한 단순화이고, 배포용 sRGB 디퓨즈의 밉은 4절·8절에서 말한 대로 선형 공간에서 디코드→필터→인코드해 오프라인으로 만든 뒤 레벨별로 업로드해야 한다.
 
 ### 샘플러 만들기
 

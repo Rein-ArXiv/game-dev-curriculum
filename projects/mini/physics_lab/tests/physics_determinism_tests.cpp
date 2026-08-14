@@ -2,6 +2,7 @@
 // 안에서 항상 bit-exact' 주장을 GUI 의 KEY_T 없이 ctest 가 확인한다.
 
 #include "scenes/measure_scene.h"
+#include "scenes/response_scene.h"
 
 #include <algorithm>
 #include <cmath>
@@ -161,6 +162,46 @@ void TestSimSettlesInsideCanvas() {
     CHECK(pen < 2.0f);
 }
 
+// (6) 결정성 측정이 도는 SI 가 *Step 6 이 가르친 그 SI* 인지. 같은 캔버스 /
+//     같은 body 수 / 같은 iteration 으로 두 Scene 을 나란히 돌려 위치가
+//     bit-exact 인지 본다. 갈라지면 측정은 교재의 솔버가 아니라 사본을 재고
+//     있는 것이고, 그때의 '결정적' 이라는 판정은 아무것도 보증하지 않는다.
+void TestMeasureRunsTheResponseSolver() {
+    constexpr int kFrames = 240;
+
+    const physlab::MeasureScene measure = MakeScene(false);
+    const auto measured = Run(measure, kFrames);
+
+    physlab::ResponseScene response;
+    response.SetCanvas(0, 0, 400, 320);
+    response.SetAlgo(physlab::ResponseAlgo::SequentialImpulse);
+    response.SetBodyCount(24);
+    response.SetIterations(8);
+    response.ResetBodiesForTest();
+    for (int i = 0; i < kFrames; ++i) response.Step(1.0f / 120.0f);
+
+    const auto& bodies = response.Bodies();
+    CHECK(bodies.size() == measured.size());
+
+    float worstPos = 0.0f, worstVel = 0.0f;
+    const size_t n = std::min(bodies.size(), measured.size());
+    for (size_t i = 0; i < n; ++i) {
+        worstPos = std::max(worstPos,
+                            std::fabs(bodies[i].pos.x - measured[i].pos.x));
+        worstPos = std::max(worstPos,
+                            std::fabs(bodies[i].pos.y - measured[i].pos.y));
+        worstVel = std::max(worstVel,
+                            std::fabs(bodies[i].vel.x - measured[i].vel.x));
+        worstVel = std::max(worstVel,
+                            std::fabs(bodies[i].vel.y - measured[i].vel.y));
+    }
+    std::cout << "  measure vs response: maxPosDelta=" << worstPos
+              << " maxVelDelta=" << worstVel << '\n';
+    CHECK(n == 24);
+    CHECK(worstPos == 0.0f);
+    CHECK(worstVel == 0.0f);
+}
+
 }  // namespace
 
 int main() {
@@ -169,6 +210,7 @@ int main() {
     TestShuffleBreaksDeterminism();
     TestSceneOwnDeterminismReport();
     TestMetrics();
+    TestMeasureRunsTheResponseSolver();
     if (failures != 0) {
         std::cerr << failures << " determinism test(s) failed\n";
         return 1;

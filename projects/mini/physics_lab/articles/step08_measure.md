@@ -21,7 +21,7 @@
 ---
 
 ## 목차
-1. [Live 시뮬 = 결정성 테스트 시뮬 (코드 공유)](#1-live-시뮬--결정성-테스트-시뮬-코드-공유)
+1. [측정 대상이 교재의 솔버와 같은 코드인가](#1-측정-대상이-교재의-솔버와-같은-코드인가)
 2. [StepSim — 모든 시뮬의 공통 단위](#2-stepsim--모든-시뮬의-공통-단위)
 3. [RunDeterminismTest](#3-rundeterminismtest)
 4. [세 단계 분류 (bit-exact / tolerant / non-deterministic)](#4-세-단계-분류-bit-exact--tolerant--non-deterministic)
@@ -29,9 +29,11 @@
 
 ---
 
-## 1. Live 시뮬 = 결정성 테스트 시뮬 (코드 공유)
+## 1. 측정 대상이 교재의 솔버와 같은 코드인가
 
-가장 큰 함정은 *결정성 테스트가 Live 시뮬과 다른 코드를 돌면 답이 무의미* 함. 따라서 *동일한 `StepSim` 함수* 가 두 케이스에 모두 쓰여야 한다.
+함정은 두 겹이다.
+
+**첫 겹** — *결정성 테스트가 Live 시뮬과 다른 코드를 돌면 답이 무의미* 하다. 따라서 *동일한 `StepSim` 함수* 가 두 케이스에 모두 쓰여야 한다.
 
 ```cpp
 class MeasureScene : public IScene {
@@ -57,41 +59,78 @@ class MeasureScene : public IScene {
 
 같은 `StepSim` → 같은 *부동소수 연산 순서* → *bit-exact* 가능성. `InitBodies` 도 *같은 seed* 면 *같은 RNG 순서* → *같은 초기 배치*.
 
+**둘째 겹, 훨씬 조용한 쪽** — `StepSim` 이 *자기만의 Sequential Impulse 사본* 을 들고 있으면 어떻게 되는가. 첫 겹은 여전히 만족한다. Live 도 테스트도 같은 `StepSim` 을 부르니 max delta 는 깨끗한 `0.0` 이 나온다. 그런데 그 `0.0` 은 *사본이 재현 가능하다* 는 뜻이지 *Response 가 가르친 SI 가 재현 가능하다* 는 뜻이 아니다. 측정과 교재가 다른 코드를 보는 순간, 초록 색띠는 아무것도 보증하지 않는 장식이 된다.
+
+그래서 접촉 파이프라인의 세 단계 — 접촉 수집 / Sequential Impulse / 위치 보정 — 는 `src/core/contact_solver.h` 에 *한 벌만* 둔다. Response 의 SI 분기도, 여기 `StepSim` 도 같은 템플릿 함수를 부른다. body 타입만 템플릿 파라미터로 다르고 (`pos` / `vel` / `radius` / `invMass` 네 멤버만 요구한다), 풀이 코드는 문자 그대로 하나다.
+
+특히 *유효질량* 을 리터럴로 적어 두는 것이 이 부류의 전형적인 사고다. 예전 `StepSim` 은 body-body 에 `2.0f`, 벽에 `1.0f` 을 박아 두었다 — `invMass` 가 1 인 워크로드에서는 정확히 맞는 값이라 끝까지 들키지 않는다. 공유 구현은 언제나 `bi.invMass + bj.invMass` 를 계산한다.
+
 ## 2. StepSim — 모든 시뮬의 공통 단위
 
+<!-- snippet: src/scenes/measure_scene.cpp#StepSim -->
 ```cpp
-void StepSim(std::vector<MeasureBody>& sim, float dt) const {
-    int n = (int)sim.size();
-    // 1. semi-implicit Euler 적분.
-    for (auto& b : sim) {
-        b.vel.y += kSimGravity * dt;
-        b.pos.x += b.vel.x * dt;
-        b.pos.y += b.vel.y * dt;
+void MeasureScene::StepSim(std::vector<MeasureBody>& sim, float dt) const {
+    const WorldBounds bounds = Bounds();
+
+    // 1. semi-implicit Euler 적분 (중력만).
+    core::IntegrateSemiImplicitEuler(sim, kDefaultGravity, dt);
+
+    // 2. contact 수집 (body-body brute O(n²) + 벽 / 바닥).
+    std::vector<Contact> contacts;
+    core::GatherCircleContacts(sim, bounds, contacts);
+
+    // 3. Sequential Impulse — velocity 수렴.
+    if (shuffleContacts_) {
+        static thread_local uint32_t shuffleRng = 0xDEADBEEFu;
+        core::SolveSequentialImpulse(sim, contacts, solver_, iterations_,
+                                     ShuffleContactOrder{&shuffleRng});
+    } else {
+        core::SolveSequentialImpulse(sim, contacts, solver_, iterations_);
     }
-    // 2. contact 수집 (brute O(n²)).
-    std::vector<Cn> contacts;
-    // body-body + walls ...
-    // 3. Sequential Impulse iter 반복.
-    for (int iter = 0; iter < iterations_; ++iter) {
-        for (auto& c : contacts) {
-            // velocity impulse with accumulated lambda clamp
-        }
-    }
-    // 4. position correction iter 반복.
-    for (int iter = 0; iter < iterations_/2; ++iter) {
-        // 새로 contact 검사 + 위치 보정
+
+    // 4. position correction (split impulse 단순화).
+    core::SolvePositionCorrection(sim, bounds, solver_, iterations_ / 2);
+}
+```
+
+네 줄이 전부다. 시나리오(중력, 캔버스 경계, 반복 수, shuffle 토글)만 이 Scene 이 정하고 *푸는 일* 은 전부 공유 솔버가 한다.
+
+임펄스 한 번의 실제 계산은 이렇다 — 유효질량이 어디서 오는지 보라.
+
+<!-- snippet: src/core/contact_solver.h@si-effective-mass -->
+```cpp
+template <class Body>
+void ApplyContactImpulse(std::vector<Body>& bodies, Contact& c,
+                         float targetVelocity) {
+    Body& bi = bodies[(size_t)c.i];
+    if (c.j >= 0) {
+        Body&       bj = bodies[(size_t)c.j];
+        const float vn = DotV(SubV(bj.vel, bi.vel), c.normal);
+        const float applied = AccumulateNormalImpulse(
+            vn, targetVelocity, bi.invMass + bj.invMass, c.lambda);
+        bi.vel.x -= applied * bi.invMass * c.normal.x;
+        bi.vel.y -= applied * bi.invMass * c.normal.y;
+        bj.vel.x += applied * bj.invMass * c.normal.x;
+        bj.vel.y += applied * bj.invMass * c.normal.y;
+    } else {
+        // 벽은 무한 질량 — 유효질량은 body 쪽 invMass 하나뿐이다.
+        const float vn = DotV(bi.vel, c.normal);
+        const float applied = AccumulateNormalImpulse(
+            vn, targetVelocity, bi.invMass, c.lambda);
+        bi.vel.x += applied * bi.invMass * c.normal.x;
+        bi.vel.y += applied * bi.invMass * c.normal.y;
     }
 }
 ```
 
 *고정 순서*:
 - body 는 *벡터의 index 순서* 로 처리.
-- contact 는 *(i, j) 쌍을 i < j* 로 생성 → *고정 순서*.
+- contact 는 *(i, j) 쌍을 i < j* 로 생성한 뒤 body 순서대로 바닥 / 좌벽 / 우벽 → *고정 순서*.
 - iter 안에서도 contact 가 *순차 처리*.
 
-이 두 조건이 *bit-exact* 의 전제. *iter 가 parallel for* 면 reduce 순서가 frame 마다 변할 수 있다 → non-deterministic.
+이 세 조건이 *bit-exact* 의 전제. *iter 가 parallel for* 면 reduce 순서가 frame 마다 변할 수 있다 → non-deterministic.
 
-`mass = 1`, `invMass = 1` 로 고정. 매 frame 에 *RNG 호출 없음* — 시뮬 진행 중에는 random 이 안 쓰임. RNG 는 *InitBodies* 때만.
+`invMass = 1` 이 이 Scene 의 기본값이지만 *가정으로 남아 있지는 않다* — 위 코드가 매번 body 에서 읽어 계산한다. 매 frame 에 *RNG 호출 없음* — 시뮬 진행 중에는 random 이 안 쓰임. RNG 는 *InitBodies* 때만 (그리고 shuffle 토글을 켰을 때만 예외).
 
 ## 3. RunDeterminismTest
 
@@ -177,7 +216,7 @@ flowchart LR
 
 Step 8 에서 추가한 것 — 그리고 lab 전체의 마무리.
 
-1. **MeasureScene 의 Live 시뮬 + Run determinism 버튼** — 같은 `StepSim` 코드를 *Live 한 step* 과 *동기적 결정성 테스트* 양쪽에 재사용.
+1. **MeasureScene 의 Live 시뮬 + Run determinism 버튼** — 같은 `StepSim` 코드를 *Live 한 step* 과 *동기적 결정성 테스트* 양쪽에 재사용. 그리고 그 `StepSim` 은 Response 와 *같은* 접촉 솔버(`src/core/contact_solver.h`)를 돈다 — 측정 대상이 교재의 솔버 그 자체다.
 2. **결정성 3 분류** — bit-exact / tolerantly deterministic / non-deterministic. UI 가 색띠로 즉시 분류.
 3. **종합 측정** — Live 의 *avg penetration* + *total KE* 시간 그래프. seed / N / iter 토글이 바뀌면 그래프가 재시작.
 4. **physics_lab 전체** — Step 1 (skeleton + fixed dt accumulator) → Step 2 (integrators) → Step 3 (forces) → Step 4 (broad phase) → Step 5 (narrow phase) → Step 6 (response) → Step 7 (constraints) → Step 8 (measure). *physics 시리즈의 part01·02 (운동학·적분기), part05 (Broad Phase), part06·07 (SAT / GJK+EPA), part08 (법선 응답), part10·11·12 (제약·SI·PBD)* 를 인터랙티브하게 검증하는 *측정 도구* 완성. 마찰 (part09), 회전 강체 동역학 (part03·04), 조인트 (part13), part14~20 은 대응 구현이 없다.
@@ -191,12 +230,12 @@ ctest --test-dir build -C Release --output-on-failure
 ```
 
 ```text
-1/6 Test #1: physics_core_tests ...............   Passed    0.06 sec
-2/6 Test #2: physics_collision_tests ..........   Passed    0.07 sec
+1/6 Test #1: physics_core_tests ...............   Passed    0.05 sec
+2/6 Test #2: physics_collision_tests ..........   Passed    0.05 sec
 3/6 Test #3: physics_broad_tests ..............   Passed    0.14 sec
-4/6 Test #4: physics_response_tests ...........   Passed    0.10 sec
-5/6 Test #5: physics_constraints_tests ........   Passed    0.08 sec
-6/6 Test #6: physics_determinism_tests ........   Passed    0.46 sec
+4/6 Test #4: physics_response_tests ...........   Passed    0.08 sec
+5/6 Test #5: physics_constraints_tests ........   Passed    0.06 sec
+6/6 Test #6: physics_determinism_tests ........   Passed    0.54 sec
 
 100% tests passed out of 6
 ```
@@ -206,10 +245,13 @@ ctest 가 도는 것은 여섯 개다 — core 헤더 (적분기 오차 차수�
 `physics_determinism_tests` 는 `MeasureScene` 의 `InitBodies` / `StepSim` / `RunDeterminismTest` 를 창 없이 부른다. GUI 가 `DrawWorld` 에서 넘겨주던 캔버스 좌표만 `SetCanvas` 로 주입하면 `T` 키가 밟는 것과 같은 경로다.
 
 - 같은 seed 로 600 스텝을 두 번 돌리면 max delta 가 정확히 `0.0f` — 패널의 *bit-exact* 색띠와 같은 판정.
-- `SetShuffleContacts(true)` 면 두 실행이 갈라진다 (실측 max delta 0.700). Gauss-Seidel 풀이의 순서 의존이 자동 검사로 남는다.
-- 반복성만 보면 *아무것도 하지 않는 `StepSim`* 도 통과하므로 절대 기준을 함께 건다 — 900 스텝 뒤 모든 body 가 벽과 바닥 안에 있고 (최저점 316.6, 바닥 316), 운동 에너지가 0 에 가깝고 (3.3e-4), 평균 침투가 slop 근처 (0.69) 인지.
+- `SetShuffleContacts(true)` 면 두 실행이 갈라진다 (실측 max delta 0.400). Gauss-Seidel 풀이의 순서 의존이 자동 검사로 남는다.
+- 반복성만 보면 *아무것도 하지 않는 `StepSim`* 도 통과하므로 절대 기준을 함께 건다 — 900 스텝 뒤 모든 body 가 벽과 바닥 안에 있고 (최저점 316.6, 바닥 316), 운동 에너지가 0 에 가깝고 (3.2e-4), 평균 침투가 slop 근처 (0.70) 인지.
+- **같은 워크로드를 Response Scene 과 나란히 240 스텝 돌려 위치·속도가 bit-exact 인지** — 두 Scene 이 정말 같은 솔버를 도는지를 ctest 가 직접 확인한다 (실측 max pos delta `0`, max vel delta `0`).
 
-바닥 접촉 생성을 지우면 이 절대 기준 다섯 줄이 한꺼번에 실패한다 — 최저점 347, KE 24300, 평균 침투 6.83.
+**통합으로 측정값이 움직였고, 그게 정상이다.** 예전 `StepSim` 은 위치 보정을 자체 구현하면서 iteration 안에서 쌍을 하나 밀 때마다 *그 자리의 최신 위치로* 다음 쌍의 침투를 다시 쟀고, 벽·바닥은 body-body 보정이 전부 끝난 *뒤* 의 위치로 계산했다. 공유 구현은 Response 가 하던 대로 iteration 시작 시점에 접촉을 한 번 수집해 *그 스냅숏* 으로 모든 보정을 적용한다. 같은 물리, 다른 갱신 순서다 — 그리고 Gauss-Seidel 계열 풀이에서 갱신 순서는 결과다. 그래서 900 스텝 뒤 평균 침투가 0.6946 → 0.6965, 최저점이 316.572 → 316.583, KE 가 3.26e-4 → 3.23e-4 로 움직였고 shuffle 실험의 max delta 는 0.700 → 0.400 이 됐다. 반대로 유효질량 리터럴(`2.0f` / `1.0f`)은 이 워크로드의 `invMass` 가 1 이라 *숫자로는* 아무 차이도 만들지 않았다 — 값이 맞았기 때문이 아니라 가정이 우연히 성립했기 때문이고, 그래서 더 오래 숨어 있었다. 중요한 것은 어느 쪽이 더 예쁜 숫자인가가 아니라 **이전 숫자가 무엇을 재고 있었는가** 다. 이전 값들은 Response 가 가르친 위치 보정이 아니라 이 Scene 안에만 존재하던 사본의 거동이었다. 통합 직전에 두 Scene 을 같은 조건으로 240 스텝 돌려 보면 위치가 0.557 px, 속도가 4.77 px/s 벌어져 있었다. 지금은 둘 다 정확히 0 이고, 그 사실이 위 목록의 마지막 줄로 ctest 에 남는다.
+
+접촉 수집에서 바닥 접촉을 지우면 body 가 세계 밖으로 떨어져 절대 기준의 최저점(16974)과 KE(24300) 두 줄이 실패하고, 접촉이 아예 사라지므로 shuffle 이 섞을 것도 없어져 순서 의존 검사 세 줄이 함께 무너진다. 통합 전에는 같은 실험이 최저점 347 / 평균 침투 6.83 을 냈다 — `StepSim` 의 위치 보정 단계가 바닥을 *두 번째로* 처리하고 있어서, 접촉 수집을 지워도 바닥이 절반만 사라졌기 때문이다. 그 중복이 사라진 지금은 바닥이 한 곳에만 있다.
 
 physics_lab 은 *시리즈의 주장이 측정으로 검증되는 도구*. *글의 그래프* 가 lab 의 *실시간 곡선* 으로 재현되고, *발산 / 수렴 / drift / 결정성 위반* 의 순간을 *직접 눈으로* 본다. 이게 *물리 lab* 이 *시각화 데모* 와 다른 결정적 차이.
 

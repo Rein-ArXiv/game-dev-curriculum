@@ -151,6 +151,7 @@ int App::Run() {
 void App::OnFrame() {
     cpuTimer_.BeginFrame();
 
+    // snippet-begin: scene-rebuild
     if (pendingCount_ != objectCount_) {
         objectCount_ = pendingCount_;
         // Instance upload buffer 를 교체할 수 있으므로 이전 frame-in-flight 사용이
@@ -158,17 +159,20 @@ void App::OnFrame() {
         ctx_.Flush();
         scene_.Rebuild(objectCount_, ctx_, ctx_.CmdList(), uploadKeepAlive_);
     }
+    // snippet-end: scene-rebuild
 
     UINT f = ctx_.BeginFrame();
     BuildFrameCB();
 
     auto* cmd = ctx_.CmdList();
 
+    // snippet-begin: barrier-entry
     // Barrier: BackBuffer Present -> RenderTarget.
     const size_t entryBarriers = RecordBackBufferBarriers(
         barriers_, cmd, ctx_.BackBuffer(f), barrierPolicy_, true);
     counters_.Reset();
     counters_.barrierCalls += (int)entryBarriers;
+    // snippet-end: barrier-entry
 
     auto rtv = ctx_.BackBufferRtv(f);
     auto dsv = ctx_.DepthDsv();
@@ -182,6 +186,7 @@ void App::OnFrame() {
     cmd->RSSetViewports(1, &vp);
     cmd->RSSetScissorRects(1, &sc);
 
+    // snippet-begin: descriptor-workload
     // Descriptor lifetime workload. 최대 32K개의 null SRV를 frame-safe slice에
     // 다시 쓰거나 persistent table로 재사용한다. 셰이더는 이 표를 읽지
     // 않으므로 측정값은 CPU descriptor 생성 비용만 뜻한다.
@@ -194,7 +199,9 @@ void App::OnFrame() {
     ID3D12DescriptorHeap* heaps[] = { heap_.SrvHeap() };
     cmd->SetDescriptorHeaps(1, heaps);
     counters_.descriptorHeapSets++;
+    // snippet-end: descriptor-workload
 
+    // snippet-begin: rootsig-bind
     // Root signature. 루트 인자는 반드시 *바인딩된 루트 시그니처 뒤* 에 와야 하고
     // CmdList::Reset 이 바인딩을 초기화하므로, 정책과 무관하게 프레임 시작 시
     // 한 번 설정한다. Per-Draw 정책은 Scene::Draw 가 드로우마다 같은 RS 를 다시
@@ -206,7 +213,9 @@ void App::OnFrame() {
     D3D12_GPU_VIRTUAL_ADDRESS cbAddr =
         frameCB_->GetGPUVirtualAddress() + f * sizeof(FrameCB);
     cmd->SetGraphicsRootConstantBufferView(1, cbAddr);
+    // snippet-end: rootsig-bind
 
+    // snippet-begin: pso-per-pass
     // PSO. PerMaterial/PerDraw 정책은 Scene::Draw 안에서 의도적으로 재설정.
     auto* primaryPso =
         useBlinnPhong_ ? psoCache_.BlinnPhong() : psoCache_.Lambert();
@@ -216,7 +225,9 @@ void App::OnFrame() {
         cmd->SetPipelineState(primaryPso);
         counters_.pipelineSets++;
     }
+    // snippet-end: pso-per-pass
 
+    // snippet-begin: gpu-timer-record
     // GPU timer.
     gpuTimer_.Begin(cmd);
 
@@ -226,6 +237,7 @@ void App::OnFrame() {
                 cpuTimer_.LastDeltaSeconds(), counters_);
 
     gpuTimer_.End(cmd);
+    // snippet-end: gpu-timer-record
 
     // ImGui.
     ImGui_ImplDX12_NewFrame();
@@ -239,9 +251,11 @@ void App::OnFrame() {
     ImGui::Render();
     ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cmd);
 
+    // snippet-begin: barrier-exit
     // Barrier: RT -> Present.
     counters_.barrierCalls += (int)RecordBackBufferBarriers(
         barriers_, cmd, ctx_.BackBuffer(f), barrierPolicy_, false);
+    // snippet-end: barrier-exit
 
     // Update scene physics (delta).
     scene_.Update(cpuTimer_.LastDeltaSeconds());
@@ -250,10 +264,12 @@ void App::OnFrame() {
         prevVsync_ = vsync_;
     }
 
+    // snippet-begin: frame-submit
     ctx_.EndFrame(vsync_);
     gpuTimer_.SignalSubmitted();
     gpuTimer_.Poll();
     cpuTimer_.EndFrame();
+    // snippet-end: frame-submit
 }
 
 void App::RenderUI() {

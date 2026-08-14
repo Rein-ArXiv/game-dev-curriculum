@@ -13,12 +13,14 @@ namespace dxlab {
 
 namespace {
 
+// snippet-begin: linearize
 template<int N>
 std::array<float, N> Linearize(const std::array<float, N>& src, int head) {
     std::array<float, N> out{};
     for (int i = 0; i < N; ++i) out[(size_t)i] = src[(size_t)((head + i) % N)];
     return out;
 }
+// snippet-end: linearize
 
 const char* SevLabel(DebugMessage::Severity s) {
     switch (s) {
@@ -59,6 +61,7 @@ void Panel::Draw(const FrameTimer& cpuTimer,
                   bool& vsync) {
     ImGui::Begin("graphics_dx_lab");
 
+    // snippet-begin: ms-plot
     ImGui::SeparatorText("Frame");
     ImGui::Text("CPU frame:  %.3f ms (ema %.3f)",
                 cpuTimer.LastFrameMs(), cpuTimer.EmaFrameMs());
@@ -80,10 +83,12 @@ void Panel::Draw(const FrameTimer& cpuTimer,
         ImPlot::PlotLine("GPU", gpuHist.data(), TimestampQuery::kHistorySize);
         ImPlot::EndPlot();
     }
+    // snippet-end: ms-plot
 
     ImGui::SeparatorText("Scene");
     ImGui::Text("objects: %d", scene.ObjectCount());
 
+    // snippet-begin: counter-readout
     ImGui::SeparatorText("Counters (this frame)");
     // 제출 수는 헬퍼가 예측한 값과 반드시 같아야 한다. 어긋나면 기록 루프가
     // 계약을 깬 것이므로 UI 에서 바로 드러나게 한다(계약 테스트와 같은 식).
@@ -103,6 +108,7 @@ void Panel::Draw(const FrameTimer& cpuTimer,
     ImGui::Text("Heap sets:       %d", counters.descriptorHeapSets);
     ImGui::Text("Descriptor writes:%d", counters.descriptorWrites);
     ImGui::Text("Barriers:        %d", counters.barrierCalls);
+    // snippet-end: counter-readout
 
     ImGui::SeparatorText("Render mode");
     ImGui::Checkbox("vsync (정확 측정 시 OFF)", &vsync);
@@ -149,6 +155,7 @@ void Panel::Draw(const FrameTimer& cpuTimer,
             barrierPolicy = (BarrierPolicy)p;
     }
 
+    // snippet-begin: scale-combo
     ImGui::SeparatorText("Scale (Step 7)");
     {
         const char* countNames[] = { "1,000", "10,000", "100,000" };
@@ -159,12 +166,14 @@ void Panel::Draw(const FrameTimer& cpuTimer,
             pendingObjectCount = counts[idx];
         ImGui::TextDisabled("(다음 프레임 시작 시 Flush 로 GPU 완료를 보장한 뒤 Scene 재빌드)");
     }
+    // snippet-end: scale-combo
 
     ImGui::SeparatorText("Step 진행");
     ImGui::TextWrapped("Step 1~7 완료. PSO/RootSig/Heap/Barrier 정책은 명령 호출 패턴과 카운터에 반영.");
 
     ImGui::End();
 
+    // snippet-begin: debug-log-window
     // 디버그 로그 창.
     ImGui::Begin("D3D12 debug log");
     int n = debug.Count();
@@ -182,6 +191,7 @@ void Panel::Draw(const FrameTimer& cpuTimer,
         }
     }
     ImGui::End();
+    // snippet-end: debug-log-window
 }
 
 }  // namespace dxlab

@@ -32,6 +32,7 @@ owner가 같아야 한다.
 서버 endpoint는 `X-Server-Key`를 constant-time으로 비교한다. 결과 제출은 여기에 `X-Server-Id`도
 요구해 allocation owner와 연결한다.
 
+<!-- snippet: src/LiveService.Api/Program.cs@results-endpoint -->
 ```csharp
 if (!IsServer(http, serverKey)) return Results.Unauthorized();
 if (!http.Headers.TryGetValue("X-Server-Id", out var serverId) ||
@@ -103,15 +104,27 @@ core test는 고정된 `DateTimeOffset`과 32바이트 test secret을 사용한�
 | `PayloadConflict` | 삽입 순서만 다른 payload는 중복 | 같은 key에 다른 score·다른 match ID는 충돌 |
 | `TicketLifecycle` | 완료 뒤 새 ticket 발급 | 새 ticket이 완료된 match를 재사용하지 않음 |
 
+<!-- snippet: tests/LiveService.Tests/Program.cs#IdempotentResult -->
 ```csharp
-ResultReceipt first = plane.RecordResult(request, "result-owner", now);
-ResultReceipt retry = plane.RecordResult(sameContentDifferentInstance, "result-owner", later);
-Require(!first.Duplicate && retry.Duplicate, "IdempotentResult: 재시도는 처음 기록한 receipt를 그대로 돌려준다");
+ResultReceipt receipt = plane.RecordResult(
+    new MatchResultRequest("res-1", firstMatch.MatchId!,
+        new Dictionary<string, int> { ["res-a"] = 1, ["res-b"] = 0 }),
+    "result-owner", t0.AddMinutes(1));
+Require(!receipt.Duplicate, name + ": 첫 제출은 duplicate가 아니다");
+ResultReceipt again = plane.RecordResult(
+    new MatchResultRequest("res-1", firstMatch.MatchId!,
+        new Dictionary<string, int> { ["res-a"] = 1, ["res-b"] = 0 }),
+    "result-owner", t0.AddMinutes(2));
+Require(again.Duplicate && again.ResultId == receipt.ResultId &&
+    again.RecordedAt == receipt.RecordedAt,
+    name + ": 재시도는 처음 기록한 receipt를 그대로 돌려준다");
 ```
 
-각 `Require` 메시지는 함수 이름으로 시작하므로 실패한 줄만 보고 어느 계약이 깨졌는지 알 수 있다.
-중복 receipt 검사는 같은 인스턴스를 두 번 넘기지 않고 내용이 같은 새 인스턴스를 만들어 넘긴다.
-같은 객체를 재사용하면 fingerprint 비교가 항등식이 되어 정렬 규칙을 지워도 통과한다.
+`name`은 각 함수 첫 줄의 상수이므로 모든 `Require` 메시지가 함수 이름으로 시작한다. 실패한 줄만
+보고 어느 계약이 깨졌는지 알 수 있다. 중복 receipt 검사는 같은 인스턴스를 두 번 넘기지 않고
+내용이 같은 새 인스턴스를 만들어 넘긴다. 같은 객체를 재사용하면 fingerprint 비교가 항등식이 되어
+정렬 규칙을 지워도 통과한다. 재시도 시각도 1분 뒤로 옮겨 receipt의 `RecordedAt`이 처음 기록한
+값 그대로인지 확인한다.
 
 시간을 인자로 넣었기 때문에 token 만료와 heartbeat timeout을 테스트 시간 증가 없이 재현할 수 있다.
 

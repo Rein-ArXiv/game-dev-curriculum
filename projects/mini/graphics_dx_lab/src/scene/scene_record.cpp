@@ -84,6 +84,7 @@ void Scene::RecordDraw(ID3D12GraphicsCommandList* cmd,
                         ID3D12PipelineState* primaryPso,
                         ID3D12PipelineState* secondaryPso,
                         GlCounters& counters) {
+    // snippet-begin: instance-upload
     // 매 프레임 instance 데이터 업데이트 — Upload heap 영구 map.
     // 저장소가 연결되지 않은 헤드리스 경로에서는 건너뛴다.
     if (instanceMapped_ != nullptr) {
@@ -95,11 +96,13 @@ void Scene::RecordDraw(ID3D12GraphicsCommandList* cmd,
             instanceMapped_[i].color = { o.color.x, o.color.y, o.color.z, 1.0f };
         }
     }
+    // snippet-end: instance-upload
 
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmd->IASetVertexBuffers(0, 1, &vbv_);
     cmd->IASetIndexBuffer(&ibv_);
 
+    // snippet-begin: draw-lambdas
     auto setRootSigForDraw = [&] {
         if (rsPolicy == RootSigPolicy::PerDraw && rootSig) {
             cmd->SetGraphicsRootSignature(rootSig);
@@ -115,7 +118,9 @@ void Scene::RecordDraw(ID3D12GraphicsCommandList* cmd,
             counters.pipelineSets++;
         }
     };
+    // snippet-end: draw-lambdas
 
+    // snippet-begin: instanced-path
     if (mode == DrawMode::Instanced) {
         setRootSigForDraw();
         if (psoPolicy == PsoSwitchPolicy::PerMaterial && primaryPso) {
@@ -137,6 +142,7 @@ void Scene::RecordDraw(ID3D12GraphicsCommandList* cmd,
         counters.rootConstantUpdates++;
         cmd->DrawIndexedInstanced(indexCount_, (UINT)objects_.size(), 0, 0, 0);
         counters.instancedDraws++;
+        // snippet-end: instanced-path
     } else if (psoPolicy == PsoSwitchPolicy::PerMaterial && secondaryPso) {
         for (int material = 0; material < 2; ++material) {
             cmd->SetPipelineState(material == 0 ? primaryPso : secondaryPso);
@@ -165,6 +171,7 @@ void Scene::RecordDraw(ID3D12GraphicsCommandList* cmd,
             }
         }
     } else {
+        // snippet-begin: per-draw-loop
         for (size_t i = 0; i < objects_.size(); ++i) {
             setRootSigForDraw();
             setPsoForDraw(i);
@@ -188,6 +195,7 @@ void Scene::RecordDraw(ID3D12GraphicsCommandList* cmd,
             cmd->DrawIndexedInstanced(indexCount_, 1, 0, 0, 0);
             counters.drawCalls++;
         }
+        // snippet-end: per-draw-loop
     }
 }
 

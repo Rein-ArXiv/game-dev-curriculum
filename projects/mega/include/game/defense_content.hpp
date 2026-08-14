@@ -68,9 +68,19 @@ inline std::vector<std::string> SplitLines(const std::string& text) {
     return lines;
 }
 
+// balance.script 는 재빌드 없이 교체할 수 있다고 광고된 파일이다 = 신뢰 경계 밖
+// 입력이다. 그래서 세 가지 실패가 모두 폴백으로 흡수돼야 한다: 파일이 없다,
+// 스크립트가 실행에 실패한다(구문 오류·실행 예산 초과), 결과가 범위 밖이다.
+//
+// diagnostic 은 뒤의 둘을 호출자가 **말할 수 있게** 하려고 있다. 폴백은 정상
+// 동작이지만 "왜 폴백인가"까지 조용하면, 교체한 사람은 자기 파일이 적용된 줄
+// 알고 그대로 둔다. 파일이 아예 없는 경우만 진단이 비는데, 그건 기본 구성으로
+// 도는 정상 상태이지 거부가 아니기 때문이다.
 inline BalanceConfig LoadBalanceScript(const std::string& path,
-                                       bool* loadedExternal = nullptr) {
+                                       bool* loadedExternal = nullptr,
+                                       std::string* diagnostic = nullptr) {
     BalanceConfig fallback;
+    if (diagnostic) diagnostic->clear();
     std::string source;
     if (!io::ReadTextFile(path, source, 64 * 1024)) {
         if (loadedExternal) *loadedExternal = false;
@@ -78,8 +88,10 @@ inline BalanceConfig LoadBalanceScript(const std::string& path,
     }
 
     tools::Script script;
+    script.SetName(path);            // 진단 문자열이 어느 파일인지 말하게 한다
     if (!script.Run(source)) {
         if (loadedExternal) *loadedExternal = false;
+        if (diagnostic) *diagnostic = script.Error();
         return fallback;
     }
 
@@ -96,6 +108,8 @@ inline BalanceConfig LoadBalanceScript(const std::string& path,
         InRange(reward, 0.5, 2.0);
     if (!valid) {
         if (loadedExternal) *loadedExternal = false;
+        if (diagnostic)
+            *diagnostic = path + ": 계산된 밸런스 값이 허용 범위 밖이다";
         return fallback;
     }
 

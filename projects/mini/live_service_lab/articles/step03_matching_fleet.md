@@ -29,12 +29,13 @@ health·drain·region·capacity 필터를 모두 통과한 서버에 두 ticket�
 모바일 네트워크 timeout 뒤 클라이언트가 `/queue`를 재시도할 수 있다. 첫 요청이 성공했지만 응답만
 잃었다면 새 ticket을 만들면 한 플레이어가 두 match에 배정될 수 있다.
 
+<!-- snippet: src/LiveService.Core/ControlPlane.cs#Enqueue -->
 ```csharp
-if (playerTickets.TryGetValue(playerId, out string? id) &&
-    tickets.TryGetValue(id, out TicketState? ticket) &&
-    ticket.Status is TicketStatus.Waiting or TicketStatus.Assigned)
+if (playerTickets.TryGetValue(request.PlayerId, out string? existingId) &&
+    tickets.TryGetValue(existingId, out TicketState? existing) &&
+    existing.Status is TicketStatus.Waiting or TicketStatus.Assigned)
 {
-    return ticket.Id;
+    return existing.Id;
 }
 ```
 
@@ -46,11 +47,12 @@ subject로 `QueueRequest`를 만든다.
 대기열은 enqueue 시각 순서로 스캔한다. 두 플레이어의 rating gap 허용치는 100에서 시작하고 대기
 1초당 10씩 증가해 최대 500에서 멈춘다.
 
+<!-- snippet: src/LiveService.Core/ControlPlane.cs#TryMatch -->
 ```csharp
-double waited = Math.Max(0, Math.Min(
+double waitedSeconds = Math.Max(0, Math.Min(
     (now - first.EnqueuedAt).TotalSeconds,
     (now - second.EnqueuedAt).TotalSeconds));
-int allowedGap = 100 + Math.Min(400, (int)(waited * 10));
+int allowedGap = 100 + Math.Min(400, (int)(waitedSeconds * 10));
 ```
 
 두 사람 중 짧게 기다린 시간을 사용하는 이유는 오래 기다린 한 사람이 방금 들어온 상대의 품질
@@ -74,12 +76,17 @@ drain은 신규 allocation을 멈추지만 active match count를 보존한다. �
 
 서버 후보 조건은 모두 참이어야 한다.
 
+<!-- snippet: src/LiveService.Core/ControlPlane.cs#TryMatch -->
 ```csharp
-candidate.Lifecycle == ServerLifecycle.Ready &&
-candidate.Region == ticket.Region &&
-now - candidate.LastHeartbeat <= ServerHealthTimeout &&
-candidate.ActiveMatches < candidate.Capacity
+.Where(candidate =>
+    candidate.Lifecycle == ServerLifecycle.Ready &&
+    candidate.Region == first.Region &&
+    now - candidate.LastHeartbeat <= ServerHealthTimeout &&
+    candidate.ActiveMatches < candidate.Capacity)
 ```
+
+`first`는 짝을 이루는 두 ticket 중 대기열에서 먼저 스캔된 쪽이다. 두 ticket의 region이 이미 같아야
+짝이 되므로 한쪽 region만 서버 조건에 넣으면 충분하다.
 
 ## capacity allocation
 
@@ -92,9 +99,11 @@ capacity는 player slot 수가 아니라 동시에 소유할 match 수다. 2인 
 서버 count 증가, match 생성, 두 ticket assignment는 같은 lock 안에서 수행한다. check와 increment를
 분리하면 동시 요청 둘이 마지막 한 슬롯을 함께 볼 수 있다.
 
+<!-- snippet: src/LiveService.Core/ControlPlane.cs#TryMatch -->
 ```csharp
 server.ActiveMatches++;
-matches[matchId] = new MatchState(matchId, server.Id, players);
+matches[matchId] = new MatchState(
+    matchId, server.Id, [first.PlayerId, second.PlayerId]);
 Assign(first, matchId, server, now);
 Assign(second, matchId, server, now);
 ```

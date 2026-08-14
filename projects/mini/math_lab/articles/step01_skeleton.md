@@ -141,9 +141,9 @@ target_link_libraries(math_core_tests PRIVATE raylib)
 add_test(NAME math_core_tests COMMAND math_core_tests)
 ```
 
-새 Scene 추가 시 *`add_executable` 의 cpp 목록* 에 추가. Step 2 부터 매번 한 줄씩 늘어난다.
+새 Scene 추가 시 *`add_executable` 의 cpp 목록* 에 추가. Scene 하나당 한 줄씩 늘어난다.
 
-테스트 타깃도 *처음부터* 깔아 둔다. `tests/core_tests.cpp` 는 이 단계에선 *`CHECK` 매크로 + 실패 카운터 + `main`* 만 있는 껍데기이고, Step 2 부터 각 Scene 이 쓰는 `algo/` 헤더의 검증 함수가 하나씩 붙는다. 실행 파일 (`math_lab`) 은 *창을 띄워야* 확인되지만 이쪽은 *헤드리스* 라 빌드마다 돌릴 수 있다.
+테스트 타깃도 *처음부터* 깔아 둔다. `tests/core_tests.cpp` 는 이 단계에선 *`CHECK` 매크로 + 실패 카운터 + `main`* 만 있는 껍데기다. Scene 이 `algo/` 헤더를 쓰기 시작하면 그 헤더의 검증 함수가 여기에 하나씩 붙는 구조다. 실행 파일 (`math_lab`) 은 *창을 띄워야* 확인되지만 이쪽은 *헤드리스* 라 빌드마다 돌릴 수 있다.
 
 ```cpp
 int failures = 0;
@@ -158,7 +158,7 @@ int failures = 0;
     } while (false)
 
 int main() {
-    // Step 2 부터 여기에 Test... () 호출이 하나씩 추가된다.
+    // Scene 이 검증 함수를 들고 오면 여기에 Test... () 호출이 하나씩 추가된다.
     if (failures != 0) {
         std::cerr << failures << " math core test(s) failed\n";
         return 1;
@@ -463,7 +463,7 @@ int main() {
 }
 ```
 
-핵심: *Scene 추가가 한 줄*. Step 2 에서 `RotationScene` 추가 시 `scenes.emplace_back` 한 줄 + cpp 파일 등록만.
+핵심: *Scene 추가가 한 줄*. 예컨대 `RotationScene` 을 붙인다면 `scenes.emplace_back` 한 줄 + cpp 파일 등록만 하면 된다.
 
 ## 8. 빌드와 실행 결과
 

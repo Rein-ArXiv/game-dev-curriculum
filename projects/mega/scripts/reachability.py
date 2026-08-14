@@ -24,14 +24,22 @@
 # mega_defense_server)은 진입점 TU 하나씩만 컴파일하므로 그 둘의 의존성 출력이
 # 곧 제품 도달 집합이다.
 #
+# 곁다리로 하나 더 본다 — README 의 코드 구조 트리가 실제 include/ 와 같은가
+# (--readme-tree). 감사 #27 은 그 트리가 실재하는 디렉터리 6개를 빠뜨렸고 그중
+# serialize/ 는 제품 도달 계층이라, 트리를 보고 소스를 찾는 독자가 제품 코드를
+# 찾지 못하는 상태를 지적했다. 손으로 맞춰 두면 다음 디렉터리가 생길 때 다시
+# 어긋난다 — 어긋날 수 없게 만드는 것은 대조뿐이다. 이 검사가 여기 사는 이유는
+# 입력이 같기 때문이다: include/ 아래에 무엇이 있는가.
+#
 # 사용:
 #   python scripts/reachability.py
 #       --include-dir <저장소>/include
 #       --lab-only    <저장소>/docs/LAB_ONLY.md
 #       --dep mega_defense=<빌드>/reachability/Release/mega_defense.json
 #       --dep mega_defense_server=<빌드>/reachability/Release/mega_defense_server.json
-#       [--report <저장소>/docs/PRODUCT_LAYERS.md]
-#       [--json   <빌드>/reachability.json]
+#       [--report      <저장소>/docs/PRODUCT_LAYERS.md]
+#       [--json        <빌드>/reachability.json]
+#       [--readme-tree <저장소>/README.md]
 #
 # 종료 코드: 0 = 게이트 통과, 1 = 규칙 위반, 2 = 게이트를 실행할 수 없음(입력 없음).
 
@@ -235,6 +243,81 @@ def validate_entry(entry):
     return problems
 
 
+# ── README 코드 구조 트리 대조(감사 #27) ─────────────────────────────
+TREE_DIRECTORY = re.compile(r"([A-Za-z0-9_+.-]+)/")
+
+
+def include_subdirectories(include_dir):
+    return {name for name in os.listdir(include_dir)
+            if os.path.isdir(os.path.join(include_dir, name))}
+
+
+def readme_tree_directories(readme_path):
+    """README 트리에서 `include/` 바로 아래로 적힌 디렉터리 이름들.
+
+    트리는 들여쓰기가 구조다. `include/` 줄의 들여쓰기보다 깊은 줄이 그 자식이고,
+    같거나 얕은 줄이 나오면 끝난다. 한 줄에 `db/ live/` 처럼 여러 개를 묶어 적을
+    수 있으므로 줄 단위가 아니라 이름 단위로 뽑는다.
+
+    반환: (이름 집합, 문제 메시지 목록). `include/` 줄을 못 찾으면 문제로 본다 —
+    빈 집합을 조용히 통과시키면 트리를 통째로 지운 README 가 게이트를 통과한다.
+    """
+    if not os.path.exists(readme_path):
+        return set(), ["{}: 파일이 없다. 대조할 코드 구조 트리가 없다.".format(
+            readme_path)]
+
+    with open(readme_path, "r", encoding="utf-8") as handle:
+        lines = handle.read().splitlines()
+
+    names = set()
+    found = False
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if stripped == "include/":
+            found = True
+            base = len(lines[index]) - len(lines[index].lstrip())
+            index += 1
+            while index < len(lines):
+                line = lines[index]
+                if not line.strip():
+                    break
+                indent = len(line) - len(line.lstrip())
+                if indent <= base:
+                    break
+                names.update(TREE_DIRECTORY.findall(line.strip()))
+                index += 1
+            break
+        index += 1
+
+    if not found:
+        return set(), [
+            "{}: 코드 구조 트리에서 `include/` 줄을 찾지 못했다. 트리가 없으면 "
+            "실제 디렉터리와 대조할 대상이 없다.".format(readme_path)]
+    return names, []
+
+
+def check_readme_tree(readme_path, include_dir):
+    """README 트리와 실제 include/ 하위 디렉터리를 양방향으로 대조한다."""
+    documented, problems = readme_tree_directories(readme_path)
+    if problems:
+        return problems
+    actual = include_subdirectories(include_dir)
+    label = os.path.basename(readme_path)
+    violations = []
+    for name in sorted(actual - documented):
+        violations.append(
+            "{} 코드 구조 트리 - `include/{}/` 가 실재하는데 트리에 없다. "
+            "트리를 보고 소스를 찾는 독자에게 이 계층은 존재하지 않는 것과 "
+            "같다.".format(label, name))
+    for name in sorted(documented - actual):
+        violations.append(
+            "{} 코드 구조 트리 - `include/{}/` 가 트리에 적혀 있는데 실재하지 "
+            "않는다. 삭제·이름 변경된 디렉터리의 서술이 남아 있다.".format(
+                label, name))
+    return violations
+
+
 # ── 리포트 생성(재설계안 A4) ─────────────────────────────────────────
 def top_level(header):
     return header.split("/", 1)[0] if "/" in header else "(루트)"
@@ -346,6 +429,8 @@ def main(argv):
                         help="도달성 리포트를 쓸 경로(재설계안 A4)")
     parser.add_argument("--json", default=None,
                         help="기계 판독용 결과를 쓸 경로")
+    parser.add_argument("--readme-tree", default=None,
+                        help="코드 구조 트리를 실제 include/ 와 대조할 README 경로")
     args = parser.parse_args(argv)
 
     include_dir = os.path.abspath(args.include_dir)
@@ -436,12 +521,22 @@ def main(argv):
             "LAB_ONLY.md:{} `{}` - 이제 제품에서 도달 가능하다. 랩 전용 등재를 "
             "지워라.".format(seen[header], header))
 
+    # 3-d. README 코드 구조 트리 ↔ 실제 include/ 하위 디렉터리(감사 #27).
+    tree_directories = 0
+    if args.readme_tree:
+        readme_path = os.path.abspath(args.readme_tree)
+        violations.extend(check_readme_tree(readme_path, include_dir))
+        tree_directories = len(include_subdirectories(include_dir))
+
     # 4. 결과 출력.
     print("도달성 게이트 - include/ 헤더 {}개".format(len(known)))
     for target in sorted(per_target):
         print("  제품 {:<22} 도달 {}개".format(target, len(per_target[target])))
     print("  제품 도달 합계 {}개 / 랩 전용 등재 {}개 / 근거 없는 미도달 {}개"
           .format(len(reachable), len(registered & known), len(orphans)))
+    if args.readme_tree:
+        print("  README 코드 구조 트리 대조: include/ 하위 디렉터리 {}개"
+              .format(tree_directories))
 
     if violations:
         print("")
@@ -453,6 +548,8 @@ def main(argv):
         print("규칙: include/ 아래 모든 헤더는 제품에서 도달 가능하거나 "
               "docs/LAB_ONLY.md 에 이유와 함께 등재돼야 한다.")
         print("      제3의 상태 - 도달 불가인데 근거도 없음 - 는 빌드 실패다.")
+        print("      README 코드 구조 트리는 실제 include/ 하위 디렉터리와 "
+              "정확히 같은 집합이어야 한다.")
         return 1
 
     if args.report:

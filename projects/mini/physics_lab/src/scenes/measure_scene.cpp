@@ -1,5 +1,5 @@
 #include "scenes/measure_scene.h"
-#include "core/physics_core.h"
+#include "core/contact_solver.h"
 
 #include "raygui.h"
 
@@ -13,7 +13,6 @@ namespace {
 
 constexpr int kGraphCapacity = 600;
 
-inline float Dot(Vector2 a, Vector2 b) { return a.x*b.x + a.y*b.y; }
 inline Vector2 Sub(Vector2 a, Vector2 b) { return {a.x-b.x, a.y-b.y}; }
 
 uint32_t Lcg(uint32_t& s) {
@@ -26,12 +25,23 @@ float Rand01(uint32_t& s) {
 
 // Live 시뮬과 결정성 테스트 시뮬 모두 *같은 코드 경로* 를 써야 한다 — 그래야
 // "Live 와 동일한 시뮬을 두 번 재현했을 때 일치하는가" 를 답할 수 있다.
+// 그리고 그 코드 경로는 *Step 6 이 가르친 그 SI* 여야 한다 — 그래야 결정성
+// 측정이 교재의 솔버를 재는 것이 된다. 접촉 수집 / SI / 위치 보정은 전부
+// core/contact_solver.h 한 벌이고, 이 파일은 시나리오만 정한다.
 
-constexpr float kSimGravity     = 600.0f;
-constexpr float kSimRestitution = 0.1f;
-constexpr float kSimSlop        = 0.5f;
-constexpr float kSimPosCorrect  = 0.2f;
-constexpr float kSimRadius      = 12.0f;
+constexpr float kSimRadius = 12.0f;
+
+// shuffle 토글용 재정렬 정책. SI 의 Gauss-Seidel 풀이가 *순서 의존* 임을
+// 실증하는 실패 주입 — 호출마다 진행되는 RNG 로 매 iter 순서를 섞는다.
+struct ShuffleContactOrder {
+    uint32_t* rng;
+    void operator()(std::vector<int>& order) const {
+        for (int k = (int)order.size() - 1; k > 0; --k) {
+            const int j = (int)(Lcg(*rng) % (uint32_t)(k + 1));
+            std::swap(order[(size_t)k], order[(size_t)j]);
+        }
+    }
+};
 
 }  // namespace
 
@@ -66,142 +76,32 @@ void MeasureScene::InitBodies(std::vector<MeasureBody>& out, int n,
 }
 
 void MeasureScene::StepSim(std::vector<MeasureBody>& sim, float dt) const {
-    int n = (int)sim.size();
+    const WorldBounds bounds = Bounds();
+
+    // Step 6 의 SequentialImpulse 분기와 *같은 네 줄* 이다. 여기서 자체 구현을
+    // 하는 순간 결정성 측정은 교재의 솔버가 아니라 사본을 재게 된다.
 
     // 1. semi-implicit Euler 적분 (중력만).
-    for (auto& b : sim) {
-        b.vel.y += kSimGravity * dt;
-        b.pos.x += b.vel.x * dt;
-        b.pos.y += b.vel.y * dt;
-    }
+    core::IntegrateSemiImplicitEuler(sim, kDefaultGravity, dt);
 
-    // 2. contact 수집.
-    struct Cn {
-        int i, j;
-        Vector2 normal;
-        float depth;
-        float lambda;
-        float targetVelocity;
-    };
-    std::vector<Cn> contacts;
-    for (int i = 0; i < n; ++i) {
-        for (int j = i + 1; j < n; ++j) {
-            Vector2 d   = Sub(sim[(size_t)j].pos, sim[(size_t)i].pos);
-            float   r   = sim[(size_t)i].radius + sim[(size_t)j].radius;
-            float   dist = std::sqrt(d.x*d.x + d.y*d.y);
-            if (dist < r) {
-                const auto nrm =
-                    core::SafeUnitNormal(d.x, d.y, i ^ j);
-                contacts.push_back({i, j,
-                                      {nrm.x, nrm.y}, r - dist, 0, 0});
-            }
-        }
-    }
-    float floorY = (float)(lastCanvasY_ + lastCanvasH_) - 4.0f;
-    float wallL  = (float)lastCanvasX_ + 4.0f;
-    float wallR  = (float)(lastCanvasX_ + lastCanvasW_) - 4.0f;
-    for (int i = 0; i < n; ++i) {
-        const auto& b = sim[(size_t)i];
-        if (b.pos.y + b.radius > floorY)
-            contacts.push_back({i, -1, {0, -1},
-                                 (b.pos.y + b.radius) - floorY, 0, 0});
-        if (b.pos.x - b.radius < wallL)
-            contacts.push_back({i, -1, {1, 0},
-                                 wallL - (b.pos.x - b.radius), 0, 0});
-        if (b.pos.x + b.radius > wallR)
-            contacts.push_back({i, -1, {-1, 0},
-                                 (b.pos.x + b.radius) - wallR, 0, 0});
-    }
-
-    constexpr float kRestitutionThreshold = 50.0f;
-    for (auto& c : contacts) {
-        const auto& bi = sim[(size_t)c.i];
-        const float initialVn = c.j >= 0
-            ? Dot(Sub(sim[(size_t)c.j].vel, bi.vel), c.normal)
-            : Dot(bi.vel, c.normal);
-        c.targetVelocity = core::RestitutionTarget(
-            initialVn, kSimRestitution, kRestitutionThreshold);
-    }
+    // 2. contact 수집 (body-body brute O(n²) + 벽 / 바닥).
+    std::vector<Contact> contacts;
+    core::GatherCircleContacts(sim, bounds, contacts);
 
     // 3. Sequential Impulse — velocity 수렴.
     //    shuffleContacts_ 가 true 면 *각 iter 안에서* contact 처리 순서를
-    //    Lcg seed (호출마다 다른) 로 섞는다. SI 의 Gauss-Seidel 풀이는 *순서
-    //    의존* 이라 결과가 갈라진다 → 결정성 검증에서 NON-DET 으로 표시.
-    static thread_local uint32_t shuffleRng = 0xDEADBEEFu;
-    std::vector<int> order((size_t)contacts.size());
-    for (size_t k = 0; k < order.size(); ++k) order[k] = (int)k;
-    for (int iter = 0; iter < iterations_; ++iter) {
-        if (shuffleContacts_) {
-            // Fisher-Yates with non-fixed seed → 매번 다른 순서.
-            for (int k = (int)order.size() - 1; k > 0; --k) {
-                int j = (int)(Lcg(shuffleRng) % (uint32_t)(k + 1));
-                std::swap(order[(size_t)k], order[(size_t)j]);
-            }
-        }
-        for (int kIdx = 0; kIdx < (int)order.size(); ++kIdx) {
-            auto& c = contacts[(size_t)order[(size_t)kIdx]];
-            MeasureBody& bi = sim[(size_t)c.i];
-            if (c.j >= 0) {
-                MeasureBody& bj = sim[(size_t)c.j];
-                Vector2 vrel = Sub(bj.vel, bi.vel);
-                float   vn   = Dot(vrel, c.normal);
-                float ap = core::AccumulateNormalImpulse(
-                    vn, c.targetVelocity, 2.0f, c.lambda);
-                bi.vel.x -= ap * c.normal.x;
-                bi.vel.y -= ap * c.normal.y;
-                bj.vel.x += ap * c.normal.x;
-                bj.vel.y += ap * c.normal.y;
-            } else {
-                float vn   = Dot(bi.vel, c.normal);
-                float ap = core::AccumulateNormalImpulse(
-                    vn, c.targetVelocity, 1.0f, c.lambda);
-                bi.vel.x += ap * c.normal.x;
-                bi.vel.y += ap * c.normal.y;
-            }
-        }
+    //    Lcg seed (호출마다 진행되는) 로 섞는다. SI 의 Gauss-Seidel 풀이는
+    //    *순서 의존* 이라 결과가 갈라진다 → 결정성 검증에서 NON-DET 으로 표시.
+    if (shuffleContacts_) {
+        static thread_local uint32_t shuffleRng = 0xDEADBEEFu;
+        core::SolveSequentialImpulse(sim, contacts, solver_, iterations_,
+                                     ShuffleContactOrder{&shuffleRng});
+    } else {
+        core::SolveSequentialImpulse(sim, contacts, solver_, iterations_);
     }
 
     // 4. position correction (split impulse 단순화).
-    for (int iter = 0; iter < std::max(1, iterations_ / 2); ++iter) {
-        for (int i = 0; i < n; ++i) {
-            for (int j = i + 1; j < n; ++j) {
-                Vector2 d  = Sub(sim[(size_t)j].pos, sim[(size_t)i].pos);
-                float r    = sim[(size_t)i].radius + sim[(size_t)j].radius;
-                float dist = std::sqrt(d.x*d.x + d.y*d.y);
-                if (dist < r) {
-                    float eff = (r - dist - kSimSlop);
-                    if (eff <= 0) continue;
-                    eff *= kSimPosCorrect;
-                    const auto safe =
-                        core::SafeUnitNormal(d.x, d.y, i ^ j);
-                    Vector2 nrm = {safe.x, safe.y};
-                    float k = eff / 2.0f;
-                    sim[(size_t)i].pos.x -= k * nrm.x;
-                    sim[(size_t)i].pos.y -= k * nrm.y;
-                    sim[(size_t)j].pos.x += k * nrm.x;
-                    sim[(size_t)j].pos.y += k * nrm.y;
-                }
-            }
-        }
-        for (int i = 0; i < n; ++i) {
-            auto& b = sim[(size_t)i];
-            if (b.pos.y + b.radius > floorY) {
-                float eff = ((b.pos.y + b.radius) - floorY - kSimSlop)
-                              * kSimPosCorrect;
-                if (eff > 0) b.pos.y -= eff;
-            }
-            if (b.pos.x - b.radius < wallL) {
-                float eff = (wallL - (b.pos.x - b.radius) - kSimSlop)
-                              * kSimPosCorrect;
-                if (eff > 0) b.pos.x += eff;
-            }
-            if (b.pos.x + b.radius > wallR) {
-                float eff = ((b.pos.x + b.radius) - wallR - kSimSlop)
-                              * kSimPosCorrect;
-                if (eff > 0) b.pos.x -= eff;
-            }
-        }
-    }
+    core::SolvePositionCorrection(sim, bounds, solver_, iterations_ / 2);
 }
 
 void MeasureScene::ComputeMetrics(const std::vector<MeasureBody>& sim,

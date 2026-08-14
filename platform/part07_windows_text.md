@@ -484,7 +484,7 @@ GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_SLANGUAGE,
 | LOCALE_SISO639LANGNAME | ISO 639 언어 코드 | "ko" |
 | LOCALE_SISO3166CTRYNAME | ISO 3166 국가 코드 | "KR" |
 | LOCALE_SLANGUAGE | 로캘 전체 표시 이름 | "한국어(대한민국)" |
-| LOCALE_SCOUNTRY | 전체 국가 이름 | "대한민국" |
+| LOCALE_SCOUNTRY | 지역화된 국가 이름 | "한국" |
 | LOCALE_SDECIMAL | 소수점 | "." |
 | LOCALE_STHOUSAND | 천 단위 구분자 | "," |
 | LOCALE_SCURRENCY | 통화 기호 | "₩" |

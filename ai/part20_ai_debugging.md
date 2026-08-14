@@ -375,7 +375,7 @@ sequenceDiagram
     QA->>TT: 버그 시점 frame=12830 기록
     Dev->>TT: At(12830) 스크럽
     TT-->>Dev: phase=2, hpRatio=0.34 (전환선=0.35)
-    Dev->>TT: At(12825) 한 틱 뒤로
+    Dev->>TT: At(12829) 한 틱 뒤로
     TT-->>Dev: hpRatio=0.36 — 정상
     Note over Dev: 0.35 경계를 한 틱에 0.02 점프 — DoT 누적 틱이 한 번에 적용됨
 ```

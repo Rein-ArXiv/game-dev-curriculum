@@ -424,7 +424,9 @@ struct StateMachineRuntime {
         if (blendingTo != kNone) {
             Pose toPose; EvalState(blendingTo, ctx, toPose);   // 두 상태 동시 평가
             blendElapsed += dt;
-            float a = std::clamp(blendElapsed / activeBlendTime, 0.0f, 1.0f);
+            float a = (activeBlendTime > 0.0f)                       // 0 나누기 방지
+                    ? std::clamp(blendElapsed / activeBlendTime, 0.0f, 1.0f)
+                    : 1.0f;                                          // 즉시 전환(cut)
             BlendPose(curPose, toPose, a, out);
             if (a >= 1.0f) { current = blendingTo; blendingTo = kNone; }
         } else { out = curPose; }

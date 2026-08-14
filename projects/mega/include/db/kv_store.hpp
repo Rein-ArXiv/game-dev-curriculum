@@ -4,6 +4,8 @@
 // 트랜잭션의 모든 레코드를 적고 마지막에 COMMIT 마커를 적은 뒤에야 적용하므로,
 // 마커 전 크래시는 그 트랜잭션을 통째로 버린다(원자성). 재시작 시 로그를 재생해
 // 맵을 복원하고, 토막난(torn) 마지막 레코드는 안전하게 무시한다(내구성·복구).
+// 버린 꼬리는 무시하는 데서 그치지 않고 파일에서 잘라낸다 — 남겨 두면 재기동 뒤
+// 첫 트랜잭션의 COMMIT 마커가 그 꼬리까지 커밋한다(Open 주석 참조).
 //
 // 인덱스는 빠른 조회용 in-memory 해시맵, 영속 진실은 WAL 이다.
 
@@ -33,10 +35,16 @@ public:
     bool Open(const char* path) {
         Close();
         path_ = path;
+        long committedEnd = 0, total = 0;
         if (std::FILE* rf = std::fopen(path, "rb")) {   // 기존 로그 재생
-            Replay(rf);
+            Replay(rf, committedEnd, total);
             std::fclose(rf);
         }
+        // 크래시가 남긴 미커밋 꼬리를 파일에 그대로 두면 안 된다. 로그는 append-only 고
+        // COMMIT 마커는 "그 앞에 쌓인 pending 전부"에 걸리므로, 재기동 뒤 첫 트랜잭션이
+        // 적는 마커 하나가 그 꼬리까지 커밋해 버린다 — 원자성이 재기동을 못 넘긴다.
+        // 재생이 인정한 마지막 커밋 지점까지로 잘라 그 경로를 없앤다.
+        if (total > committedEnd) Truncate(path, committedEnd);
         wal_ = std::fopen(path, "ab");                  // 이후 추가 기록용
         return wal_ != nullptr;
     }
@@ -121,14 +129,33 @@ private:
 #endif
     }
 
+    // 로그를 size 바이트로 자른다. 자르지 못해도 재생 결과는 바뀌지 않으므로
+    // 실패는 조용히 넘긴다 — 다음 Open 이 같은 지점을 다시 시도한다.
+    static void Truncate(const char* path, long size) {
+        std::FILE* f = std::fopen(path, "r+b");
+        if (!f) return;
+#if defined(_WIN32)
+        (void)_chsize_s(_fileno(f), (__int64)size);
+#else
+        if (ftruncate(fileno(f), (off_t)size) != 0) { /* 무시 */ }
+#endif
+        std::fclose(f);
+    }
+
     // 파일 전체를 읽어 재생. 커밋된 트랜잭션만 적용, 토막난 꼬리는 무시.
-    void Replay(std::FILE* rf) {
+    // committedEnd 에는 마지막 COMMIT 마커 바로 뒤의 오프셋을, total 에는 읽어낸
+    // 파일 크기를 돌려준다(둘이 다르면 그 사이가 버려진 미커밋 꼬리다).
+    void Replay(std::FILE* rf, long& committedEnd, long& total) {
+        committedEnd = 0;
+        total = 0;
         std::fseek(rf, 0, SEEK_END);
         long sz = std::ftell(rf);
         std::fseek(rf, 0, SEEK_SET);
         if (sz <= 0) return;
         std::vector<uint8_t> buf((size_t)sz);
+        // 읽지 못하면 total 을 0 으로 남긴다 — 내용을 못 본 파일을 자르지 않기 위해서다.
         if (std::fread(buf.data(), 1, (size_t)sz, rf) != (size_t)sz) return;
+        total = sz;
 
         size_t pos = 0;
         std::vector<Op> pending;
@@ -140,6 +167,7 @@ private:
             if (type == kCommit) {
                 for (const Op& op : pending) Apply(op);   // 커밋 → 적용
                 pending.clear();
+                committedEnd = (long)pos;                 // 여기까지는 영속 확정분
                 continue;
             }
             if (type != kPut && type != kDel) break;      // 손상 → 중단
@@ -157,6 +185,7 @@ private:
             pending.push_back({(RecType)type, key, val});
         }
         // pending 에 남은(미커밋) 트랜잭션은 버린다 — 원자성.
+        // 그 바이트 범위는 [committedEnd, total) 이고, Open 이 그만큼을 잘라낸다.
     }
 
     std::string                                  path_;

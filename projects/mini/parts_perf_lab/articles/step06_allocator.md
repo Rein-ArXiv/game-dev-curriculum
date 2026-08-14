@@ -12,8 +12,6 @@
 4. HUD가 alloc ms · alloc count · alloc bytes · live bytes 표시.
 5. allocator 콤보박스 활성화.
 
-이 글의 코드 스니펫은 *해당 단계의 스냅샷* 이다. 디스크의 통합 코드는 누적되어 더 진행된 상태일 수 있다.
-
 ---
 
 ## 목차

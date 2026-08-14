@@ -12,8 +12,6 @@
 4. Archetype에 SSE/AVX2 핫 루프 추가
 5. AoS는 의도적으로 scalar 유지 (stride 문제로 SIMD 효과 없음)
 
-이 글의 코드 스니펫은 *해당 단계의 스냅샷* 이다. 디스크의 통합 코드는 누적되어 더 진행된 상태일 수 있다.
-
 ---
 
 ## 목차
@@ -73,6 +71,7 @@ for (std::size_t i = 0; i < count_; ++i) {
 
 해결 방법: *컴파일 시점 매크로 가드*.
 
+<!-- snippet: src/platform.h -->
 ```cpp
 // src/platform.h
 
@@ -281,6 +280,7 @@ void SoASimulation::UpdateSSE(float dt) {
 
 벡터 폭으로 나누어떨어지지 않는 꼬리 구간은 scalar 루프로 처리한다.
 
+<!-- snippet: src/sim/soa.cpp#SoASimulation::UpdateSSE -->
 ```cpp
     // 잔여(count % 4) 스칼라.
     const float maxX = w - 1.0f;

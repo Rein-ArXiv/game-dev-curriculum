@@ -7,6 +7,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import check_snippets  # noqa: E402  문서 스니펫 ↔ 소스 대조(PROJECTS_PLAN 완료 기준 7).
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = ROOT / "projects" / "mini"
@@ -30,9 +33,27 @@ FORWARD_PROMISE_RE = re.compile(
     r"(?:다음|추후|후속)[^.]{0,40}(?:다룬다|살펴본다|설명한다|구현한다|증명한다|소개한다|몫이다)|"
     r"\b\d+\s*절(?:에서|의)[^.]{0,50}"
     r"(?:다룬다|살펴본다|설명한다|구현한다|증명한다|소개한다|맡는다|몫이다|토대다|자세히)|"
-    r"(?:다음|후속)[^.]{0,30}(?:주제|토픽|토대|출발점)",
+    r"(?:다음|후속)[^.]{0,30}(?:주제|토픽|토대|출발점)|"
+    # `이후 단계는`, `이후 barrier, queue 단계는` — 조사를 요구해 회고적 표현과 가른다.
+    # `이후 BVH 빌드 단계 시각화` 처럼 조사 없는 명사 수식은 예고가 아니므로 일부러 뺀다.
+    r"(?:이후|추후)\s*(?:[^.\n]{0,25}?\s)?단계(?:는|가|를|의|에서|에|까지|부터)|"
+    # `다음 스텝` 류. 본문의 `600 스텝`, `매 스텝` 같은 시뮬레이션 타임스텝은
+    # 숫자·관형어가 앞에 오므로 걸리지 않는다.
+    r"(?:다음|이후|후속|추후)\s*(?:스텝|step)\b",
     re.IGNORECASE,
 )
+
+# `Step 4 의 토픽`(예고)과 `Step 2 에서 만든 것`(회고)은 문법이 아니라 *번호* 로 갈린다.
+# 자기 step 번호보다 큰 숫자를 가리키면 그것은 반드시 아직 없는 글이다.
+#
+# 뒤의 부정 전방탐색은 `main step 4 번 모이면` 같은 *세는 말* 을 걷어낸다.
+# 그것은 문서 참조가 아니라 시뮬레이션 스텝의 횟수다.
+STEP_NUMBER_RE = re.compile(
+    r"(?:\bstep|스텝|단계)\s*(\d+)\s*(?:[~\-–]\s*(\d+))?"
+    r"(?!\s*(?:번|회|개|차례|차|줄|배|초|분|시간|프레임|픽셀|바이트|ms|Hz))",
+    re.IGNORECASE,
+)
+OWN_STEP_RE = re.compile(r"^step(\d+)", re.IGNORECASE)
 OPENING_FENCE_RE = re.compile(r"^```(.*)$")
 IMPLEMENTATION_LANGS = {
     "c",
@@ -58,11 +79,28 @@ def relative(path: Path) -> str:
     return path.relative_to(ROOT).as_posix()
 
 
+def own_step(path: Path) -> int | None:
+    matched = OWN_STEP_RE.match(path.name)
+    return int(matched.group(1)) if matched else None
+
+
+def forward_step_reference(line: str, current: int | None) -> int | None:
+    """자기 step 번호보다 뒤를 가리키는 숫자가 있으면 그 번호를 돌려준다."""
+    if current is None:
+        return None
+    for matched in STEP_NUMBER_RE.finditer(line):
+        numbers = [int(group) for group in matched.groups() if group]
+        if numbers and max(numbers) > current:
+            return max(numbers)
+    return None
+
+
 def validate(path: Path) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
     lines = path.read_text(encoding="utf-8").splitlines()
     rel = relative(path)
+    current_step = own_step(path)
 
     for heading in ("## 들어가며", "## 목차", "## 결론"):
         count = sum(line.strip() == heading for line in lines)
@@ -99,6 +137,9 @@ def validate(path: Path) -> tuple[list[str], list[str]]:
         if line.startswith("# "):
             errors.append(f"{rel}:{line_number}: H1은 사용하지 않습니다.")
         reference_line = line.replace("*", "").replace("~", "")
+        # `~` 는 강조 제거용으로 지우지만, step 번호 검사에서는 `Step 1~7` 의
+        # 범위 구분자라 지우면 `Step 17` 로 읽힌다. 그래서 따로 둔다.
+        step_line = line.replace("*", "")
         if ARTICLE_REFERENCE_RE.search(reference_line):
             errors.append(
                 f"{rel}:{line_number}: 특정 글·회차·단계를 가리키지 말고 현재 코드 상태를 직접 설명해야 합니다."
@@ -110,6 +151,12 @@ def validate(path: Path) -> tuple[list[str], list[str]]:
         if FORWARD_PROMISE_RE.search(reference_line):
             errors.append(
                 f"{rel}:{line_number}: 후속 구현 예고 대신 현재 단계의 한계를 기술해야 합니다."
+            )
+        ahead = forward_step_reference(step_line, current_step)
+        if ahead is not None:
+            errors.append(
+                f"{rel}:{line_number}: 아직 없는 step {ahead}을 가리킵니다"
+                f"(이 문서는 step {current_step}). 지난 step 참조는 허용됩니다."
             )
 
     if in_fence:
@@ -125,10 +172,16 @@ def main() -> int:
     all_errors: list[str] = []
     all_warnings: list[str] = []
 
+    snippet_anchors = 0
     for document in documents:
         errors, warnings = validate(document)
         all_errors.extend(errors)
         all_warnings.extend(warnings)
+
+        snippets = check_snippets.check_document_full(document)
+        all_errors.extend(snippets.errors)
+        all_warnings.extend(snippets.warnings)
+        snippet_anchors += snippets.anchors
 
     for message in all_errors:
         print(f"ERROR: {message}")
@@ -136,7 +189,8 @@ def main() -> int:
         print(f"WARN: {message}")
 
     print(
-        f"\nChecked {len(documents)} project documents: "
+        f"\nChecked {len(documents)} project documents "
+        f"({snippet_anchors} snippet anchor(s)): "
         f"{len(all_errors)} error(s), {len(all_warnings)} warning(s)."
     )
     return 1 if all_errors else 0

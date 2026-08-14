@@ -135,7 +135,7 @@ float MatchUtility(const Candidate& c, const Policy& p) {
 
 ## 2. MMR 모델 비교
 
-MMR (Matchmaking Rating) 모델은 *플레이어 실력을 숫자로 추정* 하고 *경기 결과로 갱신* 한다. 매치메이커가 *기대 승률* 을 계산하는 근거 — 1절의 품질 $Q$ 가 이 모델 위에 선다.
+MMR (Matchmaking Rating) 모델은 *플레이어 실력을 숫자로 추정* 하고 *경기 결과로 갱신* 한다. 매치메이커가 *기대 승률* 을 계산하는 근거 — 1절의 품질 성분 $Q_{\mathrm{balance}}$ 가 이 모델 위에 선다.
 
 ### Elo (1960)
 

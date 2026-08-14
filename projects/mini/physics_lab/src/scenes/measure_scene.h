@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "core/contact_solver.h"
 #include "scenes/iscene.h"
 #include "ui/line_graph.h"
 
@@ -25,10 +26,14 @@
 
 namespace physlab {
 
+// 공유 솔버(core/contact_solver.h)가 요구하는 것은 pos / vel / radius / invMass
+// 네 멤버뿐이다. invMass 를 들고 있어야 유효질량을 *솔버가 계산* 한다 — 예전엔
+// 이 Scene 이 2.0f / 1.0f 를 직접 박아 두어 질량 가정이 코드에 숨어 있었다.
 struct MeasureBody {
     Vector2 pos;
     Vector2 vel;
     float   radius;
+    float   invMass = 1.0f;
 };
 
 class MeasureScene : public IScene {
@@ -68,13 +73,20 @@ public:
 
 private:
 
+    WorldBounds Bounds() const {
+        return BoundsFromCanvas(lastCanvasX_, lastCanvasY_,
+                                lastCanvasW_, lastCanvasH_);
+    }
+
     // live 시뮬.
     std::vector<MeasureBody> live_;
     int                      N_           = 24;
     unsigned                 seed_        = 1u;
     int                      iterations_  = 8;
-    // 중력 / 반발계수는 결정성 비교를 위해 UI 없이 고정한다 —
-    // measure_scene.cpp 의 kSimGravity / kSimRestitution 참조.
+    // 중력 / 반발계수 / slop 은 결정성 비교를 위해 UI 없이 고정한다. 값은
+    // 공유 솔버의 기본값 그대로 — Step 6 이 슬라이더를 건드리지 않았을 때와
+    // 같은 설정에서 측정한다는 뜻이다.
+    SolverParams             solver_;
 
     // 결정성 테스트.
     int   testFrames_       = 600;

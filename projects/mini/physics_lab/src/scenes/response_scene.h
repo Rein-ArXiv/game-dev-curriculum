@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include "core/contact_solver.h"
 #include "scenes/iscene.h"
 #include "ui/line_graph.h"
 
@@ -40,12 +41,8 @@ struct CircleRb {
     float   invMass  = 1.0f;
 };
 
-struct Contact {
-    int     i, j;          // body 인덱스. j = -1 이면 벽 / 바닥 contact
-    Vector2 normal;        // i → j 방향 (벽 contact 면 body 에서 바깥쪽)
-    float   depth;
-    float   lambda;        // SI 의 accumulated impulse
-};
+// Contact / SolverParams / WorldBounds 는 core/contact_solver.h 가 정의한다 —
+// Step 8 의 결정성 측정이 *같은 타입 위에서 같은 함수* 를 돌아야 하므로.
 
 class ResponseScene : public IScene {
 public:
@@ -79,9 +76,9 @@ public:
         initialized_ = true;
     }
     const std::vector<CircleRb>& Bodies() const { return bodies_; }
-    float  Slop() const             { return slop_; }
-    float  Restitution() const      { return restitution_; }
-    float  PositionCorrectFactor() const { return posCorrectFactor_; }
+    float  Slop() const             { return solver_.slop; }
+    float  Restitution() const      { return solver_.restitution; }
+    float  PositionCorrectFactor() const { return solver_.posCorrectFactor; }
     float  LastAvgPen() const       { return lastAvgPen_; }
     float  LastMaxPen() const       { return lastMaxPen_; }
     int    LastContacts() const     { return lastContacts_; }
@@ -92,15 +89,18 @@ private:
     void   ApplyPenalty(const std::vector<Contact>& contacts, float dt);
     void   ApplyImpulseOnce(std::vector<Contact>& contacts);
     void   ApplyPBD(float dt);
+    WorldBounds Bounds() const {
+        return BoundsFromCanvas(lastCanvasX_, lastCanvasY_,
+                                lastCanvasW_, lastCanvasH_);
+    }
 
     std::vector<CircleRb> bodies_;
     int                   N_           = 24;
     int                   iterations_  = 8;
-    float                 gravity_     = 600.0f;
-    float                 restitution_ = 0.1f;
+    float                 gravity_     = kDefaultGravity;
     float                 penaltyK_    = 20000.0f;
-    float                 slop_        = 0.5f;     // penetration tolerance (px)
-    float                 posCorrectFactor_ = 0.2f;
+    // restitution / slop / posCorrectFactor 는 공유 솔버의 파라미터다.
+    SolverParams          solver_;
 
     ResponseAlgo algo_ = ResponseAlgo::SequentialImpulse;
 

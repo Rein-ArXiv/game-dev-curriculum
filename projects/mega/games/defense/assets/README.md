@@ -22,3 +22,12 @@ The balance script is capped at 64 KiB, runs in the restricted arithmetic DSL,
 and is accepted only when every exported value is finite and inside its
 documented gameplay and wire-format range. Any parse, execution, or range
 failure restores the complete built-in balance configuration.
+
+Because the file is replaceable without a rebuild, a script that never
+terminates is also an input. The interpreter therefore bounds the run itself:
+a whole-run step budget of one million evaluated nodes, a nesting depth limit
+of 64 for both parsing and evaluation, and a parser that always consumes the
+token it cannot use. Each limit covers one `Run()` rather than one loop, so
+nesting adds to the count instead of multiplying it. Exceeding any of them is a
+diagnosed error (`<path>:<line>: …` on stderr), not a hang: both executables
+report it and keep starting with the built-in configuration.

@@ -56,6 +56,17 @@ enum class RunMode { Solo, Host, Client };
 inline constexpr float kDefenseFixedDt = 1.0f / 60.0f;
 inline constexpr uint16_t kDefenseDefaultPort = 27015;
 
+// ── 검사를 "건너뜀"으로 보고하는 종료 코드 ─────────────────────────
+// CTest 는 `SKIP_RETURN_CODE` 로 지정한 종료 코드를 실패가 아니라 SKIP 으로 센다.
+// 77 은 그 관례값(GNU automake)이라 다른 도구도 같은 뜻으로 읽는다.
+//
+// 왜 필요한가. `--gpu-selftest` 는 실제 Vulkan 장치와 스왑체인을 요구한다. GPU 도
+// 드라이버도 없는 CI 러너에서 이것을 실패로 보고하면 게이트가 상시 빨간불이 되고,
+// 상시 빨간 게이트는 곧 무시당한다. 반대로 등록하지 않으면 감사 #7·#24 가 지적한
+// 상태 — 문서는 "자동 검증한다"고 적는데 ctest 에는 없는 상태 — 로 돌아간다.
+// 그래서 "돌 수 있으면 돌고, 없으면 SKIP" 이 유일하게 정직한 세 번째 선택지다.
+inline constexpr int kDefenseSkipExitCode = 77;
+
 struct DefenseOptions {
     RunMode     mode = RunMode::Solo;
     bool        selftest = false;         // 창 없이 같은 루프를 돌린다
@@ -156,8 +167,15 @@ public:
         const std::string assetRoot = vfs_.Resolve("assets");
 
         map_ = defense::LoadMapFile(vfs_.Resolve("assets/level.txt"), &externalMap_);
+        // 밸런스 스크립트가 거부되면 기본 구성으로 계속 진행한다(멈추지 않는다).
+        // 다만 그 사실을 말한다 — 실행 예산 초과·구문 오류가 조용히 지나가면
+        // 파일을 교체한 사람은 자기 값이 적용된 줄로 안다.
+        std::string balanceError;
         balance_ = defense::LoadBalanceScript(vfs_.Resolve("assets/balance.script"),
-                                              &externalBalance_);
+                                              &externalBalance_, &balanceError);
+        if (!balanceError.empty())
+            std::fprintf(stderr, "[content] balance.script 거부, 기본 구성으로 진행: %s\n",
+                         balanceError.c_str());
         waves_ = defense::ApplyBalance(
             defense::LoadWaveFile(vfs_.Resolve("assets/waves.txt"),
                                   defense::DefaultWaves(), &externalWaves_),
@@ -311,22 +329,41 @@ public:
         DrawGame(framebuffer_, map_, view_, skin_, hud, connected_, &particles_);
     }
 
-    void RecordFrameMs(double milliseconds) {
-        metrics_.GetHistogram("frame_ms", 50.0, 50).Record(milliseconds);
+    // 히스토그램의 이름·버킷 설정은 여기 한 번만 적는다. 기록하는 곳과 읽는 곳에
+    // 같은 리터럴을 두 번 쓰면 한쪽만 바뀌었을 때 조용히 다른 히스토그램이 생긴다.
+    live::Histogram& FrameHistogram() {
+        return metrics_.GetHistogram("frame_ms", 50.0, 50);
     }
+    live::Histogram& SnapshotBytesHistogram() {
+        return metrics_.GetHistogram("snapshot_bytes",
+                                     static_cast<double>(wire::kMaxPacketBytes), 24);
+    }
+
+    void RecordFrameMs(double milliseconds) { FrameHistogram().Record(milliseconds); }
 
     // 한 줄에 양쪽 방향이 다 들어간다. 호스트가 받은 것(remote_commands)과
     // 클라이언트가 보낸 것(commands_sent)이 같은 형식으로 찍히므로, 두 프로세스의
     // 표준 출력만으로 "어느 쪽 배선이 끊겼는가"를 답할 수 있다.
+    //
+    // snapshot_bytes 는 감사 #30 까지 **수집만 하고 출력하지 않았다** — 관측할 수
+    // 없는 지표는 없는 지표와 같다. p95 와 최댓값을 함께 찍는 이유는 둘이 다른
+    // 질문에 답하기 때문이다: p95 는 평소 대역폭, 최댓값은 1200바이트 예산까지의
+    // 여유. truncated 는 그 예산이 실제로 부족했던 횟수다(감사 #31).
     void PrintMetrics() {
+        live::Histogram& bytes = SnapshotBytesHistogram();
         std::printf("[metrics] matches=%llu remote_commands=%llu snapshots=%llu "
-                    "commands_sent=%llu command_ack=%u frame_p95=%.1fms\n",
+                    "commands_sent=%llu command_ack=%u frame_p95=%.1fms "
+                    "snapshot_bytes_p95=%.0f snapshot_bytes_max=%.0f "
+                    "snapshots_truncated=%llu\n",
                     static_cast<unsigned long long>(metrics_.GetCounter("matches_finished").Value()),
                     static_cast<unsigned long long>(metrics_.GetCounter("remote_commands").Value()),
                     static_cast<unsigned long long>(metrics_.GetCounter("snapshots_sent").Value()),
                     static_cast<unsigned long long>(commandPacketsSent_),
                     acknowledgedCommand_,
-                    metrics_.GetHistogram("frame_ms", 50.0, 50).Percentile(0.95));
+                    FrameHistogram().Percentile(0.95),
+                    bytes.Percentile(0.95), bytes.Max(),
+                    static_cast<unsigned long long>(
+                        metrics_.GetCounter("snapshots_truncated").Value()));
         std::fflush(stdout);
     }
 
@@ -448,9 +485,14 @@ private:
         while (network_.Receive(packet)) {
             wire::Snapshot snapshot;
             if (!wire::ReadSnapshot(packet, snapshot)) continue;
+            // 와이어 flags 의 truncated 를 읽는 유일한 제품 코드다. 켜져 있으면
+            // 이 클라이언트가 그리는 세계에 호스트가 버린 엔티티가 빠져 있다는
+            // 뜻이므로, 화면과 지표가 그 사실을 알고 있어야 한다.
+            const bool truncated = snapshot.truncated;
             if (replicas_.Add(std::move(snapshot))) {
                 lastSnapshot_ = now;
                 ++snapshotsReceived_;
+                if (truncated) metrics_.GetCounter("snapshots_truncated").Add();
             }
         }
         const wire::Snapshot* newest = replicas_.Newest();
@@ -461,13 +503,18 @@ private:
     }
 
     void SendSnapshot() {
-        net::Bytes snapshot =
-            wire::WriteSnapshot(world_, hostTick_, remoteCommands_.LastDelivered());
+        // 잘림은 조용히 일어나면 안 되는 손실이다 — 엔티티가 클라이언트 화면에서
+        // 그냥 사라지고 아무 신호도 남지 않는다. 지금은 컬렉션 상한이 게임플레이
+        // 상한보다 크거나 같아 이 값이 켜지지 않지만, 그 관계가 깨지는 순간(예:
+        // 웨이브당 적 상한 상향) 이 카운터가 먼저 말한다.
+        bool truncated = false;
+        net::Bytes snapshot = wire::WriteSnapshot(
+            world_, hostTick_, remoteCommands_.LastDelivered(), &truncated);
         if (snapshot.empty()) return;
         network_.Send(snapshot);
         metrics_.GetCounter("snapshots_sent").Add();
-        metrics_.GetHistogram("snapshot_bytes", wire::kMaxPacketBytes, 24)
-            .Record(static_cast<double>(snapshot.size()));
+        if (truncated) metrics_.GetCounter("snapshots_truncated").Add();
+        SnapshotBytesHistogram().Record(static_cast<double>(snapshot.size()));
     }
 
     DefenseOptions            options_;
@@ -520,14 +567,36 @@ private:
 };
 
 // ── 창 실행 ────────────────────────────────────────────────────────
+// GPU 셀프테스트의 실패와 부재를 가른다. 요구 조건(Vulkan 빌드 · 창 · 장치)이
+// **없어서** 못 도는 것은 SKIP 이고, 다 갖췄는데 present 가 깨지는 것만 실패다.
+// 그 구분이 없으면 이 검사는 GPU 없는 CI 에서 영구 실패로 남아 무시당한다.
+inline int DefenseGpuSelftestUnavailable(const char* reason) {
+    std::fprintf(stderr, "[gpu-selftest] SKIP: %s\n", reason);
+    std::fflush(stderr);
+    return kDefenseSkipExitCode;
+}
+
 inline int RunDefenseWindowed(DefenseApp& app, const DefenseOptions& options) {
     using Clock = DefenseApp::Clock;
+
+#ifndef MEGA_HAS_VULKAN
+    // 창을 열기 전에 답이 나오는 조건이다. 창부터 만들면 GPU 가 없는 환경에서
+    // "창 생성 실패"라는 엉뚱한 이유가 먼저 보고된다.
+    if (options.vulkan) {
+        if (options.gpuSelftest)
+            return DefenseGpuSelftestUnavailable("이 빌드에 Vulkan SDK 지원이 없다");
+        std::fprintf(stderr, "this build has no Vulkan SDK support\n");
+        return 1;
+    }
+#endif
 
     platform::Window window;
     const wchar_t* title = options.mode == RunMode::Solo ? L"Mega Defense" :
                            options.mode == RunMode::Host ? L"Mega Defense - Host" :
                                                            L"Mega Defense - Client";
     if (!window.Create(title, kViewWidth, kViewHeight)) {
+        if (options.gpuSelftest)
+            return DefenseGpuSelftestUnavailable("이 환경에 창 백엔드가 없다");
         std::fprintf(stderr,
                      "window creation failed (this platform has no window backend; use --selftest)\n");
         return 2;
@@ -538,12 +607,10 @@ inline int RunDefenseWindowed(DefenseApp& app, const DefenseOptions& options) {
     if (options.vulkan &&
         !presenter.Init(window.NativeHandle(), kViewWidth, kViewHeight,
                         platform::ExecutableDirectory())) {
+        if (options.gpuSelftest)
+            return DefenseGpuSelftestUnavailable(
+                "Vulkan 장치·스왑체인·셰이더를 준비하지 못했다(드라이버 또는 SPIR-V 부재)");
         std::fprintf(stderr, "Vulkan presenter initialization failed\n");
-        return 1;
-    }
-#else
-    if (options.vulkan) {
-        std::fprintf(stderr, "this build has no Vulkan SDK support\n");
         return 1;
     }
 #endif

@@ -582,7 +582,7 @@ void DistanceJointSoft::PrepareVelocityConstraint(float dt) {
 }
 ```
 
-물리적 의미: distance joint 의 *진동수 1 Hz + 감쇠 0.5*. 위반량이 *고무처럼 응답*.
+기본값 `frequency = 0` 은 위 게이트에 걸려 soft 모드가 꺼진 상태 — 즉 *rigid 모드* 다. soft 로 쓰려면 `frequency` 에 양수를 준다. 예를 들어 *진동수 1 Hz + 감쇠 0.5* 로 두면 distance joint 의 위반량이 *고무처럼 응답*.
 
 ### 7.4 API 로 노출할 값
 

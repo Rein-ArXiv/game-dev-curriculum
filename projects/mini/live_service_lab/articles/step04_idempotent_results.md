@@ -40,11 +40,15 @@ server를 함께 검사해 재시도를 한 번만 반영하고 match와 ticket�
 result ID만 dictionary에 보관하면 같은 key를 다른 payload에 재사용하는 오류를 숨긴다. score map을
 player ID 순서로 정렬해 canonical fingerprint를 만든다.
 
+<!-- snippet: src/LiveService.Core/ControlPlane.cs#ResultFingerprint -->
 ```csharp
-string scores = string.Join(",", request.Scores
-    .OrderBy(pair => pair.Key, StringComparer.Ordinal)
-    .Select(pair => $"{pair.Key}:{pair.Value}"));
-string fingerprint = request.MatchId + "|" + scores;
+private static string ResultFingerprint(MatchResultRequest request)
+{
+    string scores = string.Join(",", request.Scores
+        .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+        .Select(pair => $"{pair.Key}:{pair.Value}"));
+    return request.MatchId + "|" + scores;
+}
 ```
 
 같은 result ID가 이미 있으면 fingerprint도 같아야 한다. 다르면 HTTP 409 conflict다. dictionary의
@@ -55,12 +59,20 @@ serialization 순서 때문에 달라지는 것을 막기 위해서다.
 중복 경로가 authorization을 건너뛰면 다른 서버가 result ID를 아는 것만으로 성공 receipt를 조회할
 수 있다.
 
+<!-- snippet: src/LiveService.Core/ControlPlane.cs#RecordResult -->
 ```csharp
-if (results.TryGetValue(request.ResultId, out var existing)) {
-    if (existing.ServerId != serverId)
-        throw new UnauthorizedAccessException();
-    if (existing.Fingerprint != fingerprint)
-        throw new InvalidOperationException("idempotency key conflict");
+if (results.TryGetValue(request.ResultId, out RecordedResult? existing))
+{
+    if (!string.Equals(existing.ServerId, serverId, StringComparison.Ordinal))
+    {
+        throw new UnauthorizedAccessException(
+            "Server does not own this result receipt.");
+    }
+    if (!string.Equals(existing.Fingerprint, fingerprint, StringComparison.Ordinal))
+    {
+        throw new InvalidOperationException(
+            "Idempotency key was reused with a different payload.");
+    }
     return existing.Receipt with { Duplicate = true };
 }
 ```
@@ -89,6 +101,7 @@ score map의 key 집합도 match player 집합과 정확히 같아야 한다. �
 두 번째로 다른 result ID를 보내면 idempotency 재시도가 아니라 한 match의 이중 완료이므로 conflict다.
 같은 result ID 재시도는 match completed 검사보다 먼저 기존 receipt를 반환해야 한다.
 
+<!-- snippet: src/LiveService.Core/ControlPlane.cs#RecordResult -->
 ```csharp
 results[request.ResultId] = new RecordedResult(
     receipt, fingerprint, serverId);

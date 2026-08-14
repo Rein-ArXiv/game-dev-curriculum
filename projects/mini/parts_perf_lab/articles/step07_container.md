@@ -12,7 +12,7 @@
 4. HUD가 container ms, container nodes 표시.
 5. container 콤보박스 활성화.
 
-이 글의 코드 스니펫은 *해당 단계의 스냅샷* 이다. 디스크의 통합 코드는 누적되어 더 진행된 상태일 수 있다.
+파일 경로 주석이 붙은 스니펫은 저장소의 실제 소스를 그대로 옮긴 것이다. 발췌하느라 가운데를 자른 자리에는 `// ...` 를 남겨 둔다.
 
 ---
 
@@ -68,6 +68,7 @@ for (auto& n : container) sum += n.dist;
 
 ## 2. ContainerBenchmark 워크로드 설계
 
+<!-- snippet: src/measure/container_benchmark.h -->
 ```cpp
 // src/measure/container_benchmark.h
 
@@ -140,6 +141,7 @@ for (...) sum += n.dist;
 
 `Init` 이 토글 종류에 따라 분기해 데이터를 채운다.
 
+<!-- snippet: src/measure/container_benchmark.cpp#ContainerBenchmark::Init -->
 ```cpp
 // src/measure/container_benchmark.cpp
 
@@ -202,6 +204,78 @@ void ContainerBenchmark::Init(Container type, IAllocator* intrusiveAlloc,
 
 `vec_.reserve(count)` 로 미리 용량을 잡아 push_back 시 재할당이 일어나지 않는다. 만약 reserve 없이 push_back을 N번 하면 vector가 *기하급수적 재할당* (16, 32, 64, ...)을 반복해 *시작 시 비용* 이 올라간다. Init은 한 번만 호출되므로 영향이 작지만, 측정 도구의 정직성을 위해 reserve를 명시한다.
 
+### 매 프레임 순회 루프
+
+`RunFrame` 이 컨테이너를 한 번 훑으며 `dist` 를 합산하고, 그 구간만 따로 잰다.
+
+<!-- snippet: src/measure/container_benchmark.cpp#ContainerBenchmark::RunFrame -->
+```cpp
+// src/measure/container_benchmark.cpp
+
+void ContainerBenchmark::RunFrame() {
+    using Clock = std::chrono::steady_clock;
+    const auto t0 = Clock::now();
+
+    float sum = 0.0f;
+    switch (type_) {
+        case Container::Vector: {
+            for (const auto& n : vec_) sum += n.dist;
+            break;
+        }
+        case Container::StdList: {
+            for (const auto& n : list_) sum += n.dist;
+            break;
+        }
+        case Container::IntrusiveList: {
+            for (Node* p = intrusiveHead_; p; p = p->next) sum += p->dist;
+            break;
+        }
+    }
+
+    lastSum_ = sum;
+
+    const auto t1 = Clock::now();
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+    lastFrameMs_ = static_cast<float>(ns) / 1.0e6f;
+}
+```
+
+세 분기가 하는 산술은 똑같다 — float 하나를 읽어 더한다. 갈리는 것은 *원소의 주소를 어떻게 얻는가* 뿐이다. vector는 인덱스 증가, std::list는 노드의 next 포인터, IntrusiveList도 next 포인터지만 그 노드들이 Pool의 연속 슬롯에 놓여 있다.
+
+`steady_clock` 으로 이 루프만 감싸므로 채우기 비용(`Init`)은 측정에 들어오지 않는다. 시간 측정 단위는 나노초로 받아 ms로 환산한다 — 5000 노드 vector 순회는 수십 μs 수준이라 밀리초로 바로 받으면 해상도가 모자란다.
+
+### Shutdown의 노드 회수
+
+vector와 std::list는 `clear()` 로 끝나지만, IntrusiveList의 노드는 외부 allocator가 준 메모리라 직접 돌려줘야 한다.
+
+<!-- snippet: src/measure/container_benchmark.cpp#ContainerBenchmark::Shutdown -->
+```cpp
+// src/measure/container_benchmark.cpp
+
+void ContainerBenchmark::Shutdown() {
+    vec_.clear();
+    list_.clear();
+
+    // Intrusive list 정리. Pool은 Reset으로 일괄 회수도 가능하지만
+    // 인터페이스 일관성을 위해 노드별 Deallocate.
+    if (intrusiveHead_ && intrusiveAlloc_) {
+        Node* cur = intrusiveHead_;
+        while (cur) {
+            Node* next = cur->next;
+            intrusiveAlloc_->Deallocate(cur, sizeof(Node));
+            cur = next;
+        }
+    }
+    intrusiveHead_  = nullptr;
+    intrusiveAlloc_ = nullptr;
+    count_          = 0;
+}
+```
+
+`Node* next = cur->next;` 를 먼저 읽어 두는 순서가 중요하다. `Deallocate` 후에 `cur->next` 를 읽으면 use-after-free다. Pool이 반환된 슬롯을 free list로 재사용하면서 그 자리에 링크를 덮어쓰기 때문에, 실제로 값이 깨진다.
+
+`Shutdown` 이 `intrusiveAlloc_` 까지 null로 되돌리므로, `Init` 은 `Shutdown()` 을 먼저 부른 *뒤에* `intrusiveAlloc_ = intrusiveAlloc;` 을 대입한다. 순서가 뒤집히면 방금 받은 allocator 포인터가 지워진다.
+
 ## 4. Intrusive list와 외부 Pool의 결합
 
 IntrusiveList가 *vector에 가까운 캐시 효과* 를 내려면 *연속 메모리* 가 필요하다. PoolAllocator가 이걸 보장한다.
@@ -238,37 +312,78 @@ allocator 토글이 EventBenchmark에 영향을 주듯이 ContainerBenchmark에�
 
 해결: ContainerBenchmark용 *독립 PoolAllocator* 인스턴스. main이 두 개의 allocator 인스턴스를 만들어 각각 다른 워크로드에 주입.
 
+<!-- snippet: src/main.cpp -->
 ```cpp
-// main.cpp
-auto eventAlloc = CreateAllocator(toggles.allocator);  // EventBenchmark용
+// src/main.cpp
 
-auto containerPool = std::make_unique<ppl::PoolAllocator>(
-    sizeof(ppl::ContainerBenchmark::Node),
-    alignof(ppl::ContainerBenchmark::Node),
-    kContainerCount + 16);                              // ContainerBenchmark용
+    // 토글로 교체되는 인스턴스. EventBenchmark 전용이다.
+    auto alloc = CreateAllocator(toggles.allocator);
 
-bench.RunFrame(eventAlloc.get());
-cbench.RunFrame();  // 내부적으로 containerPool 사용
+    // ...
+
+    // ContainerBenchmark용 별도 Pool. EventBenchmark의 allocator와 분리해
+    // container 토글이 allocator 토글에 영향받지 않게 한다.
+    auto containerPool = std::make_unique<ppl::PoolAllocator>(
+        sizeof(ppl::ContainerBenchmark::Node),
+        alignof(ppl::ContainerBenchmark::Node),
+        kContainerCount + 16);
+
+    // ...
+
+        bench.RunFrame(alloc.get());
+        cbench.RunFrame();
 ```
 
-이러면 allocator 토글이 *EventBenchmark에만* 영향을 주고 ContainerBenchmark는 항상 동일한 Pool로 동작한다.
+`bench` 는 프레임마다 주입받은 allocator를 쓰고, `cbench` 는 `Init` 때 받아 둔 `containerPool` 을 계속 쓴다. 그래서 allocator 토글이 *EventBenchmark에만* 영향을 주고 ContainerBenchmark는 항상 동일한 Pool로 동작한다.
 
 ## 5. main 통합과 HUD 표시
 
-main에 ContainerBenchmark 인스턴스 + Pool + 토글 변경 처리 추가.
+main에 ContainerBenchmark 인스턴스 + Pool + 토글 변경 처리 추가. 먼저 파일 스코프에 헤더 하나와 노드 수 상수 하나가 늘어난다.
 
+<!-- snippet: src/main.cpp -->
 ```cpp
 // src/main.cpp
 
 #include "measure/container_benchmark.h"
 
+// ... (raylib 및 기존 alloc/measure/sim/ui 헤더)
+
 namespace {
+
+// ... (kWindowW · kHudH · kEventCount 등 기존 상수)
+
+// ContainerBenchmark가 보유할 노드 수 (시작 시 한 번 채우고 매 프레임 순회).
 constexpr std::size_t kContainerCount = 5000;
-}
+
+// ... (allocator 백킹 용량 상수와 CreateAllocator 팩토리)
+
+}  // namespace
+```
+
+main 본문 전문은 다음과 같다.
+
+<!-- snippet: src/main.cpp#main -->
+```cpp
+// src/main.cpp
 
 int main() {
-    // ... (기존 시뮬, allocator, EventBenchmark 초기화)
+    SetConfigFlags(FLAG_MSAA_4X_HINT);
+    InitWindow(kWindowW, kWindowH, "parts_perf_lab");
+    SetTargetFPS(0);
 
+    ppl::Toggles  toggles;
+    ppl::Toggles  prevToggles = toggles;
+
+    auto sim = ppl::CreateSimulation(toggles.layout);
+    sim->Init(toggles.EntityCount(), kWindowW, kSimH);
+
+    auto alloc = CreateAllocator(toggles.allocator);
+
+    ppl::EventBenchmark bench;
+    bench.Init(kEventCount);
+
+    // ContainerBenchmark용 별도 Pool. EventBenchmark의 allocator와 분리해
+    // container 토글이 allocator 토글에 영향받지 않게 한다.
     auto containerPool = std::make_unique<ppl::PoolAllocator>(
         sizeof(ppl::ContainerBenchmark::Node),
         alignof(ppl::ContainerBenchmark::Node),
@@ -277,8 +392,14 @@ int main() {
     ppl::ContainerBenchmark cbench;
     cbench.Init(toggles.container, containerPool.get(), kContainerCount);
 
+    ppl::FrameTimer timer;
+
+    ppl::Hud hud;
+    hud.Init(kWindowW, kWindowH, kHudH);
+
     while (!WindowShouldClose()) {
-        // ...
+        const float dt = GetFrameTime();
+
         timer.BeginUpdate();
         sim->Update(dt, toggles.simd, toggles.branchless);
         timer.EndUpdate();
@@ -286,31 +407,99 @@ int main() {
         bench.RunFrame(alloc.get());
         cbench.RunFrame();
 
-        // ...
-        hud.Draw(toggles, timer, sim->Count(), bench, *alloc, cbench);
-        // ...
+        timer.BeginDraw();
+        BeginDrawing();
+        ClearBackground(Color{10, 10, 14, 255});
+        sim->Draw();
+        timer.EndDraw();
 
+        // ... (프레임 타이머에 이번 프레임 샘플 커밋)
+
+        hud.Draw(toggles, timer, sim->Count(), bench, *alloc, cbench);
+        EndDrawing();
+
+        // 토글 변경 처리.
+        // - layout 변경: 시뮬 인스턴스 자체를 교체.
+        // - entityCount 변경: 시뮬 재초기화.
+        // - allocator 변경: EventBenchmark용 allocator 인스턴스를 새로 만든다.
+        // - container 변경: ContainerBenchmark 재초기화.
         if (ppl::RequiresRestart(prevToggles, toggles)) {
-            // ... (시뮬, allocator 변경 처리)
+            const bool layoutChanged    = (prevToggles.layout    != toggles.layout);
+            const bool entityChanged    = (prevToggles.entityPresetIdx != toggles.entityPresetIdx);
+            const bool allocatorChanged = (prevToggles.allocator != toggles.allocator);
             const bool containerChanged = (prevToggles.container != toggles.container);
+
+            if (layoutChanged || entityChanged) {
+                sim->Shutdown();
+                if (layoutChanged) {
+                    sim = ppl::CreateSimulation(toggles.layout);
+                }
+                sim->Init(toggles.EntityCount(), kWindowW, kSimH);
+            }
+
+            if (allocatorChanged) {
+                alloc = CreateAllocator(toggles.allocator);
+            }
+
             if (containerChanged) {
                 cbench.Init(toggles.container, containerPool.get(),
                             kContainerCount);
             }
         }
+        prevToggles = toggles;
     }
 
+    sim->Shutdown();
     cbench.Shutdown();
+    CloseWindow();
+    return 0;
 }
 ```
 
 `cbench.Init` 이 시작 시 한 번 + container 토글 변경 시마다 호출된다. Init이 내부에서 `Shutdown()` 을 먼저 호출해 이전 데이터를 정리하므로 *재초기화* 가 안전하다.
 
+`cbench.RunFrame()` 은 `timer.BeginUpdate()`/`EndUpdate()` 밖에 있다. 컨테이너 순회는 시뮬 update가 아니므로 update ms를 오염시키면 안 되고, 자체 `steady_clock` 으로 이미 재고 있다. `containerPool` 은 `cbench` 보다 먼저 선언되어 `cbench.Shutdown()` 이 노드를 돌려줄 때까지 살아 있다 — 순서가 뒤집히면 Pool이 먼저 파괴되어 Shutdown이 죽은 allocator를 건드린다.
+
 ### HUD 표시
 
 Hud::Draw 시그니처에 `ContainerBenchmark&` 인자가 추가되고, `DrawStats` 가 container ms를 표시한다.
 
+<!-- snippet: src/ui/hud.h -->
 ```cpp
+// src/ui/hud.h
+
+#include "measure/container_benchmark.h"
+
+// ...
+
+class Hud {
+public:
+    void Init(int windowW, int windowH, int hudHeight);
+
+    // 매 프레임 호출. 토글 상태와 측정값을 받아 HUD를 그리고,
+    // 사용자가 토글을 변경했으면 toggles에 반영한다.
+    void Draw(Toggles& toggles, const FrameTimer& timer,
+              std::size_t entityCount,
+              const EventBenchmark& bench,
+              const IAllocator& alloc,
+              const ContainerBenchmark& cbench);
+
+private:
+    void DrawStats(const FrameTimer& timer, std::size_t entityCount,
+                   const EventBenchmark& bench, const IAllocator& alloc,
+                   const ContainerBenchmark& cbench,
+                   int x, int y);
+
+    // ...
+};
+```
+
+`ContainerBenchmark` 를 값이 아니라 `const&` 로 받는다. HUD는 읽기만 하고, 벤치마크 객체는 vector·list·Pool 노드를 통째로 들고 있어 복사가 곧 재할당이다.
+
+<!-- snippet: src/ui/hud.cpp#Hud::DrawStats -->
+```cpp
+// src/ui/hud.cpp — Hud::DrawStats
+
 char buf[640];
 std::snprintf(buf, sizeof(buf),
               "entities  : %zu\n"
@@ -339,7 +528,10 @@ std::snprintf(buf, sizeof(buf),
 
 container 콤보박스 활성화는 비활성화 표시를 걷어내고 값을 토글에 반영하는 것이 전부다.
 
+<!-- snippet: src/ui/hud.cpp#Hud::DrawTogglePanel -->
 ```cpp
+// src/ui/hud.cpp — Hud::DrawTogglePanel
+
 DrawText("container:", x2, rowY2(row2), 14, LIGHTGRAY);
 int containerIdx = (int)toggles.container;
 if (GuiDropdownBox(Rect(x2 + kLabelW, rowY2(row2), kFieldW, kRowH),
@@ -351,14 +543,42 @@ if (!containerEdit_) {
 }
 ```
 
+여기 쓰인 `kContainerCount` 는 `Container` enum의 항목 수 3이다. main의 `kContainerCount` (노드 수 5000)와 이름은 같지만 main 쪽은 그 번역 단위의 익명 네임스페이스에 있고, 이쪽은 토글 헤더의 `ppl::kContainerCount` 다. 이름이 겹쳐 헷갈리기 쉬운 지점이라 clamp 상한이 3이라는 사실을 기억해 둔다.
+
 ## 6. 빌드와 실행 결과
+
+새 번역 단위가 하나 늘었으므로 두 타깃의 소스 목록에 모두 넣는다. 앱에만 넣으면 링크는 되지만 headless 테스트 타깃에서 `ContainerBenchmark` 심볼이 미해결로 남는다.
+
+<!-- snippet: CMakeLists.txt -->
+```cmake
+# CMakeLists.txt
+
+add_executable(${PROJECT_NAME}
+    src/main.cpp
+    # ...
+    src/measure/container_benchmark.cpp
+    # ...
+)
+
+# ...
+
+add_executable(parts_core_tests
+    tests/core_tests.cpp
+    # ...
+    src/measure/container_benchmark.cpp
+    # ...
+)
+```
 
 CMake 재구성, 빌드, 실행한다.
 
 ```bash
 cmake -S . -B build
 cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
 ```
+
+`ctest` 는 GUI 없이 도는 `parts_core_tests` 를 실행한다. 그중 `TestContainerEquivalence` 가 세 컨테이너를 같은 시드로 채워 노드 수가 정확히 같은지, 합산 결과가 상대오차 1e-4 안에서 일치하는지, `Shutdown` 후 노드 수가 0으로 돌아가는지, 풀이 모자라면 노드 수가 풀 용량에서 멈추는지를 확인한다. 컨테이너를 바꿔도 *같은 계산* 이라는 전제가 깨지면 ms 비교는 의미가 없으므로, 이 동등성 확인이 측정의 전제 조건이다.
 
 실행 후 좌측 stats 영역 하단에 `container : X.XXX ms (5000 nodes)` 가 매 프레임 갱신된다. container 콤보박스를 클릭해 vector → std::list → IntrusiveList 순서로 바꾸며 변화를 본다.
 

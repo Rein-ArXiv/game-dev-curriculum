@@ -622,7 +622,21 @@ ResourceHandle FindOrCreateSlot(uint64_t assetId) {
     liveSlots_[assetId] = h;
     return h;
 }
+
+// 물리 로드를 발행하는 유일한 지점 (2절 Acquire가 Unloaded일 때만 호출)
+void RequestLoad(ResourceHandle h) {
+    ResourceSlot* s = Resolve(h);
+    if (!s) return;
+    if (s->state == Loading || s->state == Loaded) {
+        ++profile_.duplicateLoadsThisSession;   // 상태 검사를 우회한 발행 = 중복
+        return;                                 // 진행 중·완료된 로드에 합류
+    }
+    s->state = Loading;
+    SubmitLoadJob(h);                           // 3절 비동기 파이프라인
+}
 ```
+
+슬롯 조회에서 걸러진 요청은 *중복 방지 성공* 이므로 세지 않는다. 실제 중복은 이미 `Loading`·`Loaded`인 에셋에 새 물리 로드가 발행될 때만 생기므로 계수도 그 발행 지점 한 곳에서 한다 — 위 표가 이 값을 0으로 기대하는 이유이며, 0이 아니면 상태 검사를 우회한 경로가 있다는 뜻이다.
 
 경로를 키로 쓰기 전에 가상 파일 시스템의 규칙에 따라 정규화한다. `.`·`..` 해소, 구분자와 루트 규칙 통일은 일반적으로 필요하지만, 무조건 소문자화하면 대소문자를 구분하는 파일 시스템이나 패키지에서 서로 다른 에셋을 충돌시킨다. 가장 안전한 기본 키는 쿠킹 단계가 발급한 안정적 asset ID이며, 경로 비교의 대소문자와 Unicode 정규화는 mount별 계약으로 둔다. 디버그 빌드에서는 서로 다른 원본이 같은 ID를 갖는 충돌도 검사한다.
 

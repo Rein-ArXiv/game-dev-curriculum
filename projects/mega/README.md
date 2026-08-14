@@ -22,11 +22,17 @@
 - 외부 스킨: PPM 이미지 10개를 런타임에 교체, 누락·손상 시 내장 스프라이트 폴백
 - 표시 백엔드: Win32 GDI 또는 같은 실행 파일의 Vulkan 스왑체인(`--vulkan`)
 - 영속 진행도: 매치 결과와 누적 프로필을 하나의 WAL 트랜잭션으로 커밋
-- 운영 지표: 프레임 시간, 원격 명령 수, 스냅샷 수·크기 집계
+- 운영 지표: 프레임 시간 p95, 원격 명령 수, 스냅샷 수·바이트 p95/최댓값·잘림 횟수를
+  집계하고 종료 시 한 줄로 출력
 
 검증 환경은 MSVC 19.51 Release다. 실제 로컬 UDP 왕복, 독립 호스트·클라이언트
 프로세스 왕복, 전용 서버와 두 클라이언트의 토큰 입장, 손실·지연·재정렬 복구,
-반복 매치 soak, Vulkan 스왑체인 5프레임 present를 자동 검증한다.
+반복 매치 soak를 자동 검증한다.
+
+Vulkan 스왑체인 5프레임 present도 ctest 대상(`mega_defense_gpu_selftest`)이다. 다만 이
+하나는 실제 GPU와 창이 있어야 돌므로, 없는 환경에서는 실패가 아니라 **SKIP**으로
+보고한다(종료 코드 77 + CTest `SKIP_RETURN_CODE`). 즉 "이 머신에서 GPU 경로가 검증됐다"는
+`ctest`가 이 항목을 Passed로 셌을 때만 참이고, Skipped면 검증되지 않은 것이다.
 
 ## 빠른 시작
 
@@ -97,6 +103,11 @@ Vulkan SDK와 런타임 드라이버가 있으면 같은 실행 명령에 `--vul
 Vulkan은 게임 시뮬레이션을 바꾸지 않는다. CPU 프레임버퍼를 텍스처에 업로드하고 풀스크린
 삼각형으로 스왑체인에 표시한다. SDK가 없으면 GDI 경로만 빌드된다.
 
+`--gpu-selftest`는 `ctest`가 `mega_defense_gpu_selftest`로 실행하는 것과 같은 명령이다.
+Vulkan 빌드가 아니거나, 창 백엔드가 없거나, 장치·셰이더를 준비하지 못하면 이유를 적고
+종료 코드 77로 끝난다 — 그 경우 ctest는 실패가 아니라 Skipped로 센다. 실패는 장치도 창도
+있는데 present가 깨졌을 때뿐이다.
+
 ## 조작
 
 | 입력 | 동작 |
@@ -122,6 +133,7 @@ Vulkan은 게임 시뮬레이션을 바꾸지 않는다. CPU 프레임버퍼를 
 - `level.txt`: `S` 스폰, `P` 경로, `C` 코어, `.` 건설 가능, `#` 차단
 - `waves.txt`: 한 줄마다 `count hp speed reward interval enemy_type`
 - `balance.script`: 시작 자원과 적 체력·속도·보상 배율을 계산하는 제한된 스크립트
+  (실행 스텝 예산 10⁶ · 중첩 깊이 64 — 끝나지 않는 스크립트도 진단을 남기고 기본값으로 흡수된다)
 
 순수 마젠타 `(255, 0, 255)`는 투명 키다. 이미지 최대 크기는 256x256이며 모든 채널을
 검증한다. 레벨은 직사각형이고 `S`와 `C`가 각각 하나여야 하며, 모든 `P`가 하나의
@@ -142,16 +154,23 @@ mega/
     render/               프레임버퍼, 래스터, 스프라이트, 비트맵 폰트
     io/                   파일 핸들(positioned IO)과 전체 읽기 — 디스크의 유일한 입구
     platform/             창·오디오 장치·Vulkan 표시·경로·신호·VFS — OS 의 유일한 입구
-    db/ live/             영속, 지표
+    db/ serialize/ live/  영속(WAL·아카이브)과 운영 지표
     math/ physics/ ai/    수학·시뮬레이션 라이브러리
-    memory/ ecs/ jobs/    엔진 코어 라이브러리
-    engine/ tools/ mp/    도메인 엔진·도구·동기화 라이브러리
+    memory/ containers/   할당자와 자료구조
+    ecs/ jobs/ sched/     엔티티·작업·스케줄링
+    sync/ profiler/       동기화 프리미티브와 계측
+    engine/ tools/ mp/    도메인 엔진·도구·멀티플레이어 동기화 라이브러리
   scripts/check_layers.py   계층 규칙 검사(구성 시 + 빌드마다 + ctest)
   scripts/reachability.py   도달성 게이트 + `docs/PRODUCT_LAYERS.md` 생성(빌드마다 + ctest)
   games/defense/          진입점 2개(각 30줄 미만) + 에셋 + 셰이더
   tests/                  엔진·게임·프로토콜·실소켓 테스트
   docs/                   설계와 구현 과정
 ```
+
+**이 트리는 손으로 관리하지 않는다.** `include/` 아래 디렉터리 집합과 위 트리가 다르면
+`scripts/reachability.py`가 빌드와 `reachability_gate` 테스트에서 실패시킨다. 실재하는
+디렉터리가 빠져도, 없어진 디렉터리가 남아 있어도 마찬가지다 — 트리를 보고 소스를 찾는
+독자에게 누락된 계층은 존재하지 않는 것과 같기 때문이다.
 
 **계층 규칙.** `games/`는 OS API(소켓·창·파일·오디오·GPU·신호·환경 변수)를 직접
 부를 수 없고, 게임 진입점은 150줄을 넘을 수 없으며, `games/` 아래에는 헤더를 둘 수 없다.

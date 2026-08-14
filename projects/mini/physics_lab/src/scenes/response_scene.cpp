@@ -1,5 +1,5 @@
 #include "scenes/response_scene.h"
-#include "core/physics_core.h"
+#include "core/contact_solver.h"
 
 #include "raygui.h"
 
@@ -74,68 +74,11 @@ void ResponseScene::HandleInput() {
 }
 
 void ResponseScene::IntegrateGravity(float dt) {
-    for (auto& b : bodies_) {
-        if (b.invMass <= 0) continue;
-        b.vel.y += gravity_ * dt;
-        b.pos.x += b.vel.x * dt;
-        b.pos.y += b.vel.y * dt;
-    }
+    core::IntegrateSemiImplicitEuler(bodies_, gravity_, dt);
 }
 
 void ResponseScene::GatherContacts(std::vector<Contact>& out) const {
-    out.clear();
-    int n = (int)bodies_.size();
-
-    // body-body O(n²) — Broad Phase 가 아니라 *응답* 비교가 주제이므로 단순.
-    for (int i = 0; i < n; ++i) {
-        for (int j = i + 1; j < n; ++j) {
-            Vector2 d   = Sub(bodies_[(size_t)j].pos, bodies_[(size_t)i].pos);
-            float   r   = bodies_[(size_t)i].radius + bodies_[(size_t)j].radius;
-            float   dist = std::sqrt(d.x*d.x + d.y*d.y);
-            if (dist < r) {
-                const auto nrm =
-                    core::SafeUnitNormal(d.x, d.y, i ^ j);
-                Contact c;
-                c.i = i; c.j = j;
-                c.normal = {nrm.x, nrm.y};             // i → j
-                c.depth  = r - dist;
-                c.lambda = 0.0f;
-                out.push_back(c);
-            }
-        }
-    }
-
-    // 벽 / 바닥.
-    float floorY = (float)(lastCanvasY_ + lastCanvasH_) - 4.0f;
-    float wallL  = (float)lastCanvasX_ + 4.0f;
-    float wallR  = (float)(lastCanvasX_ + lastCanvasW_) - 4.0f;
-    for (int i = 0; i < n; ++i) {
-        const auto& b = bodies_[(size_t)i];
-        if (b.pos.y + b.radius > floorY) {
-            Contact c;
-            c.i = i; c.j = -1;
-            c.normal = {0, -1};                       // body 가 위로 밀려남
-            c.depth  = (b.pos.y + b.radius) - floorY;
-            c.lambda = 0.0f;
-            out.push_back(c);
-        }
-        if (b.pos.x - b.radius < wallL) {
-            Contact c;
-            c.i = i; c.j = -1;
-            c.normal = {1, 0};
-            c.depth  = wallL - (b.pos.x - b.radius);
-            c.lambda = 0.0f;
-            out.push_back(c);
-        }
-        if (b.pos.x + b.radius > wallR) {
-            Contact c;
-            c.i = i; c.j = -1;
-            c.normal = {-1, 0};
-            c.depth  = (b.pos.x + b.radius) - wallR;
-            c.lambda = 0.0f;
-            out.push_back(c);
-        }
-    }
+    core::GatherCircleContacts(bodies_, Bounds(), out);
 }
 
 void ResponseScene::ApplyPenalty(const std::vector<Contact>& contacts, float dt) {
@@ -166,7 +109,7 @@ void ResponseScene::ApplyImpulseOnce(std::vector<Contact>& contacts) {
             Vector2 vrel = Sub(bj.vel, bi.vel);
             float   vn   = Dot(vrel, c.normal);       // i → j 방향이 +
             if (vn < 0) {
-                float jLambda = -(1.0f + restitution_) * vn
+                float jLambda = -(1.0f + solver_.restitution) * vn
                                   / (bi.invMass + bj.invMass);
                 bi.vel.x -= jLambda * bi.invMass * c.normal.x;
                 bi.vel.y -= jLambda * bi.invMass * c.normal.y;
@@ -177,7 +120,7 @@ void ResponseScene::ApplyImpulseOnce(std::vector<Contact>& contacts) {
             // wall — c.normal 은 body 가 밀려나는 방향.
             float vn = Dot(bi.vel, c.normal);
             if (vn < 0) {
-                float jLambda = -(1.0f + restitution_) * vn / bi.invMass;
+                float jLambda = -(1.0f + solver_.restitution) * vn / bi.invMass;
                 bi.vel.x += jLambda * bi.invMass * c.normal.x;
                 bi.vel.y += jLambda * bi.invMass * c.normal.y;
             }
@@ -186,78 +129,15 @@ void ResponseScene::ApplyImpulseOnce(std::vector<Contact>& contacts) {
 }
 
 void ResponseScene::ApplySequentialImpulse(std::vector<Contact>& contacts) {
-    // *target velocity* 를 첫 iter 전에 한 번 계산. iterations 안에서는
-    // restitution 을 재주입 안 한다 (재주입 시 에너지 over-injection — 정지한
-    // 박스가 다시 튀어오르거나 시뮬이 떨림).
-    //
-    // restitution slop: 접근 속도가 임계값 이하면 *resting contact* 로 보고
-    // restitution = 0. 게임 엔진의 표준 처리 (Box2D 의 b2_velocityThreshold).
-    constexpr float kRestThreshold = 50.0f;  // px/s
-    std::vector<float> vTarget(contacts.size(), 0.0f);
-    for (size_t k = 0; k < contacts.size(); ++k) {
-        const Contact& c = contacts[k];
-        const CircleRb& bi = bodies_[(size_t)c.i];
-        float vnInit;
-        if (c.j >= 0) {
-            const CircleRb& bj = bodies_[(size_t)c.j];
-            vnInit = Dot(Sub(bj.vel, bi.vel), c.normal);
-        } else {
-            vnInit = Dot(bi.vel, c.normal);
-        }
-        // vnInit < 0 (접근) + 임계 이상이면 분리 방향으로 -e * vnInit 만큼 가속.
-        if (vnInit < -kRestThreshold) {
-            vTarget[k] = core::RestitutionTarget(
-                vnInit, restitution_, kRestThreshold);
-        }
-    }
-
-    // accumulated lambda (≥ 0 clamp). 같은 contact 의 누적 임펄스가 음수가
-    // 되지 않도록 — body 가 *밀려나는 방향만* 허용.
-    for (int iter = 0; iter < iterations_; ++iter) {
-        for (size_t k = 0; k < contacts.size(); ++k) {
-            Contact& c = contacts[k];
-            CircleRb& bi = bodies_[(size_t)c.i];
-            if (c.j >= 0) {
-                CircleRb& bj = bodies_[(size_t)c.j];
-                Vector2 vrel = Sub(bj.vel, bi.vel);
-                float   vn   = Dot(vrel, c.normal);
-                float appliedL = core::AccumulateNormalImpulse(
-                    vn, vTarget[k], bi.invMass + bj.invMass, c.lambda);
-                bi.vel.x -= appliedL * bi.invMass * c.normal.x;
-                bi.vel.y -= appliedL * bi.invMass * c.normal.y;
-                bj.vel.x += appliedL * bj.invMass * c.normal.x;
-                bj.vel.y += appliedL * bj.invMass * c.normal.y;
-            } else {
-                float vn       = Dot(bi.vel, c.normal);
-                float appliedL = core::AccumulateNormalImpulse(
-                    vn, vTarget[k], bi.invMass, c.lambda);
-                bi.vel.x += appliedL * bi.invMass * c.normal.x;
-                bi.vel.y += appliedL * bi.invMass * c.normal.y;
-            }
-        }
-    }
+    // 실제 풀이는 core::SolveSequentialImpulse 한 벌뿐이다 — *target velocity 를
+    // 첫 iter 전에 한 번만* 계산하고 (재주입하면 에너지 over-injection), iter
+    // 안에서는 누적 lambda 를 ≥ 0 으로 clamp 한 증분만 적용한다. 유효질량은
+    // 리터럴이 아니라 body 의 invMass 합에서 나온다.
+    core::SolveSequentialImpulse(bodies_, contacts, solver_, iterations_);
 }
 
 void ResponseScene::ApplyPositionCorrection(const std::vector<Contact>& contacts) {
-    for (const auto& c : contacts) {
-        if (c.depth <= slop_) continue;
-        float effDepth = (c.depth - slop_) * posCorrectFactor_;
-        CircleRb& bi = bodies_[(size_t)c.i];
-        if (c.j >= 0) {
-            CircleRb& bj = bodies_[(size_t)c.j];
-            float wsum = bi.invMass + bj.invMass;
-            if (wsum < 1e-9f) continue;
-            float k = effDepth / wsum;
-            bi.pos.x -= k * bi.invMass * c.normal.x;
-            bi.pos.y -= k * bi.invMass * c.normal.y;
-            bj.pos.x += k * bj.invMass * c.normal.x;
-            bj.pos.y += k * bj.invMass * c.normal.y;
-        } else {
-            // wall — c.normal 은 body 가 밀려나는 방향.
-            bi.pos.x += effDepth * c.normal.x;
-            bi.pos.y += effDepth * c.normal.y;
-        }
-    }
+    core::ApplyPositionCorrection(bodies_, contacts, solver_);
 }
 
 void ResponseScene::ApplyPBD(float dt) {
@@ -334,11 +214,8 @@ void ResponseScene::Step(float dt) {
             // SequentialImpulse
             ApplySequentialImpulse(contacts);
             // SI 도 position correction 별도 (split impulse 의 단순 버전).
-            for (int it = 0; it < std::max(1, iterations_ / 2); ++it) {
-                std::vector<Contact> cc;
-                GatherContacts(cc);
-                ApplyPositionCorrection(cc);
-            }
+            core::SolvePositionCorrection(bodies_, Bounds(), solver_,
+                                          iterations_ / 2);
         }
     }
 
@@ -450,9 +327,9 @@ void ResponseScene::DrawPanel(int panelX, int panelY, int panelW, int panelH) {
     iterations_ = (int)fi;
     y += 22;
 
-    std::snprintf(buf, sizeof(buf), "restitution: %.2f", restitution_);
+    std::snprintf(buf, sizeof(buf), "restitution: %.2f", solver_.restitution);
     GuiSliderBar(Rectangle{(float)(panelX + 8), (float)y, 240, 18},
-                  nullptr, buf, &restitution_, 0.0f, 1.0f);
+                  nullptr, buf, &solver_.restitution, 0.0f, 1.0f);
     y += 22;
 
     std::snprintf(buf, sizeof(buf), "penalty k: %.0f", penaltyK_);

@@ -93,7 +93,10 @@ physlab_add_scene_test(physics_collision_tests   src/scenes/narrow_phase_scene.c
 physlab_add_scene_test(physics_broad_tests       src/scenes/broad_phase_scene.cpp)
 physlab_add_scene_test(physics_response_tests    src/scenes/response_scene.cpp)
 physlab_add_scene_test(physics_constraints_tests src/scenes/constraints_scene.cpp)
-physlab_add_scene_test(physics_determinism_tests src/scenes/measure_scene.cpp)
+# Measure 는 Response 와 *같은* 접촉 솔버를 돌아야 한다. 두 TU 를 함께 링크해
+# 그 동치를 ctest 가 직접 확인한다.
+physlab_add_scene_test(physics_determinism_tests src/scenes/measure_scene.cpp
+                                                 src/scenes/response_scene.cpp)
 
 # 플랫폼 분기.
 if(UNIX AND NOT APPLE)

@@ -85,6 +85,7 @@ app.MapPost("/results", (
     MatchResultRequest result,
     ControlPlane control) =>
 {
+    // snippet-begin: results-endpoint
     if (!IsServer(http, serverKey)) return Results.Unauthorized();
     if (!http.Headers.TryGetValue("X-Server-Id", out var serverId) ||
         string.IsNullOrWhiteSpace(serverId)) return Results.Unauthorized();
@@ -109,6 +110,7 @@ app.MapPost("/results", (
     {
         return Results.Conflict();
     }
+    // snippet-end: results-endpoint
 });
 
 app.MapGet("/metrics/state", (ControlPlane control) =>

@@ -29,6 +29,13 @@ if ($LASTEXITCODE -ne 0) {
     throw "Project document checks failed."
 }
 
+# check_project_docs.py는 mini의 step 문서만 순회한다. mega 문서와 README의
+# 스니펫 앵커까지 덮으려면 전체 대상으로 한 번 더 돌린다.
+& python -X utf8 (Join-Path $PSScriptRoot "check_snippets.py")
+if ($LASTEXITCODE -ne 0) {
+    throw "Snippet drift checks failed."
+}
+
 $windowsLabs = @(
     "parts_perf_lab",
     "languages_lab",

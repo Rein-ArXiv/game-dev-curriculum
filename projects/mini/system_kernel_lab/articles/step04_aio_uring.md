@@ -14,8 +14,6 @@
 4. `BackendType` enum 확장 (5종) + `BackendCompiledIn` 헬퍼.
 5. ImGui HUD 콤보를 `BeginCombo + Selectable + BeginDisabled` 패턴으로 — 컴파일에 안 들어간 옵션이 gray로 표시된다.
 
-이 글의 코드 스니펫은 *해당 단계의 스냅샷* 이다. 디스크의 통합 코드는 누적되어 더 진행된 상태일 수 있다.
-
 ---
 
 ## 목차

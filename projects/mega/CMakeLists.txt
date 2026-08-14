@@ -238,6 +238,12 @@ foreach(t ${ENGINE_TESTS})
 endforeach()
 set_tests_properties(test_defense_process PROPERTIES TIMEOUT 15)
 set_tests_properties(test_defense_soak PROPERTIES TIMEOUT 30)
+# 아래 둘은 "끝나지 않는 스크립트"를 실제로 인터프리터에 먹인다(tools::Script 의
+# 전역 실행 예산 · 중첩 깊이 · 파서 전진 보장). 그 방어가 무너지면 테스트는
+# 실패하는 게 아니라 **끝나지 않는다** — 그 상태를 실패로 바꿔 주는 것은
+# 타임아웃뿐이다. 방어가 살아 있으면 둘 다 1초 안에 끝난다.
+set_tests_properties(test_tools_script PROPERTIES TIMEOUT 30)
+set_tests_properties(test_defense_content PROPERTIES TIMEOUT 30)
 # 제품 실행 파일 둘을 띄우고 협동 왕복을 단언한다. 스폰·핸드셰이크·승리까지
 # 도는 시간을 넉넉히 잡되, 무한정 매달리지는 않게 한다.
 set_tests_properties(test_defense_coop_process PROPERTIES TIMEOUT 180)
@@ -258,6 +264,20 @@ add_custom_command(TARGET mega_defense POST_BUILD
 # 진행도 커밋이 전부 실제로 실행되고, 그 결과를 프로세스 종료 코드로 단언한다.
 add_test(NAME mega_defense_selftest COMMAND mega_defense --selftest)
 set_tests_properties(mega_defense_selftest PROPERTIES TIMEOUT 120)
+
+# GPU 표시 경로도 ctest 대상이다. 감사 #7·#24 는 README·docs 가 "Vulkan 스왑체인
+# 5프레임 present 를 자동 검증한다"고 적으면서 ctest 에도 CI 에도 그 항목이 없는
+# 상태를 지적했다. 여기서 등록해 그 문장을 사실로 만든다.
+#
+# `if(Vulkan_FOUND)` 안에 넣지 않는다. 그러면 테스트 목록 자체가 머신마다 달라져
+# "ctest N개"라는 서술이 어느 머신에서는 틀리고, 무엇보다 GPU 가 없다는 사실이
+# 결과에 아무 흔적도 남기지 않는다. 대신 항상 등록하고, 실행할 수 없는 환경에서는
+# 실행 파일이 kDefenseSkipExitCode(77) 로 끝나 ctest 가 이 검사를 SKIP 으로 센다.
+# 실패는 오직 "장치도 창도 있는데 present 가 깨졌을 때"뿐이다.
+add_test(NAME mega_defense_gpu_selftest COMMAND mega_defense --gpu-selftest)
+set_tests_properties(mega_defense_gpu_selftest PROPERTIES
+                     TIMEOUT 120
+                     SKIP_RETURN_CODE 77)
 
 # 도달성 게이트는 "헤더가 제품에서 도달 가능한가"만 강제한다. 도달 가능한 코드가
 # 실제로 **실행되는가**는 묻지 않으므로, 배선 결함은 무증상으로 통과할 수 있다.
@@ -328,12 +348,17 @@ foreach(entry ${MEGA_PRODUCT_DEPFILES})
     list(APPEND MEGA_REACHABILITY_ARGS --dep ${entry})
 endforeach()
 
+# --readme-tree 는 같은 입력(include/ 하위 구조)을 쓰는 곁다리 대조다. README 의
+# 코드 구조 트리에 실재 디렉터리가 빠지거나(감사 #27 의 serialize/ 등 6개), 없는
+# 디렉터리가 남아 있으면 빌드가 실패한다. 손으로 맞춰 둔 트리는 다음 디렉터리가
+# 생기는 순간 다시 어긋난다 — 어긋날 수 없게 만드는 것은 대조뿐이다.
 set(MEGA_REACHABILITY_COMMAND
     ${Python3_EXECUTABLE} -X utf8 ${MEGA_REACHABILITY_SCRIPT}
     --include-dir ${MEGA_CORE_INCLUDE_DIR}
     --lab-only ${MEGA_LAB_ONLY_DOC}
     --report ${MEGA_REACHABILITY_REPORT}
     --json ${MEGA_REACHABILITY_DIR}/$<CONFIG>/reachability.json
+    --readme-tree ${CMAKE_CURRENT_SOURCE_DIR}/README.md
     ${MEGA_REACHABILITY_ARGS})
 
 add_custom_target(mega_reachability ALL

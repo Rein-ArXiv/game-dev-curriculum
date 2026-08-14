@@ -6,11 +6,13 @@ public sealed class ControlPlane
     private static readonly TimeSpan GameTokenLifetime = TimeSpan.FromSeconds(45);
     private readonly object gate = new();
     private readonly TokenService tokens;
+    // snippet-begin: state-maps
     private readonly Dictionary<string, ServerState> servers = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TicketState> tickets = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> playerTickets = new(StringComparer.Ordinal);
     private readonly Dictionary<string, MatchState> matches = new(StringComparer.Ordinal);
     private readonly Dictionary<string, RecordedResult> results = new(StringComparer.Ordinal);
+    // snippet-end: state-maps
 
     public ControlPlane(TokenService tokens)
     {

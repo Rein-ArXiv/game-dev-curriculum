@@ -77,10 +77,12 @@ public sealed class TokenService
 
     private string Sign<T>(T payload)
     {
+        // snippet-begin: sign-body
         byte[] json = JsonSerializer.SerializeToUtf8Bytes(payload);
         string body = Base64UrlEncode(json);
         byte[] signature = HMACSHA256.HashData(secret, Encoding.ASCII.GetBytes(body));
         return body + "." + Base64UrlEncode(signature);
+        // snippet-end: sign-body
     }
 
     private bool TryVerify<T>(string token, out T? payload)
@@ -93,9 +95,11 @@ public sealed class TokenService
         try
         {
             byte[] supplied = Base64UrlDecode(signatureText);
+            // snippet-begin: verify-signature
             byte[] expected = HMACSHA256.HashData(secret, Encoding.ASCII.GetBytes(body));
             if (supplied.Length != expected.Length ||
                 !CryptographicOperations.FixedTimeEquals(supplied, expected)) return false;
+            // snippet-end: verify-signature
             payload = JsonSerializer.Deserialize<T>(Base64UrlDecode(body));
             return payload is not null;
         }

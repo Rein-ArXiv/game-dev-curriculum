@@ -35,11 +35,11 @@ base64url(utf8_json) + "." + base64url(hmac_sha256(secret, body))
 순서, 공백, escape 차이로 서명이 달라질 수 있다. 받은 body bytes 그대로 HMAC에 넣은 뒤에만 JSON을
 해석한다.
 
+<!-- snippet: src/LiveService.Core/TokenService.cs@sign-body -->
 ```csharp
 byte[] json = JsonSerializer.SerializeToUtf8Bytes(payload);
 string body = Base64UrlEncode(json);
-byte[] signature = HMACSHA256.HashData(
-    secret, Encoding.ASCII.GetBytes(body));
+byte[] signature = HMACSHA256.HashData(secret, Encoding.ASCII.GetBytes(body));
 return body + "." + Base64UrlEncode(signature);
 ```
 
@@ -50,8 +50,9 @@ access payload는 kind, player ID, expiry만 가진다. API의 queue와 assignme
 
 game payload에는 권한을 더 좁히는 claim이 들어간다.
 
+<!-- snippet: src/LiveService.Core/TokenService.cs#IssueGameToken -->
 ```csharp
-new GamePayload(
+var payload = new GamePayload(
     "game",
     admission.PlayerId,
     admission.MatchId,
@@ -69,6 +70,7 @@ new GamePayload(
 검증은 token에 점이 정확히 하나인지 확인하고 두 구간을 base64url decode한다. supplied signature와
 expected signature는 일반 문자열 비교 대신 constant-time API로 비교한다.
 
+<!-- snippet: src/LiveService.Core/TokenService.cs@verify-signature -->
 ```csharp
 byte[] expected = HMACSHA256.HashData(secret, Encoding.ASCII.GetBytes(body));
 if (supplied.Length != expected.Length ||
@@ -84,13 +86,22 @@ game token 수명은 45초다. assignment를 탈취한 값이 오래 재사용�
 뒤 실제 서버 접속 시간을 허용하는 실습 값이다. 서버 시계가 심하게 어긋나면 정상 token도 실패하므로
 운영에서는 clock synchronization과 작은 허용 오차 정책이 필요하다.
 
+<!-- snippet: src/LiveService.Core/TokenService.cs#TryValidateGameToken -->
 ```csharp
-if (payload.Kind != "game" ||
-    payload.ServerId != expectedServerId ||
-    payload.ExpiresAt <= now.ToUnixTimeSeconds()) return false;
+if (!TryVerify(token, out GamePayload? payload) || payload is null ||
+    payload.Kind != "game" || payload.ServerId != expectedServerId ||
+    payload.ExpiresAt <= now.ToUnixTimeSeconds() ||
+    string.IsNullOrWhiteSpace(payload.PlayerId) ||
+    string.IsNullOrWhiteSpace(payload.MatchId) ||
+    string.IsNullOrWhiteSpace(payload.TokenId))
+{
+    return false;
+}
 ```
 
-만료 검사는 `<=`다. expiry 초와 현재 초가 같으면 이미 유효 구간이 끝났다.
+만료 검사는 `<=`다. expiry 초와 현재 초가 같으면 이미 유효 구간이 끝났다. 서명이 맞아도 player,
+match, token ID claim이 비어 있으면 거부한다. HMAC은 발급자만 증명할 뿐 claim이 쓸 수 있는 값인지는
+보장하지 않는다.
 
 ## 식별자 계약과 키 관리
 

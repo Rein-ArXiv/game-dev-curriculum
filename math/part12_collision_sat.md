@@ -326,7 +326,7 @@ $$
 
 반시계방향 90° 회전한 $(-\text{edge}.y, \text{edge}.x)$ 는 *내향 법선*. CW 정렬이면 부호 반대.
 
-SAT 의 *교차 판정 자체* 는 축 부호와 무관 (양쪽 투영 비교는 부호 대칭). 하지만 *MTV (4.3절)* 와 *contact normal* 부호가 *외향 법선 일관성* 에 의존한다.
+SAT 의 *교차 판정 자체* 는 축 부호와 무관 (양쪽 투영 비교는 부호 대칭). *MTV 부호* 도 4.3 절처럼 *밀어내기 방향* 에서 뽑으면 축 부호와 무관하다. 하지만 축 방향을 그대로 법선으로 쓰는 구현과 *contact manifold 의 reference face 선택* (7.5절) 은 *외향 법선 일관성* 에 의존한다.
 
 ### 4.3 침투 깊이 추출
 
@@ -344,7 +344,7 @@ SAT2DResult SAT2D(const Polygon2D& a, const Polygon2D& b) {
     result.isColliding = false;
     result.depth  = std::numeric_limits<float>::max();
 
-    auto check = [&](const Polygon2D& src, bool flipNormal) -> bool {
+    auto check = [&](const Polygon2D& src) -> bool {
         int n = int(src.vertices.size());
         for (int i = 0; i < n; ++i) {
             int j = (i + 1) % n;
@@ -357,16 +357,19 @@ SAT2DResult SAT2D(const Polygon2D& a, const Polygon2D& b) {
             Projection pb = ProjectOntoAxis(b, axis);
             if (!Overlap(pa, pb)) return false;
 
-            float overlap = OverlapAmount(pa, pb);
+            float pushPositive = pa.max - pb.min;  // b를 +axis로
+            float pushNegative = pb.max - pa.min;  // b를 -axis로
+            float overlap = std::min(pushPositive, pushNegative);  // = OverlapAmount(pa, pb)
             if (overlap < result.depth) {
                 result.depth  = overlap;
-                result.normal = flipNormal ? -axis : axis;
+                // 깊이를 고른 밀어내기 방향이 그대로 법선 부호 (a → b)
+                result.normal = (pushPositive < pushNegative) ? axis : -axis;
             }
         }
         return true;
     };
 
-    if (!check(a, false) || !check(b, true)) return result;
+    if (!check(a) || !check(b)) return result;
     result.isColliding = true;
     return result;
 }
@@ -376,7 +379,9 @@ SAT2DResult SAT2D(const Polygon2D& a, const Polygon2D& b) {
 
 ### 4.4 정확한 충돌 노멀 방향
 
-법선의 *부호* 가 *어느 도형이 어느 도형을 미는지* 결정. 보통 *법선이 a → b 방향* 을 가리키도록 통일.
+법선의 *부호* 가 *어느 도형이 어느 도형을 미는지* 결정. 보통 *법선이 a → b 방향* 을 가리키도록 통일. 4.3 의 코드는 이 규약을 이미 만족한다 — *깊이를 고른 밀어내기 방향* 이 곧 b 를 밀어낼 방향이기 때문이다.
+
+축별 부호를 추적하지 않은 구현은 *무게중심 비교* 로 사후 보정하기도 한다.
 
 ```cpp
 // a의 중심 → b의 중심 방향 확인 후 부호 보정
@@ -385,6 +390,8 @@ if (dot(result.normal, centerDelta) < 0) {
     result.normal = -result.normal;
 }
 ```
+
+이 보정은 *근사* 다. 축별 부호는 두 *투영 구간 중점* 의 순서로 정해지는데 ($\text{push}^+ < \text{push}^-$ 는 a 의 구간 중점이 b 의 구간 중점보다 작다는 뜻), 무게중심 비교는 *무게중심을 투영한 값* 의 순서로 정한다. 원·박스처럼 *중심 대칭* 인 도형은 두 기준이 일치하지만 *비대칭 볼록 다각형* 에서는 갈린다. $A$ = 삼각형 $(-1,-1), (0,-1), (0,2)$ 와 $B$ = 삼각형 $(-3,1), (0,-1), (3,1)$ 에서 최소 축은 $y$ 축이고 $\text{push}^+ = 3$, $\text{push}^- = 2$ 라 b 를 $-y$ 로 2 만큼 밀어야 한다. 그런데 무게중심은 $c_A = (-1/3,\, 0)$, $c_B = (0,\, 1/3)$ 이라 위 보정이 $+y$ 를 고르고, 그 방향으로 2 만큼 밀면 겹침이 $y \in [1, 2]$ 로 남는다. 정사각형처럼 중심 대칭인 도형만 쓰는 테스트로는 드러나지 않는 결함이다.
 
 물리 엔진은 *법선 방향이 일관* 해야 *임펄스 응답* 이 정확.
 

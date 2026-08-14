@@ -113,7 +113,7 @@ build\Debug\graphics_vk_lab.exe
 
 ## 결론
 
-Step 2 의 결과는 “빠른 렌더러”가 아니라 *측정 가능한 렌더러의 조건* 이다. timestamp query 는 GPU 시간을, validation log 는 명시 계약의 정확성을 확인한다. 이후 barrier, queue, semaphore 단계는 이 두 인프라 위에서만 의미가 있다.
+Step 2 의 결과는 “빠른 렌더러”가 아니라 *측정 가능한 렌더러의 조건* 이다. timestamp query 는 GPU 시간을, validation log 는 명시 계약의 정확성을 확인한다. 다만 지금 측정되는 것은 단일 렌더 패스 하나뿐이라, 동기화 방식을 바꿨을 때 그 수치가 어떻게 움직이는지는 이 상태에서 관측할 수 없다.
 
 ## 더 읽을거리
 

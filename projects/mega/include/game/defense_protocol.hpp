@@ -27,6 +27,41 @@ static constexpr uint32_t kMagic = 0x3146444du;  // "MDF1" in little endian
 static constexpr uint8_t kVersion = 1;
 static constexpr size_t kMaxPacketBytes = 1200;
 
+// ── 스냅샷 컬렉션 상한 ─────────────────────────────────────────────
+// 이 셋은 게임플레이 규칙이 아니라 와이어 포맷의 일부다. 인코더가 잘라내는
+// 개수와 디코더가 거부하는 개수는 정의상 같은 수여야 하므로 상수는 하나씩만
+// 존재하고 WriteSnapshot · ReadSnapshot 이 함께 그것을 읽는다. 값을 바꾸면
+// 프로토콜이 바뀐다 — kVersion 도 함께 올려야 한다.
+static constexpr size_t kSnapshotMaxTowers = 16;
+static constexpr size_t kSnapshotMaxEnemies = 64;
+static constexpr size_t kSnapshotMaxProjectiles = 20;
+
+// 상한이 어디서 왔는지는 산수다. 가득 찬 스냅샷 한 장이 1200바이트 예산 안에
+// 들어가야 하고, 각 개수는 U8 한 바이트에 실린다. 상한을 올리면 둘 중 하나가
+// 먼저 깨지므로 컴파일 시간에 센다.
+static constexpr size_t kSnapshotFixedBytes = 8 + 4 + 4 + 4 + 2 + 2 + 2 + 1 + 3;
+static constexpr size_t kSnapshotTowerBytes = 4 + 2 + 2 + 1 + 1 + 1;
+static constexpr size_t kSnapshotEnemyBytes = 4 + 2 + 2 + 2 + 2 + 1;
+static constexpr size_t kSnapshotProjectileBytes = 4 + 2 + 2;
+static constexpr size_t kSnapshotMaxBytes =
+    kSnapshotFixedBytes + kSnapshotMaxTowers * kSnapshotTowerBytes +
+    kSnapshotMaxEnemies * kSnapshotEnemyBytes +
+    kSnapshotMaxProjectiles * kSnapshotProjectileBytes;
+static_assert(kSnapshotMaxBytes <= kMaxPacketBytes,
+              "가득 찬 스냅샷이 UDP payload 예산을 넘는다");
+static_assert(kSnapshotMaxTowers <= 255 && kSnapshotMaxEnemies <= 255 &&
+                  kSnapshotMaxProjectiles <= 255,
+              "컬렉션 개수는 U8 한 바이트로 실린다");
+
+// 게임플레이 상한(GameWorld::kMaxTowers)과 프로토콜 상한은 같은 것이 아니다.
+// 하나는 디자인 규칙이고 하나는 패킷 예산이라, 지금 값이 같은 것은 우연이다.
+// 그래서 하나로 합치지 않는다 — 대신 묶여야 할 방향을 단언한다. 월드가 프로토콜
+// 보다 많은 타워를 담을 수 있게 되면 초과분은 min() 에 잘려 모든 스냅샷에서
+// 조용히 사라진다. 그 발산을 런타임이 아니라 빌드가 잡는다.
+static_assert(GameWorld::kMaxTowers <= kSnapshotMaxTowers,
+              "게임플레이 타워 상한이 스냅샷 상한을 넘으면 초과 타워가 모든 "
+              "클라이언트에서 사라진다");
+
 enum class PacketType : uint8_t {
     Hello = 1,
     Command = 2,
@@ -214,29 +249,66 @@ inline net::Bytes WriteCommand(const Command& command) {
     return writer.Finish();
 }
 
+// argument 의 의미는 type 이 정하지만, 그 도메인은 전부 와이어 포맷이 이미 아는
+// 것이다 — TowerType 집합도 TargetMode 집합도 월드를 봐야 알 수 있는 값이 아니다.
+// 그래서 이 검사는 디코더의 몫이고, 월드가 있어야 답할 수 있는 질문(그 칸이
+// 건설 가능한가, 골드가 있는가, 거기 타워가 있는가)만 ApplyCommand 에 남는다.
+//
+// 여기서 통과시키고 ApplyCommand 에서 거절하는 것으로는 늦다. 호스트는 디코드에
+// 성공한 명령을 곧바로 신뢰 채널에 Accept 하고, Accept 는 그 자체로 상태 변경이다
+// (nextExpected_ 가 앞당겨진다). 기대 시퀀스에 얹힌 위조 명령 하나가 그 자리를
+// 태우면 정직한 클라이언트가 같은 시퀀스로 보낼 진짜 명령은 영원히 중복 취급돼
+// 사라진다 — 플레이어가 요청한 타워가 조용히 안 서는 것으로 보인다.
+inline bool CommandArgumentInRange(CommandType type, uint8_t argument) {
+    switch (type) {
+        case CommandType::Place:
+            return argument < static_cast<uint8_t>(TowerType::Count);
+        case CommandType::Target:
+            return argument <= static_cast<uint8_t>(TargetMode::Strongest);
+        case CommandType::Upgrade:
+        case CommandType::Sell:
+            // 이 둘은 argument 를 읽지 않는다. 읽지 않는 필드는 0 이어야 한다 —
+            // 아니면 같은 동작을 뜻하는 패킷이 256가지가 되고, 다음 버전이 이
+            // 바이트에 의미를 주는 순간 옛 클라이언트의 쓰레기가 명령이 된다.
+            return argument == 0;
+    }
+    return false;
+}
+
 inline bool ReadCommand(const net::Bytes& bytes, Command& command) {
     Reader reader(bytes);
     if (!reader.Header(PacketType::Command)) return false;
-    command.sequence = reader.U32();
-    command.type = static_cast<CommandType>(reader.U8());
-    command.x = reader.U16();
-    command.y = reader.U16();
-    command.argument = reader.U8();
+
+    // ReadSnapshot 과 같은 규율: 지역에 풀고, 전부 검증된 뒤에만 내보낸다.
+    // 출력 인자에 먼저 쓰면 거부된 패킷의 범위 밖 값이 호출자 구조체에 남는다.
+    Command decoded;
+    decoded.sequence = reader.U32();
+    decoded.type = static_cast<CommandType>(reader.U8());
+    decoded.x = reader.U16();
+    decoded.y = reader.U16();
+    decoded.argument = reader.U8();
     if (!reader.Done()) return false;
-    return command.type >= CommandType::Place && command.type <= CommandType::Target;
+    if (decoded.type < CommandType::Place || decoded.type > CommandType::Target) return false;
+    if (!CommandArgumentInRange(decoded.type, decoded.argument)) return false;
+    command = decoded;
+    return true;
 }
 
-inline net::Bytes WriteSnapshot(const GameWorld& world, uint32_t tick, uint32_t acknowledgedCommand) {
-    static constexpr size_t kMaxTowers = 16;
-    static constexpr size_t kMaxEnemies = 64;
-    static constexpr size_t kMaxProjectiles = 20;
-
-    size_t towerCount = std::min(world.Towers().size(), kMaxTowers);
-    size_t enemyCount = std::min(world.Enemies().size(), kMaxEnemies);
-    size_t projectileCount = std::min(world.Projectiles().size(), kMaxProjectiles);
+// truncatedOut 은 "이 스냅샷을 만들면서 엔티티를 버렸는가"를 **보낸 쪽**에 돌려준다.
+// 같은 사실이 와이어 flags 로도 나가지만(받는 쪽이 읽는다), 그것만으로는 클라이언트가
+// 붙어 있을 때만 관측된다. 잘림은 호스트에서 일어나는 손실이므로 호스트도 셀 수 있어야
+// 한다 — 감사 #31 이 지적한 "생산만 되고 소비되지 않는 플래그"의 생산 쪽 출구다.
+// 기본값 nullptr 이라 관심 없는 호출자는 그대로 둔다.
+inline net::Bytes WriteSnapshot(const GameWorld& world, uint32_t tick,
+                                uint32_t acknowledgedCommand,
+                                bool* truncatedOut = nullptr) {
+    size_t towerCount = std::min(world.Towers().size(), kSnapshotMaxTowers);
+    size_t enemyCount = std::min(world.Enemies().size(), kSnapshotMaxEnemies);
+    size_t projectileCount = std::min(world.Projectiles().size(), kSnapshotMaxProjectiles);
     bool truncated = towerCount != world.Towers().size() ||
                      enemyCount != world.Enemies().size() ||
                      projectileCount != world.Projectiles().size();
+    if (truncatedOut) *truncatedOut = truncated;
 
     Writer writer(PacketType::Snapshot);
     writer.U32(tick);
@@ -278,6 +350,12 @@ inline net::Bytes WriteSnapshot(const GameWorld& world, uint32_t tick, uint32_t 
         writer.U16(EncodePosition(projectile.pos.y));
     }
     net::Bytes bytes = writer.Finish();
+    // 이 비교는 방어선이 아니라 마지막 자물쇠다. 실제 상한 보장은 위의
+    // `static_assert(kSnapshotMaxBytes <= kMaxPacketBytes)` 가 컴파일 시간에 한다 —
+    // 세 컬렉션이 전부 상한이면 1198바이트이므로 이 분기의 else 는 구성상 도달할 수
+    // 없다(감사 #31: 변이 테스트에서 이 줄을 지워도 어떤 테스트도 실패하지 않았다.
+    // 그것은 테스트의 구멍이 아니라 도달 불가라는 사실의 반영이다). 상한을 올리면
+    // static_assert 가 먼저 빌드를 멈추므로 런타임에 여기까지 오지 않는다.
     return bytes.size() <= kMaxPacketBytes ? bytes : net::Bytes{};
 }
 
@@ -299,7 +377,11 @@ inline bool ReadSnapshot(const net::Bytes& bytes, Snapshot& snapshot) {
     uint8_t towerCount = reader.U8();
     uint8_t enemyCount = reader.U8();
     uint8_t projectileCount = reader.U8();
-    if (towerCount > 16 || enemyCount > 64 || projectileCount > 20) return false;
+    // 디코더의 상한은 인코더가 자른 상한과 같은 상수여야 한다. 둘이 갈라지면
+    // 한쪽은 보내고 한쪽은 거부하는 패킷이 생긴다.
+    if (static_cast<size_t>(towerCount) > kSnapshotMaxTowers ||
+        static_cast<size_t>(enemyCount) > kSnapshotMaxEnemies ||
+        static_cast<size_t>(projectileCount) > kSnapshotMaxProjectiles) return false;
 
     decoded.towers.reserve(towerCount);
     for (uint8_t i = 0; i < towerCount; ++i) {
@@ -371,6 +453,9 @@ inline Snapshot Lerp(const Snapshot& a, const Snapshot& b, float t) {
 // 스냅샷 타입만 이 프로토콜의 것으로 고정한다.
 using SnapshotView = net::InterpolatedView<Snapshot>;
 
+// 여기 남은 argument 검사는 ReadCommand 의 중복이 아니다. 솔로·호스트의 로컬
+// 입력은 DefenseApp::Submit 에서 Command 를 손수 만들어 곧장 이리로 온다 —
+// 디코더를 한 번도 지나지 않는 두 번째 입구다. 이 함수는 그 입구의 문지기다.
 inline bool ApplyCommand(GameWorld& world, const Command& command) {
     math::Vec2 position{DecodePosition(command.x), DecodePosition(command.y)};
     switch (command.type) {

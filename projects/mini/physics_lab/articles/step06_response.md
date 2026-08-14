@@ -26,12 +26,13 @@
 
 ## 1. Contact 자료구조 + 수집
 
+<!-- snippet: src/core/contact_solver.h#Contact -->
 ```cpp
 struct Contact {
-    int     i, j;         // body 인덱스. j == -1 이면 벽 / 바닥
-    Vector2 normal;       // i → j 방향 (벽이면 body 가 밀려나는 방향)
+    int     i, j;          // body 인덱스. j = -1 이면 벽 / 바닥 contact
+    Vector2 normal;        // i → j 방향 (벽 contact 면 body 가 밀려나는 방향)
     float   depth;
-    float   lambda;       // SI 의 accumulated impulse
+    float   lambda;        // SI 의 accumulated impulse
 };
 ```
 
@@ -42,25 +43,35 @@ normal 의 *부호 규약* 이 가장 헷갈리는 부분. 이 코드는:
 
 이 통일 규약 덕에 응답 코드가 *if (j >= 0) ... else ...* 두 분기로 깔끔하게 갈린다.
 
+<!-- snippet: src/core/contact_solver.h@gather-contacts -->
 ```cpp
-void GatherContacts(std::vector<Contact>& out) const {
+template <class Body>
+void GatherCircleContacts(const std::vector<Body>& bodies,
+                          const WorldBounds& bounds,
+                          std::vector<Contact>& out) {
     out.clear();
-    int n = (int)bodies_.size();
+    const int n = (int)bodies.size();
+
     for (int i = 0; i < n; ++i) {
         for (int j = i + 1; j < n; ++j) {
-            Vector2 d   = Sub(bodies_[j].pos, bodies_[i].pos);
-            float   r   = bodies_[i].radius + bodies_[j].radius;
-            float   dist = std::sqrt(Dot(d, d));
-            if (dist < r && dist > 1e-6f) {
-                out.push_back({i, j, {d.x/dist, d.y/dist}, r - dist, 0});
+            const Vector2 d =
+                SubV(bodies[(size_t)j].pos, bodies[(size_t)i].pos);
+            const float r =
+                bodies[(size_t)i].radius + bodies[(size_t)j].radius;
+            const float dist = std::sqrt(d.x * d.x + d.y * d.y);
+            if (dist < r) {
+                const UnitNormal2 nrm = SafeUnitNormal(d.x, d.y, i ^ j);
+                out.push_back({i, j, {nrm.x, nrm.y}, r - dist, 0.0f});
             }
         }
     }
-    // 바닥 + 양 벽 (생략) ...
+    // ... 바닥 + 양 벽 (생략)
 }
 ```
 
-contact 수집은 *Broad Phase 가 아니라 brute O(n²)* — Response 가 주제이므로 단순.
+contact 수집은 *Broad Phase 가 아니라 brute O(n²)* — Response 가 주제이므로 단순. 중심이 정확히 겹쳐 `dist == 0` 이면 방향을 정할 수 없으므로 `SafeUnitNormal` 이 *결정적인 대체 축* 을 고른다 — 접촉을 그냥 버리면 겹친 body 가 영원히 겹친 채로 남는다.
+
+`Body` 가 템플릿 파라미터인 이유. 이 세 함수(수집 / SI / 위치 보정)는 `src/core/contact_solver.h` 에 *한 벌만* 존재하고, 이 Scene 뿐 아니라 lab 의 측정용 Scene 도 같은 구현을 부른다. 측정이 자기 사본을 들고 있으면 그 측정은 여기서 설명한 솔버가 아니라 사본을 재게 되기 때문이다. body 타입이 요구하는 것은 `pos` / `vel` / `radius` / `invMass` 네 멤버뿐이다.
 
 ## 2. Penalty 응답
 
@@ -210,6 +221,8 @@ for (const auto& c : contacts) {
 
 이 코드는 velocity impulse와 별도로 위치를 투영하는 단순 post-stabilization이다. 문헌의 split impulse는 운동 에너지를 직접 바꾸지 않는 별도 보정 속도 또는 별도 누적 impulse를 두는 더 구체적인 기법이다. 여기서는 그 구현까지 했다고 부르지 않는다.
 
+보정 pass 는 `iterations / 2` 번 돌고, *매 iteration 시작마다 접촉을 다시 수집한다* — 위치를 밀면 depth 가 바뀌므로 이전 iteration 의 depth 로 계속 미는 것은 틀리다. 반대로 한 iteration *안에서* 는 그 스냅숏을 끝까지 쓴다. 이 "언제 다시 재는가" 가 결과를 바꾸는 진짜 파라미터다 — 같은 공식이라도 갱신 시점이 다르면 다른 시뮬이 된다. 그래서 이 pass 도 수집·SI 와 함께 공유 헤더에 한 벌만 둔다.
+
 ## 7. 무엇을 보는가
 
 UI 토글: Penalty / Impulse / SI / PBD. 슬라이더: N (4 ~ 100), iterations (1 ~ 32), restitution (0 ~ 1), penalty k.
@@ -262,6 +275,8 @@ Step 6 에서 추가한 것.
 5. **`physics_response_tests` 타깃** — `GatherContacts` / `ApplySequentialImpulse` / `ApplyPositionCorrection` 을 창 없이 부른다. 반지름 8 원 두 개를 중심거리 12 로 두면 깊이 4, 법선 (1, 0) 이고, 위치 보정량은 `(4 - slop 0.5) * factor 0.2 = 0.7` 을 둘로 나눈 0.35 씩 — 전부 리터럴로 못 박는다. slop 이하 (깊이 0.2) 는 아예 움직이지 않는지도 함께 본다.
 
 iter 가 stiffness 라는 그래프의 주장도 같은 타깃이 숫자로 받는다. 24 개 body 를 400 스텝 돌린 뒤 남은 평균 침투가 iteration 1 / 2 / 4 / 8 / 16 에서 단조 감소하고 (1.345 → 0.485), 16 회에서 `slop + 1px` 아래로 떨어진다. position correction 을 지우면 16 회에서도 4.07 로 남아 실패한다.
+
+여기서 검증하는 세 함수는 `src/core/contact_solver.h` 의 공유 구현이므로, lab 의 결정성 타깃이 자기 워크로드로 돌리는 것도 *바로 이 코드* 다. 두 타깃이 같은 구현을 서로 다른 각도에서 — 하나는 해석적 리터럴로, 하나는 반복 재현성으로 — 누른다.
 
 이 Scene 에서 얻을 결론. *"올바른 응답 방식" 은 없다* — 워크로드 / 정확성 요구 / 비용 예산에 따라 다름.
 
