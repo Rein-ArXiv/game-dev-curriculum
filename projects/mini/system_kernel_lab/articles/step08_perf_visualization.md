@@ -27,7 +27,9 @@ system_kernel_lab은 backend·sync·sched·ctx·workers 다섯 토글을 가진 
 7. 외부 도구 결합 — strace · perf · ftrace
 8. 측정의 정직성 — 도구가 알려주지 않는 것
 9. 최종 코드의 계약 — 폴백 보고 · 워커 오류 전파 · 자동 테스트
-10. 결론
+10. 헤드리스 러너 — 조합을 인자로 받고 4채널을 CSV로 남긴다
+11. 실측 표 — 이 머신에서 조합이 실제로 갈라지는가
+12. 결론
 
 ---
 
@@ -647,6 +649,209 @@ Test project .../system_kernel_lab/build
 
 이 테스트가 검사하는 것은 *결과의 동등성* 이지 *성능* 이 아니다. 성능 수치는 환경마다 달라 회귀 판정 기준이 될 수 없다.
 
+## 10. 헤드리스 러너 — 조합을 인자로 받고 4채널을 CSV로 남긴다
+
+앞 절들까지의 측정 경로에는 구멍이 하나 있다. **결과가 화면에만 있다.**
+
+- `main` 은 `argc`/`argv` 를 받지 않는다. 조합은 GUI 콤보로만 바꾼다.
+- `FrameTimer` 의 시계열은 `PlotLines` 로만 소비된다. 파일로 나가는 경로가 없다.
+
+그래서 *같은 조합을 두 번 돌린 결과를 나란히 놓기*, *p50/p99 계산*, *다른 머신과 대조*, *스크립트로 회귀 판정* 중 어느 것도 할 수 없다. 눈으로 본 그래프는 인용할 수 없는 측정이다.
+
+세 번째 실행 파일 `system_kernel_bench` 가 그 구멍을 메운다. 워크로드도 계측기도 GUI와 같은 것을 쓰고, 창만 없다.
+
+<!-- snippet: CMakeLists.txt@bench-target -->
+```cmake
+add_executable(system_kernel_bench
+    tools/bench_main.cpp
+    ${SKL_CORE_TEST_SOURCES}
+    src/measure/frame_timer.cpp
+    src/measure/proc_counters.cpp)
+
+target_include_directories(system_kernel_bench PRIVATE src)
+target_link_libraries(system_kernel_bench PRIVATE
+    Threads::Threads
+    ${CMAKE_DL_LIBS}
+)
+```
+
+SDL2·OpenGL·ImGui는 링크 목록에 없다. 테스트 타깃이 이미 증명한 분리를 그대로 쓴 것이다 — `FrameTimer` 와 `ProcCounters` 는 GUI 의존이 없으므로 테스트가 쓰는 코어 TU 목록에 두 파일만 얹으면 된다. `SKL_HAS_POSIX_AIO` / `SKL_HAS_LIBURING` 정의와 라이브러리 링크는 테스트와 러너에 같은 `foreach` 로 걸린다. 한쪽만 걸면 측정에 들어가는 backend 집합이 GUI 도구와 달라진다.
+
+### 인자
+
+```bash
+./build/system_kernel_bench \
+    --backend=io_uring --sync=mutex --sched=default --ctx=pthread \
+    --workers=4 --cycles=200 --warmup=20 --out=uring_w4.csv
+```
+
+| 인자 | 값 | 기본값 |
+|---|---|---|
+| `--backend` | `read` `pread` `mmap` `aio` `io_uring` | `read` |
+| `--sync` | `mutex` `spin` `futex` `cas` | `mutex` |
+| `--sched` | `default` `nice` `fifo` `cgroup` | `default` |
+| `--ctx` | `pthread` `coroutine` | `pthread` |
+| `--workers` | 워커 수 | `1` |
+| `--cycles` | 기록할 사이클 수 | `30` |
+| `--warmup` | 버릴 사이클 수 | `2` |
+| `--files` / `--bytes` | 픽스처 파일 수 · 파일당 바이트 | `16` / `1048576` |
+| `--fixture-dir` | 픽스처 디렉터리 | `/tmp/system_kernel_bench_data` |
+| `--out` | CSV 경로 (`-` 면 stdout) | `run.csv` |
+| `--strict-backend` | 런타임 폴백을 실패로 | 꺼짐 |
+| `--min-faults=N` | 사이클당 평균 page fault 하한 | `0` (검사 안 함) |
+
+토글 이름은 `[a-z0-9]` 만 남기고 정규화한 뒤 별칭표와 맞춘다. `io_uring` · `IO_URING` · `uring` 이 같은 값이 되고, UI 라벨의 공백(`atomic CAS`, `nice +10`) 때문에 셸에서 따옴표를 쓸 일이 없다. **모르는 이름은 거부한다** — 조용히 기본값으로 흘리면 CSV가 요청하지도 않은 조합의 수치를 그 이름으로 담게 된다.
+
+### 계측 루프는 GUI와 같다
+
+<!-- snippet: tools/bench_main.cpp@bench-cycle -->
+```cpp
+timer.BeginCycle();
+const skl::ProcCounters before = skl::ReadProcCounters();
+std::uint64_t bytes = 0;
+try {
+    bytes = workload.RunCycle();
+} catch (const std::exception& e) {
+    std::cerr << "system_kernel_bench: cycle " << i << " failed: "
+              << e.what() << '\n';
+    workload.Shutdown();
+    return 1;
+}
+const skl::ProcCounters after = skl::ReadProcCounters();
+const skl::ProcCounters delta = skl::DiffCounters(before, after);
+timer.EndCycle(bytes,
+               static_cast<std::uint64_t>(delta.voluntaryCtxSw +
+                                          delta.involuntaryCtxSw),
+               static_cast<std::uint64_t>(delta.minorFaults +
+                                          delta.majorFaults));
+```
+
+`getrusage` 를 사이클 직전·직후에 읽어 delta를 `FrameTimer` 로 넘기는 것까지 GUI 루프와 동일하다. CSV에 적히는 값은 `timer.LastCycleMs()` · `LastThroughputMBs()` · `LastCtxSwitches()` · `LastPageFaults()` — 즉 HUD 그래프가 그리는 바로 그 값이다. 러너가 자기만의 계산을 따로 하면 두 경로의 수치가 갈라지고, 그러면 CSV는 HUD를 대신하지 못한다.
+
+`--warmup` 사이클은 똑같이 측정하되 기록하지 않는다. 첫 사이클은 픽스처 생성 직후의 콜드 IO, 할당자 워밍업, 워커 스레드 기동이 섞인다.
+
+### CSV
+
+```text
+backend_req,backend,sync,sched,sched_applied,ctx,workers,files,file_bytes,cycle,cycle_ms,mb_per_s,ctx_sw,page_faults
+io_uring,io_uring,mutex,default,1,pthread,4,16,1048576,0,1.732844,9682.317,32,0
+io_uring,io_uring,mutex,default,1,pthread,4,16,1048576,1,1.688201,9938.383,32,0
+```
+
+조합 정보를 행마다 반복해서 싣는다. 용량은 낭비지만 여러 실행의 파일을 그대로 이어 붙여 하나의 표로 읽을 수 있고(헤더 한 줄만 지우면 된다), 행 하나만 봐도 그것이 어떤 조합의 수치인지 알 수 있다. 파일 이름에 조합을 인코딩하는 방식은 파일이 옮겨지거나 이름이 바뀌는 순간 메타데이터를 잃는다.
+
+`backend_req` 와 `backend` 를 나눈 이유가 측정 정직성의 핵심이다. `io_uring` 과 `aio` 는 런타임 초기화가 실패하면 조용히 `read` 로 폴백한다. 요청 값만 적으면 read로 돈 수치를 io_uring 수치로 읽게 된다. 폴백이 일어나면 stderr에 경고가 나가고, `--strict-backend` 를 주면 그 자체가 실패다.
+
+```text
+[bench] backend=io_uring(actual io_uring) sync=mutex sched=default(applied) ctx=pthread workers=4
+[bench] files=16 x 1048576 B  warmup=20  cycles=200  out=uring_w4.csv
+[bench] cycle_ms  mean=1.889  p50=1.829  p99=2.637  min=1.393  max=3.600
+[bench] mb_per_s  mean=9070.4  p50=9156.5  p99=11493.3  min=4660.2  max=12040.3
+[bench] ctx_sw    mean=32  p50=32  p99=34  min=31  max=34
+[bench] faults    mean=0  p50=0  p99=1  min=0  max=1
+[bench] bytes/cycle=16777216  checksum=527643
+```
+
+요약은 stdout, CSV는 파일로 간다(`--out=-` 이면 반대로 CSV가 stdout, 요약이 stderr). p50/p99는 nearest-rank다 — 사이클 수가 적을 때 보간 정의는 원본에 없는 값을 만들어 내므로 실제 관측값 하나를 고른다.
+
+### 러너 자신의 회귀
+
+러너는 성능을 판정하지 않는다. 환경마다 달라 판정 기준이 될 수 없다. 대신 *정합성* 은 판정한다.
+
+- 사이클마다 총 바이트가 `files * file_bytes` 인지.
+- 체크섬이 사이클 간 동일한지.
+- 토글 이름이 유효한지(아니면 종료 코드 2).
+- `--min-faults=N` 이 주어졌으면 page fault 채널이 정말 값을 내는지.
+
+이 넷이 `add_test` 네 개로 걸려 있다.
+
+```text
+5/8 Test #5: system_kernel_bench_smoke ................   Passed
+6/8 Test #6: system_kernel_bench_smoke_workers ........   Passed
+7/8 Test #7: system_kernel_bench_fault_channel ........   Passed
+8/8 Test #8: system_kernel_bench_rejects_bad_toggle ...   Passed
+```
+
+`system_kernel_bench_fault_channel` 이 특히 값싸고 강하다. `mmap` backend는 사이클마다 새 매핑을 만들어 반드시 minor fault를 내므로, `--backend=mmap --min-faults=1` 하나로 `getrusage` → `DiffCounters` → `FrameTimer` → CSV 배선 전체를 못 박는다. 실제로 `timer.EndCycle(bytes, ...)` 에서 카운터 인자 둘을 떼어내 `timer.EndCycle(bytes)` 로 바꾸면 나머지 일곱 케이스는 모두 통과하고 이 케이스만 실패한다 — *러너가 돌기는 도는데 두 채널이 아무것도 재지 않는* 상태가 정확히 이 모양이다.
+
+`system_kernel_bench_rejects_bad_toggle` 은 `WILL_FAIL TRUE` 로 걸린 반대 방향 케이스다. 이름 파싱이 모르는 값을 통과시키도록 바꾸면 이 케이스가 실패한다.
+
+## 11. 실측 표 — 이 머신에서 조합이 실제로 갈라지는가
+
+러너가 있어도 *조합마다 다른 값이 나오지 않으면* 아무것도 재지 않는 것이다. 아래는 그 확인이다.
+
+### 측정 환경
+
+| 항목 | 값 |
+|---|---|
+| OS | Ubuntu 26.04 LTS |
+| 커널 | 6.18.33.2-microsoft-standard-WSL2 |
+| 실행 형태 | **WSL2 VM** (베어메탈 아님) |
+| CPU | 16 논리 코어 |
+| 컴파일러 | g++ 15.2.0, `-O3` (Release) |
+| liburing | 2.14 |
+| 파일시스템 | WSL2 가상 디스크의 ext4 |
+| 픽스처 | 16 × 1 MB, 측정 직전에 새로 생성(= 페이지 캐시에 올라간 상태) |
+| 사이클 | `--warmup=20 --cycles=200`, 조합당 3회 반복 |
+
+**이 수치를 절대값으로 인용하면 안 된다.** WSL2는 가상 디스크·가상 메모리 관리·호스트 스케줄러가 한 겹씩 더 끼어 있어 베어메탈 Linux와 다른 수를 낸다. 여기서 읽어야 하는 것은 *조합 사이의 상대 관계* 와 *어떤 축이 어떤 채널을 움직이는가* 뿐이다.
+
+### 표
+
+`cycle_ms` 는 3회 반복의 p50 중 중앙값이고, 두 열은 픽스처를 새로 만들어 전 조합을 처음부터 다시 돌린 *독립된 두 세션* 이다.
+
+| 조합 | cycle ms (세션 A / B) | MB/s | ctx-sw/사이클 | faults/사이클 |
+|---|---|---|---|---|
+| read, w1 | 1.88 / 2.13 | 8953 / 7878 | 0 | 0 |
+| pread, w1 | 1.82 / 2.15 | 9249 / 7846 | 0 | 0 |
+| mmap, w1 | 0.71 / 0.63 | 24062 / 27267 | 0 | **256** |
+| aio, w1 | 3.50 / 2.93 | 4879 / 5684 | **48** | 4 |
+| io_uring, w1 | 9.42 / 10.05 | 1733 / 1687 | **17** | **4064** |
+| read, w4 | 0.66 / 0.74 | 25550 / 22809 | 0.3 | 0 |
+| read, w8 | 0.61 / 0.85 | 26401 / 19081 | 0.9 | 0 |
+| read, w4, coroutine | 2.25 / 2.53 | 7219 / 6252 | 0 | 0 |
+| read, w4, spinlock | 0.83 / 0.79 | 20460 / 21403 | 0 | 0 |
+| io_uring, w4 | 1.76 / 1.67 | 9685 / 10044 | **32** | 0 |
+| mmap, w4 | 0.99 / 1.06 | 16976 / 15946 | **13** | **272** |
+
+### 읽히는 것
+
+**backend 축이 가장 크게 갈라진다.** `io_uring, w1` 이 `mmap, w1` 보다 13배 느리다. 세션 간 차이(1.7~13%)보다 훨씬 큰 간격이라 잡음으로 설명되지 않는다. `read` 와 `pread` 는 두 세션 모두 서로 3% 안에 있다 — 같은 커널 경로를 다른 진입점으로 부르는 것이므로 그게 옳은 결과다.
+
+**카운터 채널이 시간 채널보다 훨씬 재현성이 높다.** `ctx-sw` 와 `faults` 열에 세션 A/B를 나눠 적지 않은 이유가 그것이다. 두 세션에서 `aio`=48, `io_uring, w1`=17, `io_uring, w4`=32, `mmap, w1`=256이 그대로 나왔다. 시간은 호스트 부하에 흔들리지만 "이 조합이 사이클마다 페이지를 몇 개 폴트하는가"는 구조가 정하는 값이다. 조합을 특징짓는 지문으로는 시간보다 이쪽이 낫다.
+
+**`io_uring, w1` 의 4064는 워크로드 크기와 정비례한다.** 파일 수를 4 · 8 · 16으로 바꾸면 992 · 2016 · 4064가 나온다. 이 backend는 사이클마다 요청 수만큼 버퍼를 새로 잡으므로(`uring_backend.cpp` 의 `bufs[i].resize(fileBytes)`) 16 MB를 매번 처음 만지는 셈이고, 그 first-touch minor fault가 그대로 채널에 찍힌다. 워커 4개로 나누면 `RunCycle` 당 파일이 하나여서 같은 1 MB 버퍼가 할당자에서 재사용되고 fault가 0으로 떨어진다 — 같은 backend가 워커 수에 따라 fault 채널을 완전히 다르게 쓴다. `aio` 도 같은 "사이클마다 fresh 버퍼" 정책인데 fault가 4에 그친다. 그 차이는 할당자 재사용 여부에서 오고, **이 도구는 그것을 설명하지 못한다** — 러너가 하는 일은 차이가 *있다* 는 사실을 재현 가능한 형태로 남기는 것까지다.
+
+**mmap의 fault 채널은 페이지 캐시 상태에 통째로 달려 있다.** 위 표는 픽스처를 막 생성한 상태의 값(256 fault, 0.7 ms)이다. 같은 픽스처를 한동안 두어 캐시에서 밀려난 뒤 재면 **4096 fault, 5.2 ms** 가 나온다. 16 MB ÷ 4 KB = 4096이므로 페이지마다 폴트가 한 번씩 났다는 뜻이고, 256은 fault-around가 폴트 한 번에 16페이지를 매핑했다는 뜻이다. 두 값 모두 결정적으로 재현된다 — 픽스처 디렉터리를 지우고 다시 만들면 256, 그대로 두고 한참 뒤에 재면 4096. 눈으로 그래프를 보던 때에는 "mmap이 오늘은 느리네" 로 흘러갔을 차이다.
+
+**워커 수는 4에서 포화한다.** 1 → 4에서 1.88 → 0.66 ms로 줄지만 4 → 8은 두 세션 모두 개선이 없다(0.66 → 0.61, 0.74 → 0.85). 16코어 머신이지만 워크로드가 16 MB 페이지 캐시 읽기라 CPU가 아니라 메모리 대역과 사이클당 고정비에서 막힌다.
+
+**코루틴 모드의 예측 하나가 이 환경에서는 관측되지 않는다.** 이 글 앞부분의 예측 표는 `pthread → coroutine` 에서 *cycle ms 증가 + ctx-sw 대폭 감소* 를 적었다. 앞쪽은 맞는다(0.66 → 2.25 ms, 3.4배). 뒤쪽은 **확인할 수 없다** — pthread 쪽 ctx-sw가 이미 사이클당 0.3이라 줄어들 여지가 없기 때문이다. 워크로드가 페이지 캐시 히트라 워커가 블록되지 않고, 블록되지 않으면 voluntary 컨텍스트 스위치가 생기지 않는다. 예측이 성립하려면 워커가 실제로 대기하는 워크로드(콜드 IO, 경합하는 락)가 필요하다. 이건 가설이 틀렸다기보다 *이 워크로드가 그 가설을 검사할 수 없다* 는 쪽이고, 그 사실은 CSV 없이는 알기 어려웠다.
+
+**sync 축은 이 러너로 분리되지 않는다.** `mutex` 대 `spinlock` 이 세션 A에서는 0.66 대 0.83(spin이 느림), 세션 B에서는 0.74 대 0.79로 거의 겹친다. 세션 간 변동이 두 값의 차이만 하다. 워커 4개가 파일 8~16개를 나눠 가지는 동안 락은 사이클당 수십 번만 잡히므로 경합이 거의 없고, 측정하려는 신호가 노이즈보다 작다. 이 축을 보려면 락 획득 횟수를 크게 늘리는 별도 워크로드가 필요하다. **차이를 못 보는 것도 결과다** — GUI 그래프에서는 눈금이 흔들리는 것을 보고 "spinlock이 조금 빠른 것 같다" 고 넘어가기 쉽다.
+
+### 재현
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+rm -rf /tmp/skl_fx                      # 픽스처를 새로 만들어 캐시 상태를 맞춘다
+
+for combo in "--backend=read" "--backend=pread" "--backend=mmap" \
+             "--backend=aio" "--backend=io_uring" \
+             "--backend=read --workers=4" "--backend=read --workers=8" \
+             "--backend=read --workers=4 --ctx=coroutine" \
+             "--backend=read --workers=4 --sync=spin" \
+             "--backend=io_uring --workers=4" "--backend=mmap --workers=4"; do
+    ./build/system_kernel_bench $combo --warmup=20 --cycles=200 \
+        --fixture-dir=/tmp/skl_fx --out=- 2>/dev/null
+done > raw.csv
+
+awk 'NR == 1 || $0 !~ /^backend_req/' raw.csv > all.csv
+```
+
+`--out=-` 은 CSV를 stdout으로, 사람이 읽는 요약을 stderr로 보낸다. 실행마다 붙는 헤더를 첫 줄만 남기고 걷어내면 조합이 다른 실행들이 한 CSV로 합쳐진다. 열에 조합이 들어 있으므로 그대로 group-by 할 수 있다.
+
 ## 결론
 
 system_kernel_lab은 여기서 마무리한다. 여덟 구현 단계에 걸쳐 토글 기반 시스템 측정 도구의 골격을 세웠고, 마지막 구현에서 *카운터 채널 확장 + 시각화 마무리* 를 끌어왔다.
@@ -656,6 +861,7 @@ system_kernel_lab은 여기서 마무리한다. 여덟 구현 단계에 걸쳐 �
 - 5 축 토글로 IO 모델 / 동기화 / 스케줄링 / 컨텍스트 / 워커 수를 *런타임에* 갈아 끼운다.
 - 4 측정 채널(cycle ms · throughput · ctx-sw · page faults)을 슬라이딩 윈도우로 본다.
 - 세 모드(단일 스레드 / 워커 풀 / 코루틴 풀)가 한 워크로드 위에서 비교된다.
+- 같은 워크로드·같은 계측기를 창 없이 돌려 사이클마다 4채널을 CSV로 남기는 러너가 있다 — 조합이 명령줄 인자라 재현·반복·머신 간 대조가 된다.
 - WSL2 / native Linux 모두에서 *권한 셋업 없이* 동작.
 
 도구가 없는 것:
@@ -682,7 +888,7 @@ flowchart LR
     A2 --> NM[다음 가설로]
 ```
 
-네 가설이 모두 이 도구만으로 판정되는 것은 아니다. 가설 1(제출 경계)은 시스템 콜 횟수가 4개 채널 어디에도 없어 이 도구 단독으로는 참·거짓을 가릴 수 없다 — cycle ms 차이는 제출 경계 외의 원인으로도 생기므로 `strace -c` 를 함께 붙여야 한다. 나머지 셋은 4개 채널로 판정된다.
+네 가설이 모두 이 도구만으로 판정되는 것은 아니다. 가설 1(제출 경계)은 시스템 콜 횟수가 4개 채널 어디에도 없어 이 도구 단독으로는 참·거짓을 가릴 수 없다 — cycle ms 차이는 제출 경계 외의 원인으로도 생기므로 `strace -c` 를 함께 붙여야 한다. 가설 2와 가설 4도 *이 워크로드에서는* 절반만 판정된다. 실측 표가 보인 대로 락 경합이 거의 없어 sync 축의 차이가 세션 간 변동에 묻히고, 워커가 블록되지 않아 코루틴의 ctx-sw 이점이 관측 대상 자체를 갖지 못한다. 4개 채널로 판정되는 것은 가설 3(단, 별도 경쟁 부하를 만들었을 때)과 가설 4의 *처리량 손해* 쪽이다.
 
 *가설 깨짐을 받아들임* 이 도구의 가치다. futex가 mutex보다 별로 안 빠르더라도, SCHED_FIFO가 부하 없을 때 효과 없더라도, 코루틴이 동기 IO에서 더 느리더라도 — 그게 *이 환경의 진실*. 도구가 *통념을 부정* 하는 결과를 내놓을 때 그 자체가 측정 정보다.
 

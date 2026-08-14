@@ -450,6 +450,20 @@ std::uint64_t UringBackend::RunCycle(const std::vector<std::string>& paths,
 - `cqe->user_data` 가 우리가 박아둔 fileIdx.
 - 처리 후 `io_uring_cqe_seen` 으로 *CQ 슬롯 해제* 신호.
 
+### 대기가 실패하면 — IORING_OP_ASYNC_CANCEL 로 배수
+
+POSIX AIO 쪽에서 이미 정한 규약("버퍼와 `aiocb` 를 해제하기 전에 모든 요청을 `aio_return` 까지 수확한다")은 io_uring에도 그대로 필요하다. `io_uring_wait_cqe` 가 `EINTR` 이 아닌 오류를 돌려주거나 제출 수가 기대와 다르면, in-flight read는 *곧 사라질 `bufs[]`* 를 가리킨 채 남는다.
+
+여기서 `io_uring_queue_exit` 로 링을 버리는 것만으로는 부족하다. 링 fd를 닫으면 커널이 남은 요청을 정리하기는 하지만, 그 정리가 끝나는 시점이 우리가 `RunCycle` 에서 반환하는 시점과 동기화되지 않는다. 그래서 남은 요청마다 `io_uring_prep_cancel64(sqe, user_data, 0)` 로 취소를 걸고, **원 요청 CQE와 취소 요청 CQE를 모두 수확한 뒤에야** 반환한다.
+
+세 가지가 필요하다.
+
+1. **취소 요청 자신의 CQE 를 구분할 태그.** 원 요청의 `user_data` 는 파일 인덱스(`< kQueueDepth`)라 최상위 비트를 절대 쓰지 않는다. 취소 요청에는 `1ull << 63` 을 or 해 둔다.
+2. **`user_data` 를 믿을 수 없으면 취소하지 않는다.** 손상된 `user_data` 를 본 뒤에는 어느 요청이 남았는지 특정할 수 없다. 이 경우에만 링 폐기에 의존한다.
+3. **사후조건: 배수 후 CQ 링이 비어 있어야 한다.** 남은 CQE는 다음 사이클이 자기 요청의 완료로 오인할 쓰레기다. `io_uring_peek_cqe` 로 세면서 치우고, 그 값이 0이 아니면 회계가 틀렸다는 뜻이다.
+
+취소는 원 요청이 이미 끝났으면 `-ENOENT`, 진행 중이면 취소를 시도한다. 어느 쪽이든 *요청 하나당 CQE 하나* 라는 회계는 변하지 않는다. 그래서 남은 요청이 k개면 총 수확 CQE는 `paths.size() + k` 다. `UringBackend::LastDrainStats()` 가 이 네 숫자(`requestCqes`, `cancelSqes`, `cancelCqes`, `leftoverCqes`)를 관측 전용으로 노출하고, `tests/system_io_path_tests.cpp` 가 파일 4개 사이클에서 `4 + 4` 와 `leftoverCqes == 0` 을 확인한다.
+
 ### 시스템 콜 카운트
 
 이 패턴은 제출 쪽 시스템 콜 경계를 줄인다.

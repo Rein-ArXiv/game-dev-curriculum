@@ -1,6 +1,7 @@
 #include "workload/file_io_workload.h"
 
 #include "sync/sync_factory.h"
+#include "testhook/test_hook.h"
 
 #include <chrono>
 #include <cstdio>
@@ -271,7 +272,12 @@ void FileIoWorkload::WorkerLoop(std::size_t workerIdx) {
             } catch (...) {
                 RecordWorkerError(std::current_exception());
             }
-            remaining_.fetch_sub(1, std::memory_order_acq_rel);
+            // 감산 *직전* 값을 훅에 넘긴다. 1 이면 이 워커가 사이클의 마지막
+            // 작업을 끝낸 것, 0 이면 아래 RunCycleMulti 주석이 말하는 언더플로다.
+            // 무장되지 않은 빌드에서는 호출 자체가 사라진다(testhook/test_hook.h).
+            const std::size_t before =
+                remaining_.fetch_sub(1, std::memory_order_acq_rel);
+            RunTestHook(TestHookId::WorkerAfterDecrement, before);
         }
     }
 }
@@ -318,6 +324,9 @@ void FileIoWorkload::RunCycleMulti() {
     for (std::size_t i = 0; i < paths_.size(); ++i) queue_.push(i);
     remaining_.store(paths_.size(), std::memory_order_release);
     queueSync_->Unlock();
+    // 위 store 를 이 지점 *뒤* 로 옮기면 언더플로가 열린다. 그 회귀를 확률이
+    // 아니라 결정적으로 잡기 위한 랑데부 지점 — 테스트 빌드에서만 존재한다.
+    RunTestHook(TestHookId::AfterQueueUnlock);
 
     // 2) 모든 워커가 새 사이클을 보도록 시퀀스 증가.
     workerCycleAck_.store(0, std::memory_order_release);

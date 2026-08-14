@@ -2,6 +2,8 @@
 
 #if defined(SKL_HAS_POSIX_AIO)
 
+#include "fault/skl_syscalls.h"
+
 #include <aio.h>
 #include <cerrno>
 #include <cstring>
@@ -13,6 +15,44 @@
 #include <vector>
 
 namespace skl {
+
+namespace {
+
+// AIO 전용 seam. <aio.h> 를 공통 헤더로 끌어오지 않으려고 여기 둔다.
+int SklAioRead(aiocb* cb) {
+    if (const int e = SklFaultCheck("aio_read")) {
+        errno = e;
+        return -1;
+    }
+    return ::aio_read(cb);
+}
+
+int SklAioSuspend(const aiocb* const list[], int nent,
+                   const timespec* timeout) {
+    if (const int e = SklFaultCheck("aio_suspend")) {
+        errno = e;
+        return -1;
+    }
+    return ::aio_suspend(list, nent, timeout);
+}
+
+// aio_cancel / aio_return 은 *취소 후 수확* 규약의 관측점이다. 주입 없이
+// 무장만 해 두면 FaultCallCount 로 "요청 n 개를 전부 취소하고 전부
+// aio_return 까지 수확했는가" 를 세어 확인할 수 있다.
+int SklAioCancel(int fd, aiocb* cb) {
+    if (SklFaultTriggered("aio_cancel")) return AIO_NOTCANCELED;
+    return ::aio_cancel(fd, cb);
+}
+
+ssize_t SklAioReturn(aiocb* cb) {
+    if (const int e = SklFaultCheck("aio_return")) {
+        errno = e;
+        return -1;
+    }
+    return ::aio_return(cb);
+}
+
+}  // namespace
 
 std::uint64_t AioBackend::RunCycle(const std::vector<std::string>& paths,
                                      std::size_t fileBytes,
@@ -39,7 +79,7 @@ std::uint64_t AioBackend::RunCycle(const std::vector<std::string>& paths,
 
     // open + aiocb 준비. 제출 전 실패가 나면 pending AIO가 없다.
     for (std::size_t i = 0; i < n; ++i) {
-        fds[i] = ::open(paths[i].c_str(), O_RDONLY);
+        fds[i] = SklOpen(paths[i].c_str(), O_RDONLY);
         if (fds[i] < 0) {
             closeAll();
             throw std::runtime_error(std::string("open failed: ") + paths[i]
@@ -62,7 +102,9 @@ std::uint64_t AioBackend::RunCycle(const std::vector<std::string>& paths,
 
         const int err = ::aio_error(&cbs[i]);
         if (err == EINPROGRESS) return false;
-        const ssize_t bytes = ::aio_return(&cbs[i]);
+        // 완료된 요청은 성공·실패와 무관하게 정확히 한 번 aio_return 해야
+        // 구현이 보유한 요청 자원이 회수된다.
+        const ssize_t bytes = SklAioReturn(&cbs[i]);
         if (err != 0) {
             if (firstError.empty()) {
                 firstError = std::string("aio_error: ") + paths[i]
@@ -74,15 +116,12 @@ std::uint64_t AioBackend::RunCycle(const std::vector<std::string>& paths,
                     firstError = std::string("aio_return failed: ") + paths[i]
                                + ": " + std::strerror(errno);
                 }
-            } else if (static_cast<std::size_t>(bytes) != fileBytes) {
-                if (firstError.empty()) {
-                    firstError = std::string("short aio_read: ") + paths[i]
-                               + ": expected " + std::to_string(fileBytes)
-                               + ", got " + std::to_string(bytes);
-                }
             } else if (invokeRead) {
-                onRead(bufs[i].data(), fileBytes);
-                totalBytes += fileBytes;
+                // bytes < fileBytes 는 EOF 이지 오류가 아니다
+                // (io_backend.h 의 short read 계약).
+                const std::size_t got = static_cast<std::size_t>(bytes);
+                onRead(bufs[i].data(), got);
+                totalBytes += got;
             }
         }
 
@@ -100,7 +139,7 @@ std::uint64_t AioBackend::RunCycle(const std::vector<std::string>& paths,
         bool suspendUsable = true;
         while (doneCount < submitted) {
             if (suspendUsable) {
-                const int rc = ::aio_suspend(cbsList.data(),
+                const int rc = SklAioSuspend(cbsList.data(),
                                              static_cast<int>(submitted),
                                              nullptr);
                 if (rc < 0) {
@@ -114,7 +153,7 @@ std::uint64_t AioBackend::RunCycle(const std::vector<std::string>& paths,
                     // 취소를 요청하고 aio_error를 polling한다.
                     suspendUsable = false;
                     for (std::size_t i = 0; i < submitted; ++i) {
-                        if (!done[i]) ::aio_cancel(fds[i], &cbs[i]);
+                        if (!done[i]) SklAioCancel(fds[i], &cbs[i]);
                     }
                 }
             }
@@ -135,12 +174,12 @@ std::uint64_t AioBackend::RunCycle(const std::vector<std::string>& paths,
     // aio_read 제출 단계.
     std::size_t submitted = 0;
     for (; submitted < n; ++submitted) {
-        if (::aio_read(&cbs[submitted]) < 0) {
+        if (SklAioRead(&cbs[submitted]) < 0) {
             const std::string msg = std::string("aio_read failed: ")
                                   + paths[submitted]
                                   + ": " + std::strerror(errno);
             for (std::size_t j = 0; j < submitted; ++j) {
-                ::aio_cancel(fds[j], &cbs[j]);
+                SklAioCancel(fds[j], &cbs[j]);
             }
             drainSubmitted(submitted, /*invokeRead=*/false);
             closeAll();

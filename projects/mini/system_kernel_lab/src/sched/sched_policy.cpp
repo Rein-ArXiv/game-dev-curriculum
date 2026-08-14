@@ -1,5 +1,7 @@
 #include "sched/sched_policy.h"
 
+#include "fault/skl_syscalls.h"
+
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +24,9 @@ inline pid_t SklGettid() {
 }
 
 std::string ReadFirstLine(const std::string& path) {
+    // cgroup 파일 읽기 실패 seam. 컨트롤러가 없거나 권한이 없는 환경을
+    // 결정적으로 재현한다.
+    if (SklFaultTriggered("cgroup_read")) return {};
     std::ifstream f(path);
     std::string line;
     if (f && std::getline(f, line)) return line;
@@ -74,7 +79,7 @@ bool ApplyNice(int niceValue) {
     // Linux는 nice를 task_struct 단위로 들고 있으므로 TID를 명시한다.
     // 이렇게 해야 워커 스레드별 nice 적용 의도가 코드에 분명히 드러난다.
     const pid_t tid = SklGettid();
-    if (::setpriority(PRIO_PROCESS, tid, niceValue) != 0) {
+    if (SklSetPriority(PRIO_PROCESS, static_cast<id_t>(tid), niceValue) != 0) {
         std::fprintf(stderr,
             "skl: setpriority(nice=%d) failed: %s — keeping default\n",
             niceValue, std::strerror(errno));
@@ -86,7 +91,7 @@ bool ApplyNice(int niceValue) {
 bool ApplyFifo(int rtPriority) {
     sched_param param{};
     param.sched_priority = rtPriority;
-    const int rc = ::pthread_setschedparam(::pthread_self(),
+    const int rc = SklPthreadSetSchedParam(::pthread_self(),
                                             SCHED_FIFO, &param);
     if (rc != 0) {
         std::fprintf(stderr,
@@ -101,6 +106,12 @@ bool ApplyFifo(int rtPriority) {
 bool WriteCgroupFile(const std::string& dir, const char* file,
                       const char* content,
                       int* outErr = nullptr) {
+    // cgroup 파일 쓰기 실패 seam. 위임되지 않은 cgroup(= 쓰기 권한 없음)을
+    // 결정적으로 재현한다. 주입 시 파일을 아예 열지 않는다.
+    if (const int e = SklFaultCheck("cgroup_write")) {
+        if (outErr) *outErr = e;
+        return false;
+    }
     const std::string path = dir + "/" + file;
     FILE* f = std::fopen(path.c_str(), "w");
     if (!f) {

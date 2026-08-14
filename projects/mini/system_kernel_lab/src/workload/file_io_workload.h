@@ -5,6 +5,7 @@
 #include "io/io_backend_factory.h"
 #include "sched/sched_policy.h"
 #include "sync/i_sync.h"
+#include "sync/sync_factory.h"   // SyncType — Init/Reconfigure 시그니처와 Sync() 가 쓴다
 
 #include <atomic>
 #include <cstddef>
@@ -67,6 +68,11 @@ public:
     CtxType       Ctx()          const { return ctxType_; }
     const std::filesystem::path& FixtureDir() const { return fixtureDir_; }
 
+    // ucontext 트램폴린 진입점. makecontext 가 부르는 함수는 자유 함수여야 하고
+    // (extern "C", 인자는 int), 그 함수가 다시 이 멤버로 넘어온다. 그래서 public 이다 —
+    // 호출자는 파일 안의 트램폴린 하나뿐이며 외부에서 부를 대상이 아니다.
+    void CoroBody(std::size_t coroIdx);
+
 private:
     void GenerateFixture(std::size_t fileCount, std::size_t fileBytes);
 
@@ -76,7 +82,6 @@ private:
 
     void StartCoroutinePool();
     void StopCoroutinePool();
-    void CoroBody(std::size_t coroIdx);  // 코루틴 진입 함수 (entry trampoline에서 호출)
 
     void RunCycleSingle();
     void RunCycleMulti();

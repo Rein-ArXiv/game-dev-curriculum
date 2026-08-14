@@ -13,7 +13,10 @@
   코드·문장은 **2026-08 검수 시점의 상태**이며, 지금의 파일과 다를 수 있다. 인용문이 현재
   파일에서 검색되지 않는다면 대개 반영으로 그 줄이 바뀐 것이다.
 - 지적별 처리 결과와 **아직 남은 일**은 문서 끝 [반영 상태 (2026-08-13)](#반영-상태-2026-08-13)과
-  [2차 반영 (2026-08-14)](#2차-반영-2026-08-14) 두 절에 있다. **후자가 최신이다.**
+  [2차 반영 (2026-08-14)](#2차-반영-2026-08-14) 두 절에 있다.
+  **`system_kernel_lab`만은 두 절보다 최신 상태가 있다** — 2026-08-15에 Linux 환경이 붙어
+  이월 5건 중 4건(#1·#2·#3·#10)과 #9가 처리됐다. 결과는 그 lab 절 머리의
+  `[2026-08-15] Linux 실행 검증` 블록에 있다.
 
 > 총 **166건** — 치명 6 · 높음 54 · 중간 76 · 낮음 30
 >
@@ -22,6 +25,11 @@
 > 2026-08-14 기준 처리: **반영됨 160 · 부분 반영 1 · 이월 5 · 기반영 0 · 기각 0**
 > — 이월 9건 중 4건(`parts_perf_lab` #12 · `physics_lab` #10 · `graphics_dx_lab` #10 ·
 > `live_service_lab` #13)을 처리했고, 남은 5건은 전부 `system_kernel_lab`이며 **Linux 환경을 요구한다.**
+>
+> 2026-08-15 기준 처리: **반영됨 164 · 부분 반영 1 · 이월 1 · 기반영 0 · 기각 0**
+> — Linux(WSL2)가 붙어 `system_kernel_lab` 이월 5건 중 **4건(#1 · #2 · #3 · #10)** 을 닫았다.
+> 남은 이월은 `system_kernel_lab` **#8**(기능 증설) 하나다. 이 과정에서
+> **이 lab이 한 번도 컴파일된 적 없었다는 사실**과 컴파일 에러 두 개가 드러났다.
 
 ## 총평
 
@@ -592,9 +600,62 @@ step01:104-108 cmake/ctest 3줄, step02:115 `.\build\Release\languages_tests.exe
 
 학습 대상 대체는 발견되지 않았다. 동기화 4종(spin/mutex/futex/CAS)은 직접 구현했고 FutexSync는 라이브러리 대신 `syscall(SYS_futex, ...)`를 직접 호출하며, 코루틴도 ucontext로 직접 짰다. SDL2/OpenGL/ImGui는 HUD 전용이고 `system_core_tests` 타깃은 이 셋을 링크하지 않아 "렌더링·UI에서 계산 코어를 분리하라"는 기준을 실제로 지킨다. 다만 검증력은 선언된 기준에 크게 못 미친다. PROJECTS_PLAN.md:33이 이 lab에 명시한 세 항목 중 "I/O 결과 동등성"만 검증되고 "부분 읽기·EINTR·취소"는 테스트에 전혀 없으며, lab 전체에 실패 주입 수단(시그널·파이프·짧은 읽기·권한 실패 모사)이 하나도 없다. 게다가 VERIFY.md:46이 밝히듯 이 CTest는 한 번도 실행된 적이 없고, backend가 런타임 폴백해도 테스트는 조용히 통과하므로 aio/io_uring 경로가 단 한 번도 실행되지 않은 채 "backend 동등성 통과"가 나올 수 있다. 문서 쪽은 step02~08의 일괄 면책 문구가 기준 4·7(문서 코드만으로 빌드, 드리프트 금지)을 사실상 포기한 상태이고, 특히 step06의 cgroup 코드는 최종 코드의 `SKL_CGROUP_DIR` 승인 게이트가 빠져 같은 문서의 산문과 코드가 서로 모순된다.
 
+> **[2026-08-15] Linux 실행 검증 — 이월 5건 처리**
+>
+> **이 lab은 2026-08-15에 처음으로 컴파일됐다.** 그전까지 "실행 미검증"이 아니라
+> **빌드 미확인**이었고, 실제로 빌드해 보니 **컴파일조차 되지 않았다**. 아래 §0 참조.
+>
+> 환경: WSL2 / Ubuntu 26.04 / 커널 `6.18.33.2-microsoft-standard-WSL2` / 16 논리 코어 /
+> g++ 15.2.0 / cmake 4.2.3 / liburing 2.14. `sudo` 불가.
+> 결과: **`ctest` 8/8 통과**(`-L strict` 포함), 문서 검사 0 error / 앵커 120개.
+>
+> | 이월 | 지적 | 08-15 결과 |
+> |---|---|---|
+> | #1 [높음] | 부분 읽기·EINTR·취소 자동 검증 부재 | **완료** — `tests/system_io_path_tests.cpp` 810줄 신설(6군) |
+> | #2 [높음] | 실패 주입 수단 부재 | **완료** — `src/fault/` 신설 + `tests/system_fault_tests.cpp` 698줄(11군) |
+> | #3 [높음] | CTest 미실행, backend 폴백 시 조용한 통과 | **완료** — ctest 1 → 8, strict 라벨, Linux 실행 8/8 |
+> | #9 [중간] | `remaining_` 언더플로 | **완료** — 08-13 수정에 회귀 테스트 2종(결정적 랑데부 + 스트레스)을 붙였다 |
+> | #10 [중간] | 재현 가능한 측정 경로 없음 | **완료** — `tools/bench_main.cpp` 465줄 헤드리스 러너 + ctest 4케이스 |
+>
+> 남은 이월은 **#8 하나**다. 다만 내용이 줄었다 — #8이 지적한 넷 중 **시그널과 취소는
+> #1의 새 테스트가 실제로 다루게 됐고**(FIFO + `pthread_kill` 소스, `IORING_OP_ASYNC_CANCEL`
+> 배수 규약), 남은 것은 `registered files/buffers` 토글과 IPC를 *조작 변수*로 만드는 쪽,
+> 즉 기능 증설이다.
+>
+> 권한·커널·하드웨어 제약으로 이 기기에서 닫지 못한 항목이 8개 남는다. **미착수가 아니라
+> 환경 제약**이며, 그 각각의 실행 절차·기대 출력·"닫을 수 없다면 왜인지·그럼에도 규약이
+> 닫혔는지"는 `system_kernel_lab/docs/LINUX_HANDOFF.md`(신설)에 있다.
+>
+> **§0. 한 번도 컴파일된 적이 없었다 — 고친 두 곳**
+>
+> `VERIFY.md:46`이 "현재 환경에서 미검증"으로 적어 온 것, 2026-08-14의 "mini 클린 재빌드"가
+> **12개 중 11개**에서만 돈 것의 실제 내용이 이것이다. 첫 `cmake --build`에서 **컴파일 에러
+> 두 개**가 나왔다. 둘 다 `src/workload/file_io_workload.h`이고, 둘 다 *어떤 컴파일러도 이
+> 파일을 본 적이 없다*는 증거다 — 링크 단계가 아니라 문법·접근 제어 단계에서 막히는 종류다.
+>
+> 1. **`SyncType`의 정의를 include하지 않았다.** 헤더가 `Init`/`Reconfigure`의 시그니처,
+>    `Sync()` 접근자, 멤버 `syncType_` 넷에서 `SyncType`을 쓰는데 include는
+>    `sync/i_sync.h`(= `ISync` 추상만) 하나였다. `SyncType`은 `sync/sync_factory.h`에 있다.
+>    → `#include "sync/sync_factory.h"` 추가.
+> 2. **`CoroBody`가 private인데 자유 함수가 부른다.** `makecontext` 트램폴린은 `extern "C"`
+>    자유 함수여야 하므로 `file_io_workload.cpp`의 `SklCoroTrampoline(int)`이
+>    `g_coroSelf->CoroBody(idx)`를 부르는데, 그 멤버가 private이라 접근 불가였다.
+>    → `CoroBody`를 public으로 올리고 "호출자는 파일 안의 트램폴린 하나뿐"이라는
+>    주석을 붙였다.
+>
+> 두 결함 모두 **검수가 정적 대조로는 잡지 못한 종류**다. 이 보고서의 13건 어디에도 없다.
+> `physics_lab` #10이 남긴 교훈("지적 건수 = 결함 건수가 아니다")과 같은 자리에 놓인다 —
+> 다만 그쪽은 통합해 돌려 봐야 드러났고, 이쪽은 **컴파일 한 번이면 드러났다.**
+
 ### 1. [높음] PROJECTS_PLAN이 이 lab에 지정한 3개 검증 항목 중 "부분 읽기·EINTR·취소"가 테스트에 전혀 없다
 
 > **[이월 · 2026-08-13]** `tests/system_core_tests.cpp`는 변경되지 않았다(main은 여전히 세 함수만 호출). Linux 전용 테스트 신설이 필요하고 반영 환경에 WSL·POSIX 툴체인이 없어 작성해도 실행 검증이 불가능했다.
+>
+> **[반영됨 · 2026-08-15]** `tests/system_io_path_tests.cpp`(810줄, 6군) 신설. 세 항목이 각각 닫혔다.
+> **부분 읽기** — 계약 자체를 `io_backend.h`에 명문화했다(짧은 파일은 *오류가 아니라 EOF*, path당 `onRead` 정확히 1회, 실제 읽은 크기). 그에 맞춰 `read`·`pread`의 "짧으면 throw"를 걷어내고 `mmap`은 매핑 길이를 파일 크기로 자르도록 고쳤다(파일 끝을 넘겨 매핑하면 접근이 SIGBUS다). 딱 맞는 파일·요청의 절반·4097B·1B·빈 파일·요청보다 큰 파일을 한 사이클에 섞어 컴파일된 5개 backend가 *같은 `(크기, 체크섬)` 목록*을 내는지 본다.
+> **EINTR** — 주입이 아니라 **실제 시그널**이다. `/tmp`에 FIFO를 만들고 `SA_RESTART` 없는 `SIGUSR1`을 읽기 스레드에만 `pthread_kill`로 1ms 간격 전달. `read`의 부분 읽기 루프, `aio_suspend`, `io_uring_wait_cqe` 세 대기 지점을 밟고, 판정은 "시그널이 와도 최종 바이트·체크섬이 무시그널 실행과 동일". 재시도 분기가 *정말 실행됐는지*는 fault seam을 주입 없이 무장해(`read:100000000`) 호출 횟수로 센다.
+> **취소** — aio는 `aio_suspend` 실패 후 남은 요청 전부에 `aio_cancel`을 걸고 *전부 `aio_return`까지 수확*했는지를 seam 호출 횟수로(파일 4개에서 `aio_cancel`=4, `aio_return`=4), io_uring은 `IORING_OP_ASYNC_CANCEL` 뒤 원 요청 CQE와 취소 CQE를 **모두** 수확했는지를 새로 노출한 `UringBackend::LastDrainStats()`로 센다(`requestCqes=4 cancelSqes=4 cancelCqes=4 leftoverCqes=0`).
+> **닫지 못한 것 둘**은 환경이 아니라 구조·커널 때문이다. FIFO에서 aio/uring이 부분 읽기 루프를 도는 경로는 두 backend가 파일당 요청을 하나만 만들어 **존재하지 않는 경로**이고, pread·mmap의 FIFO EINTR은 커널이 막는다(실측: `pread`→ESPIPE, `mmap`→ENODEV). 후자는 두 backend가 FIFO를 *명시적으로 거부*한다는 것으로 대신 못 박았다(`TestFifoRejectedByNonStreamBackends`). 자세한 근거는 `docs/LINUX_HANDOFF.md` §4.
 
 <sub>분류: 검증력부족</sub>
 
@@ -611,6 +672,11 @@ C:/Users/REIN/Documents/VeLog/PROJECTS_PLAN.md:33 — "`system_kernel_lab`: I/O 
 ### 2. [높음] 실패 주입 수단이 lab 전체에 없어 모든 오류 경로가 검증 불가
 
 > **[이월 · 2026-08-13]** `src/`에 fault injection seam이 여전히 없다. #1과 같은 이유(Linux 실행 검증 불가)로 이월.
+>
+> **[반영됨 · 2026-08-15]** `src/fault/fault_inject.{h,cpp}`(87+190줄)와 `src/fault/skl_syscalls.h`(89줄) 신설. backend·sched가 syscall을 직접 부르지 않고 얇은 wrapper를 거치게 바꿨고, wrapper가 호출 직전에 `SklFaultCheck(op)`를 물어 0이 아닌 errno가 오면 *syscall을 부르지 않고* 그 errno로 실패한 것처럼 반환한다. seam 20개(`open read pread fstat mmap munmap aio_read aio_suspend aio_cancel aio_return io_uring_queue_init io_uring_get_sqe io_uring_submit io_uring_submit_short io_uring_wait_cqe uring_user_data setpriority pthread_setschedparam cgroup_read cgroup_write`). 무장 전 비용은 relaxed atomic load 하나이고, 빌드를 바꾸지 않고 `SKL_FAULT=op[:skip[:ERRNO[:times]]]` 환경변수로도 열린다.
+> 지적이 요구한 `/proc/self/fd` 누수 검사는 **모든 오류 경로의 공통 사후조건**으로 들어갔다. `tests/system_fault_tests.cpp`(698줄, 11군)가 io_uring 런타임 폴백, aio의 cancel+수확, uring 링 재초기화·잘못된 user_data 방어, mmap fstat 가드, sched 권한 실패 폴백, cgroup 읽기 실패·승인 거부를 결정적으로 밟고, 각각 뒤에 fd 개수 동일 + 주입 해제 후 정상값 복귀를 확인한다.
+> `skip`을 아주 크게 준 규칙은 **아무것도 주입하지 않고 호출 횟수만 세는 순수 관측 모드**가 되어, "그 분기가 정말 실행됐는가"를 동작을 바꾸지 않고 확인하는 데 쓰인다 — #1의 EINTR·취소 판정이 이것 위에 서 있다.
+> **닫지 못한 것**: cgroup `cpu.weight` **쓰기 성공**과 `SCHED_FIFO` **적용 성공**은 권한이 필요해 이 기기에서 밟히지 않는다(실패 폴백만 검증). 절차는 `docs/LINUX_HANDOFF.md` §3-1·§3-2. 덧붙여 `cgroup_write` seam은 *어떤 환경에서도* `system_fault_tests`로 도달하지 않는다는 것을 실측으로 확인했다 — `CaptureOriginalCgroupWeight`가 읽기 실패 때도 `captured=true`로 캐시를 굳혀, 앞선 `cgroup_read` 주입 케이스가 뒤따르는 쓰기 케이스를 막는다(같은 문서 §6.1).
 
 <sub>분류: 검증력부족</sub>
 
@@ -627,6 +693,13 @@ PROJECTS_PLAN.md:26 — 추적 단위 "실패 주입 | 어떤 입력이 잘못�
 ### 3. [높음] CTest가 한 번도 실행된 적 없고, backend 런타임 폴백 시 테스트가 조용히 통과한다
 
 > **[이월 · 2026-08-13]** 테스트 소스와 `VERIFY.md`의 "현재 환경에서 미검증"이 모두 그대로다. 폴백 실패 처리·실행된 backend 요약 출력·`TestWorkloadExecutionModels` 확장은 미착수.
+>
+> **[반영됨 · 2026-08-15]** 방향 (a)~(d) 넷 다 처리했다.
+> **(d) Linux 실행** — WSL2(Ubuntu 26.04)에서 처음 빌드했고 **컴파일 에러 두 개**를 고쳐야 했다(위 §0). 이후 `ctest` **8/8 통과**. 지적이 인용한 "CTest 1개 정의"가 8개가 됐다 — `system_core_tests` / `system_fault_tests` / `system_io_path_tests` / `system_core_tests_strict` / 벤치 러너 스모크 2 · fault 채널 1 · 잘못된 토글 거부 1.
+> **(a) 폴백을 실패로** — `SKL_REQUIRE_BACKENDS`에 적힌 backend가 런타임 폴백하면 `CHECK` 실패다. 오타는 조용히 넘기지 않고 그 자체를 실패로 만든다(오타를 흘리면 strict 케이스가 *아무것도 강제하지 않은 채* 초록이 되는데, 그게 이 지적이 고치려는 병이다). liburing/AIO가 없는 머신도 있으므로 강제는 별도 케이스 `system_core_tests_strict`(`ENVIRONMENT SKL_REQUIRE_BACKENDS=uring,aio`, `LABELS strict`)로 분리했다 — `ctest -L strict`로 요구, `-LE strict`로 이식성 모드.
+> **(b) 요약 라인 상시 출력** — `[backends] read=read pread=pread mmap=mmap aio=aio io_uring=io_uring`와 `[strict] SKL_REQUIRE_BACKENDS=...`를 항상 stdout에 찍는다. 이 기기에서는 5개 backend가 **폴백 없이 전부 실제로 돌았다**.
+> **(c) 전수 확장** — `TestWorkloadExecutionModels`가 `BackendCompiledIn`인 모든 backend × {pthread 워커풀, 코루틴} × sync 4종 × 워커 4개를 돈다(이 기기에서 40조합). 워커 4개면 io_uring 링이 4개 동시에 생기는 조합을 실제로 밟는다. "값이 같다"만으로는 그 backend가 돌았다는 증거가 아니므로(폴백한 read도 같은 값을 낸다) fault seam을 *주입 없이* 무장해 backend별 syscall 호출 횟수가 `> 0`인지 `CHECK`한다.
+> `VERIFY.md`의 이 lab 행과 `check_projects.ps1` 제외 여부는 이 작업 범위 밖이라 손대지 않았다 — **갱신이 필요하다.**
 
 <sub>분류: 검증력부족</sub>
 
@@ -716,6 +789,14 @@ system/README.md:15 "07 | 시그널 | process 비동기 통지·job control·PTY
 
 ### 9. [중간] RunCycleMulti의 remaining_ 설정이 큐 push보다 늦어 직전 사이클 지연 워커가 카운터를 언더플로시킬 수 있다
 
+> **[반영됨 · 2026-08-15]** 수정 자체는 2026-08-13에 들어갔다(`remaining_.store`를 `Unlock()` 앞으로). 이번에 붙인 것은 **그 수정이 지켜지는지 감시하는 회귀 테스트 둘**이고, 둘의 사각이 서로 다르다는 것이 핵심이다.
+> **(1) 결정적 재현.** `src/testhook/test_hook.h`(78줄, 신설)의 타이밍 훅 두 개로 문제의 인터리빙을 직접 만든다 — `WorkerAfterDecrement`가 `remaining_`을 0으로 만든 워커를 pop 루프 안에 붙잡아 두고, `AfterQueueUnlock`이 push 직후 그 워커를 풀어 준 뒤 감산을 마칠 때까지 기다리는 랑데부다. 훅은 `SKL_TEST_HOOKS`를 정의하는 테스트 타깃에만 존재하고 앱 타깃에서는 호출이 통째로 사라진다(제품 바이너리에 분기도 load도 남지 않는다).
+> **(2) 스트레스.** 8워커 × **8000사이클** × sync 4종 = 32000사이클. 세기 전용 훅(락도 대기도 없는 relaxed `fetch_add` 하나)과 1ms 주기 감시 스레드를 함께 둔다.
+> 감시 스레드가 필요한 이유가 이 버그의 성질이다. **언더플로와 hang은 같은 사건이다** — 0에서의 `fetch_sub`가 만든 `SIZE_MAX`를 뒤이은 `store(N)`이 지워 `remaining_`이 영영 0이 못 되고, 언더플로를 일으킨 바로 그 `RunCycle`이 그대로 매달린다. 루프로 돌아와 카운터를 읽는 코드는 실행될 기회가 없으므로 **다른 스레드가** 읽어야 한다.
+> 사이클 수 8000의 근거는 실측이다. 이 회귀는 메인이 하필 `Unlock`과 `store` 사이(수십 ns)에서 선점당해야 발현하고 측정한 사이클당 적중 확률은 ~2e-4다. 변이 주입 스윕: **400사이클 4/20 · 2000 16/20 · 4000 38/40 · 8000 40/40**. 워커 수를 코어(16)보다 늘려 선점을 유도하는 쪽은 검출률이 그대로고 시간만 5배가 됐다 — 사이클 수가 유일하게 듣는 손잡이였다. 정상 코드 소요 0.2s → 0.9s(ctest `TIMEOUT 60`).
+> `SKL_STRESS_CYCLES`로 **늘릴 수는 있어도 줄일 수는 없다**(`std::max(8000, ...)`). soak용 손잡이지 테스트를 약화시키는 손잡이가 아니다.
+> 지적이 언급한 ctest 안전망도 그대로 있다(`TIMEOUT 60`, 테스트 자체의 워치독이 먼저 잡는다). 실행 확인: `[handoff] 4 sync types x 8000 cycles with 8 workers; remaining_ underflow observations=0` · `[handoff] deterministic straggler rendezvous reproduced`.
+
 <sub>분류: 코드오류</sub>
 
 **근거**
@@ -731,6 +812,13 @@ src/workload/file_io_workload.cpp:311-317 — 큐를 먼저 채우고(`queueSync
 ### 10. [중간] 측정값을 재현 가능하게 남길 경로가 없어 관측이 GUI 육안 확인에만 의존한다
 
 > **[이월 · 2026-08-13]** headless 러너 실행 파일이 없고 `src/main.cpp`는 여전히 인자를 무시한다. 새 타깃 신설이라 이월.
+>
+> **[반영됨 · 2026-08-15]** `tools/bench_main.cpp`(465줄) + `system_kernel_bench` 타깃 신설. 지적의 방향대로 `FileIoWorkload`+`FrameTimer`가 이미 GUI와 분리돼 있어 코어 TU 목록에 `frame_timer.cpp`·`proc_counters.cpp` 둘만 더 얹었고 SDL2/OpenGL/ImGui는 링크하지 않는다. GUI 루프와 **같은 계측 패턴**(사이클 직전·직후 `getrusage`, delta를 `FrameTimer`로)을 쓴다.
+> `--backend --sync --sched --ctx --workers --cycles --warmup --files --bytes --fixture-dir --out`을 받아 사이클마다 4채널을 CSV 한 줄로 적는다. 조합 정보를 **행마다** 실어 여러 실행의 파일을 그대로 이어 붙일 수 있고, `backend_req`와 `backend`를 나눠 **폴백한 read의 수치를 io_uring 수치로 읽는 일**을 막는다(`--strict-backend`는 폴백 자체를 실패로).
+> 러너 자신의 회귀도 ctest 4케이스로 잡는다 — 스모크 2(사이클마다 총 바이트·체크섬 정합 판정), `--backend=mmap --min-faults=1`(mmap은 사이클마다 새 매핑을 만들어 반드시 minor fault를 내므로 `getrusage`→`DiffCounters`→`FrameTimer`→CSV 배선 전체를 못 박는다 — 카운터 인자를 `EndCycle`에서 떼면 이것만 실패한다), 잘못된 토글 이름 거부(`WILL_FAIL TRUE`).
+> 지적이 불가능하다고 적은 셋이 가능해졌다. (a) 같은 조합 2회 대조 — `articles/step08` §11의 독립 세션 A/B 표가 그것이다. (b) p50/p99 — 요약이 nearest-rank로 찍는다. (c) 머신 간 대조 — 절차와 교체할 표 위치를 `docs/LINUX_HANDOFF.md` §5에 적었다.
+> **주의 하나.** CSV의 `sched_applied` 열은 `Init()` 직후 한 번 읽어 고정하는데 `nice`/`SCHED_FIFO` 적용은 워커 스레드가 자기 루프 시작 시점에 하므로 **경쟁이 있다** — 실측에서 워커 4개가 전부 `EPERM`으로 실패했는데도 1이 기록된 실행이 나왔다(`--cycles=1` 10회 중 1회, `--cycles=3` 12회 중 5회). 사이클 수와 무관하다(열은 루프 전에 정해진다). `docs/LINUX_HANDOFF.md` §6.2에 판정 대안(stderr 메시지 부재 + `chrt -p`)과 함께 적었다.
+> `src/main.cpp`는 여전히 인자를 무시한다 — GUI는 토글 도구라는 역할 분담이 명시적이고, 재현 경로는 이 러너가 맡는다.
 
 <sub>분류: 검증력부족</sub>
 
@@ -3612,6 +3700,10 @@ articles/step04_crash_test.md:27 "각 절단본을 Replay하면 파서·CRC·Com
 - **`system_kernel_lab`은 Linux 전용**이라 반영 환경에서 빌드조차 하지 못했다. 이 lab의
   이월 5건은 그래서 "미착수"가 맞지만, 반영됨으로 분류한 8건(문서 수정과
   `file_io_workload.cpp`의 `remaining_` 순서 수정)도 컴파일 확인이 되지 않은 상태다.
+  → **[2026-08-15] 이 우려가 맞았다.** WSL2에서 처음 빌드하자 **컴파일 에러 두 개**가 나왔다
+  (둘 다 `src/workload/file_io_workload.h` — `SyncType` 정의 미포함, `CoroBody` 접근 제어).
+  즉 이 lab은 그때까지 **한 번도 컴파일된 적이 없었다.** 고친 뒤 `ctest` 8/8 통과.
+  자세한 내용은 `## system_kernel_lab` 절 머리의 `[2026-08-15] Linux 실행 검증 · §0`.
 - **변이 테스트를 다시 돌리지 않았다.** 이 보고서의 검증력 지적은 변이 주입으로 얻은 것인데,
   반영 뒤 그 변이들이 실제로 죽는지는 재확인하지 않았다. 새 테스트의 서술(예: `math_lab`
   step08의 "변이 주입으로 확인했다", `physics_lab` step05의 "옛 식으로 되돌리면 65개 CHECK가
@@ -3634,7 +3726,7 @@ articles/step04_crash_test.md:27 "각 절단본을 Replay하면 파서·CRC·Com
 | `physics_lab` | 14 | 1 | #10 **완료** |
 | `live_service_lab` | 15 | 1 | #13 **완료** |
 | `graphics_dx_lab` | 16 | 1 | #10 **부분 처리** — 잔여 2개(§2) |
-| `system_kernel_lab` | 13 | 5 | **5건 전부 이월 유지** — Linux 필요(§3) |
+| `system_kernel_lab` | 13 | 5 | 08-14 시점 **5건 전부 이월 유지** — Linux 필요(§3). **08-15에 4건 처리**(#1·#2·#3·#10), 남은 이월 #8 하나 |
 | 나머지 7개 lab | 93 | 0 | — |
 | **합계** | **166** | **9** | **완료 3 · 부분 1 · 이월 유지 5** |
 
@@ -3753,6 +3845,12 @@ lab별 분포는 `graphics_dx_lab` 85 · `live_service_lab` 16 · `parts_perf_la
   사라졌는데 파일만 남았다.
 
 ### 3. `system_kernel_lab` 5건 — 여전히 Linux 필요
+
+> **[2026-08-15 갱신 — 이 절은 지나간 상태다.]** 아래가 요구한 "WSL 배포판 또는 별도 Linux
+> 환경 1회"가 확보됐고, 5건 중 **4건(#1 · #2 · #3 · #10)이 닫혔다.** 남은 것은 #8 하나다.
+> 결과는 `## system_kernel_lab` 절 머리의 `[2026-08-15] Linux 실행 검증` 블록과
+> 각 지적 아래 `> **[반영됨 · 2026-08-15]**` 줄에 있다. 아래 표의 "현재 상태" 열은
+> **2026-08-14 시점의 기록으로만** 읽어라.
 
 **이월 5건은 상태가 바뀌지 않았다.** 착수하지 않은 것이 아니라 **착수할 수 없다.**
 

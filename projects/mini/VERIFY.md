@@ -26,7 +26,11 @@ pwsh -File scripts/check_projects.ps1 -BuildRoot "$env:TEMP/velog-project-check"
 pwsh -File scripts/check_projects.ps1 -SkipConfigure
 ```
 
-`system_kernel_lab`은 Linux 전용이므로 이 스크립트에서 제외한다. WSL 배포판 또는 별도 Linux 환경에서 README의 빌드 절차를 실행해야 한다.
+`system_kernel_lab`은 Linux 전용이므로 이 스크립트에서 제외한다. WSL2 배포판 또는 별도 Linux 환경에서
+README의 빌드 절차를 실행한다. 2026-08-15 WSL2 Ubuntu 26.04(커널 6.18.33.2)에서 빌드·CTest 8개 통과를 확인했다.
+
+권한이 필요해 WSL2에서 검증하지 못한 항목(cgroup 쓰기 성공 경로, `SCHED_FIFO` 적용 성공 경로)과
+커널·하드웨어 제약으로 밟히지 않는 경로는 이 lab의 `docs/` 아래 인수인계 문서에 절차와 통과 조건이 정리돼 있다.
 
 ## 현재 결과
 
@@ -43,7 +47,7 @@ pwsh -File scripts/check_projects.ps1 -SkipConfigure
 | `game_network_lab` | 통과 | protocol·oversized UDP 회복 process CTest 2개 | 6 |
 | `live_service_lab` | 통과 | core contract 테스트. 실패 주입 보강 필요, HTTP smoke는 mega 행 | 5 |
 | `db_lab` | 통과 | CTest 2개 통과 | 4 |
-| `system_kernel_lab` | 현재 환경에서 미검증 | CTest 1개 정의, Linux 실행 미검증 | 8 |
+| `system_kernel_lab` | 통과 (Linux 전용 — WSL2 Ubuntu 26.04) | CTest 8개. 5개 backend가 실제로 실행됨을 호출 카운터로 확인 | 8 |
 
 전체 스크립트의 마지막 검사는 C# Live Service의 실제 game token 두 개를 C++ Mega 전용 서버가
 검증하고 서로 다른 UDP 끝점 두 곳에 snapshot을 보내는 교차 언어 process smoke다.
