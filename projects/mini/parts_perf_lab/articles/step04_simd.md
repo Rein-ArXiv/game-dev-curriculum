@@ -540,6 +540,69 @@ Intel CPU + AVX2 옵션 ON 빌드, 100k 엔티티 기준 일반적인 경향:
 
 콤보를 SoA Scalar → SoA AVX2 → AoS AVX2 순서로 클릭하면 그래프에 *세로 절벽 두 번* 이 그려진다. 첫 절벽은 SIMD 효과(아래로), 두 번째 절벽은 layout이 AoS가 되면서 SIMD 토글이 무효화돼 다시 위로. *AoS의 SIMD 무효성* 이 시각적 사건으로 드러난다.
 
+### 자동 검증: `parts_simd_tests`
+
+"SIMD로 빨라졌다"는 주장은 세 폭이 *같은 값* 을 낼 때만 성립한다. 결과가 달라졌다면 빨라진 게 아니라 덜 한 것이다. `simd` 그룹이 그 등식을 붙든다.
+
+두 종류의 단언이 들어 있다. SoA 쪽은 폭이 달라도 결과가 허용 오차 안이라는 것, AoS 쪽은 폭이 달라도 결과가 *비트까지* 같다는 것이다. 뒤엣것이 앞에서 말한 *AoS의 SIMD 무효성* 을 기계가 확인하는 형태다.
+
+<!-- snippet: tests/core_tests.cpp#TestSimdEquivalence -->
+```cpp
+// tests/core_tests.cpp — simd 그룹
+
+void TestSimdEquivalence() {
+    constexpr int   kFrames = 240;
+    constexpr float kDt     = 1.0f / 144.0f;
+
+    auto scalar = MakeAndInit(ppl::Layout::SoA);
+    auto simd   = MakeAndInit(ppl::Layout::SoA);
+    // ...
+    std::vector<float> a, c;
+    scalar->CopyState(a);
+    simd->CopyState(c);
+    CHECK(NearStates(a, c, 1e-4f));
+#if defined(PERF_LAB_AVX2)
+    // AVX2는 FMA로 pos += vel*dt 의 중간 반올림이 사라져 비트가 다르다.
+    std::vector<float> d;
+    wide->CopyState(d);
+    CHECK(NearStates(a, d, ToleranceFor(ppl::SimdWidth::AVX2, kFrames)));
+    // SSE만큼 가깝지는 않다는 것까지 못 박는다. 깨지면 AVX2 토글이 폴백 중이다.
+    CHECK(!NearStates(a, d, 1e-6f));
+#endif
+
+    // AoS는 SIMD 토글을 통째로 무시하고 언제나 scalar 경로를 돈다.
+    std::vector<float> aosState[ppl::kSimdCount];
+    const ppl::SimdWidth kWidths[] = {
+        ppl::SimdWidth::Scalar, ppl::SimdWidth::SSE, ppl::SimdWidth::AVX2};
+    for (int w = 0; w < ppl::kSimdCount; ++w) {
+        auto aos = MakeAndInit(ppl::Layout::AoS);
+        for (int i = 0; i < kFrames; ++i) aos->Update(kDt, kWidths[w], false);
+        aos->CopyState(aosState[w]);
+    }
+    CHECK(NearStates(aosState[0], aosState[1], 0.0f));
+    CHECK(NearStates(aosState[0], aosState[2], 0.0f));
+}
+```
+
+`CHECK(!NearStates(a, d, 1e-6f))` 는 방향이 반대인 단언이다. AVX2 결과가 스칼라와 *너무 똑같으면* 오히려 실패한다 — 그건 AVX2 경로가 아니라 SSE나 scalar가 돌고 있다는 신호이기 때문이다. 옵션을 켜지 않은 빌드에서는 이 두 줄이 아예 컴파일되지 않는다.
+
+```bash
+cmake -S . -B build -DPERF_LAB_ENABLE_AVX2=ON
+cmake --build build --config Release
+ctest --test-dir build -C Release -R parts_simd_tests --output-on-failure
+
+./build/parts_core_tests simd              # Linux/macOS
+.\build\Release\parts_core_tests.exe simd  # Windows
+```
+
+```text
+parts_core_tests: group `simd`
+  simd/SimdEquivalence ... 5 check(s) ok
+simd: 1 test(s), 5 check(s), 0 failure(s)
+```
+
+`5 check(s)` 는 AVX2를 켠 빌드의 수다. 옵션 없이 구성하면 위의 두 줄이 빠져 `3 check(s)` 가 나온다. 이 차이가 곧 "AVX2 경로가 실제로 컴파일됐는가" 의 지표라, 옵션을 켰는데 `3` 이 나오면 아키텍처가 x86이 아니거나 매크로 가드가 어긋난 것이다.
+
 ### 검증 체크리스트
 
 - AVX2 토글 선택 시 *SSE와 같은 ms* → AVX2 빌드 옵션이 꺼져 있어 SSE로 폴백 중. `cmake -DPERF_LAB_ENABLE_AVX2=ON` 으로 재빌드.

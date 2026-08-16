@@ -41,14 +41,17 @@ void RotationScene::Update(float dt) {
 void RotationScene::DrawAxesAndCube(Quaternion q, Vector3 offset,
                                        float scale, Color tint) const {
     // 회전된 축을 화살표로. world 축 = q 가 적용된 단위 벡터들.
+    // snippet-begin: axis-triad
     Vector3 ex = QuatRotateVec(q, {scale, 0, 0});
     Vector3 ey = QuatRotateVec(q, {0, scale, 0});
     Vector3 ez = QuatRotateVec(q, {0, 0, scale});
     DrawArrow3D(offset, Vector3Add(offset, ex), Color{255, 90, 90, 255},  0.04f);
     DrawArrow3D(offset, Vector3Add(offset, ey), Color{120, 255, 120, 255}, 0.04f);
     DrawArrow3D(offset, Vector3Add(offset, ez), Color{120, 160, 255, 255}, 0.04f);
+    // snippet-end: axis-triad
 
     // 큐브: 기본 행렬을 quaternion 의 행렬로 대체해 그린다.
+    // snippet-begin: cube-matrix
     rlPushMatrix();
     rlTranslatef(offset.x, offset.y, offset.z);
     Matrix m = QuatToMatrix(q);
@@ -63,6 +66,7 @@ void RotationScene::DrawAxesAndCube(Quaternion q, Vector3 offset,
     DrawCubeV({0, 0, 0}, size, tint);
     DrawCubeWiresV({0, 0, 0}, size, Color{220, 220, 220, 200});
     rlPopMatrix();
+    // snippet-end: cube-matrix
 }
 
 void RotationScene::DrawWorld(int cx, int cy, int cw, int ch) {
@@ -100,10 +104,12 @@ void RotationScene::DrawWorld(int cx, int cy, int cw, int ch) {
                 : "Mode: Slerp (green, top) vs Nlerp (red, bottom)",
               cx + 10, cy + 10, 14, Color{200, 200, 200, 255});
 
+    // snippet-begin: gimbal-warning
     if (mode_ == Mode::Euler && EulerNearGimbalLock(yaw_)) {
         DrawText("GIMBAL LOCK — pitch and roll collapsed onto same axis",
                   cx + 10, cy + 30, 14, Color{255, 100, 100, 255});
     }
+    // snippet-end: gimbal-warning
     (void)cw; (void)ch;
 }
 
@@ -115,11 +121,13 @@ void RotationScene::DrawPanel(int px, int py, int pw, int ph) {
     y += 22;
 
     // 모드 토글
+    // snippet-begin: mode-toggle
     int   modeIdx  = (mode_ == Mode::Euler) ? 0 : 1;
     int   newMode  = GuiToggleGroup(Rectangle{(float)(px + 8), (float)y, 130, 22},
                                      "Euler;Slerp/Nlerp", &modeIdx);
     (void)newMode;
     mode_ = (modeIdx == 0) ? Mode::Euler : Mode::SlerpVsNlerp;
+    // snippet-end: mode-toggle
     y += 30;
 
     char buf[128];

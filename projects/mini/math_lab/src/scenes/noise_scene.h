@@ -2,8 +2,8 @@
 //   Value / Perlin / Simplex 토글
 //   + FBM (옥타브 / lacunarity / gain) 토글
 //   + scale (zoom), seed, offset 슬라이더
-//   + Image 로 noise heatmap 을 빌드 후 Texture 로 표시 (매 프레임 재계산하지만
-//     해상도 256x256 정도면 60fps 안전).
+//   + Image 로 noise heatmap 을 빌드 후 Texture 로 표시 (파라미터가 바뀐
+//     프레임에만 256x256 을 다시 계산해 UpdateTexture).
 
 #pragma once
 

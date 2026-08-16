@@ -528,9 +528,9 @@ std::snprintf(buf, sizeof(buf),
 
 container 콤보박스 활성화는 비활성화 표시를 걷어내고 값을 토글에 반영하는 것이 전부다.
 
-<!-- snippet: src/ui/hud.cpp#Hud::DrawTogglePanel -->
+<!-- snippet: src/ui/hud.cpp#Hud::DrawTogglePanelPass -->
 ```cpp
-// src/ui/hud.cpp — Hud::DrawTogglePanel
+// src/ui/hud.cpp — Hud::DrawTogglePanelPass
 
 DrawText("container:", x2, rowY2(row2), 14, LIGHTGRAY);
 int containerIdx = (int)toggles.container;
@@ -570,15 +570,74 @@ add_executable(parts_core_tests
 )
 ```
 
-CMake 재구성, 빌드, 실행한다.
+### 자동 검증: `parts_container_tests`
+
+컨테이너를 바꿔도 *같은 계산* 이라는 전제가 깨지면 ms 비교는 의미가 없다. 그 전제를 `container` 그룹이 확인한다. 세 컨테이너를 같은 시드로 채워 노드 수가 정확히 같은지, 합산 결과가 상대오차 1e-4 안에서 일치하는지, 같은 프레임을 두 번 돌려도 합이 변하지 않는지, `Shutdown` 후 노드 수가 0으로 돌아가는지를 본다.
+
+<!-- snippet: tests/core_tests.cpp#TestContainerEquivalence -->
+```cpp
+// tests/core_tests.cpp — container 그룹
+
+void TestContainerEquivalence() {
+    constexpr std::size_t kNodes = 5000;
+    using Node = ppl::ContainerBenchmark::Node;
+
+    // 노드 수보다 약간 넉넉한 풀. intrusive 경로가 여기서 노드를 받는다.
+    ppl::PoolAllocator pool(sizeof(Node), alignof(Node), 5016);
+
+    float baseline = 0.0f;
+    for (int t = 0; t < ppl::kContainerCount; ++t) {
+        const auto type = static_cast<ppl::Container>(t);
+        const char* label = ppl::ContainerName(type);
+
+        pool.Reset();
+        ppl::ContainerBenchmark bench;
+        bench.Init(type, &pool, kNodes);
+
+        CHECK_AT(bench.Type() == type, label);
+        CHECK_AT(bench.NodeCount() == kNodes, label);
+
+        bench.RunFrame();
+        const float sum = bench.LastSum();
+        // ...
+        if (t == 0) {
+            baseline = sum;
+        } else {
+            const float rel = std::fabs(sum - baseline) / std::fabs(baseline);
+            CHECK_AT(rel < 1e-4f, label);
+        }
+
+        // 순회는 상태를 바꾸지 않으므로 다시 돌려도 합이 같다.
+        bench.RunFrame();
+        CHECK_AT(bench.LastSum() == sum, label);
+
+        bench.Shutdown();
+        CHECK_AT(bench.NodeCount() == 0, label);
+    }
+    // ...
+}
+```
+
+`bench.LastSum() == sum` 은 오차 없는 등식이다. 순회가 상태를 바꾸지 않는다는 성질이라, 여기서 부동소수 오차가 끼면 그건 순회가 아니라 갱신을 하고 있다는 뜻이다. 뒤이어 allocator를 주지 않은 intrusive 경로가 노드를 0개로 두는지와, 풀이 모자랄 때 노드 수가 풀 용량에서 멈추는지도 같은 검사 안에 있다.
 
 ```bash
 cmake -S . -B build
 cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
+ctest --test-dir build -C Release -R parts_container_tests --output-on-failure
+
+./build/parts_core_tests container              # Linux/macOS
+.\build\Release\parts_core_tests.exe container  # Windows
 ```
 
-`ctest` 는 GUI 없이 도는 `parts_core_tests` 를 실행한다. 그중 `TestContainerEquivalence` 가 세 컨테이너를 같은 시드로 채워 노드 수가 정확히 같은지, 합산 결과가 상대오차 1e-4 안에서 일치하는지, `Shutdown` 후 노드 수가 0으로 돌아가는지, 풀이 모자라면 노드 수가 풀 용량에서 멈추는지를 확인한다. 컨테이너를 바꿔도 *같은 계산* 이라는 전제가 깨지면 ms 비교는 의미가 없으므로, 이 동등성 확인이 측정의 전제 조건이다.
+```text
+parts_core_tests: group `container`
+  container/ContainerEquivalence ... 25 check(s) ok
+container: 1 test(s), 25 check(s), 0 failure(s)
+```
+
+25는 첫 컨테이너 6개 + 나머지 둘 7개씩(baseline과의 상대오차 비교가 하나 더 붙는다) = 20에, allocator 없는 경로 2개와 풀이 모자란 경로 3개를 더한 수다. 컨테이너를 하나 더 붙이면 `ppl::kContainerCount` 를 따라 루프가 늘어나 이 수도 함께 늘어난다.
+
+### 실행 결과
 
 실행 후 좌측 stats 영역 하단에 `container : X.XXX ms (5000 nodes)` 가 매 프레임 갱신된다. container 콤보박스를 클릭해 vector → std::list → IntrusiveList 순서로 바꾸며 변화를 본다.
 

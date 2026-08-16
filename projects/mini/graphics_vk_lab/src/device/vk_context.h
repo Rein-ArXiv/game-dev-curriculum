@@ -2,8 +2,10 @@
 
 // VkContext — Instance + PhysicalDevice + LogicalDevice + Queue 묶음.
 //
-// Step 1: Graphics queue 한 개 + Validation Layer 활성 (디버그 빌드).
-// Step 4 에서 Compute / Transfer queue 추가.
+// Validation Layer 는 디버그 빌드에서만 켠다. queue 는 present 가능한 graphics
+// family 와 dedicated compute/transfer family 를 함께 고르고(dedicated 이 없으면
+// graphics family 로 대체) 셋 다 생성한다. 다만 실제 제출은 graphics queue 하나만
+// 쓴다 — compute/transfer 는 Step 4 의 queue 모델을 위한 선택 구조다.
 
 #include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>

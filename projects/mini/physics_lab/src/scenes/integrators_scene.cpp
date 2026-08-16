@@ -111,7 +111,7 @@ void IntegratorsScene::DrawWorld(int cx, int cy, int cw, int ch) {
     DrawRectangleLines(cx, cy, cw, ch, Color{60, 62, 70, 255});
 
     // === 진동자 시각화 ===
-    // 4 개 적분기 + 분석해 = 5 트랙. 각 트랙은 수평선 + 그 위 마우스 흔들리는 점.
+    // 4 개 적분기 + 분석해 = 5 트랙. 각 트랙은 수평선 + 그 위를 x 값 따라 오가는 점.
     int   trackTop    = cy + 12;
     int   trackHeight = 36;
     int   trackInner  = 28;   // 마커 그리는 폭의 반(수직)

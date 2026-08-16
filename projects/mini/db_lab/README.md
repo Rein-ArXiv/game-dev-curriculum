@@ -22,7 +22,7 @@
 |---|---|---|
 | `db_bench` | 커밋 지연 스윕 + 재생 시간 | fsync × txn 크기별 avg/max ms, commits/sec; 로그 크기별 replay ms |
 | `db_crash_test` | 크래시 주입 일관성 스윕 | 파일 전체 범위의 절단 지점 표본 + 바이트 손상 지점 표본 × 시드 3종 — 보존·원자성 불변식 |
-| `db_tests` | 단위 테스트 (ctest) | put/get/del 가시성, 재시작 복구, 미완 꼬리 폐기, CRC 손상 검출과 손상 이후 꼬리 폐기, Del 프레임 디스크 왕복, fsync ON 커밋의 내구성, 프레임 길이 상한 거부 |
+| `db_tests` | 단위 테스트 (ctest) | 프레임 바이트 배치와 CRC 검사값, put/get/del 가시성, 재시작 복구, 미완 꼬리 폐기, CRC 손상 검출과 손상 이후 꼬리 폐기, Del 프레임 디스크 왕복, fsync ON 커밋의 내구성, 프레임 길이 상한 거부 |
 
 스토어 자체(`src/wal_kv.hpp`)는 헤더 하나다 — 프레임 형식 `[len][crc32][payload]`, 트랜잭션 = op 프레임들 + COMMIT 프레임, 복구 = 재생하되 COMMIT 없는 꼬리와 CRC 불일치 이후를 유효 접두사 끝에서 절단.
 
@@ -32,10 +32,11 @@
 
 | 결함 | 잡는 검사 |
 |---|---|
-| CRC 불일치에서 멈추지 않고 재동기화 (`break`→`continue`) | `db_tests`의 로그 중간 손상 케이스, `db_crash_test`의 바이트 손상 스윕 |
-| `Op::Del` 프레임 디코드 실패 | `db_tests`의 Del 재시작 케이스 |
-| fsync ON 경로가 항상 실패 | `db_tests`의 fsync 내구성 케이스, `db_bench --smoke` |
-| 프레임 길이 상한(`kMaxFrame`) 가드 제거 | `db_tests`의 과대 프레임 거부 케이스 |
+| CRC 다항식·반사·엔디언이 바뀜 | `db_tests`의 `frame_codec_bytes` (IEEE 검사값 `0xCBF43926`) |
+| CRC 불일치에서 멈추지 않고 재동기화 (`break`→`continue`) | `db_tests`의 `midlog_corruption_drops_tail`, `db_crash_test`의 바이트 손상 스윕 |
+| `Op::Del` 프레임 디코드 실패 | `db_tests`의 `del_survives_restart` |
+| fsync ON 경로가 항상 실패 | `db_tests`의 `fsync_on_commit_durable`, `db_bench --smoke` |
+| 프레임 길이 상한(`kMaxFrame`) 가드 제거 | `db_tests`의 `oversized_frame_rejected` |
 
 ## 빌드와 실행
 
@@ -49,13 +50,26 @@ ctest --test-dir build --output-on-failure
 
 Windows(MSVC)에서는 `cmake --build build --config Release`, 실행 파일은 `build/Release/`, ctest는 `ctest --test-dir build -C Release --output-on-failure`. 외부 의존성이 없다 — C++20 컴파일러와 CMake만 있으면 된다.
 
-ctest에 등록된 대상은 세 개다.
+ctest에 등록된 대상은 다섯이다 — 전체 실행 셋과, step 문서가 자기 검증에 쓰는 step별 실행 둘이다.
 
-| 테스트 이름 | 명령 | 걸리는 시간 |
-|---|---|---|
-| `db_tests` | `./build/Release/db_tests` | 1초 미만 |
-| `db_crash_test` | `./build/Release/db_crash_test` | 20초 안팎 |
-| `db_bench_smoke` | `./build/Release/db_bench --smoke` | 1초 안팎 |
+| 테스트 이름 | 명령 | step | 걸리는 시간 |
+|---|---|---|---|
+| `db_tests` | `./build/Release/db_tests` | — (전체) | 1초 미만 |
+| `db_crash_test` | `./build/Release/db_crash_test` | step04 | 20초 안팎 |
+| `db_bench_smoke` | `./build/Release/db_bench --smoke` | step03 | 1초 안팎 |
+| `db_tests_step01` | `./build/Release/db_tests --step=01` | step01 | 1초 미만 |
+| `db_tests_step02` | `./build/Release/db_tests --step=02` | step02 | 1초 미만 |
+
+step별 실행은 전체 실행을 대체하지 않고 *더한다*. step k를 막 끝낸 독자가 그 시점에 확인할 수 있는 것만 골라 이름과 함께 찍는 것이 목적이다 — 어느 검사가 어느 step 소속인지는 `tests/db_tests.cpp`의 `kCases` 표가 정한다.
+
+```text
+$ ./build/Release/db_tests --step=01
+  ok   frame_codec_bytes
+  ok   crc_mismatch_stops_replay
+  ok   garbage_length_rejected
+  ok   oversized_frame_rejected
+db_tests[step01]: 4/4 passed
+```
 
 `db_bench --smoke`는 표본을 줄인 축소 실행이라 측정값으로는 쓸 수 없다. 등록 이유는 fsync ON 커밋 경로와 벤치의 실패 검사(커밋·재생이 실패하면 즉시 비정상 종료)를 매 ctest 실행에서 지나가게 하기 위해서다. 수치를 보려면 인자 없이 `./build/Release/db_bench`를 직접 돌린다.
 
@@ -83,8 +97,9 @@ db_lab/
   src/
     wal_kv.hpp          WAL 트랜잭셔널 KV (헤더 단일, fsync 토글, 복구 통계)
     db_bench.cpp        커밋 지연 / 재생 시간 벤치
+  tests/
     db_crash_test.cpp   절단 스윕 크래시 주입 + 불변식 검사
-    db_tests.cpp        단위 테스트 (ctest)
+    db_tests.cpp        단위 테스트 (ctest, step별 이름 필터)
 ```
 
 ## 구현 범위 메모

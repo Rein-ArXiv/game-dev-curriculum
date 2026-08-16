@@ -45,9 +45,10 @@ CgroupWeightState& CgroupState() {
     return state;
 }
 
-// /proc/self/cgroup 첫 줄의 v2 cgroup 경로를 얻는다.
+// /proc/self/cgroup 의 v2 라인("0::...")에서 cgroup 경로를 얻는다.
 //   "0::/user.slice/.../skl.scope" 형태. /sys/fs/cgroup 와 합쳐 절대 경로.
-//   cgroup v2가 아니면 빈 문자열.
+//   cgroup v2가 아니거나, SKL_CGROUP_DIR 이 그 경로와 정확히 일치하지 않으면
+//   빈 문자열.
 std::string CurrentCgroupV2Path() {
     std::ifstream f("/proc/self/cgroup");
     if (!f) return {};

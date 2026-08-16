@@ -1,6 +1,8 @@
 #pragma once
 
-// VkAlloc — VMA (Vulkan Memory Allocator) 래퍼. Buffer/Image 생성 헬퍼.
+// VkAlloc — VMA (Vulkan Memory Allocator) 래퍼. Buffer 생성 헬퍼 두 개와
+// VmaAllocator 접근자를 제공한다. Image 는 호출부가 Allocator() 로 직접 만든다
+// (App::CreateDepth 의 vmaCreateImage).
 
 #include <vulkan/vulkan.h>
 #include "vk_mem_alloc.h"

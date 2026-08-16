@@ -13,13 +13,13 @@ namespace skl {
 // main 루프가 prev/curr 비교로 변경 감지를 한다.
 //
 // 활성화된 토글: backend / sync / sched / ctx / workerCount.
-// 확장 지점: ctx(컨텍스트), file size 등.
+// 확장 지점: file size 등.
 struct Toggles {
     BackendType backend     = BackendType::Read;
     SyncType    sync        = SyncType::Mutex;
     SchedType   sched       = SchedType::Default;
     CtxType     ctx         = CtxType::Pthread;
-    int         workerIdx   = 0;       // workerCountPresets[0] = 1
+    int         workerIdx   = 0;       // kWorkerCountPresets[0] = 1
 };
 
 // 워커 수 프리셋. 콤보박스 인덱스 → 실제 워커 수.

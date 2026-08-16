@@ -428,7 +428,8 @@ target_include_directories(graphics_dx_contract_tests PRIVATE
 target_compile_definitions(graphics_dx_contract_tests PRIVATE
     NOMINMAX
     WIN32_LEAN_AND_MEAN
-    DXLAB_WINDOWS=1)
+    DXLAB_WINDOWS=1
+    DXLAB_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(graphics_dx_contract_tests PRIVATE d3d12 dxguid)
 add_test(NAME graphics_dx_contract_tests COMMAND graphics_dx_contract_tests)
 
@@ -438,20 +439,75 @@ if(MSVC)
 endif()
 ```
 
+`DXLAB_SOURCE_DIR` 은 링크할 수 없는 TU 의 계약을 위한 탈출구다. `src/app/app.cpp` 는 Win32 창·실제 디바이스·ImGui 백엔드에 묶여 헤드리스로 링크할 수 없는데, `App::Shutdown()` 의 *단계 순서* 만은 반드시 지켜져야 한다. 그래서 테스트가 그 파일을 소스 텍스트로 읽어 순서를 검사한다.
+
 `tests/d3d12_stubs.h` 가 `ID3D12GraphicsCommandList` · `ID3D12Fence` · `ID3D12Resource` · `ID3D12QueryHeap` · `ID3D12CommandQueue` 의 모든 가상 함수를 채운 대역을 제공한다. 실제 인터페이스를 상속하므로 제품 코드는 자기가 대역과 이야기하는지 모른다. 타임스탬프 쪽은 `InitHeadless` 로 query heap · readback · queue · fence 를 대역으로 물리고 주파수를 1 MHz 로 주입한다 — 그래야 틱 차가 곧 마이크로초가 돼 기대값을 손으로 계산할 수 있다.
+
+실행 단위는 그 실행 파일 하나가 아니다. `add_test` 는 검사 그룹의 묶음마다 하나씩 있고, 인자가 어느 묶음을 돌지 고른다. 측정 인프라 몫의 등록은 이 한 줄이다.
+
+<!-- snippet: CMakeLists.txt@step02-target -->
+```cmake
+add_test(NAME graphics_dx_step02_measure      COMMAND graphics_dx_contract_tests step02)
+```
 
 ```powershell
 cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
+ctest --test-dir build -C Release -R graphics_dx_step02 --output-on-failure
+build\Release\graphics_dx_contract_tests.exe step02
 ```
 
-기대 출력은 `1/1 Test #1: graphics_dx_contract_tests .... Passed` 와 `DirectX contract tests passed` 다. 검사 항목은 다음과 같다.
+```text
+1/1 Test #3: graphics_dx_step02_measure .......   Passed    0.03 sec
+
+100% tests passed out of 1
+
+  [step02] slot_ready_predicate                        5 checks
+  [step02] timestamp_poll_waits_for_fence              14 checks
+  [step02] timestamp_begin_waits_before_overwrite      11 checks
+step02: 3 groups, 30 checks, 0 failures
+DirectX contract tests passed
+```
+
+`-R` 를 빼면 등록된 전체 타깃 `graphics_dx_contract_tests` 가 모든 그룹을 한 번에 돈다. 없는 이름을 넘기면 실행 파일이 `no test group matches` 를 찍고 exit 2 로 죽는다 — 0 개를 돌고 조용히 통과하는 상태가 없다.
+
+세 그룹의 검사 항목은 다음과 같다.
 
 - 완료값이 slot fence 값보다 작으면 `Poll`이 `Map`을 *한 번도* 부르지 않고 slot도 소비하지 않는다.
 - 완료 후에는 정확히 한 번 `Map`/`Unmap` 하고, 주입한 tick 차와 주파수로 계산한 ms가 나온다.
 - 링을 완료 없이 가득 채운 뒤 `Begin`을 부르면 slot을 잡지 않고(`activeSlot == -1`) `EndQuery`도 기록하지 않는다. 완료를 알리면 그때 다시 같은 slot을 잡는다.
+- `App::Shutdown()` 에서 `ctx_.Flush()` 가 ImGui 백엔드 종료·`gpuTimer_.Shutdown()`·`ctx_.Shutdown()` 보다 앞에 온다. `D3D12Context::Flush()` 가 `Signal` 뒤에 실제로 기다린다.
 
-판정식을 `return true;`로 바꾸면 이 검사들이 한꺼번에 깨진다.
+앞의 두 항목은 이렇게 판정한다. 주파수를 1 MHz 로 주입했으므로 tick 차 2000 은 정확히 2 ms 여야 한다.
+
+<!-- snippet: tests/graphics_dx_contract_tests.cpp#TestTimestampPollWaitsForFence -->
+```cpp
+void TestTimestampPollWaitsForFence() {
+    // ...
+    tq.SignalSubmitted();
+    CHECK(tq.SlotFence(0) == 1);
+    CHECK(fence.lastSignaled == 1);
+
+    // GPU 미완료 -> Map 하지 않고, slot 도 소비하지 않는다.
+    fence.completed = 0;
+    tq.Poll();
+    CHECK(readback.mapCalls == 0);
+    CHECK(tq.SlotFence(0) == 1);
+    CHECK(tq.ReadIndex() == 0);
+
+    // 완료 -> 정확히 1회 Map/Unmap 하고 ms 를 계산한다.
+    fence.completed = 1;
+    readback.storage[0] = 1000;
+    readback.storage[1] = 3000;       // 2000 tick @1MHz = 2ms.
+    tq.Poll();
+    CHECK(readback.mapCalls == 1);
+    CHECK(readback.unmapCalls == 1);
+    CHECK(std::fabs(tq.LastMs() - 2.0) < 1e-9);
+    CHECK(tq.SlotFence(0) == 0);
+    CHECK(tq.ReadIndex() == 1);
+}
+```
+
+`fence.completed` 를 GPU 대신 손으로 움직이는 것이 이 검사의 핵심이다. 실제 하드웨어에서는 "아직 안 끝난 slot 을 읽는" 순간을 재현할 수 없지만, 여기서는 그 순간이 첫 번째 `Poll()` 이다. 판정식 `IsSlotReady` 를 `return true;`로 바꾸면 그 `Poll()` 이 `Map` 을 불러 버리므로 검사들이 한꺼번에 깨진다.
 
 ---
 

@@ -19,6 +19,7 @@
 
 스토어의 공개 계약과 상태는 다음과 같다.
 
+<!-- snippet: src/wal_kv.hpp -->
 ```cpp
 class WalKv {
 public:
@@ -30,11 +31,15 @@ public:
     // 테스트가 그 경계를 정확히 겨냥할 수 있도록 계약으로 노출한다.
     static constexpr uint32_t kMaxFrame = 1u << 20;
 
+    // ... Open — 3절
+
     void Close() { if (f_) { std::fclose(f_); f_ = nullptr; } }
 
     // ----- 트랜잭션 API -----
     void TxnPut(const std::string& k, const std::string& v) { staged_.push_back({Op::Put, k, v}); }
     void TxnDel(const std::string& k)                       { staged_.push_back({Op::Del, k, {}}); }
+
+    // ... Commit — 2절
 
     void Rollback() { staged_.clear(); }
 
@@ -48,7 +53,11 @@ public:
     uint64_t RecoveredTxns() const { return recovered_txns_; }
     uint64_t DiscardedTailBytes() const { return discarded_tail_bytes_; }
 
+    // ... RecoverStats, Replay — 3절
+
 private:
+    // ... ApplyToIndex, DecodePayload, WriteFrame
+
     Options opt_;
     std::string path_;
     FILE* f_ = nullptr;
@@ -71,16 +80,14 @@ private:
 
 WAL보다 인덱스를 먼저 바꾸면 프로세스가 죽었을 때 메모리에서 보였던 값이 복구 후 사라질 수 있다.
 
+<!-- snippet: src/wal_kv.hpp#Commit -->
 ```cpp
 bool Commit() {
-    for (const Frame& frame : staged_)
-        if (!WriteFrame(frame)) return false;
+    for (const Frame& fr : staged_) if (!WriteFrame(fr)) return false;
     if (!WriteFrame({Op::Commit, {}, {}})) return false;
     if (std::fflush(f_) != 0) return false;
     if (opt_.fsync_on_commit && WALKV_FSYNC(f_) != 0) return false;
-
-    for (const Frame& frame : staged_)
-        ApplyToIndex(index_, frame);
+    for (const Frame& fr : staged_) ApplyToIndex(index_, fr);
     staged_.clear();
     return true;
 }
@@ -88,6 +95,7 @@ bool Commit() {
 
 프레임 하나를 쓰는 일과 인덱스에 적용하는 일은 각각 한 함수로 떨어진다. `fsync`는 플랫폼 분기다.
 
+<!-- snippet: src/wal_kv.hpp -->
 ```cpp
 #if defined(_WIN32)
   #include <io.h>
@@ -97,10 +105,14 @@ bool Commit() {
   #define WALKV_FSYNC(f) fsync(fileno(f))
 #endif
 
+// ...
+
 static void ApplyToIndex(std::unordered_map<std::string, std::string>& idx, const Frame& fr) {
     if (fr.op == Op::Put) idx[fr.key] = fr.value;
     else if (fr.op == Op::Del) idx.erase(fr.key);
 }
+
+// ...
 
 bool WriteFrame(const Frame& fr) {
     std::vector<uint8_t> payload = EncodePayload(fr);
@@ -121,6 +133,7 @@ Replay는 op 프레임을 임시 pending 목록에 모으고, Commit을 만났�
 
 따라서 어느 바이트에서 로그가 잘려도 복구 결과는 *완전히 커밋된 트랜잭션들의 접두사* 다.
 
+<!-- snippet: src/wal_kv.hpp -->
 ```cpp
 struct RecoverStats {
     uint64_t committed_txns = 0;
@@ -173,6 +186,7 @@ static bool Replay(const std::string& path,
 
 `Open`은 Replay 결과를 스토어 상태로 옮기고, 버린 꼬리만큼 파일을 잘라낸 뒤 append 모드로 연다.
 
+<!-- snippet: src/wal_kv.hpp#Open -->
 ```cpp
 bool Open(const std::string& path, Options opt) {
     opt_ = opt;
@@ -206,18 +220,52 @@ fsync OFF에서 Commit이 성공해도 OS 페이지 캐시에만 있을 수 있�
 5. 재시작 후 커밋된 값만 복원된다.
 6. 미완 꼬리를 복구한 뒤 새로 커밋한 값도 다음 재시작에서 복원된다.
 
-1·2번은 `db_tests`의 `TestBasic`, 3·5번은 `TestReopen`, 4·6번은 `TestUncommittedTailDiscarded`가 확인한다.
+1·2번은 `commit_visibility`(`TestBasic`), 3·5번은 `reopen_keeps_committed`(`TestReopen`), 4·6번은 `uncommitted_tail_discarded`(`TestUncommittedTailDiscarded`)가 확인한다. 여기에 `midlog_corruption_drops_tail`·`del_survives_restart`·`fsync_on_commit_durable`을 더한 여섯이 이 step의 실행 단위 `db_tests_step02`다. 셋 다 이 step이 추가한 것 — Replay의 정지 규칙, Del 프레임의 왕복, fsync 반환값 — 을 겨냥한다.
+
+4·6번의 단정은 이렇게 생겼다. 미완 꼬리를 버리는 것만으로는 부족하고, *그 자리에 새로 커밋한 값* 까지 다음 재시작에서 살아 있어야 한다. 꼬리를 잘라내지 않고 뒤에 이어 붙이는 구현은 두 번째 재시작에서 죽는다.
+
+<!-- snippet: tests/db_tests.cpp#TestUncommittedTailDiscarded -->
+```cpp
+static void TestUncommittedTailDiscarded() {
+    Reset();
+    // ... 커밋 하나를 남긴 뒤, COMMIT 프레임 없이 PUT 프레임만 손으로 덧붙인다
+    {
+        walkv::WalKv db;
+        CHECK(db.Open(kPath, {.fsync_on_commit = false}));
+        CHECK(db.Get("k").value_or("") == "committed");   // torn 값이 아니어야 한다
+        CHECK(db.DiscardedTailBytes() > 0);
+        db.TxnPut("after-recovery", "visible");
+        CHECK(db.Commit());
+        db.Close();
+    }
+    {
+        walkv::WalKv db;
+        CHECK(db.Open(kPath, {.fsync_on_commit = false}));
+        CHECK(db.Get("k").value_or("") == "committed");
+        CHECK(db.Get("after-recovery").value_or("") == "visible");
+        db.Close();
+    }
+}
+```
 
 ```bash
 cmake --build build --config Release
-./build/Release/db_tests
+./build/Release/db_tests --step=02
 ```
 
-관측 결과:
+관측 결과 — step01의 형식 검사는 빠지고, 이 step이 추가한 여섯만 이름과 함께 돈다.
 
 ```text
-db_tests: all passed
+  ok   commit_visibility
+  ok   reopen_keeps_committed
+  ok   uncommitted_tail_discarded
+  ok   midlog_corruption_drops_tail
+  ok   del_survives_restart
+  ok   fsync_on_commit_durable
+db_tests[step02]: 6/6 passed
 ```
+
+ctest 이름은 `db_tests_step02`이고, `./build/Release/db_tests`는 여전히 두 step을 합쳐 전부 돌린다.
 
 ---
 

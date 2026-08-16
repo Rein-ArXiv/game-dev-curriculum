@@ -97,6 +97,7 @@ int fd = syscall(SYS_perf_event_open, &attr, 0, -1, -1, 0);
 
 이 lab은 *환경 호환성* 을 우선해 getrusage를 쓴다. 모든 사용자가 권한 셋업 없이 측정 가능. perf_event_open은 *외부 perf 도구* 와 결합해 더 풍부한 분석을 보충하는 패턴으로 둔다.
 
+<!-- snippet: src/measure/proc_counters.h -->
 ```cpp
 // src/measure/proc_counters.h
 
@@ -135,12 +136,20 @@ inline ProcCounters DiffCounters(const ProcCounters& a, const ProcCounters& b) {
 
 main 루프의 측정 패턴.
 
+<!-- snippet: src/main.cpp#main -->
 ```cpp
 // src/main.cpp 일부
 
 timer.BeginCycle();
 const skl::ProcCounters before = skl::ReadProcCounters();
-const std::uint64_t bytes = workload.RunCycle();
+std::uint64_t bytes = 0;
+try {
+    bytes = workload.RunCycle();
+} catch (const std::exception& e) {
+    std::fprintf(stderr, "system_kernel_lab cycle failed: %s\n", e.what());
+    running = false;
+    break;
+}
 const skl::ProcCounters after = skl::ReadProcCounters();
 const skl::ProcCounters delta = skl::DiffCounters(before, after);
 const std::uint64_t ctxSwTotal = static_cast<std::uint64_t>(
@@ -149,6 +158,9 @@ const std::uint64_t faultsTotal = static_cast<std::uint64_t>(
     delta.minorFaults + delta.majorFaults);
 timer.EndCycle(bytes, ctxSwTotal, faultsTotal);
 ```
+
+`RunCycle` 을 감싼 try/catch는 아래 9절의 *워커 예외 전파* 와 짝이다. 워커가 보관해 둔
+예외를 메인이 다시 던지므로, 그 예외가 여기서 잡히지 않으면 도구가 조용히 죽는다.
 
 세 가지 결정 포인트.
 
@@ -223,6 +235,7 @@ float로 보관하는 이유는 *PlotLines가 float 배열을 받기* 때문. �
 
 HUD 패널 높이를 200 → 240 px로 늘려 그래프 네 개가 들어가도록 한다.
 
+<!-- snippet: src/ui/hud.cpp#Hud::Draw -->
 ```cpp
 constexpr float kPanelH = 240.0f;
 ```
@@ -540,6 +553,7 @@ WSL2의 GUI 도구가 도는 것 자체가 *시스템 부하* 다. 다른 *측�
 
 factory는 요청한 backend를 만들지 못하면 `ReadBackend` 로 폴백한다. 폴백이 일어났는데 HUD가 *요청 값* 을 그대로 표시하면, 사용자는 read로 돈 결과를 io_uring 결과로 읽는다. 그래서 시그니처가 out 파라미터를 갖는다.
 
+<!-- snippet: src/io/io_backend_factory.h -->
 ```cpp
 // src/io/io_backend_factory.h
 
@@ -552,6 +566,7 @@ std::unique_ptr<IIoBackend> CreateBackend(
 
 워크로드는 backend를 만들 때마다 이 out 값을 자기 상태에 되반영한다. 단일 모드·워커 풀·코루틴 풀 세 곳이 같은 헬퍼를 쓴다.
 
+<!-- snippet: src/workload/file_io_workload.cpp#FileIoWorkload::CreateEffectiveBackend -->
 ```cpp
 // src/workload/file_io_workload.cpp
 
@@ -569,6 +584,7 @@ std::unique_ptr<IIoBackend> FileIoWorkload::CreateEffectiveBackend() {
 
 워커 루프에서 backend가 던진 예외를 그 자리에서 놓치면 사이클은 조용히 짧은 결과를 내고 그래프는 *더 빨라진 것처럼* 보인다. 워커는 예외를 잡아 보관하고, 사이클을 기다리던 메인이 다시 던진다.
 
+<!-- snippet: src/workload/file_io_workload.cpp@worker-error -->
 ```cpp
 // src/workload/file_io_workload.cpp
 
@@ -598,12 +614,14 @@ void FileIoWorkload::RethrowWorkerError() {
 
 측정 도구라도 *계산이 맞는지* 는 GUI 없이 검사할 수 있어야 한다. 테스트 타깃은 SDL2·OpenGL·ImGui를 링크하지 않고 코어 TU만 모아 빌드한다.
 
+<!-- snippet: CMakeLists.txt -->
 ```cmake
 # CMakeLists.txt 일부
 
 enable_testing()
-add_executable(system_core_tests
-    tests/system_core_tests.cpp
+
+set(SKL_CORE_TEST_SOURCES
+    src/fault/fault_inject.cpp
     src/io/aio_backend.cpp
     src/io/io_backend_factory.cpp
     src/io/mmap_backend.cpp
@@ -614,24 +632,113 @@ add_executable(system_core_tests
     src/sync/sync_factory.cpp
     src/workload/file_io_workload.cpp
 )
-target_include_directories(system_core_tests PRIVATE src)
-target_link_libraries(system_core_tests PRIVATE
-    Threads::Threads
-    ${CMAKE_DL_LIBS}
-)
-add_test(NAME system_core_tests COMMAND system_core_tests)
-set_tests_properties(system_core_tests PROPERTIES TIMEOUT 30)
+
+add_executable(system_core_tests
+    tests/system_core_tests.cpp ${SKL_CORE_TEST_SOURCES}
+    src/measure/frame_timer.cpp)
+
+add_executable(system_fault_tests
+    tests/system_fault_tests.cpp ${SKL_CORE_TEST_SOURCES})
+
+add_executable(system_io_path_tests
+    tests/system_io_path_tests.cpp ${SKL_CORE_TEST_SOURCES})
+
+set(SKL_TEST_TARGETS system_core_tests system_fault_tests system_io_path_tests)
+
+# ...
+
+foreach(skl_test IN LISTS SKL_TEST_TARGETS)
+    target_include_directories(${skl_test} PRIVATE src)
+    target_link_libraries(${skl_test} PRIVATE
+        Threads::Threads
+        ${CMAKE_DL_LIBS}
+    )
+    target_compile_definitions(${skl_test} PRIVATE SKL_TEST_HOOKS=1)
+    target_compile_options(${skl_test} PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME ${skl_test} COMMAND ${skl_test})
+    set_tests_properties(${skl_test} PROPERTIES TIMEOUT 60)
+endforeach()
 ```
+
+코어 TU 목록을 `SKL_CORE_TEST_SOURCES` 변수 하나로 두는 이유는 타깃이 셋(성공 경로 ·
+오류 경로 · I/O 경로)이고 뒤에 헤드리스 러너까지 같은 목록을 쓰기 때문이다. 목록이
+갈라지면 어느 타깃이 어느 backend를 링크했는지가 조용히 어긋난다.
+
+`SKL_TEST_HOOKS` 는 테스트 타깃에만 정의한다. `src/testhook/test_hook.h` 의 타이밍 훅이
+앱·러너 바이너리에서는 빈 인라인 함수로 사라지도록 하기 위해서다.
 
 `SKL_HAS_POSIX_AIO` / `SKL_HAS_LIBURING` 정의와 라이브러리 링크는 GUI 타깃과 테스트 타깃에 *같이* 걸어야 한다. 한쪽만 걸면 테스트가 도는 backend 집합이 실제 도구와 달라진다.
 
-`TIMEOUT 30` 은 단순한 안전장치가 아니다. 이 lab의 워커 풀은 카운터 기반 완료 대기(`while (remaining_ > 0) yield();`)를 쓰므로, 동기화가 깨지면 *실패* 가 아니라 *멈춤* 으로 나타난다. 타임아웃이 없으면 그 종류의 회귀가 테스트에서 영원히 매달린다.
+`TIMEOUT 60` 은 단순한 안전장치가 아니다. 이 lab의 워커 풀은 카운터 기반 완료 대기(`while (remaining_ > 0) yield();`)를 쓰므로, 동기화가 깨지면 *실패* 가 아니라 *멈춤* 으로 나타난다. 타임아웃이 없으면 그 종류의 회귀가 테스트에서 영원히 매달린다.
 
-`tests/system_core_tests.cpp` 는 세 가지를 검사한다.
+`tests/system_core_tests.cpp` 의 검사 목록은 파일 끝의 대응표에 있다. 표의 항목마다 *그 검사를 추가한 step 번호* 가 붙어 있다.
 
-- `TestIoBackends` — 컴파일에 들어간 모든 backend가 같은 총 바이트와 같은 체크섬을 돌려주는지.
+- `TestWorkloadSkeleton` / `TestFrameTimerWindow` — 결정적 fixture 위의 단일 스레드 사이클과 슬라이딩 윈도우의 회계.
+- `TestReadBackendEquivalence` / `TestSyncBackendEquivalence` / `TestAsyncBackendEquivalence` — backend 그룹마다 같은 총 바이트와 같은 체크섬을 돌려주는지.
 - `TestSyncPrimitives` — 4종 동기화가 4스레드 × 20000회 증가에서 상호배제를 지키는지.
-- `TestWorkloadExecutionModels` — 단일 / 워커 풀 / 코루틴 풀 세 실행 모델이 같은 결과를 내는지.
+- `TestWorkerPoolExecutionModel` / `TestCoroutinePoolExecutionModel` — 두 실행 단위가 단일 스레드 기준값과 같은 결과를 내는지.
+- `TestQueueHandoffStress` / `TestQueueHandoffRegression` — 작업 큐 인계 경계의 `remaining_` 언더플로를 반복 스트레스와 `src/testhook` 훅 두 개의 결정적 랑데부로.
+- `TestFrameTimerCounterChannels` — 카운터 두 채널이 delta를 가공 없이 그대로 싣는지.
+
+오류 경로(`system_fault_tests`)와 I/O 3항목(`system_io_path_tests`)은 별도 타깃이다. 자세한 범위는 `README.md` 의 검증 범위 절에 있다.
+
+### 실행 단위를 step 입도로 나눈다
+
+전체 실행 케이스 하나만 있으면 각 단계의 독자가 *자기가 방금 만든 것* 을 따로 확인할 수 없다. 초록은 나오지만 그 초록이 무엇에 대한 초록인지는 마지막 단계에서만 대응한다. 그래서 세 실행 파일이 `--step=N` 필터를 받고, CMake가 step마다 `add_test` 를 따로 건다. 전체 실행 케이스는 그대로 두고 *더한* 것이다.
+
+<!-- snippet: CMakeLists.txt@step-tests -->
+```cmake
+function(skl_add_step_test tag suite target)
+    add_test(NAME skl_step${tag}_${suite} COMMAND ${target} --step=${tag})
+    set_tests_properties(skl_step${tag}_${suite} PROPERTIES TIMEOUT 60)
+endfunction()
+
+# 워크로드 골격 · 프레임 타이머 윈도우
+skl_add_step_test(01 core     system_core_tests)
+# IIoBackend + ReadBackend + factory
+skl_add_step_test(02 core     system_core_tests)
+skl_add_step_test(02 fault    system_fault_tests)
+skl_add_step_test(02 io_path  system_io_path_tests)
+# ...
+# 카운터 채널 · 주입 seam 의 계약
+skl_add_step_test(08 core     system_core_tests)
+skl_add_step_test(08 fault    system_fault_tests)
+```
+
+이 배선이 스스로를 지킨다. 대응표에 없는 step을 CMake에서 걸면 실행 파일이 *선택된 검사가 0개* 라며 종료 코드 2로 실패한다. 케이스가 아무것도 돌지 않은 채 초록이 되는 상태가 없다.
+
+이 단계가 얹은 검사는 카운터 두 채널이다. 시간은 머신마다 다르지만 "받은 delta를 그대로 싣는다"는 계약은 아니다.
+
+<!-- snippet: tests/system_core_tests.cpp#TestFrameTimerCounterChannels -->
+```cpp
+// tests/system_core_tests.cpp
+
+void TestFrameTimerCounterChannels() {
+    skl::FrameTimer timer;
+
+    timer.BeginCycle();
+    timer.EndCycle(4096, /*ctxSwitchesDelta=*/37, /*pageFaultsDelta=*/11);
+    CHECK(timer.LastCtxSwitches() == 37.0f);
+    CHECK(timer.LastPageFaults() == 11.0f);
+    CHECK(timer.CtxSwitches()[0] == 37.0f);
+    CHECK(timer.PageFaults()[0] == 11.0f);
+
+    // 기본 인자 = 0. 카운터를 못 읽는 환경에서도 채널이 조용히 이전 값을
+    // 물고 있으면 안 된다.
+    timer.BeginCycle();
+    timer.EndCycle(4096);
+    CHECK(timer.LastCtxSwitches() == 0.0f);
+    CHECK(timer.LastPageFaults() == 0.0f);
+    // ...
+    // 네 채널이 같은 인덱스를 공유한다 — 그래프 네 개가 같은 사이클을 가리킨다.
+    CHECK(timer.Head() == 2);
+    CHECK(timer.Filled() == 2);
+    CHECK(timer.CycleMs()[1] == timer.LastCycleMs());
+    // ...
+}
+```
+
+두 번째 사이클이 0을 싣는지 보는 것이 요점이다. 채널이 이전 값을 물고 있으면 카운터를 못 읽는 환경에서 그래프가 *변화 없음* 대신 *직전 값 유지* 를 그린다. 그리고 네 채널이 같은 인덱스를 공유해야 그래프 넷이 같은 사이클을 가리킨다.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -640,12 +747,80 @@ ctest --test-dir build --output-on-failure
 ```
 
 ```text
-Test project .../system_kernel_lab/build
-    Start 1: system_core_tests
-1/1 Test #1: system_core_tests ................   Passed    2.31 sec
+      Start  1: system_core_tests
+ 1/25 Test  #1: system_core_tests ........................   Passed    0.77 sec
+      Start  2: system_fault_tests
+ 2/25 Test  #2: system_fault_tests .......................   Passed    0.02 sec
+      Start  3: system_io_path_tests
+ 3/25 Test  #3: system_io_path_tests .....................   Passed    0.64 sec
+      Start  4: system_core_tests_strict
+ 4/25 Test  #4: system_core_tests_strict .................   Passed    0.86 sec
+      Start  5: system_kernel_bench_smoke
+ 5/25 Test  #5: system_kernel_bench_smoke ................   Passed    0.01 sec
+      Start  6: system_kernel_bench_smoke_workers
+ 6/25 Test  #6: system_kernel_bench_smoke_workers ........   Passed    0.01 sec
+      Start  7: system_kernel_bench_fault_channel
+ 7/25 Test  #7: system_kernel_bench_fault_channel ........   Passed    0.01 sec
+      Start  8: system_kernel_bench_rejects_bad_toggle
+ 8/25 Test  #8: system_kernel_bench_rejects_bad_toggle ...   Passed    0.00 sec
+      Start  9: skl_step01_core
+ 9/25 Test  #9: skl_step01_core ..........................   Passed    0.00 sec
+      Start 10: skl_step02_core
+10/25 Test #10: skl_step02_core ..........................   Passed    0.00 sec
+      Start 11: skl_step02_fault
+11/25 Test #11: skl_step02_fault .........................   Passed    0.00 sec
+      Start 12: skl_step02_io_path
+12/25 Test #12: skl_step02_io_path .......................   Passed    0.31 sec
+      Start 13: skl_step03_core
+13/25 Test #13: skl_step03_core ..........................   Passed    0.00 sec
+      Start 14: skl_step03_fault
+14/25 Test #14: skl_step03_fault .........................   Passed    0.00 sec
+      Start 15: skl_step03_io_path
+15/25 Test #15: skl_step03_io_path .......................   Passed    0.00 sec
+      Start 16: skl_step04_core
+16/25 Test #16: skl_step04_core ..........................   Passed    0.00 sec
+      Start 17: skl_step04_fault
+17/25 Test #17: skl_step04_fault .........................   Passed    0.01 sec
+      Start 18: skl_step04_io_path
+18/25 Test #18: skl_step04_io_path .......................   Passed    0.33 sec
+      Start 19: skl_step05_core
+19/25 Test #19: skl_step05_core ..........................   Passed    0.94 sec
+      Start 20: skl_step05_fault
+20/25 Test #20: skl_step05_fault .........................   Passed    0.00 sec
+      Start 21: skl_step06_fault
+21/25 Test #21: skl_step06_fault .........................   Passed    0.00 sec
+      Start 22: skl_step07_core
+22/25 Test #22: skl_step07_core ..........................   Passed    0.04 sec
+      Start 23: skl_step07_fault
+23/25 Test #23: skl_step07_fault .........................   Passed    0.00 sec
+      Start 24: skl_step08_core
+24/25 Test #24: skl_step08_core ..........................   Passed    0.00 sec
+      Start 25: skl_step08_fault
+25/25 Test #25: skl_step08_fault .........................   Passed    0.00 sec
 
-100% tests passed, 0 tests failed out of 1
+100% tests passed, 0 tests failed out of 25
 ```
+
+앞의 셋이 실행 파일 전체를 도는 케이스다. 그 뒤 `system_core_tests_strict` 는 같은
+실행 파일을 `SKL_REQUIRE_BACKENDS=uring,aio` 환경에서 한 번 더 돌려 io_uring/aio가 조용히
+read로 폴백하지 않았는지 강제한다(`ctest -LE strict` 로 빼면 그 강제 없이 돈다).
+`system_kernel_bench_*` 넷은 헤드리스 러너가 거는 케이스다.
+
+`skl_step01_core` 부터 `skl_step08_fault` 까지 열일곱은 같은 검사들을 step 입도로 다시 건 것이다. 같은 검사가 두 번 도는 셈이라 실행 시간이 조금 늘지만(전체 4초), 얻는 것은 *어느 단계의 무엇이 깨졌는지* 가 케이스 이름에 바로 나온다는 점이다. `ctest -R skl_step05` 처럼 한 단계만 골라 돌릴 수도 있다.
+
+```bash
+./build/system_core_tests --step=08
+```
+
+```text
+[strict] SKL_REQUIRE_BACKENDS=<unset> (fallback tolerated)
+[ run  ] step08  frame timer counter channels
+[channels] ctx_sw=37,0 faults=11,0 (delta as given, no smoothing)
+[  ok  ] step08  frame timer counter channels
+system_core_tests --step=8: 1/11 check(s) run, 0 failed
+```
+
+`ctx_sw=37,0` 은 첫 사이클이 받은 37을 그대로 싣고 둘째 사이클이 0으로 돌아왔다는 뜻이다. 평활화도 누적도 하지 않는다 — 그래야 CSV의 값과 `strace -c` 의 값을 나란히 놓을 수 있다.
 
 이 테스트가 검사하는 것은 *결과의 동등성* 이지 *성능* 이 아니다. 성능 수치는 환경마다 달라 회귀 판정 기준이 될 수 없다.
 

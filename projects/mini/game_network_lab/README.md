@@ -12,7 +12,7 @@
 | wire format은 encoder가 아니라 명세가 정한다. control frame 12byte header와 datagram 24byte header는 고정 byte 열이다. | 없음(고정 vector) | 손으로 적은 기대 byte 배열 | `EncodeControl(Hello, {1..5})` 17byte, `EncodeDatagram(Input, 42, 99, {1..5})` 29byte 전 byte | magic `47 4E 4C 31`, version·type·길이·reserved가 big-endian으로 명세와 일치한다 | encoder와 decoder가 같은 상수를 공유하도록 바꿔도 golden 배열이 먼저 깨진다 | `game_network_protocol` |
 | 손상된 header는 복구 대상이 아니라 종료 사유다. | 변조 위치(magic, version, 선언 길이, reserved), 누적 push byte 수 | 나머지 byte는 정상 frame·datagram 그대로 | `DecodeDatagram` 반환, `FrameDecoder::Pop`과 `Failed()`, `BufferedBytes()` | 네 종류 모두 거부되고 stream decoder는 영구 실패 상태로 남는다 | 마지막 byte 제거, 선언 길이 ±1, reserved 1, magic 1byte 반전, version 2, 선언 길이 65537, 상한 +1 byte push | `game_network_protocol` |
 | 오류 데이터그램이 preposted receive capacity를 영구 소비하지 않는다. | 정상 client 앞에 보내는 oversized UDP 개수(64) | 같은 서버 설정, oversized 뒤 정상 client 1명 | client exit code, decode한 snapshot 수 | `WSAEMSGSIZE` 완료 뒤에도 handshake·binding·snapshot이 성공한다 | 4KiB UDP 데이터그램 64개 | `game_network_process` |
-| socket close와 session 해제는 다르다. close 뒤 취소 completion을 회수할 때까지 operation의 `shared_ptr<Session>`이 수명을 유지한다. | `--duration` 종료 시점 | 같은 포트, 같은 client 시나리오 | 서버 process exit code와 종료 소요 시간 | drain 뒤 제한 시간 안에 exit 0 | 없음. 강제 종료 결과는 성공으로 세지 않는다 | `game_network_process`(종료 경로 간접) |
+| socket close와 session 해제는 다르다. close 뒤 취소 completion을 회수할 때까지 operation의 `shared_ptr<Session>`이 수명을 유지한다. | `--duration` 종료 시점 | 같은 포트, 같은 client 시나리오 | 서버 process exit code와 종료 소요 시간, 정지한 backend를 다시 Start 했을 때의 `Connected` 이벤트 | drain 뒤 제한 시간 안에 exit 0. 같은 객체를 3회 Start/Stop 해도 매 round에서 loopback 연결이 accept된다 | 없음. 강제 종료 결과는 성공으로 세지 않는다 | `game_network_process`(종료 경로 간접), `game_network_lifecycle`(drain 뒤 재시작) |
 | 입력 순서는 wrap될 수 있다. 32bit serial number 비교로 오래된·중복 입력을 버린다. | sequence 쌍 `(0, 0xffffffff)`, `(0xffffffff, 0)`, `(17, 17)`, `(18, 17)`. 적용부는 `0xfffffff0` → 같은 값 → `0xffffffef` → `2` 순서 | 같은 비교 함수, 같은 결합 endpoint | `IsNewerSequence` 반환, snapshot의 ack와 권위 위치 | wrap 뒤 값이 더 새롭고 같은 값은 새롭지 않다. 중복·역행 입력은 `moveX`를 바꾸지 않고 ack도 갱신하지 않는다 | 같은 sequence 재전송, 역행 sequence 재전송 | `game_network_protocol`(순수 함수), `game_network_runtime`(적용부) |
 | 권위 상태는 고정 tick에서만 전진하고 snapshot은 3 tick마다 나간다. 긴 정지 뒤 catch-up에는 상한이 있다. | 주입한 `Advance()` 시각 열(1 tick 간격 12회, 10 tick 점프 1회) | 같은 입력 `moveX=+3, moveY=-2`, 결합된 client 1명 | `RuntimeMetrics::ticks`, snapshot payload의 ack와 위치 | 12 tick 뒤 위치가 (36, -24)이고 snapshot이 정확히 4개. 10 tick 점프는 4 tick으로 잘리고 같은 시각 재호출은 0 tick이다 | 위치 적분 무력화, snapshot 주기 10배, ack 상수화, catch-up 상한 확대 | `game_network_runtime` |
 | I/O 완료 전 buffer를 재사용하지 않는다. IOCP operation이 `OVERLAPPED`, `WSABUF`, payload와 session 참조를 함께 소유한다. | — | — | operation이 소유하는 buffer 필드 | 완료가 회수될 때까지 buffer 주소와 내용이 유효하다 | 없음 | 구현만 있음 |
@@ -52,9 +52,11 @@ game_network_lab/
     server_main.cpp     headless authoritative server
     client_main.cpp     TCP/UDP client and prediction output
   tests/
+    step_cases.h          step tag table and the argv filter every test binary shares
     protocol_tests.cpp    golden vectors, fragmentation, coalescing, rejection paths
     runtime_tests.cpp     handshake, endpoint binding, fixed tick, snapshot cadence
     send_queue_tests.cpp  bounded send queue against a peer that never reads
+    lifecycle_tests.cpp   Start/Stop/Start on one backend object, drain included
     process_tests.cpp     two real processes over loopback sockets
   articles/             implementation decisions by step
 ```
@@ -115,18 +117,51 @@ projects/mini/game_network_lab/build/Release/game_client.exe --ticks 300
 
 ## 자동 검증
 
-CTest는 네 계층으로 나뉜다. 각 계층은 아래 명령 하나로 전부 실행된다.
+CTest 등록은 두 종류다. 실행 파일 하나를 통째로 도는 타깃 다섯 개와, 같은 실행 파일에 step
+태그를 넘겨 그 단계가 추가한 case만 도는 타깃이다. 아래 명령이 전부를 실행한다.
 
 ```powershell
 ctest --test-dir projects/mini/game_network_lab/build `
       -C Release --output-on-failure
 ```
 
-개별 실행이 필요하면 이름으로 고른다.
+개별 실행이 필요하면 이름으로 고른다. 계층으로 고를 때는 `game_network_runtime`처럼,
+단계로 고를 때는 `game_network_step05`처럼 쓴다.
 
 ```powershell
 ctest --test-dir projects/mini/game_network_lab/build -C Release `
       -R game_network_runtime --output-on-failure
+```
+
+| 단계 타깃 | 실행 파일과 태그 | 확인하는 것 |
+|---|---|---|
+| `game_network_step01_protocol` | `game_network_tests step01` | wire format, framing, 거부 경로, sequence wrap |
+| `game_network_step02_tick_clock` | `game_network_runtime_tests step02` | 고정 틱 catch-up 상한과 시계 재설정 |
+| `game_network_step02_send_queue` | `game_network_send_queue_tests step02` | 연결별 queued send byte 상한 |
+| `game_network_step03_backend_restart` | `game_network_lifecycle_tests step03` | IOCP drain 뒤 재시작(Windows 빌드에만 등록) |
+| `game_network_step03_datagram_recovery` | `game_network_process_tests step03` | `WSAEMSGSIZE` 뒤 receive 재게시(Windows 빌드에만 등록) |
+| `game_network_step04_backend_restart` | `game_network_lifecycle_tests step04` | epoll descriptor 수명과 재시작(Linux 빌드에만 등록) |
+| `game_network_step04_datagram_recovery` | `game_network_process_tests step04` | 잘린 데이터그램 뒤 receive 유지(Linux 빌드에만 등록) |
+| `game_network_step05_authority` | `game_network_runtime_tests step05` | handshake, endpoint 결합, 입력 순서, snapshot 주기 |
+| `game_network_step06_process_smoke` | `game_network_process_tests step06` | 오류 입력 없는 두 프로세스 loopback smoke |
+
+플랫폼 backend는 한 번에 하나만 컴파일되므로 `step03`과 `step04` 타깃은 서로 배타적이다.
+같은 계약을 두 구현에서 각각 확인한다는 뜻이며, 한쪽 통과를 다른 쪽 통과로 세지 않는다.
+
+실행 파일을 직접 부르면 case마다 관측값이 나온다. 인자 없이 부르면 그 실행 파일의 case가
+전부 돈다.
+
+```powershell
+projects/mini/game_network_lab/build/Release/game_network_runtime_tests.exe step05
+```
+
+```text
+[step05] hello_welcome          ok  Welcome payload = 8B id + 16B token, token non-zero; a second Hello -> rejectedPackets=1 disconnects=1
+[step05] forged_token           ok  one flipped token byte -> rejectedPackets=2 ConnectAccepted=0 snapshots=0 after 3 ticks
+[step05] foreign_endpoint       ok  Input from an unbound endpoint -> rejectedPackets=1 position=(0, 0) ack=0
+[step05] stale_input_ack        ok  duplicate and older sequences dropped, ack 0xfffffff0 -> 2 across the wrap, positionX=21
+[step05] tick_snapshot_cadence  ok  ticks=12 snapshots=4 ack=7 position=(36, -24)
+game_network_runtime_tests: 5 case(s) passed [step05 5]
 ```
 
 `game_network_protocol`(`tests/protocol_tests.cpp`)은 wire format을 확인한다.

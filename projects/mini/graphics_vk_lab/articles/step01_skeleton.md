@@ -44,14 +44,19 @@
 
 ## 2. Instance와 Validation
 
-Instance 생성은 GLFW surface extension 과 debug utils extension 을 함께 켠다.
+Instance 생성은 GLFW 가 요구하는 surface extension 을 켜고, validation 을 쓰는 빌드에서만 debug utils extension 을 덧붙인다.
 
+<!-- snippet: src/device/vk_context.cpp#VkContext::CreateInstance -->
 ```cpp
 uint32_t glfwExtCount = 0;
 const char** glfwExts = glfwGetRequiredInstanceExtensions(&glfwExtCount);
 std::vector<const char*> exts(glfwExts, glfwExts + glfwExtCount);
-exts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+if (kEnableValidation) {
+    exts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+}
 ```
+
+`kEnableValidation` 은 `NDEBUG` 로 갈리므로 Release 빌드에서는 messenger extension 도 layer 도 올라가지 않는다. 측정용 빌드에 validation 비용이 섞이지 않게 하는 것이 목적이다.
 
 Validation layer 는 Vulkan 학습에서 선택이 아니다. OpenGL 에서는 틀린 상태도 드라이버가 보정하는 경우가 많지만, Vulkan 은 잘못된 layout/access/queue ownership 이 곧 undefined behavior 로 이어진다.
 
@@ -59,6 +64,7 @@ Validation layer 는 Vulkan 학습에서 선택이 아니다. OpenGL 에서는 �
 
 이 lab 의 기준은 Vulkan 1.3 이다.
 
+<!-- snippet: src/device/vk_context.cpp#VkContext::CreateLogicalDevice -->
 ```cpp
 VkPhysicalDeviceVulkan13Features v13{};
 v13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
@@ -77,13 +83,15 @@ v12.pNext = &v13;
 
 Device 선택은 feature 와 surface 조건을 함께 봐야 한다. 이 lab 은 Vulkan 1.3, `synchronization2`, `dynamicRendering`, `timelineSemaphore` 가 모두 가능한 장치만 선택한다. 또한 graphics queue 라고 해서 항상 해당 window surface 에 present 할 수 있는 것은 아니다.
 
+<!-- snippet: src/device/vk_context.cpp#VkContext::PickPhysicalDevice -->
 ```cpp
-VkBool32 presentSupported = VK_FALSE;
-vkGetPhysicalDeviceSurfaceSupportKHR(physical, family, surface,
-                                     &presentSupported);
+VkBool32 presentSupported = VK_TRUE;
+if (surface != VK_NULL_HANDLE) {
+    vkGetPhysicalDeviceSurfaceSupportKHR(d, i, surface, &presentSupported);
+}
 ```
 
-이 lab 은 임시 probe surface 로 physical device 를 고른 뒤 swapchain 단계에서 실제 surface 를 다시 만든다. 핵심은 *present 가능한 graphics queue family 를 고른다* 는 점이다.
+이 lab 은 임시 probe surface 로 physical device 를 고른 뒤 swapchain 단계에서 실제 surface 를 다시 만든다. 핵심은 *present 가능한 graphics queue family 를 고른다* 는 점이다. 초기값이 `VK_TRUE` 인 것은 surface 가 없는 호출(창 없이 device 만 고를 때)에서 present 조건을 검사하지 않겠다는 뜻이고, surface 가 있으면 곧바로 질의 결과로 덮인다.
 
 ## 4. Swapchain Skeleton
 
@@ -102,15 +110,20 @@ Swapchain 은 format/present mode 를 반드시 질의해야 한다. `MAILBOX` �
 
 Pipeline 은 shader module 만으로 완성되지 않는다. vertex shader 의 `layout(location = 0) in vec3 aPos` 와 pipeline 의 vertex input description 이 정확히 맞아야 한다.
 
+<!-- snippet: src/pipeline/pipeline_cache.cpp#PipelineCache::Build -->
 ```cpp
 VkVertexInputAttributeDescription attrs[2]{};
 attrs[0].location = 0;
+attrs[0].binding = 0;
 attrs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-attrs[0].offset = offsetof(Vertex, pos);
+attrs[0].offset = offsetof(VertexForLayout, pos);
 attrs[1].location = 1;
+attrs[1].binding = 0;
 attrs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-attrs[1].offset = offsetof(Vertex, normal);
+attrs[1].offset = offsetof(VertexForLayout, normal);
 ```
+
+`VertexForLayout` 은 `pipeline_cache.cpp` 안에 둔 레이아웃 전용 구조체다. 정점 데이터 자체는 `scene.cpp` 의 `Vertex` 가 갖고 있고, 파이프라인은 그 메모리 레이아웃만 알면 되므로 두 파일이 같은 타입을 공유하지 않는다 — 대신 `stride` 와 `offset` 이 어긋나면 화면이 깨지는 계약이 된다.
 
 데이터는 갱신 빈도에 따라 세 곳으로 나눈다. 프레임마다 한 번 바뀌는 `viewProj`·조명·카메라는 set 0, binding 0 의 UBO 로, 오브젝트별 변환은 Instanced 모드에서 binding 1 의 SSBO 로, Per-Draw 모드의 오브젝트별 `model`·`color` 는 push constant 로 보낸다.
 
@@ -123,8 +136,61 @@ push constant 범위는 shader 와 정확히 맞아야 하고, 사양이 보장�
 ```powershell
 cmake -S . -B build
 cmake --build build --config Release
+ctest --test-dir build -C Release -R vk_step01_skeleton --output-on-failure
+.\build\Release\graphics_vk_contract_tests.exe step01
 build\Release\graphics_vk_lab.exe
 ```
+
+`vk_step01_skeleton` 은 골격이 세운 계약 둘만 돈다. 계약 이름과 CHECK 개수까지 함께 출력되므로, 통과 표시가 아니라 *무엇이 몇 개 확인됐는지* 가 보인다.
+
+```text
+    Start 2: vk_step01_skeleton
+1/1 Test #2: vk_step01_skeleton ...............   Passed    0.04 sec
+
+100% tests passed out of 1
+
+[step01] swapchain_negotiation ... ok (12 checks)
+[step01] push_constant_budget ... ok (9 checks)
+step01: 2 test(s), 21 checks, 0 failed
+```
+
+첫째는 swapchain 협상이다. vsync 를 켜면 무조건 `FIFO`, 끄면 `MAILBOX > IMMEDIATE > FIFO` 순으로 고른다. 후보 목록이 비어도 `FIFO` 로 떨어진다 — 이 규칙이 §4 의 네 단계 순서를 코드로 고정한 것이다.
+
+<!-- snippet: tests/graphics_vk_contract_tests.cpp#TestSwapchainSelection -->
+```cpp
+// vsync 켜짐 → 무조건 FIFO.
+CHECK(vklab::ChoosePresentMode(all, true) == VK_PRESENT_MODE_FIFO_KHR);
+CHECK(vklab::ChoosePresentMode(noMailbox, true) == VK_PRESENT_MODE_FIFO_KHR);
+// vsync 꺼짐 → MAILBOX > IMMEDIATE > FIFO.
+CHECK(vklab::ChoosePresentMode(all, false) == VK_PRESENT_MODE_MAILBOX_KHR);
+CHECK(vklab::ChoosePresentMode(noMailbox, false) == VK_PRESENT_MODE_IMMEDIATE_KHR);
+CHECK(vklab::ChoosePresentMode(fifoOnly, false) == VK_PRESENT_MODE_FIFO_KHR);
+CHECK(vklab::ChoosePresentMode({}, false) == VK_PRESENT_MODE_FIFO_KHR);
+// ...
+bool threw = false;
+try {
+    (void)vklab::ChooseSurfaceFormat({});
+} catch (const std::runtime_error&) {
+    threw = true;
+}
+CHECK(threw);
+```
+
+둘째는 push constant 예산이다. 앞에서 84 bytes 라고 적은 값이 실제 구조체 크기와 같은지, 그리고 프레임 데이터까지 합치면 보장 한도 128 bytes 를 넘는지를 같은 실행이 확인한다. shader 의 push_constant 블록과 offset 이 어긋나는 변이도 여기서 잡힌다.
+
+<!-- snippet: tests/graphics_vk_contract_tests.cpp#TestPushConstantBudget -->
+```cpp
+CHECK(sizeof(vklab::PushConstants) == 84);      // mat4(64) + vec4(16) + uint(4).
+CHECK(sizeof(vklab::PushConstants) <= 128);     // 사양이 보장하는 최소 한도.
+CHECK(offsetof(vklab::PushConstants, model) == 0);
+CHECK(offsetof(vklab::PushConstants, color) == 64);
+CHECK(offsetof(vklab::PushConstants, mode) == 80);
+// ...
+CHECK(sizeof(vklab::FrameUBO) == 96);
+CHECK(sizeof(vklab::PushConstants) + sizeof(vklab::FrameUBO) > 128);
+```
+
+instance/device/messenger 생성은 `VkInstance` 가 있어야 성립하므로 이 실행 단위 밖이다. 그쪽은 아래 화면 관측이 담당한다.
 
 관측 항목.
 

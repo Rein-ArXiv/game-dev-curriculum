@@ -76,10 +76,12 @@ void SdfScene::RebuildTextureIfNeeded(int cx, int cy, int cw, int ch) {
             float gray = 0.5f + 0.5f * t;     // 표면에서 0.5
 
             // 등고선: |fract(d/30)| 가 작으면 진하게.
+            // snippet-begin: contour-band
             if (showContours_) {
                 float band = std::fmod(std::fabs(d) / 30.0f, 1.0f);
                 if (band > 0.92f || band < 0.08f) gray *= 0.65f;
             }
+            // snippet-end: contour-band
 
             unsigned char gv = (unsigned char)(std::clamp(gray, 0.0f, 1.0f) * 255.0f);
             unsigned char rv = (d < 0) ? (unsigned char)(gv * 0.65f) : gv;
@@ -124,6 +126,7 @@ void SdfScene::DrawWorld(int cx, int cy, int cw, int ch) {
 
     // Sphere tracing 단계 시각화.
     if (showRay_) {
+        // snippet-begin: sphere-trace
         Vector2 ro = rayStart_.Position();
         Vector2 rd = {rayEnd_.Position().x - ro.x, rayEnd_.Position().y - ro.y};
         float L = std::sqrt(rd.x * rd.x + rd.y * rd.y);
@@ -139,9 +142,11 @@ void SdfScene::DrawWorld(int cx, int cy, int cw, int ch) {
             for (; iter < maxIter; ++iter) {
                 float d = SampleSDF(cur);
                 // 안전 구 (sphere tracing 의 최대 안전 반지름) 표시.
+                // snippet-begin: safe-circle
                 DrawCircleLines((int)cur.x, (int)cur.y,
                                   std::max(d, 0.0f),
                                   Color{200, 230, 255, 70});
+                // snippet-end: safe-circle
                 if (d < epsilon) { hit = true; break; }
                 if (t > maxT)    break;       // 표면 못 만남 — miss
                 t   += d;
@@ -152,12 +157,15 @@ void SdfScene::DrawWorld(int cx, int cy, int cw, int ch) {
                 DrawCircleV(cur, 5.0f, Color{255, 80, 80, 255});
             }
 
+            // snippet-begin: ray-status
             char buf[64];
             std::snprintf(buf, sizeof(buf),
                            "ray steps: %d   t = %.0f   %s",
                            iter, t, hit ? "HIT" : "miss");
             DrawText(buf, cx + 10, cy + 30, 14, Color{220, 220, 220, 255});
+            // snippet-end: ray-status
         }
+        // snippet-end: sphere-trace
     }
 
     centerA_.Draw(Color{255, 200, 80, 255}, "A");

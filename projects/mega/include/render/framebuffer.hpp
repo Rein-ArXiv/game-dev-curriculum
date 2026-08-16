@@ -1,9 +1,16 @@
 // framebuffer — CPU 프레임버퍼(RGBA8). 소프트웨어 래스터라이저의 출력 대상.
 //
-// 이 머신엔 Vulkan SDK 가 없어 GPU 백엔드를 빌드·검증할 수 없다. 그래서 RHI 의
-// *검증 가능한 백엔드* 로 소프트웨어 래스터라이저를 1급으로 둔다 — 픽셀 단위로
-// 결과를 단언할 수 있고, 게임 루프 전체를 GPU 없이 돌려 PPM 으로 떨군다. Vulkan/
-// OpenGL 백엔드는 같은 인터페이스 뒤 교체 지점으로 남긴다(graphics_vk_lab 검증).
+// GPU 백엔드가 있어도 소프트웨어 래스터라이저를 RHI 의 1급 백엔드로 둔다. Vulkan 이
+// 선택 의존이기 때문이다 — CMake 의 find_package(Vulkan QUIET) 가 실패하면
+// MEGA_HAS_VULKAN 이 정의되지 않아 platform/vk_present.hpp 가 통째로 비활성이고, 그
+// 환경에서도 제품은 빌드되고 돌아야 한다. 게다가 *검증 가능한 백엔드* 는 이쪽뿐이다
+// — 픽셀 단위로 결과를 단언할 수 있고, 게임 루프 전체를 창도 장치도 없이 돌려
+// (mega_defense --selftest) PPM 으로 떨군다.
+//
+// GPU 표시 경로는 이 저장소 안에 있다. platform/vk_present.hpp 가 아래 Data() 를 매
+// 프레임 텍스처로 올려 스왑체인에 present 하고, ctest 의 mega_defense_gpu_selftest 가
+// 그것을 검증한다(장치·창이 없는 환경에서는 실패가 아니라 SKIP). 어느 쪽이든 시뮬과
+// 그리기는 같다 — 바뀌는 것은 "표시"뿐이다.
 
 #pragma once
 

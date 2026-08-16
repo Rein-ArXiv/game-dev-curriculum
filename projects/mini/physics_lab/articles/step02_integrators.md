@@ -271,35 +271,52 @@ add_executable(physics_core_tests tests/physics_core_tests.cpp)
 target_include_directories(physics_core_tests PRIVATE src)
 enable_testing()
 add_test(NAME physics_core_tests COMMAND physics_core_tests)
+# core 는 앞으로 여러 주제가 모이는 헤더다. 실행 파일은 `argv[1]` 로 케이스
+# 필터를 받고, 여기서 추가한 것만 도는 진입점을 따로 등록한다.
+add_test(NAME step02.integrators COMMAND physics_core_tests step02)
 ```
 
 `tests/physics_core_tests.cpp` 는 dt 를 절반으로 줄였을 때 위치 오차가 줄어드는 *수렴비* 를 본다 — Explicit Euler 는 1 차 (비 > 1.7), Velocity Verlet 은 2 차 (> 3.5), RK4 는 4 차 (> 10).
 
-실행:
-
-```bash
-ctest --test-dir build -C Release --output-on-failure
-```
-
-기대 출력:
-
-```text
-    Start 1: physics_core_tests
-1/6 Test #1: physics_core_tests ...............   Passed    0.06 sec
-```
-
 수렴비만으로는 "Explicit 은 에너지가 발산하고 Semi-implicit 은 유계" 라는 이 Scene 의 간판 주장을 잡지 못한다. 둘 다 조화 진동자에서 전역 오차가 1 차라 비가 비슷하게 나오고, 두 분기를 서로 바꿔치기해도 통과한다. 그래서 에너지 `E = ½v² + ½ω²x²` 를 직접 재는 검사를 같은 파일에 둔다 (ω = 1, x₀ = 1, dt = 0.1, 200 스텝).
 
+<!-- snippet: tests/physics_core_tests.cpp@energy-checks -->
 ```cpp
 // Explicit Euler 는 매 스텝 (1 + w^2 dt^2) 배로 커진다.
 CHECK(monotone);              // e 가 직전보다 줄지 않는다
 CHECK(prevE / e0 > 1.5f);     // 실측 약 7.3 배
+// ...
 // Semi-implicit / Verlet 은 유계 진동.
 CHECK(worst < 0.15f);         // |e/e0 - 1| 의 최댓값
 CHECK(minX < -0.9f);          // 실제로 진동하는가
 ```
 
 한 스텝만 돌려 두 적분기의 위치가 갈라지는 것도 리터럴로 못 박는다 — Explicit 은 옛 속도로 옮겨 `x = 1.0`, Semi-implicit 은 갱신된 속도로 옮겨 `x = 0.99`. 이 두 줄이 있으면 `ExplicitEuler` 분기를 semi-implicit 코드로 바꾸거나 `SemiImplicitEuler` 분기를 통째로 지우는 변형이 모두 실패한다.
+
+실행:
+
+```powershell
+cmake --build build --config Release -j
+ctest --test-dir build -C Release -R step02 --output-on-failure
+.\build\Release\physics_core_tests.exe step02   # 같은 것을 직접 — 관측값까지 본다
+```
+
+`ctest` 는 통과 / 실패만 알려 준다. 두 번째 줄을 직접 돌리면 위 임계값들이 *실측 몇* 으로 통과했는지가 보인다.
+
+```text
+[step02] integrator_order
+  error ratio (dt -> dt/2): explicit=2.12044 verlet=4.00136 rk4=13.75
+  ok
+[step02] integrator_energy
+  explicit euler E/E0 after 200 steps = 7.31602
+  semi-implicit |E/E0 - 1| max = 0.0526243 minX = -1.00121
+  verlet |E/E0 - 1| max = 0.00250012 minX = -0.999999
+  1 step: x_explicit=1 x_semi=0.99
+  ok
+2 case(s) ok: physics core [step02]
+```
+
+숫자가 임계값과 얼마나 떨어져 있는지가 그대로 보인다 — 수렴비 2.12 / 4.00 / 13.75 는 각각 1 차 / 2 차 / 4 차의 이론값 2 / 4 / 16 근처이고, Explicit 의 에너지는 200 스텝에 7.3 배로 불어난 반면 Verlet 은 0.25 % 안에서 진동한다.
 
 ```mermaid
 flowchart LR
@@ -323,9 +340,9 @@ Step 2 에서 추가한 것.
 3. **integDt 누적기** — main 의 fixed dt 와 분리. 사용자가 *시뮬레이션 wall time 은 그대로 두고 적분 dt 만 바꿔* 발산 임계를 탐색.
 4. **GraphSeries / LineGraph** — 시간 시리즈 (원형 버퍼) + 라인 차트. 두 위젯 모두 Scene 에 독립적인 공용 UI.
 5. **5 track 시각화 + 에너지 그래프** — 발산이 *진동자 진폭이 화면 밖으로 + 에너지 곡선이 천장을 뚫음* 두 표현 동시에.
-6. **`physics_core_tests` 타깃** — `ctest --test-dir build -C Release` 로 적분기 오차 차수를 GUI 없이 검사.
+6. **`physics_core_tests` 타깃 + `step02` 필터** — `ctest --test-dir build -C Release -R step02` 로 오차 차수와 에너지 거동을 GUI 없이 검사. 네 적분기가 모두 호출되고, Explicit / Semi-implicit 의 한 스텝 위치 차이까지 리터럴로 고정된다.
 
-이 단계에서 자동으로 검증되는 것은 *오차 차수* 뿐이다. 에너지 유계성·발산은 그래프로만 확인할 수 있고, `SemiImplicitEuler` 분기는 어떤 테스트도 호출하지 않는다.
+여기서 자동으로 검증되는 것은 *한 자유도 조화 진동자* 의 거동뿐이다. 화면의 5 track 시각화와 에너지 그래프, dt 슬라이더로 발산 임계를 찾는 조작은 눈으로 보는 몫으로 남는다.
 
 ## 더 읽을거리
 

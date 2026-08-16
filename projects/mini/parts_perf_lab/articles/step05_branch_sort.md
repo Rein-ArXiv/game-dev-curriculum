@@ -197,6 +197,81 @@ ON 쪽이 *살짝 빠르거나 거의 같음* 이 흔한 결과다. 분기 빈�
 
 `simd: SSE/AVX2` 일 때는 체크박스 ON/OFF가 그래프에 영향이 없다. SIMD 경로는 이미 마스크 처리라 토글의 영향이 없는 게 *옳은* 결과다.
 
+### 자동 검증: `parts_branch_tests`
+
+predication은 *같은 값* 을 다른 명령으로 내는 변형이다. 결과가 달라졌다면 그건 최적화가 아니라 버그다. 그래서 `branch` 그룹은 성능이 아니라 *등식* 만 본다 — 체크박스를 켰을 때 화면의 점들이 조금이라도 다른 자리에 있으면 ms 비교는 의미를 잃는다.
+
+앞 절에서 말한 "SIMD 경로는 토글 무관" 도 여기서 기계가 확인한다. 그쪽은 같은 함수가 같은 인자로 도는 것이므로 허용 오차가 아니라 *0* 이 기준이다.
+
+<!-- snippet: tests/core_tests.cpp#TestBranchlessEquivalence -->
+```cpp
+// tests/core_tests.cpp — branch 그룹
+
+void TestBranchlessEquivalence() {
+    constexpr int   kFrames = 240;
+    constexpr float kDt     = 1.0f / 144.0f;
+
+    auto branched   = MakeAndInit(ppl::Layout::SoA);
+    auto predicated = MakeAndInit(ppl::Layout::SoA);
+    for (int i = 0; i < kFrames; ++i) {
+        branched->Update(kDt, ppl::SimdWidth::Scalar, false);
+        predicated->Update(kDt, ppl::SimdWidth::Scalar, true);
+    }
+    std::vector<float> a, b;
+    branched->CopyState(a);
+    predicated->CopyState(b);
+    CHECK(NearStates(a, b));
+
+    // 세 레이아웃 모두에서 같은 성질이 성립해야 한다.
+    for (int l = 0; l < ppl::kLayoutCount; ++l) {
+        const auto layout = static_cast<ppl::Layout>(l);
+        const char* label = ppl::LayoutName(layout);
+
+        auto off = MakeAndInit(layout);
+        auto on  = MakeAndInit(layout);
+        for (int i = 0; i < kFrames; ++i) {
+            off->Update(kDt, ppl::SimdWidth::Scalar, false);
+            on->Update(kDt, ppl::SimdWidth::Scalar, true);
+        }
+        std::vector<float> scalarOff, scalarOn;
+        off->CopyState(scalarOff);
+        on->CopyState(scalarOn);
+        CHECK_AT(NearStates(scalarOff, scalarOn), label);
+
+        // SIMD 경로는 이미 마스크 select라 이 토글에 영향받지 않는다.
+        auto simdOff = MakeAndInit(layout);
+        auto simdOn  = MakeAndInit(layout);
+        for (int i = 0; i < kFrames; ++i) {
+            simdOff->Update(kDt, ppl::SimdWidth::SSE, false);
+            simdOn->Update(kDt, ppl::SimdWidth::SSE, true);
+        }
+        std::vector<float> sseOff, sseOn;
+        simdOff->CopyState(sseOff);
+        simdOn->CopyState(sseOn);
+        CHECK_AT(NearStates(sseOff, sseOn, 0.0f), label);
+    }
+}
+```
+
+predication 쪽 루프가 `std::clamp` 를 조건 없이 부르는데도 결과가 같은 이유는 clamp가 범위 안에서 항등이기 때문이다. 그 성질이 깨지는 방향으로 루프를 고치면 `NearStates(scalarOff, scalarOn)` 이 먼저 걸린다.
+
+```bash
+cmake -S . -B build -DPERF_LAB_ENABLE_AVX2=ON
+cmake --build build --config Release
+ctest --test-dir build -C Release -R parts_branch_tests --output-on-failure
+
+./build/parts_core_tests branch              # Linux/macOS
+.\build\Release\parts_core_tests.exe branch  # Windows
+```
+
+```text
+parts_core_tests: group `branch`
+  branch/BranchlessEquivalence ... 7 check(s) ok
+branch: 1 test(s), 7 check(s), 0 failure(s)
+```
+
+`7 check(s)` 는 SoA 한 쌍 + 세 레이아웃 × (scalar 등식, SSE 등식) 이다. 이 수는 빌드 옵션에 영향받지 않는다 — 분기 처리는 x86 인트린식과 무관한 축이라, AVX2를 켜든 끄든 같은 일곱 단언이 돈다.
+
 ### 검증 체크리스트
 
 - 체크박스 ON/OFF가 *그래프에 차이를 안 만듦* → simd 토글이 SSE/AVX2일 때 정상. Scalar로 바꾼 뒤 다시 토글.

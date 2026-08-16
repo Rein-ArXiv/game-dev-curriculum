@@ -8,7 +8,8 @@
 // 압축은 *드라이버 측 generic compression* — 학습 단계의 단순함.
 // 실제 게임은 오프라인 인코더 (texconv / NVTT / ISPC) 출력을 .dds 로 로드.
 //
-// VRAM 측정 — 각 mip level 의 `GL_TEXTURE_COMPRESSED_IMAGE_SIZE` 합산.
+// VRAM 측정 — mip level 별 합산. 압축 level 은 `GL_TEXTURE_COMPRESSED_IMAGE_SIZE`,
+// 비압축 level 은 width × height × 4.
 
 #include <glad/gl.h>
 

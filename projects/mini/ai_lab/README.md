@@ -72,6 +72,7 @@ ai_lab/
       boids_scene.*
       influence_scene.*
   tests/
+    chrome_tests.cpp          → ai_chrome_tests 타깃 (레이아웃·그리드 좌표계)
     pathfinder_tests.cpp      → ai_pathfinder_tests 타깃
     ai_model_tests.cpp        → ai_model_tests 타깃
 ```
@@ -88,28 +89,55 @@ raylib·raygui는 CMake FetchContent로 자동으로 가져온다. 인터넷 연
 
 ## 자동 테스트
 
-창을 띄우지 않고 도는 테스트 타깃이 두 개 있다. 계산 코어는 전부 raylib 비의존 헤더에 있어 GUI 없이 실행된다.
+창을 띄우지 않고 도는 테스트 실행 파일이 셋 있다. 계산 코어는 전부 raylib 비의존 헤더거나 raylib 함수를 부르지 않는 계산이라 `InitWindow` 없이 실행된다.
 
 ```bash
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-개별 실행:
-
-```bash
-ctest --test-dir build -C Release -R ai_pathfinder_tests --output-on-failure
-ctest --test-dir build -C Release -R ai_model_tests --output-on-failure
-./build/Release/ai_pathfinder_tests   # "pathfinder tests passed"
-./build/Release/ai_model_tests        # "AI model tests passed"
-```
-
-| 타깃 | 검증 대상 | 고정하는 것 |
+| 실행 파일 | 검증 대상 | 고정하는 것 |
 |---|---|---|
+| `ai_chrome_tests` | `ui/scene_chrome.cpp`, `grid/grid.cpp` | 캔버스·패널·탭바·푸터가 화면을 겹침도 빈틈도 없이 덮음, 셀 중심 ↔ 화면 좌표 왕복과 셀 경계 위치, 캔버스 밖 클릭이 격자 범위를 벗어나지 않음, `Resize` 의 start·goal clamp 와 벽 보존 |
 | `ai_pathfinder_tests` | `pathfind/pathfinder.h`, `grid/grid.cpp` | 절대 경로 비용(직선 1·대각 √2), `Path()` 의 시작·끝·8-인접·통행 가능성·비용 재계산 일치, 시드 1..200 랜덤 맵에서 JPS ≡ Dijkstra, 대각 forced neighbor 고정 맵, `expanded`/`maxOpen` 부등식, Greedy·Manhattan 의 비최적성 |
 | `ai_model_tests` | `model/*.h` | 속도 상한 `\|v\| <= maxSpeed`(프레임 스톨 dt 포함), Arrive 감속 단조성, Pursue lookahead 값, 경계 반사 부호, integration field 의 octile 해석해·무한대·우회 비용, 영향력 장의 확산 거리·감쇠·벽 차단·결정론 |
 
-두 타깃 모두 `src/scenes/*.cpp` 를 컴파일하지 않는다. Scene 은 입력·렌더와 파라미터 전달만 맡고 계산은 `pathfind/`·`model/` 헤더가 담당하므로, 이 테스트가 죽이는 결함은 앱이 실제로 쓰는 코드의 결함이다.
+세 실행 파일 모두 `src/scenes/*.cpp` 를 컴파일하지 않는다. Scene 은 입력·렌더와 파라미터 전달만 맡고 계산은 `pathfind/`·`model/`·`ui/scene_chrome.cpp`·`grid/grid.cpp` 가 담당하므로, 이 테스트가 죽이는 결함은 앱이 실제로 쓰는 코드의 결함이다.
+
+### step 단위 실행
+
+각 실행 파일은 `{step, 케이스 이름, 함수}` 표를 들고 있고, 첫 인자로 필터를 받는다. 인자가 없으면 자기 케이스를 전부 돌고, `step03` 을 주면 그 단계가 추가한 것만 돈다. 아무것도 고르지 못한 필터는 조용히 통과하지 않고 exit 2 로 죽는다.
+
+ctest 에는 두 층으로 등록돼 있다 — 단계별 6 개와 실행 파일별 3 개, 합해서 9 개다.
+
+| ctest 이름 | 실행 | 케이스 |
+|---|---|---|
+| `ai_step01_skeleton` | `ai_chrome_tests step01` | 4 |
+| `ai_step02_pathfinding` | `ai_pathfinder_tests step02` | 10 |
+| `ai_step03_flowfield` | `ai_model_tests step03` | 2 |
+| `ai_step04_steering` | `ai_model_tests step04` | 4 |
+| `ai_step05_boids` | `ai_model_tests step05` | 2 |
+| `ai_step06_influence` | `ai_model_tests step06` | 2 |
+| `ai_chrome_tests` | `ai_chrome_tests` | 4 |
+| `ai_pathfinder_tests` | `ai_pathfinder_tests` | 10 |
+| `ai_model_tests` | `ai_model_tests` | 10 |
+
+단계별 케이스 수의 합(24)과 실행 파일별 합(24)이 같아야 한다. 어긋나면 어떤 케이스가 어느 단계에도 등록되지 않은 것이다.
+
+```bash
+ctest --test-dir build -C Release -R ai_step04_steering --output-on-failure
+./build/Release/ai_model_tests step04        # 같은 네 케이스를 직접 실행
+./build/Release/ai_model_tests steering/bounds   # 케이스 하나만
+```
+
+```text
+ai_model_tests [step04] 4 case(s)
+  ok  steering/speed-cap
+  ok  steering/arrive-slowdown
+  ok  steering/pursue-lookahead
+  ok  steering/bounds
+AI model tests passed
+```
 
 ## 구현 범위 메모
 

@@ -132,7 +132,10 @@ target_include_directories(graphics_dx_contract_tests PRIVATE
 target_compile_definitions(graphics_dx_contract_tests PRIVATE
     NOMINMAX
     WIN32_LEAN_AND_MEAN
-    DXLAB_WINDOWS=1)
+    DXLAB_WINDOWS=1
+    # app.cpp 는 창·디바이스·ImGui 에 묶여 링크할 수 없다. 종료 순서 계약만은
+    # 소스 텍스트로 검사하므로 트리 경로를 넘긴다.
+    DXLAB_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(graphics_dx_contract_tests PRIVATE d3d12 dxguid)
 add_test(NAME graphics_dx_contract_tests COMMAND graphics_dx_contract_tests)
 
@@ -141,3 +144,29 @@ if(MSVC)
         /W4 /permissive- /utf-8)
 endif()
 # snippet-end: contract-tests
+
+# step 별 실행 단위. 실행 파일은 위의 하나뿐이고 argv[1] 이 그 step 이 추가한
+# 검사 그룹만 고른다. 전체 실행 타깃 `graphics_dx_contract_tests` 는 그대로
+# 남는다 — step 타깃은 그것을 대체하지 않고 더한다. 없는 이름을 넘기면 실행
+# 파일이 exit 2 로 죽으므로, 오타 난 타깃이 0 개를 돌고 통과하는 일은 없다.
+# snippet-begin: step01-target
+add_test(NAME graphics_dx_step01_skeleton     COMMAND graphics_dx_contract_tests step01)
+# snippet-end: step01-target
+# snippet-begin: step02-target
+add_test(NAME graphics_dx_step02_measure      COMMAND graphics_dx_contract_tests step02)
+# snippet-end: step02-target
+# snippet-begin: step03-target
+add_test(NAME graphics_dx_step03_drawcall_pso COMMAND graphics_dx_contract_tests step03)
+# snippet-end: step03-target
+# snippet-begin: step04-target
+add_test(NAME graphics_dx_step04_rootsig      COMMAND graphics_dx_contract_tests step04)
+# snippet-end: step04-target
+# snippet-begin: step05-target
+add_test(NAME graphics_dx_step05_descriptor   COMMAND graphics_dx_contract_tests step05)
+# snippet-end: step05-target
+# snippet-begin: step06-target
+add_test(NAME graphics_dx_step06_barrier      COMMAND graphics_dx_contract_tests step06)
+# snippet-end: step06-target
+# snippet-begin: step07-target
+add_test(NAME graphics_dx_step07_scale        COMMAND graphics_dx_contract_tests step07)
+# snippet-end: step07-target

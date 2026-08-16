@@ -28,6 +28,7 @@
 6. workload 통합과 시작/종료
 7. Toggles 확장과 HUD
 8. 빌드와 측정 결과
+9. 검증 — 실행 단위를 바꿔도 결과가 같은가
 
 ---
 
@@ -296,6 +297,7 @@ void makecontext(ucontext_t* ucp, void (*func)(), int argc, ...);
 
 entry 함수는 멤버 함수가 아니라 자유 함수여야 한다. 그래서 `FileIoWorkload* self` 는 정적 pass-through로 잡고, 코루틴 번호 `idx` 는 `makecontext` 의 정수 인자로 넘긴다. worker 수가 작으므로 `int` 로 넘겨도 충분하다.
 
+<!-- snippet: src/workload/file_io_workload.cpp@coro-trampoline -->
 ```cpp
 // src/workload/file_io_workload.cpp
 
@@ -365,6 +367,7 @@ for (std::size_t i = 0; i < coros_.size(); ++i) {
 
 driver 스레드는 새 cycleSeq가 올 때까지 대기한다. 기본 스케줄러에서는 `yield` 로 충분하지만, `SCHED_FIFO` 에서 바쁜 yield 루프를 돌면 CFS로 도는 GUI 메인 스레드가 밀릴 수 있다.
 
+<!-- snippet: src/workload/file_io_workload.cpp#FileIoWorkload::StartCoroutinePool -->
 ```cpp
 if (curSeq == lastSeen) {
     if (schedType_ == SchedType::Fifo) {
@@ -420,21 +423,24 @@ void FileIoWorkload::Init(BackendType backendType,
 
 ### Shutdown 처리
 
+<!-- snippet: src/workload/file_io_workload.cpp#FileIoWorkload::Shutdown -->
 ```cpp
 void FileIoWorkload::Shutdown() {
     StopWorkers();
     StopCoroutinePool();
     singleBackend_.reset();
+    ApplySchedProcessSetup(SchedType::Default);
     paths_.clear();
     fileBytes_   = 0;
     workerCount_ = 1;
 }
 ```
 
-두 풀 정리 함수가 *idempotent* — 풀이 안 떠 있으면 no-op. 어떤 모드에서 어떤 모드로 바뀌든 안전.
+두 풀 정리 함수가 *idempotent* — 풀이 안 떠 있으면 no-op. 어떤 모드에서 어떤 모드로 바뀌든 안전. `ApplySchedProcessSetup(SchedType::Default)` 도 같은 성질이라, 종료 경로에서 한 번 더 불러 step06이 쓴 cgroup `cpu.weight` 를 원래 값으로 되돌린다.
 
 ## 7. Toggles 확장과 HUD
 
+<!-- snippet: src/ui/toggles.h#Toggles -->
 ```cpp
 // src/ui/toggles.h
 struct Toggles {
@@ -450,6 +456,7 @@ struct Toggles {
 
 ### HUD 콤보
 
+<!-- snippet: src/ui/hud.cpp#Hud::Draw -->
 ```cpp
 // src/ui/hud.cpp 일부
 
@@ -489,6 +496,7 @@ throughput  :   919.6 MB/s
 
 CMakeLists에 ucontext_t deprecated 경고 억제 옵션 추가.
 
+<!-- snippet: CMakeLists.txt -->
 ```cmake
 target_compile_options(${PROJECT_NAME} PRIVATE
     -Wall -Wextra -Wpedantic
@@ -527,6 +535,71 @@ throughput으로 보면 코루틴 모드는 *workers = 1 (단일 스레드)* 와
 - **단일 스레드 직렬 한계** — 코루틴 모드는 코어를 한 개만 쓴다. CPU bound 워크로드가 여러 코어에 분산되어야 하는 시나리오에는 부적합.
 
 도구는 *모델의 차이* 를 보여 준다. 결과를 *어느 모델이 절대 빠르다* 로 일반화하지 않고 *워크로드와 결합 모델을 함께* 본다.
+
+## 9. 검증 — 실행 단위를 바꿔도 결과가 같은가
+
+위 체크리스트의 두 번째 항목 — *coroutine 모드의 checksum이 pthread와 다름* — 은 사람이 HUD를 보고 알아채라고 적혀 있다. 그런데 그 비교는 눈이 아니라 기계가 할 일이다. 두 실행 단위가 같은 파일 집합을 읽는 이상 총 바이트와 체크섬은 *글자까지* 같아야 하고, 다르면 그건 튜닝 문제가 아니라 버그다.
+
+기준값은 단일 스레드 / read backend 사이클 하나다. 코루틴 풀은 실행 단위도 다르고 backend도 sync 구현도 갈아 끼우지만, 같은 fixture를 읽으므로 결과가 같아야 한다. 체크섬은 파일 단위 표본이라 처리 순서에 무관하다.
+
+<!-- snippet: tests/system_core_tests.cpp@execution-model-equivalence -->
+```cpp
+// tests/system_core_tests.cpp
+
+for (int rawSync = 0; rawSync < skl::kSyncTypeCount; ++rawSync) {
+    const auto sync = static_cast<skl::SyncType>(rawSync);
+    const std::string where = Combo(backend, ctx, sync, kWorkers);
+
+    workload.Reconfigure(backend, sync, skl::SchedType::Default,
+                         ctx, kWorkers);
+    CheckNoSilentFallback(backend, workload.Backend(), where);
+    if (workload.Backend() != backend) downgraded = true;
+
+    for (int cycle = 0; cycle < kCyclesPerCombo; ++cycle) {
+        CHECK_IN(workload.RunCycle() == expectedBytes, where);
+        CHECK_IN(workload.LastChecksum() == expectedChecksum, where);
+    }
+    ++combos;
+}
+```
+
+`ctx` 가 인자인 것이 핵심이다. 이 순회를 pthread 풀로 한 번, 코루틴 풀로 한 번 부른다. 두 실행 단위가 *같은 조합 표* 를 밟으므로 어느 쪽이 어긋났는지가 조합 문자열(`where`)에 그대로 남는다.
+
+바이트와 체크섬 비교만으로는 부족한 부분이 하나 있다. 코루틴 풀이 backend를 조용히 `read` 로 폴백해도 결과는 같기 때문이다. 그래서 backend마다 자기 syscall seam을 *주입 없이* 무장해 호출 횟수만 세고, 폴백하지 않은 backend는 그 횟수가 0보다 커야 한다고 요구한다.
+
+```bash
+cmake --build build -j
+ctest --test-dir build -R skl_step07 --output-on-failure
+```
+
+```text
+    Start 22: skl_step07_core
+1/2 Test #22: skl_step07_core ..................   Passed    0.03 sec
+    Start 23: skl_step07_fault
+2/2 Test #23: skl_step07_fault .................   Passed    0.00 sec
+
+100% tests passed, 0 tests failed out of 2
+```
+
+```bash
+./build/system_core_tests --step=07
+./build/system_fault_tests --step=07
+```
+
+```text
+[ run  ] step07  coroutine pool execution model
+[models] ctx=coroutine: 20 combos x 4 cycles; backends exercised: read(readx128) pread(preadx128) mmap(mmapx128) aio(aio_readx128) io_uring(io_uring_submitx128)
+[  ok  ] step07  coroutine pool execution model
+system_core_tests --step=7: 1/11 check(s) run, 0 failed
+[ run  ] step07  coroutine pool error propagation
+  coroutine pool: worker error propagated, pool reusable, bytes=32768 checksum=2207
+[  ok  ] step07  coroutine pool error propagation
+system_fault_tests --step=7: 1/17 check(s) run, 0 failed
+```
+
+`ctx=coroutine` 줄의 `readx128` 부터 `io_uring_submitx128` 까지가 코루틴 드라이버가 다섯 backend를 실제로 돌렸다는 증거다. 다섯 backend × sync 4종 = 20 조합, 각 4사이클 × 파일 8개 = 조합당 32회, backend당 128회. 어느 하나가 0이면 그 backend는 코루틴 경로에서 폴백한 것이다.
+
+`bytes=32768 checksum=2207` 은 코루틴 드라이버 안에서 backend가 예외를 던졌을 때의 확인이다. 예외가 메인으로 전달되고, 주입을 푼 다음 사이클이 기준값으로 돌아온다. 코루틴이 예외를 삼키고 완료 회계만 어긋나게 두면 다음 사이클이 영영 끝나지 않으므로, 이 검사는 *멈춤* 으로도 실패한다.
 
 ---
 

@@ -12,6 +12,7 @@
 namespace mathlab {
 
 // 표준 [0, 1] depth (DX/Vulkan 관례). z = -n → 0, z = -f → 1.
+// snippet-begin: ndc-z
 inline float StdNdcZ(float viewZ, float n, float f) {
     float A = -f / (f - n);
     float B = -f * n / (f - n);
@@ -29,5 +30,6 @@ inline float ReverseNdcZ(float viewZ, float n, float f) {
     if (std::fabs(w) < 1e-12f) return 1.0f;
     return (A * viewZ + B) / w;
 }
+// snippet-end: ndc-z
 
 }  // namespace mathlab

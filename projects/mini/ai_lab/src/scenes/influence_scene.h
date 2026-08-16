@@ -9,7 +9,7 @@
 
 namespace ailab {
 
-// Influence Map Scene — stamp -> spread -> decay 루프와 히트맵.
+// Influence Map Scene — decay -> stamp -> spread 루프와 히트맵.
 // 좌클릭=아군 유닛, 우클릭=적 유닛. control(아군-적) 을 색으로 본다 (ai/part09).
 class InfluenceScene : public IScene {
 public:

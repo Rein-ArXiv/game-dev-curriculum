@@ -3,7 +3,8 @@
 // D3D12Context — Device + DXGI Factory + Direct Queue + Swap Chain.
 //
 // 소유 자원: Direct Queue 1개(Compute/Copy 큐는 이 lab 범위 밖) + RGBA8 RTV
-// + D24S8 DSV. 프레임 in flight 3개. Allocator + CmdList 도 그만큼.
+// + D24S8 DSV. 프레임 in flight 3개. Allocator 도 그만큼이지만 CmdList 는 하나를
+// 프레임마다 Reset 해 재사용한다.
 
 #include <d3d12.h>
 #include <dxgi1_6.h>

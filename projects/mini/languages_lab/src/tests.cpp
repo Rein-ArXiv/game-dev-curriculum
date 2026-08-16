@@ -1,17 +1,21 @@
+#include "bench_program.hpp"
 #include "language.hpp"
 
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
 namespace {
 
 int failures = 0;
+int checks = 0;
 
 #define CHECK(condition)                                                        \
     do {                                                                        \
+        ++checks;                                                               \
         if (!(condition)) {                                                     \
             std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__,       \
                          #condition);                                            \
@@ -109,13 +113,10 @@ void TestHostBoundaryRejectsUnregisteredName() {
     CHECK(!refused.ok);
 }
 
-void TestDiagnostics() {
-    const auto syntax = lab::lang::Compiler{}.Compile("let x = 1 + ;");
-    CHECK(!syntax.program.has_value());
-    CHECK(!syntax.diagnostics.empty());
-    CHECK(syntax.diagnostics.front().location.line == 1);
-
-    // 여러 줄 소스: 줄과 열이 모두 기본값 {1,1}이 아니어야 한다.
+// 렉서가 만드는 진단. 위치 보존은 진단의 줄만 보면 검증되지 않는다 —
+// `SourceLocation`의 기본값이 `{1, 1}`이라 한 줄짜리 소스는 위치 추적을 지워도
+// 통과한다. 그래서 세 줄짜리 소스에서 줄과 열을 함께 못 박는다.
+void TestLexerRejectsUnknownCharacter() {
     const auto multiline =
         lab::lang::Compiler{}.Compile("let a = 1;\nlet b = 2;\n   let c = @;\n");
     CHECK(!multiline.program.has_value());
@@ -127,25 +128,6 @@ void TestDiagnostics() {
         CHECK(d.location.column == 12);
         CHECK(lab::lang::FormatDiagnostic(d) == "3:12: 알 수 없는 문자: @");
     }
-
-    auto undefined = Execute("let x = missing + 1;");
-    CHECK(!undefined.run.ok);
-    CHECK(undefined.run.diagnostic.has_value());
-
-    // 0 나눗셈은 비유한 값 차단과 구분되는 고유 진단을 내야 한다.
-    auto division = Execute("let x = 1 / 0;");
-    CHECK(!division.run.ok);
-    CHECK(division.run.diagnostic.has_value());
-    if (division.run.diagnostic)
-        CHECK(division.run.diagnostic->message == "0으로 나눌 수 없다");
-
-    // 0 나눗셈을 거치지 않고 오버플로만으로 비유한 값에 도달하는 경로.
-    // isfinite 가드를 지우면 무한 루프가 되어 메시지가 예산 초과로 바뀐다.
-    auto overflow = Execute("let x = 2; while (x > 0) { x = x * x; }");
-    CHECK(!overflow.run.ok);
-    CHECK(overflow.run.diagnostic.has_value());
-    if (overflow.run.diagnostic)
-        CHECK(overflow.run.diagnostic->message == "연산 결과가 유한하지 않다");
 }
 
 // 토큰 위치가 상수로 고정되면 실패한다. 최대 길이 일치(`==`가 두 개의 `=`로
@@ -178,6 +160,37 @@ void TestLexerTokenLocations() {
         CHECK(lines[4].location.line == 3);
         CHECK(lines[4].location.column == 4);
     }
+}
+
+// 파서가 만드는 진단. 컴파일 오류에는 `Program`이 없어야 하고, 진단 위치가
+// 소스 범위 안이어야 한다.
+void TestParserRejectsIncompleteExpression() {
+    const auto syntax = lab::lang::Compiler{}.Compile("let x = 1 + ;");
+    CHECK(!syntax.program.has_value());
+    CHECK(!syntax.diagnostics.empty());
+    CHECK(syntax.diagnostics.front().location.line == 1);
+}
+
+// 실행 시점의 값 진단 세 종류. 하나로 묶으면 서로를 가린다.
+void TestRuntimeValueDiagnostics() {
+    auto undefined = Execute("let x = missing + 1;");
+    CHECK(!undefined.run.ok);
+    CHECK(undefined.run.diagnostic.has_value());
+
+    // 0 나눗셈은 비유한 값 차단과 구분되는 고유 진단을 내야 한다.
+    auto division = Execute("let x = 1 / 0;");
+    CHECK(!division.run.ok);
+    CHECK(division.run.diagnostic.has_value());
+    if (division.run.diagnostic)
+        CHECK(division.run.diagnostic->message == "0으로 나눌 수 없다");
+
+    // 0 나눗셈을 거치지 않고 오버플로만으로 비유한 값에 도달하는 경로.
+    // isfinite 가드를 지우면 무한 루프가 되어 메시지가 예산 초과로 바뀐다.
+    auto overflow = Execute("let x = 2; while (x > 0) { x = x * x; }");
+    CHECK(!overflow.run.ok);
+    CHECK(overflow.run.diagnostic.has_value());
+    if (overflow.run.diagnostic)
+        CHECK(overflow.run.diagnostic->message == "연산 결과가 유한하지 않다");
 }
 
 void TestBudgetStopsUntrustedLoop() {
@@ -236,8 +249,8 @@ void TestVerifierBranchContracts() {
     CHECK(lab::lang::Verify(balanced, error));
     CHECK(error.empty());
 
-    // (a) 합류 불일치: 참 경로는 Pop으로 깊이를 1 줄이고 거짓 경로는 그대로
-    // 통과해 인덱스 4에서 깊이 0과 1이 만난다.
+    // (a) 합류 불일치: 거짓 경로(JumpIfFalse의 대상 3)는 Pop으로 깊이를 1 줄이고
+    // 참 경로(낙하 2 -> Jump 4)는 그대로 통과해 인덱스 4에서 깊이 0과 1이 만난다.
     Program mismatched;
     mismatched.constants.push_back(1.0);
     mismatched.code.push_back({OpCode::Constant, 0, {1, 1}});     // 0: depth 0 -> 1
@@ -286,25 +299,116 @@ void TestStackLimitStopsDeepExpression() {
         CHECK(limited.run.diagnostic->message == "VM 스택 한도를 초과했다");
 }
 
+// 측정이 비교하는 두 경로가 *같은 작업*을 한다는 전제를 못 박는다. 측정 루프는
+// 결과를 읽지 않으므로(전역 조회 비용이 시간에 섞인다) 그 불변식은 여기가 맡는다.
+void TestBenchProgramInvariants() {
+    lab::lang::Compiler compiler;
+    const auto compiled = compiler.Compile(lab::lang::bench::kSource);
+    CHECK(compiled.program.has_value());
+    if (!compiled.program) return;
+
+    lab::lang::VirtualMachine vm;
+    const auto run = vm.Run(*compiled.program);
+    CHECK(run.ok);
+    CHECK(vm.Global(*compiled.program, "sum").value_or(-1.0) == 5050.0);
+    CHECK(vm.Global(*compiled.program, "x").value_or(-1.0) == 101.0);
+    CHECK(run.instructions == 1612);
+
+    // 캐시 경로: 같은 Program을 새 VM으로 다시 실행해도 명령 수와 결과가 같아야
+    // 한다. 실행 사이에 전역이나 스택이 새면 두 번째 실행이 달라진다.
+    lab::lang::VirtualMachine second;
+    const auto cached = second.Run(*compiled.program);
+    CHECK(cached.ok);
+    CHECK(cached.instructions == run.instructions);
+    CHECK(second.Global(*compiled.program, "sum").value_or(-1.0) == 5050.0);
+
+    // 컴파일 포함 경로: 다시 컴파일한 바이트코드가 첫 컴파일과 같아야 두 경로의
+    // 시간 비교가 성립한다. 컴파일러가 호출마다 다른 코드를 내면 비교가 무의미하다.
+    const auto recompiled = compiler.Compile(lab::lang::bench::kSource);
+    CHECK(recompiled.program.has_value());
+    if (recompiled.program) {
+        bool identical =
+            recompiled.program->code.size() == compiled.program->code.size();
+        for (size_t i = 0; identical && i < recompiled.program->code.size(); ++i) {
+            identical = recompiled.program->code[i].op == compiled.program->code[i].op &&
+                        recompiled.program->code[i].operand ==
+                            compiled.program->code[i].operand;
+        }
+        CHECK(identical);
+        CHECK(recompiled.program->constants == compiled.program->constants);
+        CHECK(recompiled.program->names == compiled.program->names);
+    }
+
+    // 벤치마크가 출력하는 checksum은 두 경로가 각각 kIterations번 돈 명령 수의
+    // 합이다. 이 값이 환경과 무관한 고정값이라는 주장이 여기서 산술로 닫힌다.
+    CHECK(2 * static_cast<uint64_t>(lab::lang::bench::kIterations) * run.instructions ==
+          32240000);
+}
+
+// 등록표. 어느 계약이 어느 step에서 추가됐는지가 여기 한 곳에 적히고,
+// CMake의 step별 ctest 타깃은 첫 칸의 라벨을 인자로 넘겨 이 표를 걸러낸다.
+// snippet-begin: test-registry
+struct TestCase {
+    const char* step;
+    const char* name;
+    void (*run)();
+};
+
+constexpr TestCase kTestCases[] = {
+    {"step01", "lexer_token_locations", TestLexerTokenLocations},
+    {"step01", "lexer_rejects_unknown_character", TestLexerRejectsUnknownCharacter},
+    {"step02", "precedence_and_variables", TestPrecedenceAndVariables},
+    {"step02", "associativity_and_unary_precedence", TestAssociativityAndUnaryPrecedence},
+    {"step02", "control_flow", TestControlFlow},
+    {"step02", "parser_rejects_incomplete_expression", TestParserRejectsIncompleteExpression},
+    {"step03", "verifier_rejects_malformed_program", TestVerifierRejectsMalformedProgram},
+    {"step03", "verifier_branch_contracts", TestVerifierBranchContracts},
+    {"step04", "runtime_value_diagnostics", TestRuntimeValueDiagnostics},
+    {"step04", "budget_stops_untrusted_loop", TestBudgetStopsUntrustedLoop},
+    {"step04", "stack_limit_stops_deep_expression", TestStackLimitStopsDeepExpression},
+    {"step04", "parser_rejects_deep_nesting", TestParserRejectsDeepNesting},
+    {"step05", "host_boundary", TestHostBoundary},
+    {"step05", "host_boundary_rejects_unregistered_name", TestHostBoundaryRejectsUnregisteredName},
+    {"step06", "bench_program_invariants", TestBenchProgramInvariants},
+};
+// snippet-end: test-registry
+
 }  // namespace
 
-int main() {
-    TestPrecedenceAndVariables();
-    TestAssociativityAndUnaryPrecedence();
-    TestControlFlow();
-    TestHostBoundary();
-    TestHostBoundaryRejectsUnregisteredName();
-    TestDiagnostics();
-    TestLexerTokenLocations();
-    TestBudgetStopsUntrustedLoop();
-    TestStackLimitStopsDeepExpression();
-    TestParserRejectsDeepNesting();
-    TestVerifierRejectsMalformedProgram();
-    TestVerifierBranchContracts();
-    if (failures != 0) {
-        std::fprintf(stderr, "%d test(s) failed\n", failures);
+// 인자가 없으면 전부, 있으면 step 라벨(`step01`) 또는 사례 이름과 정확히 일치하는
+// 것만 실행한다. 필터가 아무것도 고르지 못하면 조용히 통과하지 않고 실패한다 —
+// 오타 난 ctest 타깃이 "통과"로 보이는 것이 가장 나쁜 결과다.
+int main(int argc, char** argv) {
+    const char* filter = argc > 1 ? argv[1] : nullptr;
+    int selected = 0;
+    int failedCases = 0;
+
+    for (const TestCase& test : kTestCases) {
+        if (filter && std::strcmp(filter, test.step) != 0 &&
+            std::strcmp(filter, test.name) != 0) {
+            continue;
+        }
+        ++selected;
+        const int before = failures;
+        test.run();
+        const bool ok = failures == before;
+        if (!ok) ++failedCases;
+        std::printf("[%s] %s %s\n", test.step, test.name, ok ? "ok" : "FAIL");
+    }
+
+    if (selected == 0) {
+        std::fprintf(stderr, "선택된 테스트가 없다: %s\n", filter ? filter : "");
         return EXIT_FAILURE;
     }
-    std::puts("languages_tests: all checks passed");
+    if (failures != 0) {
+        std::fprintf(stderr, "%d test(s) failed in %d case(s)\n", failures, failedCases);
+        return EXIT_FAILURE;
+    }
+    if (filter)
+        std::printf("languages_tests [%s]: all checks passed (%d case(s), %d check(s))\n",
+                    filter, selected, checks);
+    else
+        std::printf("languages_tests: all checks passed (%d case(s), %d check(s))\n",
+                    selected, checks);
     return EXIT_SUCCESS;
 }

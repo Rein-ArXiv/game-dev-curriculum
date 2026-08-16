@@ -183,11 +183,32 @@ float DistanceCapsuleCapsule(const UprightCapsule& a, const UprightCapsule& b) {
 
 거리 < `a.radius + b.radius` 면 충돌.
 
-### 2.6 sweep 검사
+### 2.6 컨트롤러가 전제하는 sweep 계약
 
-Move-and-slide 가 *sweep test* 에 의존. 캡슐을 한 step 동안 이동시키며 *처음 만나는 충돌*.
+Move-and-slide 는 *sweep test* 위에 선다. 캡슐을 현재 자세에서 한 방향으로 정해진 거리만큼 밀며 *처음 만나는 충돌* 을 찾는 질의다. 이 글의 코드는 다음 시그니처와 계약을 전제한다.
 
-`SweepCapsule(capsule, fromPos, toPos, world) → hit info`. 산업 엔진 (PhysX `sweep`, Bullet `convexSweepTest`) 의 표준 함수.
+```cpp
+struct SweepHit {
+    bool  hit;
+    float t;        // [0, 1]. 요청 거리에 대한 비율이다.
+    vec3  point;
+    vec3  normal;   // 표적 표면의 바깥 법선
+};
+
+SweepHit SweepCapsule(UprightCapsule cap, vec3 dir, float maxDist,
+                      const World& world);
+```
+
+이 컨트롤러가 실제로 의존하는 항목은 넷이다.
+
+- **`t` 는 정규화 비율이다.** 이동 거리는 `t * maxDist` 로 계산한다. 충돌까지의 거리를 반환하는 API 를 그대로 끼우면 3.2절과 4.2절의 코드가 벽을 지나쳐 서거나 벽 앞에서 기어간다. 둘 다 컴파일도 실행도 정상이고 결과만 틀린다.
+- **`t` 는 경로 위의 첫 접촉이다.** 어떤 충돌도 건너뛰지 않는다. 이 보장이 깨지면 iteration 을 늘려도 미끄러짐이 이미 벽 안쪽에서 시작한다.
+- **초기 겹침 정책이 고정돼 있다.** 시작 자세가 이미 침투 상태면 sweep 은 진전할 지점을 찾지 못한다. 6절의 push out 이 sweep 보다 앞에 오는 이유다.
+- **양의 여유를 남기고 끝난다.** 정확히 닿아 멈추면 다음 프레임의 검사가 접촉 상태에서 시작한다. 3.3절의 `kSkin` 이 그 여유를 호출부에서 강제하는 장치다.
+
+직립 캡슐은 이동 중 회전하지 않으므로 이 질의는 *순수 병진* 캐스트다. 회전을 포함한 연속 검출보다 값싸고, 결과가 요청 방향과 거리만으로 결정된다.
+
+이 질의가 필요한 이유는 프레임 시간으로 계산된다. 한 step 의 이동량이 *벽 두께 + 이동 방향에서 잰 캡슐 폭* 보다 작으면 이산 검사만으로도 충돌을 반드시 한 번은 본다. 반지름 0.3m 캡슐 (수평 폭 0.6m) 과 두께 0.2m 벽이면 그 한계는 0.8m 이고, 10m/s 로 움직이는 캐릭터에서는 0.08s — 12.5Hz 다. 정상 프레임에는 여유가 5배 가까이 있지만 로딩 히치 한 번이면 넘어간다. 캐릭터가 속도 때문이 아니라 프레임 히치 때문에 벽을 뚫는다는 뜻이고, 8.3절이 큰 hitch 를 필수 회귀 장면에 두는 근거이기도 하다.
 
 ## 3. Move-and-slide 알고리즘
 

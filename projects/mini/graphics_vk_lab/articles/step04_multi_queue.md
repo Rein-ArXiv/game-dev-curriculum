@@ -20,9 +20,12 @@ Step 4 는 Vulkan 의 queue 모델을 다룬다. Vulkan 은 graphics, compute, t
 
 Vulkan physical device 는 queue family 목록을 제공한다.
 
+<!-- snippet: src/device/vk_context.cpp#VkContext::PickPhysicalDevice -->
 ```cpp
-vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, nullptr);
-vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, props.data());
+uint32_t qfc = 0;
+vkGetPhysicalDeviceQueueFamilyProperties(d, &qfc, nullptr);
+std::vector<VkQueueFamilyProperties> qfs(qfc);
+vkGetPhysicalDeviceQueueFamilyProperties(d, &qfc, qfs.data());
 ```
 
 family 는 capability 를 가진다.
@@ -33,7 +36,23 @@ family 는 capability 를 가진다.
 | `VK_QUEUE_COMPUTE_BIT` | dispatch 가능 |
 | `VK_QUEUE_TRANSFER_BIT` | copy/blit 가능 |
 
-중요한 점은 dedicated compute/transfer queue 가 없을 수 있다는 것이다. 이 경우 graphics queue 하나가 모든 일을 한다.
+중요한 점은 dedicated compute/transfer queue 가 없을 수 있다는 것이다. 이 경우 graphics queue 하나가 모든 일을 한다. 이 lab 은 “graphics 비트가 없는 compute family”를 dedicated 로 보고, 못 찾으면 graphics family 로 되돌린다.
+
+이 판정에는 Vulkan 핸들이 필요 없다. family 목록과 family 별 present 지원 여부만 있으면 결론이 나오므로, 규칙은 `SelectQueueFamilies`(`src/device/queue_select.h`)라는 순수 함수로 나가 있고 `VkContext::PickPhysicalDevice` 는 장치에서 그 두 입력을 뽑아 넘기기만 한다.
+
+<!-- snippet: src/device/queue_select.cpp#SelectQueueFamilies -->
+```cpp
+if ((flags & VK_QUEUE_COMPUTE_BIT) &&
+    !(flags & VK_QUEUE_GRAPHICS_BIT) && c == kNoQueueFamily) {
+    c = i;
+}
+// ... transfer 도 같은 방식으로 고른다
+if (g == kNoQueueFamily) return false;
+if (c == kNoQueueFamily) c = g;
+if (t == kNoQueueFamily) t = g;
+```
+
+present 가능한 graphics family 가 아예 없으면 함수가 `false` 를 돌려주고 호출부가 그 장치를 후보에서 뺀다. 반면 compute/transfer 는 없어도 탈락 사유가 아니다 — graphics family 로 대체된다.
 
 ## 2. 단일 Queue가 기본값인 이유
 
@@ -71,6 +90,45 @@ queue overlap 을 측정하려면 각 queue 에 timestamp 를 따로 기록하�
 
 ## 5. 빌드와 실행 결과
 
+family 선택 규칙이 순수 함수로 나가 있으므로, “어떤 장치를 만나면 무엇을 고르는가”는 GPU 없이 확인할 수 있다. 장치를 기다릴 필요 없이 가상의 family 조합을 직접 만들어 넣는다.
+
+```powershell
+cmake --build build --config Release
+ctest --test-dir build -C Release -R vk_step04_multi_queue --output-on-failure
+.\build\Release\graphics_vk_contract_tests.exe step04
+```
+
+```text
+    Start 5: vk_step04_multi_queue
+1/1 Test #5: vk_step04_multi_queue ............   Passed    0.04 sec
+
+100% tests passed out of 1
+
+[step04] queue_family_selection ... ok (26 checks)
+step04: 1 test(s), 26 checks, 0 failed
+```
+
+26개 CHECK 가 덮는 조합은 일곱이다. dedicated 이 다 있는 장치, 하나도 없는 장치, graphics 비트를 함께 가진 “가짜 dedicated”, compute 비트가 있어 transfer 후보가 못 되는 family, present 를 지원하지 않는 graphics family, present 가능한 graphics 가 아예 없는 장치, present 정보가 없는 호출. 앞의 둘이 이 절의 주제인 fallback 이다.
+
+<!-- snippet: tests/graphics_vk_contract_tests.cpp@queue-family-fallback -->
+```cpp
+// (a) dedicated 가 다 있는 장치 — 셋이 서로 다른 family 로 갈린다.
+vklab::QueueFamilies q;
+CHECK(vklab::SelectQueueFamilies(MakeFamilies({kG, kC, kT}), {}, q));
+CHECK(q.graphics == 0);
+CHECK(q.compute == 1);
+CHECK(q.transfer == 2);
+
+// (b) dedicated 가 하나도 없으면 셋 다 graphics family 로 접힌다.
+vklab::QueueFamilies only;
+CHECK(vklab::SelectQueueFamilies(MakeFamilies({kG}), {}, only));
+CHECK(only.graphics == 0);
+CHECK(only.compute == 0);          // c == kNoQueueFamily → c = g.
+CHECK(only.transfer == 0);         // t == kNoQueueFamily → t = g.
+```
+
+`!(flags & VK_QUEUE_GRAPHICS_BIT)` 조건을 지우면 (c) 가, present 검사를 지우면 (e)·(f) 가 깨진다. 반대로 이 실행이 확인하지 못하는 것은 “실제 장치의 family 목록이 무엇인가”다. 그것은 드라이버가 답하는 값이라 실행으로 본다.
+
 ```powershell
 cmake --build build --config Debug
 build\Debug\graphics_vk_lab.exe
@@ -78,7 +136,7 @@ build\Debug\graphics_vk_lab.exe
 
 관측 항목.
 
-- 이 step 은 설계 토픽이므로 패널에 토글이 생기지 않는다. 관측 대상은 화면이 아니라 device 생성 결과다. dedicated compute/transfer family 가 없는 장치에서도 실행이 성공하면 `c == ~0u → c = g` fallback 이 동작한 것이다.
+- 이 step 은 설계 토픽이므로 패널에 토글이 생기지 않는다. 관측 대상은 화면이 아니라 device 생성 결과다. dedicated compute/transfer family 가 없는 장치에서도 실행이 성공하면 `c = g` fallback 이 실제 장치에서도 동작한 것이다.
 - 실제 제출 경로는 `ctx_.GraphicsQueue()` 하나뿐이다. `computeQueue_` / `transferQueue_` 는 family 선택 구조를 보여 주기 위해 생성만 하고 이 lab 의 워크로드에서는 사용하지 않는다 — 그래서 ownership transfer 도 발생하지 않고, `Validation log` 에 queue ownership 관련 메시지가 뜨지 않는 것이 정상이다.
 - 정리하면 이 step 의 종료 상태는 “single graphics queue 로 모든 제출이 이루어지고, 분리 조건만 코드 구조에 남아 있다”이다.
 

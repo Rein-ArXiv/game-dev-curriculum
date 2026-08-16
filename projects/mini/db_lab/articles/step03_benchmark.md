@@ -19,6 +19,7 @@ WAL 설계의 옳고 그름만 확인하면 내구성 비용을 체감하기 어
 
 실패한 커밋의 지연을 성공으로 집계하면 표 전체가 거짓이 되므로, `Commit()`의 반환값을 확인하고 실패 시 즉시 중단한다.
 
+<!-- snippet: src/db_bench.cpp -->
 ```cpp
 #include <chrono>
 #include <cstdio>
@@ -85,6 +86,7 @@ $$
 
 `BenchReplay`는 커밋 수가 다른 WAL을 만들고 Replay 시간을 잰다. 체크포인트가 없으므로 복구 시간은 로그 길이에 대체로 선형이다.
 
+<!-- snippet: src/db_bench.cpp#BenchReplay -->
 ```cpp
 // 복구 시간: n_txns 커밋이 쌓인 로그의 Replay ms
 static void BenchReplay(int n_txns) {
@@ -135,6 +137,7 @@ static void BenchReplay(int n_txns) {
 
 `main`은 두 측정의 스윕 범위와 표 머리글을 정한다. `--smoke` 인자는 표본을 줄인 축소 실행이다 — 측정값으로는 쓸 수 없지만, fsync ON 커밋 경로와 위의 `Die` 검사가 ctest에서 매번 실행되도록 `db_bench_smoke`라는 이름으로 등록해 두었다.
 
+<!-- snippet: src/db_bench.cpp#main -->
 ```cpp
 // `--smoke` 는 표본을 줄인 축소 실행이다. 측정값으로는 쓸 수 없지만,
 // fsync ON 커밋 경로와 Die() 검사를 ctest 안에서 매번 지나가게 하는 것이 목적이다.
@@ -167,9 +170,52 @@ int main(int argc, char** argv) {
 
 등록은 CMake 쪽 한 줄이다.
 
+<!-- snippet: CMakeLists.txt -->
 ```cmake
 add_test(NAME db_bench_smoke COMMAND db_bench --smoke)
 ```
+
+이 step은 단정문 대신 `Die`로 검증한다. 벤치가 통과·실패로 갈리는 지점은 여기 하나이고, `BenchCommit`의 `Die("commit failed")`와 `BenchReplay`의 `Die("replay lost commits")`가 그것을 부른다 — 커밋이 실패했거나 재생이 커밋을 흘렸으면 표를 찍지 않고 종료 코드 1로 죽는다.
+
+<!-- snippet: src/db_bench.cpp#Die -->
+```cpp
+static void Die(const char* what) {
+    std::fprintf(stderr, "db_bench: %s\n", what);
+    std::exit(1);
+}
+```
+
+그래서 이 step의 실행 단위는 `db_bench_smoke`다. `-V`를 주면 축소 실행의 표가 그대로 보인다.
+
+```bash
+cmake --build build --config Release
+ctest --test-dir build -C Release -R db_bench_smoke -V
+```
+
+관측 결과 — 표의 수치는 장비마다 다르지만, `committed` 열이 요청한 커밋 수와 어긋나면 표가 나오기 전에 죽는다는 것이 이 실행의 판정이다.
+
+```text
+    Start 3: db_bench_smoke
+3: (smoke 모드 — 표본 축소, 측정값 아님)
+3: == db_lab bench 1: 커밋 지연 — fsync x 트랜잭션 크기 ==
+3: | fsync | txn_ops | txns     | avg ms     | max ms    | commits/sec  |
+3: |-------|---------|----------|------------|-----------|--------------|
+3: | OFF   |       1 |      200 |     0.0131 |     0.187 |        76511 |
+3: | OFF   |       4 |      200 |     0.0170 |     0.154 |        58874 |
+3: | ON    |       1 |       20 |     2.8553 |     4.387 |          350 |
+3: | ON    |       4 |       20 |     2.4378 |     8.000 |          410 |
+3:
+3: == db_lab bench 2: 복구(재생) 시간 — 로그 크기별 ==
+3: | txns     | replay ms  | committed| keys   |
+3: |----------|------------|----------|--------|
+3: |      200 |      19.08 |      200 |      200 |
+3: |     1000 |      13.46 |     1000 |     1000 |
+1/1 Test #3: db_bench_smoke ...................   Passed    0.24 sec
+
+100% tests passed out of 1
+```
+
+수치를 볼 때는 축소하지 않은 실행을 직접 돌린다.
 
 ```bash
 cmake --build build --config Release

@@ -107,7 +107,7 @@ void App::InitResources() {
                                     &mapped);
     frameCBMapped_ = (FrameCB*)mapped;
 
-    // Scene mesh + objects 업로드 — 별도 single-shot command list.
+    // Scene mesh + objects 업로드 — 컨텍스트의 공용 command list 로 single-shot 제출.
     ctx_.BeginFrame();    // index 0 사용.
     scene_.Init(ctx_, ctx_.CmdList(), uploadKeepAlive_);
     ctx_.EndFrame(false);
@@ -123,6 +123,13 @@ void App::BuildFrameCB() {
 
 void App::Shutdown() {
     // Wait for GPU before destroying resources.
+    // 마지막 프레임의 EndFrame 은 ExecuteCommandLists + Present + Signal 만 하고
+    // 대기하지 않는다. Flush() 가 direct queue 에 새 fence 값을 Signal 하고 그
+    // 값까지 기다리므로, 그 이후로는 아래에서 놓는 자원(ImGui 폰트 텍스처·프레임별
+    // 정점/인덱스 버퍼·PSO·루트시그니처, query heap, readback 버퍼)을 GPU 가
+    // 더 참조하지 않는다.
+    ctx_.Flush();
+
     ImGui_ImplDX12_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImPlot::DestroyContext();

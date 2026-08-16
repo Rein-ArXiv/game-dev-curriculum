@@ -41,16 +41,24 @@ Scene은 알고리즘 상태를 소유하고, chrome은 화면 배치만 책임�
 
 `IScene`의 핵심 계약은 다음과 같다.
 
+<!-- snippet: src/scenes/iscene.h#IScene -->
 ```cpp
 class IScene {
 public:
     virtual ~IScene() = default;
-    virtual std::string_view Name() const = 0;
+
     virtual void OnEnter() {}
     virtual void OnExit() {}
+
     virtual void Update(float dt) = 0;
-    virtual void DrawWorld(int x, int y, int w, int h) = 0;
-    virtual void DrawPanel(int x, int y, int w, int h) = 0;
+
+    // 메인 캔버스에 그리기.
+    virtual void DrawWorld(int canvasX, int canvasY, int canvasW, int canvasH) = 0;
+
+    // 사이드 패널에 raygui 컨트롤 그리기.
+    virtual void DrawPanel(int panelX, int panelY, int panelW, int panelH) = 0;
+
+    virtual std::string_view Name() const = 0;
 };
 ```
 
@@ -72,17 +80,33 @@ public:
 
 메인 루프의 순서는 고정한다.
 
+<!-- snippet: src/main.cpp#main -->
 ```cpp
-timer.BeginFrame();
-activeScene.Update(dt);
+while (!WindowShouldClose()) {
+    timer.BeginFrame();
+    float dt = GetFrameTime();
+    // ... 탭이 바뀌었으면 OnExit -> OnEnter, 그리고 레이아웃 계산
+    scenes[(size_t)activeIdx]->Update(dt);
 
-BeginDrawing();
-DrawChrome();
-activeScene.DrawWorld(...);
-activeScene.DrawPanel(...);
-EndDrawing();
+    BeginDrawing();
+    ClearBackground(Color{12, 14, 18, 255});
 
-timer.EndFrame();
+    ailab::DrawCanvasBackground(layout.canvas);
+    ailab::DrawPanelBackground(layout.panel);
+
+    scenes[(size_t)activeIdx]->DrawWorld(
+        (int)layout.canvas.x, (int)layout.canvas.y,
+        (int)layout.canvas.width, (int)layout.canvas.height);
+
+    scenes[(size_t)activeIdx]->DrawPanel(
+        (int)layout.panel.x, (int)layout.panel.y,
+        (int)layout.panel.width, (int)layout.panel.height);
+    // ... 탭 바와 푸터는 Scene 위에 그린다
+    EndDrawing();
+
+    activeIdx = nextIdx;
+    timer.EndFrame();
+}
 ```
 
 FrameTimer는 순간값 대신 EMA를 제공한다. Scene을 바꿀 때 프레임 시간이 흔들려도 수치가 읽을 수 있는 속도로 움직인다. 이 값은 알고리즘 벤치마크가 아니라 UI가 과도하게 느려지는지 확인하는 안전 계기다.
@@ -97,11 +121,67 @@ FrameTimer는 순간값 대신 EMA를 제공한다. Scene을 바꿀 때 프레�
 4. Draw 호출 횟수가 Scene 상태를 바꾸지 않는다.
 5. Welcome Scene만 등록한 상태로 빌드·실행된다.
 
+이 중 2번과 3번은 창 없이 판정된다. `ComputeLayout` 과 `Grid` 의 `Layout`·`CellCenter`·
+`ScreenToCell`·`Resize` 는 raylib 함수를 하나도 부르지 않는 계산이라 `InitWindow` 없이
+그대로 호출할 수 있다. 그래서 둘은 눈으로 보는 대신 테스트로 고정하고, 렌더 진입점과
+Scene 생명주기에 달린 나머지(1·4·5)만 실행 화면에서 확인한다.
+
 **실행과 관측**
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
+ctest --test-dir build -C Release -R ai_step01_skeleton --output-on-failure
+./build/Release/ai_chrome_tests step01   # 같은 네 케이스를 직접 실행
+```
+
+```text
+1/1 Test #1: ai_step01_skeleton ...............   Passed
+100% tests passed out of 1
+
+ai_chrome_tests [step01] 4 case(s)
+  ok  layout/canvas-panel-disjoint
+  ok  grid/screen-round-trip
+  ok  grid/edge-clicks-in-bounds
+  ok  grid/resize-clamps-endpoints
+chrome tests passed
+```
+
+`layout/canvas-panel-disjoint` 은 창 크기 20 가지를 훑으며 네 사각형이 화면을 겹침도
+빈틈도 없이 덮는지 본다. 핵심은 부등호가 아니라 등호다 — 캔버스 오른쪽 끝과 패널 왼쪽
+끝이 *정확히 같은 x* 여야 한다. `canvasW` 를 1 만 늘려도 두 사각형이 한 픽셀 겹치는데,
+부등호로만 적으면 그 겹침이 통과한다.
+
+<!-- snippet: tests/chrome_tests.cpp@layout-disjoint -->
+```cpp
+// 캔버스 오른쪽 끝과 패널 왼쪽 끝이 정확히 맞닿는다.
+CHECK_CTX(L.canvas.x + L.canvas.width == L.panel.x, ctx);
+CHECK_CTX(L.canvas.width + L.panel.width == (float)screenW, ctx);
+CHECK_CTX(L.panel.width == (float)kPanelW, ctx);
+
+// 세로도 같다: 탭바 → 콘텐츠 → 푸터가 이어 붙는다.
+CHECK_CTX(L.tabBar.y == 0.0f, ctx);
+CHECK_CTX(L.tabBar.y + L.tabBar.height == L.canvas.y, ctx);
+CHECK_CTX(L.canvas.y + L.canvas.height == L.footer.y, ctx);
+CHECK_CTX(L.footer.y + L.footer.height == (float)screenH, ctx);
+
+// 캔버스와 패널은 같은 띠를 나눠 쓴다.
+CHECK_CTX(L.canvas.y == L.panel.y, ctx);
+CHECK_CTX(L.canvas.height == L.panel.height, ctx);
+```
+
+`grid/screen-round-trip` 은 모든 셀에서 `ScreenToCell(CellCenter(c)) == c` 를 확인한 뒤,
+셀 중심의 양옆 반 칸을 찍어 셀 경계가 어디인지 다시 묻는다. 왕복만 보면 `CellCenter` 가
+셀 *모서리* 를 돌려줘도 통과한다 — `ScreenToCell` 이 같은 식을 그대로 되돌리기 때문이다.
+`grid/edge-clicks-in-bounds` 는 탭바·패널·푸터·창 밖 좌표를 찍어, `ScreenToCell` 이 참을
+주면 반드시 격자 안이고 거짓이면 출력 인자를 건드리지 않는지 본다. 캔버스 밖 클릭이
+그리드 편집으로 새는 경로가 이 지점에서 막힌다. `grid/resize-clamps-endpoints` 는
+40x30 → 8x6 → 40x30 으로 크기를 왕복시켜 start·goal 이 새 범위 안으로 clamp 되고 살아남은
+영역의 벽이 보존되는지 본다.
+
+나머지 세 기준은 창을 띄워 본다.
+
+```bash
 ./build/Release/ai_lab        # Windows (MSVC): build\Release\ai_lab.exe
 ```
 

@@ -31,6 +31,7 @@ private:
 };
 
 // big 에서 시작해 small 을 n 회 더한 단순 float 합산.
+// snippet-begin: pure-sums
 inline float NaiveSum(float big, float small, int n) {
     float sum = big;
     for (int i = 0; i < n; ++i) sum += small;
@@ -43,5 +44,6 @@ inline float KahanSum(float big, float small, int n) {
     for (int i = 0; i < n; ++i) acc.Add(small);
     return acc.Sum();
 }
+// snippet-end: pure-sums
 
 }  // namespace mathlab

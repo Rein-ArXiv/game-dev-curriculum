@@ -287,19 +287,86 @@ cmake --build build --config Release
 build\Release\graphics_dx_lab.exe
 ```
 
-자동 검증 — 위 계획 수식(`PlanNullSrvWrites`)은 CTest가 검사한다.
+자동 검증 — 위 계획 수식(`PlanNullSrvWrites`)은 CTest가 검사한다. descriptor 몫만 도는 등록은 이 한 줄이다.
 
-```powershell
-ctest --test-dir build -C Release --output-on-failure
+<!-- snippet: CMakeLists.txt@step05-target -->
+```cmake
+add_test(NAME graphics_dx_step05_descriptor   COMMAND graphics_dx_contract_tests step05)
 ```
 
-기대 출력은 `1/1 Test #1: graphics_dx_contract_tests .... Passed`와 `DirectX contract tests passed`다. 계약 테스트가 다음을 확인한다.
+```powershell
+cmake --build build --config Release
+ctest --test-dir build -C Release -R graphics_dx_step05 --output-on-failure
+build\Release\graphics_dx_contract_tests.exe step05
+```
+
+```text
+1/1 Test #6: graphics_dx_step05_descriptor ....   Passed    0.04 sec
+
+100% tests passed out of 1
+
+  [step05] descriptor_lifetime_plan                    9 checks
+  [step05] descriptor_ranges_disjoint                  28 checks
+  [step05] heap_manager_follows_plan                   17 checks
+step05: 3 groups, 54 checks, 0 failures
+DirectX contract tests passed
+```
+
+세 그룹이 계획식·구간 불변식·계획과 실행의 일치를 하나씩 맡는다. 계약 테스트가 다음을 확인한다.
 
 - Transient 모드의 frame slot 시작 오프셋과 `sliceSize` 상한.
 - Persistent 모드의 최초 write 수가 N이고, 위치가 예약 구간 시작이다.
 - 정책과 count가 그대로면 persistent write 수가 0이다.
 - **구간 불변식** — `F`개 transient 구간이 서로 겹치지 않고, persistent 구간이 그 어느 것과도 겹치지 않으며, 모두 heap 용량 안에 있다. 위 §1 표의 실패 신호 “frame 구간이 겹침”을 육안이 아니라 CTest가 판정한다는 뜻이다. 앱이 실제로 쓰는 크기(`C = 100000`, `F = 3`, 요청 32,768)에 대해서도 같은 검사를 돌린다.
 - **계획과 실행의 일치** — `PrepareNullSrvWorkload`가 계획한 위치·개수 그대로 descriptor 작성 지점을 호출하는지.
+
+“겹치지 않는다”가 무슨 뜻인지부터 코드로 못박는다. 빈 구간은 어느 것과도 겹치지 않는다는 것까지 포함한 정의다.
+
+<!-- snippet: tests/graphics_dx_contract_tests.cpp#RangesOverlap -->
+```cpp
+bool RangesOverlap(const dxlab::DescriptorWritePlan& a,
+                   const dxlab::DescriptorWritePlan& b) {
+    if (a.count == 0 || b.count == 0) return false;
+    return a.first < b.first + b.count && b.first < a.first + a.count;
+}
+```
+
+그 정의 위에서 `F`개 frame slot 구간과 persistent 구간을 실제로 계획해 서로 대조한다. 표의 실패 신호 “frame 구간이 겹침”이 여기서 판정으로 바뀐다.
+
+<!-- snippet: tests/graphics_dx_contract_tests.cpp#TestDescriptorRangesDisjoint -->
+```cpp
+void TestDescriptorRangesDisjoint() {
+    const UINT framesInFlight = 3;
+    const UINT capacity = ninetySix;
+    const UINT requested = 32;
+
+    dxlab::DescriptorWritePlan frames[3];
+    for (UINT f = 0; f < framesInFlight; ++f) {
+        frames[f] = dxlab::PlanNullSrvWrites(
+            dxlab::HeapPolicy::RebuildEachFrame, f, framesInFlight, requested,
+            capacity, 0, dxlab::HeapPolicy::RebuildEachFrame);
+        CHECK(frames[f].count > 0);
+        CHECK(frames[f].first + frames[f].count <= capacity);
+    }
+    // (a) frame slot 구간끼리 겹치지 않는다.
+    CHECK(!RangesOverlap(frames[0], frames[1]));
+    CHECK(!RangesOverlap(frames[0], frames[2]));
+    CHECK(!RangesOverlap(frames[1], frames[2]));
+
+    // (b) persistent 구간은 어떤 frame slot 구간과도 겹치지 않는다.
+    auto persistent = dxlab::PlanNullSrvWrites(
+        dxlab::HeapPolicy::PersistentTable, 0, framesInFlight, requested,
+        capacity, 0, dxlab::HeapPolicy::RebuildEachFrame);
+    CHECK(persistent.count > 0);
+    CHECK(persistent.first + persistent.count <= capacity);
+    CHECK(!RangesOverlap(persistent, frames[0]));
+    CHECK(!RangesOverlap(persistent, frames[1]));
+    CHECK(!RangesOverlap(persistent, frames[2]));
+    // ... 앱이 실제로 쓰는 크기(C = 100000, 요청 32,768)로 같은 검사를 한 번 더.
+}
+```
+
+`capacity` 를 96 으로 좁혀 잡은 것이 의도다. 슬라이스가 24 로 떨어져 시작 오프셋을 손으로 셀 수 있고, 계산식이 어긋나면 구간이 곧바로 서로를 밟는다. 뒤이어 같은 검사를 앱의 실제 크기로 한 번 더 돌리므로 “작은 수에서만 맞는 식”은 통과하지 못한다.
 
 마지막 항목이 §3 에서 말한 `virtual` 의 쓸모다. 테스트는 파생 클래스로 작성 지점을 가로채 호출 로그만 남기고, 디바이스 없이 초기화하는 경로로 용량과 핸들 간격을 주입한다.
 

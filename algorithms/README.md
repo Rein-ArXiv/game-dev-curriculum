@@ -44,7 +44,7 @@ CLRS의 분석·증명 체계와 *The Algorithm Design Manual*의 문제 모델�
 | 장 | 필수 구현 | 필수 검증 |
 |---:|---|---|
 | 01 | 점화식 분석기 또는 상각 비용 계측 | 작은 입력 완전 탐색과 복잡도 증가율 비교 |
-| 02 | `lower_bound`, stable merge sort, quickselect | 표준 구현과 differential test, 잘못된 비교자 반례 |
+| 02 | `lower_bound`, stable merge sort, quickselect, LSD radix sort | 표준 구현과 differential test, 잘못된 비교자 반례, 패스 하나를 불안정하게 만든 radix 반례 |
 | 03 | sliding maximum, Fenwick tree, segment tree | 모든 구간 직접 계산 oracle과 비교 |
 | 04 | open-addressing map, KMP, Aho-Corasick | 충돌 hash와 naive 문자열 검색 oracle |
 | 05 | BFS/DFS, SCC, DSU, MST | component·cycle·최소 비용 brute-force 검증 |

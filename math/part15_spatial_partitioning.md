@@ -21,7 +21,7 @@ SAT, GJK·EPA 같은 알고리즘은 *두 도형 사이의 충돌 한 번* 을 �
 - *Quadtree·Octree* — 분포 적응적 분할.
 - *K-d Tree* — 차원별 교대 분할, NN 쿼리.
 - *Loose Quadtree* — 동적 객체에 적합한 변형.
-- *Frustum Culling* — 카메라 절두체와 분할 구조의 결합.
+- *Frustum Culling* — 카메라에서 받은 6평면으로 트리를 자르는 3분 판정.
 - *동적 객체 갱신 전략*.
 
 *BVH (객체 자체를 트리로)* 와 함께, 이 둘이 *broad phase 가속 구조* 의 표준 패밀리다.
@@ -589,7 +589,7 @@ void UpdateObject(LooseQuadNode*& currentNode, int objId, AABB newAABB) {
 
 카메라의 *절두체 (frustum)* 안의 객체만 *렌더*. 공간 분할 구조와 결합해 *대규모 가지치기*.
 
-### 7.1 Frustum 의 정의
+### 7.1 입력은 평면 6개다
 
 원근 카메라의 *시야 절두체* — 6평면으로 둘러싸인 사각뿔의 잘린 부분.
 
@@ -603,31 +603,28 @@ flowchart LR
     Cam --> Right[Right 평면]
 ```
 
-투영 행렬 + 카메라 행렬에서 *6평면 추출*. 각 평면이 *내향 법선* (frustum 안쪽 향함).
+이 절의 관심은 *평면을 어떻게 구하는가* 가 아니라 *구해진 평면으로 트리를 어떻게 자르는가* 다. 평면 6개는 투영·뷰 행렬을 쥔 카메라 쪽에서 이미 만들어져 넘어온다고 본다. 넘어오는 값이 만족해야 하는 계약은 세 줄이다.
 
-### 7.2 평면 추출
+- **정규화** — `normal` 이 단위 벡터다. 그래야 부호 거리를 평면끼리 비교할 수 있고 반지름을 빼는 검사가 성립한다.
+- **내향 법선** — 여섯 법선이 모두 frustum *안쪽* 을 향한다.
+- **Hessian 부호** — 평면은 $\hat{n} \cdot \vec{p} = d$, 즉 `d` 는 원점에서 평면까지의 부호 거리다. 점의 부호 거리는 `dot(normal, p) - d`.
 
 ```cpp
 struct Plane {
-    vec3  normal;     // 단위 벡터
-    float d;          // dot(p, normal) + d = 0
+    vec3  normal;     // 단위 벡터, frustum 안쪽을 향함
+    float d;          // 원점에서 평면까지의 부호 거리 (n·p = d)
 };
 
-void ExtractFrustumPlanes(mat4 viewProj, Plane planes[6]) {
-    // Gribb-Hartmann 방법
-    // VP 행렬 4개 행으로부터 6평면 추출
-    planes[0] = NormalizePlane({ viewProj.row(3) + viewProj.row(0) }); // Left
-    planes[1] = NormalizePlane({ viewProj.row(3) - viewProj.row(0) }); // Right
-    planes[2] = NormalizePlane({ viewProj.row(3) + viewProj.row(1) }); // Bottom
-    planes[3] = NormalizePlane({ viewProj.row(3) - viewProj.row(1) }); // Top
-    planes[4] = NormalizePlane({ viewProj.row(3) + viewProj.row(2) }); // Near
-    planes[5] = NormalizePlane({ viewProj.row(3) - viewProj.row(2) }); // Far
+inline float SignedDistance(const Plane& pl, vec3 p) {
+    return dot(pl.normal, p) - pl.d;
 }
 ```
 
-*Gribb-Hartmann* (2001) 의 표준 방법. ViewProjection 행렬의 행 합·차로 평면 직접 추출. *행렬 한 번 계산이 6평면*.
+세 조건이 모이면 *안쪽 판정이 여섯 번의 `>= 0`* 으로 끝난다. 이 절의 모든 코드가 이 한 줄 위에 선다.
 
-### 7.3 Plane vs AABB
+*계약이 깨지면 증상이 조용하다.* 특히 부호 관례가 반대인 평면 — $\hat{n} \cdot \vec{p} + D = 0$ 의 $D$ 를 `d` 에 그대로 담은 것 — 을 받으면 컴파일도 실행도 정상인데 여섯 평면이 전부 원점 반대편으로 옮겨 앉는다. 대칭 절두체라면 원점을 지나는 좌우·상하 네 평면($d = 0$)은 그대로여서 아무 이상이 없어 보이고, near 는 카메라 뒤로 far 는 카메라 앞으로 밀린다. view 공간 $z = -11$ 의 far 평면은 $\hat{n} = (0,0,1)$, $d = -11$ 인데, 부호가 뒤집혀 $d = +11$ 로 들어오면 $z = -5$ 의 상자가 $-5 - 11 = -16$ 으로 `Outside` 가 된다 — *장면 전체가 지워진다*. 화면이 통째로 비는 증상에서는 컬링 로직보다 넘어온 평면부터 검산하는 편이 빠르다.
+
+### 7.2 AABB vs Frustum
 
 ```cpp
 enum class FrustumResult { Outside, Inside, Intersect };
@@ -635,29 +632,31 @@ enum class FrustumResult { Outside, Inside, Intersect };
 FrustumResult AABBVsFrustum(AABB box, const Plane planes[6]) {
     bool intersect = false;
     for (int i = 0; i < 6; ++i) {
-        // p = AABB 의 정점 중 평면에서 가장 양수 쪽 (positive vertex)
-        vec3 p = vec3(
-            planes[i].normal.x >= 0 ? box.max.x : box.min.x,
-            planes[i].normal.y >= 0 ? box.max.y : box.min.y,
-            planes[i].normal.z >= 0 ? box.max.z : box.min.z
-        );
-        if (dot(planes[i].normal, p) + planes[i].d < 0) return FrustumResult::Outside;
+        const vec3 n = planes[i].normal;
 
-        // n = 가장 음수 쪽 (negative vertex)
-        vec3 n = vec3(
-            planes[i].normal.x >= 0 ? box.min.x : box.max.x,
-            planes[i].normal.y >= 0 ? box.min.y : box.max.y,
-            planes[i].normal.z >= 0 ? box.min.z : box.max.z
-        );
-        if (dot(planes[i].normal, n) + planes[i].d < 0) intersect = true;
+        // p-vertex: 법선 방향으로 가장 멀리 나간 코너 = 부호 거리가 최대인 코너
+        vec3 pv = vec3(n.x >= 0 ? box.max.x : box.min.x,
+                       n.y >= 0 ? box.max.y : box.min.y,
+                       n.z >= 0 ? box.max.z : box.min.z);
+        if (SignedDistance(planes[i], pv) < 0) return FrustumResult::Outside;
+
+        // n-vertex: 반대편 코너 = 부호 거리가 최소인 코너
+        vec3 nv = vec3(n.x >= 0 ? box.min.x : box.max.x,
+                       n.y >= 0 ? box.min.y : box.max.y,
+                       n.z >= 0 ? box.min.z : box.max.z);
+        if (SignedDistance(planes[i], nv) < 0) intersect = true;
     }
     return intersect ? FrustumResult::Intersect : FrustumResult::Inside;
 }
 ```
 
-*p-vertex / n-vertex 트릭*. AABB의 *8 코너* 중 *각 평면에서 가장 양수 쪽 코너 1개* 만 검사하면 된다 — *AABB 가 평면의 어느 쪽에 있는가* 가 그 코너 한 점으로 결정.
+*p-vertex / n-vertex 트릭*. 8 코너를 다 볼 필요가 없다. 부호 거리 $\hat{n} \cdot \vec{p} - d$ 는 각 축에 대해 단조라서, *최대를 주는 코너는 축별로 법선 부호만 보면 정해진다*. 그 코너가 음수면 나머지 일곱도 음수이므로 상자 전체가 바깥이다.
 
-### 7.4 트리 트래버설 + Frustum Culling
+n-vertex 는 *완전히 안쪽인가* 를 가른다. 최소 코너까지 양수면 상자가 그 평면 안쪽에 통째로 들어 있고, 여섯 평면 모두에서 그렇다면 `Inside` — 자식 노드는 평면 검사를 건너뛰어도 된다. 트리 가지치기에서 이 3분 판정이 2분 판정보다 훨씬 값어치가 있다.
+
+검산해 둔다. near 평면을 $\hat{n} = (0,0,-1)$, $d = 1$ (view 공간 $z = -1$) 로 두자. 상자가 $z \in [-3, -2]$ 면 p-vertex 의 $z$ 는 $-3$ 이므로 $3 - 1 = +2$, n-vertex 의 $z$ 는 $-2$ 이므로 $2 - 1 = +1$ — 둘 다 양수라 이 평면에 대해 안쪽이다. 상자가 $z \in [-2, -0.5]$ 면 p-vertex 는 $+1$, n-vertex 는 $0.5 - 1 = -0.5$ — `Intersect`. 상자가 $z \in [-0.8, -0.2]$ 면 p-vertex 부터 $0.8 - 1 = -0.2$ 로 음수 — `Outside`, 카메라에 너무 붙어 잘린다.
+
+### 7.3 트리 트래버설 + Frustum Culling
 
 ```cpp
 void RenderQuadtreeFrustum(QuadNode* node, const Plane planes[6]) {
@@ -683,13 +682,13 @@ void RenderQuadtreeFrustum(QuadNode* node, const Plane planes[6]) {
 
 *Outside 노드는 즉시 컷*. *Inside 노드는 자식 검사 스킵*. 가지치기가 *카메라 시야 밖 객체 80~90%* 를 제거.
 
-### 7.5 Hierarchical Z-buffer 와 Occlusion Culling
+### 7.4 Hierarchical Z-buffer 와 Occlusion Culling
 
 Frustum 컬링이 *시야 밖만* 자른다. *시야 안인데 다른 물체에 가려진* 객체도 자르고 싶으면 *occlusion culling*.
 
 GPU의 *Hierarchical Z-buffer* 또는 *Hardware Occlusion Query* 로 가려진 영역 검출. 큰 폴리곤이 작은 폴리곤을 가리는 *도시 게임* 에서 효과 큼.
 
-### 7.6 게임 활용
+### 7.5 게임 활용
 
 - **렌더링 컬링**: 가장 흔한 활용. 카메라 밖 객체 안 그림.
 - **AI LOD**: 시야 밖 적 *간소화 시뮬레이션*.
@@ -818,7 +817,7 @@ struct Object {
 3. **Quadtree / Octree** — 분포 불균일에 적응적. 큰 환경의 표준.
 4. **K-d Tree** — 정적 객체의 NN 쿼리에 강하지만 동적 약함.
 5. **Loose Quadtree** — 동적 객체 갱신 비용 절감의 핵심 트릭.
-6. **Frustum Culling** — 카메라 + 분할 구조 결합. 렌더링 컬링의 표준.
+6. **Frustum Culling** — 정규화된 내향 평면 6개를 받아 Outside/Inside/Intersect 로 가르고, Outside 는 즉시 컷·Inside 는 하위 검사 생략.
 7. **동적 갱신 전략** — lazy update, 정적/동적 분리, sleep 분류.
 
 *BVH (Bounding Volume Hierarchy)* 는 객체 자체를 *경계 볼륨으로 묶어 트리* 로 만드는 구조다. 충돌·레이트레이싱·레이캐스팅의 표준 가속 구조이며, 공간 분할과 객체 계층이 함께 *broad phase 의 두 패밀리* 를 이룬다.
@@ -829,7 +828,7 @@ struct Object {
 - Tomas Akenine-Möller et al., *Real-Time Rendering*, 4th ed., Ch. 19 — Frustum / Occlusion Culling.
 - Hanan Samet, *Foundations of Multidimensional and Metric Data Structures* — 공간 자료구조의 백과사전.
 - Thatcher Ulrich, "Loose Octrees" (Game Programming Gems, 2000) — Loose 변형 원전.
-- Gribb, Hartmann, "Fast Extraction of Viewing Frustum Planes" (2001) — 행렬에서 평면 추출.
+- Ulf Assarsson, Tomas Möller, ["Optimized View Frustum Culling Algorithms for Bounding Boxes"](https://www.cse.chalmers.se/~uffe/vfc_bbox.pdf) (JGT, 2000) — p-vertex/n-vertex 판정과 그 최적화의 원전.
 - David Eberly, *3D Game Engine Design* — 다양한 가속 구조의 게임 적용.
 - Bullet Physics 소스 (`btDbvtBroadphase.cpp`) — 산업 broad phase 구현.
 - Box2D `b2DynamicTree.cpp` — 2D 동적 트리 산업 표준.

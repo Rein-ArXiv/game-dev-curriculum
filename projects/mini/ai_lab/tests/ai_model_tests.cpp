@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <string>
 #include <vector>
 
 namespace {
@@ -156,12 +157,14 @@ void TestSteeringSpeedCap() {
     // 결정적 최악 케이스: 최고 속도로 달리는 중에 목표가 정반대로 뒤집히고
     // 프레임이 1.5 초 걸린다. 절단이 없으면 |v| 가 520 까지 튄다.
     // (경계 반사가 결과를 가리지 않도록 넓은 캔버스를 쓴다.)
+    // snippet-begin: steering-speed-cap
     const ailab::SteerBounds wide{0.0f, 0.0f, 10000.0f, 10000.0f};
     ailab::SteerState state{{5000.0f, 5000.0f}, {params.maxSpeed, 0.0f}, 0.0f};
     state = ailab::StepSteering(state, ailab::SteerBehavior::Seek, {-100000.0f, 5000.0f},
                                 {}, params, 1.5f, wide);
     CHECK(ailab::VecLen(state.vel) <= params.maxSpeed + 1e-4f);
     CHECK(state.vel.x < 0.0f);
+    // snippet-end: steering-speed-cap
 }
 
 // Arrive: slowRadius 안에서 목표에 가까워질수록 desired 속력이 단조 감소하고,
@@ -281,6 +284,7 @@ void TestIntegrationField() {
             return x != 4 || y == 5;
         },
         0, 0);
+    // snippet-begin: integration-field-detour
     const float detour = at(corridor, 7, 0);
     CHECK(std::isfinite(detour));
     CHECK(detour > at(open, 7, 0) + 1e-3f);
@@ -288,6 +292,7 @@ void TestIntegrationField() {
     //   (0,0)→(4,5) = 1 + 4√2,  (4,5)→(7,0) = 2 + 3√2,  합 = 3 + 7√2.
     CHECK(Near(at(corridor, 4, 5), 1.0f + 4.0f * 1.41421356f, 1e-4f));
     CHECK(Near(detour, 3.0f + 7.0f * 1.41421356f, 1e-3f));
+    // snippet-end: integration-field-detour
 
     // (d) 필드와 국소 정책의 결합: 통로 앞 셀은 통로 쪽으로 내려가야 한다.
     const auto step = ailab::SelectFlowDirection(
@@ -312,6 +317,7 @@ void TestInfluenceField() {
     };
 
     // (a) 확산 반복 1회 = 이웃까지, 2회 = 거리 2 까지. 감쇠는 spread^거리.
+    // snippet-begin: influence-spread-distance
     {
         std::vector<float> field((size_t)(W * H), 0.0f);
         const std::vector<ailab::GridPoint> stamps{{3, 3}};
@@ -331,6 +337,7 @@ void TestInfluenceField() {
         CHECK(Near(at(field, 5, 3), 0.25f));
         CHECK(Near(at(field, 6, 3), 0.0f));
     }
+    // snippet-end: influence-spread-distance
 
     // (b) decay: 스탬프를 걷어낸 다음 tick 은 정확히 decay 배로 줄어든다.
     {
@@ -341,7 +348,7 @@ void TestInfluenceField() {
         const float before = at(field, 4, 3);
         ailab::StepInfluenceField(W, H, field, std::vector<ailab::GridPoint>{}, params,
                                   openGrid);
-        // decay 후 0.25*0.5=0.125, 이웃 (3,3)=0.5 에서 0.25 가 들어와 0.25.
+        // decay 후 0.5*0.5=0.25, 이웃 (3,3)=0.5 에서 0.25 가 들어와 0.25.
         CHECK(Near(at(field, 3, 3), 0.5f));
         CHECK(Near(at(field, 4, 3), 0.25f));
         CHECK(at(field, 4, 3) < before);
@@ -387,19 +394,57 @@ void TestInfluenceField() {
     }
 }
 
+struct TestCase {
+    const char* step;
+    const char* name;
+    void (*fn)();
+};
+
+// 어느 케이스가 어느 step 소속인가 — 그 step 이 무엇을 추가했는지로 정한다.
+//   flow_field.h + SelectFlowDirection  → 비용장 step
+//   steering.h                          → 국소 제어 step
+//   LimitSpeed / ReflectAxis            → 군집 step (BoidsScene 만 부른다)
+//   influence.h + CombineInfluence      → 영향력 장 step
+// LimitSpeed 의 하한 인자와 ReflectAxis 의 반복 반사는 둘 다 군집 Scene 이
+// 요구해서 생긴 것이라 그쪽에 둔다. 국소 제어는 자기 감쇠 반사를 따로 쓴다.
+const TestCase kCases[] = {
+    {"step03", "flow/direction-edge-cost",   TestWeightedFlowDirection},
+    {"step03", "flow/integration-field",     TestIntegrationField},
+    {"step04", "steering/speed-cap",         TestSteeringSpeedCap},
+    {"step04", "steering/arrive-slowdown",   TestSteeringArriveSlowdown},
+    {"step04", "steering/pursue-lookahead",  TestSteeringPursueLookahead},
+    {"step04", "steering/bounds",            TestSteeringBounds},
+    {"step05", "boids/reflect-axis",         TestReflectAxis},
+    {"step05", "boids/speed-limits",         TestSpeedLimits},
+    {"step06", "influence/derived-views",    TestInfluenceCombination},
+    {"step06", "influence/field-step",       TestInfluenceField},
+};
+
 }  // namespace
 
-int main() {
-    TestWeightedFlowDirection();
-    TestReflectAxis();
-    TestSpeedLimits();
-    TestInfluenceCombination();
-    TestSteeringSpeedCap();
-    TestSteeringArriveSlowdown();
-    TestSteeringPursueLookahead();
-    TestSteeringBounds();
-    TestIntegrationField();
-    TestInfluenceField();
+// 인자가 없으면 전부, `step04` 같은 step 이름이나 케이스 이름 전체를 주면
+// 그것만 돈다. 아무것도 고르지 못한 필터는 조용히 통과하지 않고 실패한다.
+int main(int argc, char** argv) {
+    const std::string filter = (argc > 1) ? argv[1] : "";
+    std::vector<const TestCase*> selected;
+    for (const TestCase& c : kCases)
+        if (filter.empty() || filter == c.step || filter == c.name)
+            selected.push_back(&c);
+
+    if (selected.empty()) {
+        std::cerr << "no case matches filter '" << filter << "'\n";
+        return 2;
+    }
+
+    std::cout << "ai_model_tests [" << (filter.empty() ? "all" : filter)
+              << "] " << selected.size() << " case(s)\n";
+    for (const TestCase* c : selected) {
+        const int before = failures;
+        c->fn();
+        std::cout << "  " << (failures == before ? "ok" : "FAIL") << "  "
+                  << c->name << "\n";
+    }
+
     if (failures != 0) {
         std::cerr << failures << " AI model test(s) failed\n";
         return 1;

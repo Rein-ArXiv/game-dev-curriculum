@@ -221,59 +221,24 @@ Cache Line (64 bytes):
 
 SoA가 6배 적은 캐시 라인을 로드한다.
 
-### SIMD 벡터화: SoA의 진정한 힘
+### 레이아웃이 벡터 적재 방식을 정한다
 
-SoA의 진가는 SIMD(Single Instruction Multiple Data) 최적화에서 드러난다.
-
-**AoS의 SIMD 어려움:**
+캐시 라인 활용률과 같은 계산이 벡터 명령에서 한 번 더 반복된다. 벡터 레지스터도 **연속된 바이트를 통째로 가져오는 것이 가장 싸기** 때문이다.
 
 ```cpp
-struct Particle { float x, y, z, vx, vy, vz; };
-std::vector<Particle> particles;
+struct Particle { float x, y, z, vx, vy, vz; };   // 24바이트 간격
 
-// 여덟 scalar load로 SIMD register를 직접 구성
-__m256 xs = _mm256_set_ps(
-    p[7].x, p[6].x, p[5].x, p[4].x,
-    p[3].x, p[2].x, p[1].x, p[0].x
-);
-// _mm256_set_ps 자체는 gather 명령이 아니다.
+// 구조체 배열: x는 24바이트씩 떨어져 있다
+__m256 xs = _mm256_set_ps(p[7].x, p[6].x, p[5].x, p[4].x,
+                          p[3].x, p[2].x, p[1].x, p[0].x);
+
+// 필드별 배열: x는 4바이트씩 붙어 있다
+__m256 xs2 = _mm256_loadu_ps(&particles.x[i]);
 ```
 
-데이터가 인터리브되어 있어서 8개의 x값을 모으려면 위처럼 scalar load를 나열하거나 `_mm256_i32gather_ps` 같은 실제 gather 명령을 사용해야 한다. 어느 쪽이 유리한지는 stride, cache 상태와 CPU 세대에 따라 다르지만 연속 vector load보다 주소 생성과 데이터 결합이 복잡하다.
+두 줄의 겉모습은 비슷하지만 아래쪽만 명령 하나로 끝난다. 위쪽은 흩어진 주소에서 값을 하나씩 모아 레지스터에 끼워 넣는 작업으로 펼쳐진다. 여기서 확인할 것은 인트린직의 세부가 아니라 **같은 배치 결정이 두 계층에서 같은 방향으로 작용한다**는 사실이다. 캐시 라인을 낭비 없이 채우는 배치가 벡터 레지스터도 낭비 없이 채운다.
 
-**SoA의 SIMD 용이성:**
-
-```cpp
-// 연속된 데이터를 바로 로드
-__m256 xs = _mm256_loadu_ps(&particles.x[i]);    // 정렬을 보장하지 않는 배열
-__m256 vxs = _mm256_loadu_ps(&particles.vx[i]);
-__m256 dts = _mm256_set1_ps(dt);                 // dt 브로드캐스트
-
-// 8개 동시 계산: x = x + vx * dt
-__m256 result = _mm256_fmadd_ps(vxs, dts, xs);
-_mm256_storeu_ps(&particles.x[i], result);       // 정렬 미보장 주소에 8개 저장
-```
-
-연속된 메모리에서 직접 로드하므로 추가 셔플 없이 깔끔하다. 컴파일러가 자동으로 벡터화할 수도 있다.
-
-100만 개 요소를 비교하는 벤치마크의 핵심 루프는 다음과 같다.
-
-```cpp
-// 스칼라 버전
-for (int i = 0; i < 1000000; ++i) {
-    particles[i].x += particles[i].vx * dt;
-}
-
-// SIMD 버전 (SoA)
-for (int i = 0; i < 1000000; i += 8) {
-    __m256 x = _mm256_loadu_ps(&particles.x[i]);
-    __m256 vx = _mm256_loadu_ps(&particles.vx[i]);
-    __m256 result = _mm256_fmadd_ps(vx, dt_vec, x);
-    _mm256_storeu_ps(&particles.x[i], result);
-}
-```
-
-명시적 AVX2/FMA가 스칼라 소스보다 몇 배 빠른지는 컴파일러가 스칼라 루프를 이미 벡터화했는지, 메모리 대역폭이 포화됐는지, tail 처리와 정렬에 따라 달라진다. scalar baseline에는 벡터화 비활성 빌드와 일반 최적화 빌드를 구분하고, compiler vectorization report와 처리 bytes/s를 함께 기록한다.
+반대 방향의 사실도 같이 알아 두어야 한다. 루프가 구조체의 모든 필드를 읽는다면 어차피 모든 바이트를 가져와야 하므로 필드별 배열의 이점이 사라진다. 레이아웃은 데이터 자체의 속성이 아니라 **그 데이터를 읽는 루프의 속성**에 따라 정해진다.
 
 ### 하이브리드: AoSoA
 
@@ -515,34 +480,20 @@ renderSystem.render();
 
 가능한 이득은 조밀한 순회, 불필요한 필드 제외, batch 단위 벡터화와 독립 시스템 scheduling에서 온다. 그러나 모든 ECS가 연속 배치를 보장하는 것은 아니며 sparse set, archetype, pointer-based storage의 비용이 다르다. cache hit, vectorization, job 병렬성은 구현과 질의별로 측정한다.
 
-### Archetype 기반 ECS
+### 왜 이 형태로 수렴하는가
 
-더 발전된 ECS는 archetype을 사용한다. 같은 컴포넌트 조합을 가진 엔티티들을 하나의 청크에 모은다.
+컴포넌트를 배열로 나눈 것만으로는 아직 한 가지 문제가 남는다. 시스템이 "`Transform`과 `Velocity`를 둘 다 가진 엔티티"를 순회하려 할 때, 두 배열의 인덱스가 같은 엔티티를 가리킨다는 보장이 없다는 것이다. 엔티티마다 컴포넌트 조합이 다르면 배열 길이도 달라진다.
 
-```cpp
-// Archetype A: [Transform, Velocity, Health]
-// Archetype B: [Transform, Velocity]
-// Archetype C: [Transform, Renderable]
+가능한 답은 두 갈래뿐이다.
 
-class World {
-    std::unordered_map<ComponentMask, ArchetypeChunk> archetypes;
+| 답 | 순회할 때 하는 일 | 대가 |
+|---|---|---|
+| 조합에 관계없이 배열을 유지하고 인덱스를 사상한다 | 컴포넌트마다 인덱스를 변환해 교차 | 순회마다 간접 참조가 추가된다 |
+| 같은 조합끼리 미리 모아 둔다 | 같은 인덱스로 바로 접근 | 조합이 바뀌면 엔티티를 옮겨야 한다 |
 
-    void updatePhysics(float dt) {
-        for (auto& [mask, chunk] : archetypes) {
-            if (mask.has<Transform>() && mask.has<Velocity>()) {
-                for (size_t i = 0; i < chunk.entityCount; ++i) {
-                    chunk.transforms[i].position +=
-                        chunk.velocities[i].linear * dt;
-                }
-            }
-        }
-    }
-};
-```
+두 번째가 archetype이다. 이름은 자료구조처럼 보이지만 실제로 하는 일은 **비용을 순회에서 구조 변경으로 옮기는 것**이다. 매 프레임 반복되는 것은 순회이고 컴포넌트 조합이 바뀌는 일은 드물다는 관찰이 이 교환을 정당화한다. 그 관찰이 성립하지 않는 워크로드 — 매 프레임 상태 플래그를 컴포넌트로 붙였다 떼는 코드 — 에서는 같은 구조가 손해로 뒤집힌다.
 
-핵심은 "필요한 컴포넌트가 있는 엔티티만 순회한다"는 점이다. 청크 내부는 SoA로 연속 배치되어 캐시 친화적이며, 컴포넌트 추가/삭제 시 archetype 이동만 발생한다. Unity의 DOTS가 이 방식을 사용한다.
-
-DOD 관점에서 ECS의 가치는 자료구조 자체가 아니라 "데이터를 변환하는 흐름"을 명확히 분리하는 데 있다. 자료구조의 세부(SparseSet 인덱싱, 청크 분할 정책 등)는 구현 영역이며, 핵심은 메모리가 시스템의 접근 패턴에 맞게 배치된다는 사실이다.
+여기까지가 데이터 지향 관점에서 ECS에 대해 말할 수 있는 것이다. 어떤 배열을 어떤 단위로 묶고, 인덱스를 어떻게 사상하고, 조합이 바뀔 때 무엇을 복사하는지는 자료구조 설계의 문제이지 레이아웃 원칙의 문제가 아니다. 이 글이 소유하는 주장은 그 앞 단계다. **시스템이 실제로 읽는 필드만 연속으로 놓으면 캐시 라인 활용률이 계산 가능한 값으로 바뀌고, 그 계산이 자료구조 선택의 근거가 된다.**
 
 ## 5. 실전 적용: 파티클 시스템
 

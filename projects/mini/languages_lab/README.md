@@ -37,6 +37,45 @@ ctest --test-dir build -C Release --output-on-failure
 
 Linux와 macOS의 단일 구성 생성기에서는 실행 파일이 `build/`에 생성된다.
 
+## 계약별 테스트 타깃
+
+`ctest`는 전체 실행 타깃 `languages_tests` 하나와 계약별 타깃 여섯 개를 등록한다.
+계약별 타깃은 같은 실행 파일에 라벨을 인자로 넘긴 것이며, 라벨은 `src/tests.cpp`의
+등록표 첫 칸이다.
+
+<!-- snippet: src/tests.cpp@test-registry -->
+```cpp
+struct TestCase {
+    const char* step;
+    const char* name;
+    void (*run)();
+};
+
+constexpr TestCase kTestCases[] = {
+    {"step01", "lexer_token_locations", TestLexerTokenLocations},
+    {"step01", "lexer_rejects_unknown_character", TestLexerRejectsUnknownCharacter},
+    // ...
+    {"step06", "bench_program_invariants", TestBenchProgramInvariants},
+};
+```
+
+한 묶음만 돌리려면 ctest 이름 필터나 실행 파일 인자를 쓴다. 사례 이름 하나만 넘겨도 된다.
+
+```powershell
+ctest --test-dir build -C Release -R languages_step03 --output-on-failure
+.\build\Release\languages_tests.exe step03
+.\build\Release\languages_tests.exe verifier_branch_contracts
+```
+
+```text
+[step03] verifier_rejects_malformed_program ok
+[step03] verifier_branch_contracts ok
+languages_tests [step03]: all checks passed (2 case(s), 11 check(s))
+```
+
+라벨이 등록표에 없으면 실행 파일은 통과가 아니라 실패로 끝난다. 오타 난 필터가 "통과"로
+보이는 것이 가장 나쁜 결과이기 때문이다.
+
 ## 디렉터리
 
 ```text
@@ -45,10 +84,11 @@ languages_lab/
   README.md
   articles/
   src/
-    language.hpp     렉서, 컴파일러, 바이트코드 검증기, VM
-    main.cpp         게임 밸런스 식 실행 예제
-    tests.cpp        문법·실행·실패 주입 테스트
-    bench.cpp        컴파일 비용 상각 실험
+    language.hpp       렉서, 컴파일러, 바이트코드 검증기, VM
+    main.cpp           게임 밸런스 식 실행 예제
+    tests.cpp          문법·실행·실패 주입 테스트, 계약별 등록표
+    bench.cpp          컴파일 비용 상각 실험
+    bench_program.hpp  측정과 정확성 테스트가 공유하는 벤치마크 소스
 ```
 
 ## 범위

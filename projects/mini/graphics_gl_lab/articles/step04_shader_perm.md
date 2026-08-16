@@ -39,19 +39,24 @@
 
 ## 2. Uber shader 구조
 
+<!-- snippet: shaders/uber.frag -->
 ```glsl
 // uber.frag
-uniform int uShadingModel;   // 0=lambert, 1=blinn-phong, 2=cel
-
+uniform int  uShadingModel;    // 0=lambert, 1=blinn-phong, 2=cel
+// ... ShadeLambert / ShadeBlinnPhong / ShadeCel 정의
 void main() {
     vec3 N = normalize(vNormalWS);
     vec3 L = normalize(uLightDir);
     vec3 V = normalize(uCameraPos - vWorldPos);
 
     vec3 result;
-    if (uShadingModel == 0)      result = ShadeLambert(N, L, vColor);
-    else if (uShadingModel == 1) result = ShadeBlinnPhong(N, L, V, vColor);
-    else                          result = ShadeCel(N, L, vColor);
+    if (uShadingModel == 0) {
+        result = ShadeLambert(N, L, vColor);
+    } else if (uShadingModel == 1) {
+        result = ShadeBlinnPhong(N, L, V, vColor);
+    } else {
+        result = ShadeCel(N, L, vColor);
+    }
     FragColor = vec4(result, 1.0);
 }
 ```
@@ -68,6 +73,7 @@ void main() {
 
 ## 3. Static permutation 구조
 
+<!-- snippet: shaders/perm_lambert.frag#main -->
 ```glsl
 // perm_lambert.frag
 void main() {
@@ -78,6 +84,7 @@ void main() {
 }
 ```
 
+<!-- snippet: shaders/perm_blinn_phong.frag#main -->
 ```glsl
 // perm_blinn_phong.frag
 void main() {
@@ -110,9 +117,12 @@ public:
 };
 ```
 
+<!-- snippet: src/render/shader_registry.cpp#ShaderRegistry::Pick -->
 ```cpp
 ShaderProgram& ShaderRegistry::Pick(ShaderStyle style, ShadingModel model) {
-    if (style == ShaderStyle::Uber) return *uber_;
+    if (style == ShaderStyle::Uber) {
+        return *uber_;
+    }
     switch (model) {
         case ShadingModel::Lambert:    return *permLambert_;
         case ShadingModel::BlinnPhong: return *permBlinn_;
@@ -126,6 +136,7 @@ App 의 Render() 가 *매 프레임 Pick → Use → Scene::Draw*. Uber 모드�
 
 ### 변경 감지
 
+<!-- snippet: src/render/shader_registry.cpp#ShaderRegistry::ProgramChangedSinceLast -->
 ```cpp
 bool ShaderRegistry::ProgramChangedSinceLast(ShaderProgram& prog) {
     GLuint p = prog.Program();
@@ -188,6 +199,58 @@ build\Release\graphics_gl_lab.exe      # Linux/macOS: ./build/graphics_gl_lab
 - `style` 콤보를 *Uber ↔ Static permutation* 으로 바꾸면 프로그램이 교체되는 프레임에 `state changes` 가 1 늘어난다. 같은 스타일을 유지하는 동안에는 다시 정상값으로 돌아온다.
 - `model` 콤보 (Lambert / Blinn-Phong / Cel) 를 바꾸면 Uber 모드에서는 프로그램이 그대로이고, Static 모드에서만 프로그램이 바뀐다.
 - Blinn-Phong 은 다른 두 모델보다 `GPU pass` 가 눈에 띄게 크다 (specular pow + half vector).
+
+### 이 step 의 검증
+
+위 세 줄 중 *시간* 은 GPU 마다 달라 고정 기대값을 둘 수 없다. 그러나 *프로그램 구성* — 어느 조합이 같은 프로그램이고 어느 조합이 다른 프로그램인가 — 는 컨텍스트만 있으면 그대로 확인된다. 셰이더 컴파일이 필요하므로 이 검증은 실제 4.5 코어 컨텍스트에서 돈다.
+
+```powershell
+ctest --test-dir build -C Release -R gl_step04 --output-on-failure
+```
+
+```text
+    Start 9: gl_step04_shader_perm
+1/1 Test #9: gl_step04_shader_perm ............   Passed    0.25 sec
+
+100% tests passed out of 1
+```
+
+```powershell
+build\Release\graphics_gl_render_tests.exe step04   # Linux/macOS: ./build/graphics_gl_render_tests step04
+```
+
+```text
+[gl] vendor=Intel renderer=Intel(R) Iris(R) Xe Graphics version=4.5.0 - Build 32.0.101.7088
+[shader] uber=3 perm={6,9,12}
+[step04] shader_permutations ... ok
+graphics_gl_render_tests: 1/1 passed (filter=step04)
+```
+
+`[shader]` 줄의 GL 프로그램 이름 값 자체는 드라이버가 정한다. 고정된 것은 *uber 는 셋이 같은 하나, static 은 셋이 서로 다른 셋* 이라는 관계다.
+
+<!-- snippet: tests/graphics_gl_render_tests.cpp#TestShaderPermutationPrograms -->
+```cpp
+CHECK(uberLambert.Program() != 0u);
+CHECK(uberLambert.Program() == uberBlinn.Program());
+CHECK(uberLambert.Program() == uberCel.Program());
+// ...
+CHECK(permLambert.Program() != permBlinn.Program());
+CHECK(permBlinn.Program()   != permCel.Program());
+CHECK(permLambert.Program() != permCel.Program());
+CHECK(permLambert.Program() != uberLambert.Program());
+```
+
+분기가 *어디에 있는지* 도 같은 함수가 확인한다. `SetInt` 는 uniform location 이 -1 이면 `glUniform` 을 부르지 않고 false 를 돌려주므로, 이 두 줄이 곧 "런타임 분기냐 컴파일 시점 분리냐" 의 판정이 된다.
+
+<!-- snippet: tests/graphics_gl_render_tests.cpp#TestShaderPermutationPrograms -->
+```cpp
+uberLambert.Use();
+CHECK(uberLambert.SetInt("uShadingModel", 1));
+permLambert.Use();
+CHECK(!permLambert.SetInt("uShadingModel", 1));
+```
+
+마지막으로 `ProgramChangedSinceLast` 가 정직한지 본다 — uber 는 모델을 바꿔도 전환이 없고 (`false`), static 은 모델을 바꿀 때마다 전환이 잡힌다 (`true`), 같은 프로그램을 연달아 고르면 다시 `false`. 이 함수가 항상 `true` 를 돌려주도록 망가지면 `state changes` 카운터가 부풀고 위 세 단언이 함께 죽는다.
 
 ---
 

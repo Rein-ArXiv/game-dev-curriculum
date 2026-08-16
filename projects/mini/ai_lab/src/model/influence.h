@@ -4,9 +4,9 @@
 // 서로를 읽지 않으므로 필드 하나짜리 순수 함수로 나눌 수 있고, 그래야 raylib
 // 없이 결정성·벽 차단을 검증할 수 있다 (ai/part09).
 //
-// spread 는 "이웃 값 * spread 계수" 중 최댓값을 취하는 max-확산이다. 따라서
-// 벽으로 완전히 갈린 영역에는 값이 전파되지 않고, 확산 반복 i 회는 거리 i
-// 셀까지만 도달한다.
+// spread 는 자기 값과 "이웃 값 * spread 계수" 중 최댓값을 취하는 max-확산이다.
+// 따라서 벽으로 완전히 갈린 영역에는 값이 전파되지 않고, 확산 반복 i 회는
+// 거리 i 셀까지만 도달한다.
 
 #pragma once
 
@@ -25,7 +25,8 @@ struct InfluenceParams {
     int   iterations = 2;      // tick 당 확산 반복
 };
 
-// stamps 는 .x/.y 를 가진 셀의 임의 범위 (Grid::Cell 도 그대로 들어간다).
+// stamps 는 .x/.y 를 가진 셀의 임의 범위 (grid.h 의 ailab::Cell 도 그대로
+// 들어간다).
 template <typename StampRange, typename Walkable>
 void StepInfluenceField(int width, int height,
                         std::vector<float>& field,

@@ -40,6 +40,7 @@
 
 ### Light 구조체
 
+<!-- snippet: src/render/lighting_bindings.h#Light -->
 ```cpp
 struct Light {
     glm::vec4 posRadius;       // xyz = position, w = radius.
@@ -51,20 +52,36 @@ struct Light {
 
 ## 2. per-call Uniform
 
+uniform 이름을 만드는 부분은 *GL 호출이 없는 순수 함수* 로 떼어 둔다. 컨텍스트 없이 테스트할 수 있고, 아래 `Apply` 가 이 목록을 그대로 순회하므로 *비용 모델과 실행 경로가 한 곳에서 나온다*.
+
+<!-- snippet: src/render/lighting_bindings.cpp#BuildPerCallUniformNames -->
 ```cpp
-for (int i = 0; i < activeCount_; ++i) {
-    std::string p = "uLightPos[" + std::to_string(i) + "]";
-    std::string c = "uLightColor[" + std::to_string(i) + "]";
-    shader.SetVec3(p.c_str(), glm::vec3(lights_[i].posRadius));
-    shader.SetVec3(c.c_str(), glm::vec3(lights_[i].colorIntensity)
-                              * lights_[i].colorIntensity.w);
+names.reserve((size_t)activeCount * 2);
+for (int i = 0; i < activeCount; ++i) {
+    names.push_back("uLightPos[" + std::to_string(i) + "]");
+    names.push_back("uLightColor[" + std::to_string(i) + "]");
+}
+```
+
+<!-- snippet: src/render/lighting_bindings.cpp#LightingBindings::Apply -->
+```cpp
+const std::vector<std::string> names = BuildPerCallUniformNames(activeCount_);
+for (size_t k = 0; k + 1 < names.size(); k += 2) {
+    const size_t i = k / 2;
+    if (shader.SetVec3(names[k].c_str(),
+                       glm::vec3(lights_[i].posRadius)))
+        counters.uniformUpdates++;
+    if (shader.SetVec3(names[k + 1].c_str(), LightRadiance(lights_[i])))
+        counters.uniformUpdates++;
 }
 ```
 
 64 광원 = *128 호출 + 128 문자열 빌드 + 128 glUniform3fv*. Uniform location cache 활용해도 *호출 자체 비용* 무시 못 함.
 
+<!-- snippet: shaders/lit_per_call.frag -->
 ```glsl
 const int MAX_LIGHTS = 64;
+// ...
 uniform vec3 uLightPos[MAX_LIGHTS];
 uniform vec3 uLightColor[MAX_LIGHTS];
 ```
@@ -75,10 +92,13 @@ GPU 측 — uniform 은 *드라이버가 const memory / register 에 배치* —
 
 ### 생성 + 바인딩
 
+<!-- snippet: src/render/lighting_bindings.cpp#LightingBindings::Init -->
 ```cpp
 glGenBuffers(1, &ubo_);
 glBindBuffer(GL_UNIFORM_BUFFER, ubo_);
-glBufferData(GL_UNIFORM_BUFFER, sizeof(Light) * 64, nullptr, GL_DYNAMIC_DRAW);
+glBufferData(GL_UNIFORM_BUFFER,
+             (GLsizeiptr)(sizeof(Light) * (size_t)maxLights_),
+             nullptr, GL_DYNAMIC_DRAW);
 glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo_);
 ```
 
@@ -86,15 +106,19 @@ glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo_);
 
 ### 매 프레임 갱신
 
+<!-- snippet: src/render/lighting_bindings.cpp#LightingBindings::UploadUBO -->
 ```cpp
 glBindBuffer(GL_UNIFORM_BUFFER, ubo_);
-glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Light) * activeCount_, lights_.data());
+glBufferSubData(GL_UNIFORM_BUFFER, 0,
+                (GLsizeiptr)(sizeof(Light) * (size_t)activeCount_),
+                lights_.data());
 ```
 
 *한 호출* 로 *N 광원 × 32 B 갱신*. 64 광원 = 2 KB. 네트워크 비용 무시 가능.
 
 ### 셰이더 측
 
+<!-- snippet: shaders/lit_ubo.frag -->
 ```glsl
 const int MAX_LIGHTS = 64;
 struct Light {
@@ -108,8 +132,10 @@ layout(std140, binding = 0) uniform LightBlock {
 
 `std140` layout 의 함정 — *vec3 가 16바이트 정렬*. C++ 측 `glm::vec3` 가 *12 바이트* 라 layout 어긋남. *vec4 두 개* 로 패킹해 회피.
 
+<!-- snippet: shaders/lit_ubo.frag#main -->
 ```glsl
 vec3 L = lights[i].posRadius.xyz - vWorldPos;
+// ...
 vec3 col = lights[i].colorIntensity.rgb * lights[i].colorIntensity.w;
 ```
 
@@ -121,10 +147,13 @@ UBO 와 거의 같은 패턴 + *크기 제한 거의 없음 + 가변 길이*.
 
 ### 생성
 
+<!-- snippet: src/render/lighting_bindings.cpp#LightingBindings::Init -->
 ```cpp
 glGenBuffers(1, &ssbo_);
 glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo_);
-glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(Light) * 64, nullptr, GL_DYNAMIC_DRAW);
+glBufferData(GL_SHADER_STORAGE_BUFFER,
+             (GLsizeiptr)(sizeof(Light) * (size_t)maxLights_),
+             nullptr, GL_DYNAMIC_DRAW);
 glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo_);
 ```
 
@@ -132,6 +161,7 @@ OpenGL 4.3+. 4.5 Core 에 포함.
 
 ### 셰이더 측 — 가변 길이
 
+<!-- snippet: shaders/lit_ssbo.frag -->
 ```glsl
 struct Light {
     vec4 posRadius;
@@ -211,11 +241,75 @@ build\Release\graphics_gl_lab.exe      # Linux/macOS: ./build/graphics_gl_lab
 
 `light count` 슬라이더를 움직이면 per-call 에서만 `uniform updates` 가 따라 움직인다.
 
-```bash
-ctest --test-dir build -C Release --output-on-failure
+### 이 step 의 검증
+
+이 절의 수치를 잠그는 항목 두 개가 이 step 소속이다.
+
+```powershell
+ctest --test-dir build -C Release -R gl_step05 --output-on-failure
 ```
 
-두 테스트 타깃이 이 절의 수치를 잠근다. `graphics_gl_contract_tests` 는 GL 컨텍스트 없이 돌면서 `CountBindingCost(mode, n)` 의 결과가 `ExpectedBindingCost(mode, n)` 와 같은지, 그리고 per-call 이 `1 + 2N`, UBO/SSBO 가 `{uniform 1, buffer 1}` 인지 절대값으로 검사한다. `CountBindingCost` 는 `Apply` 의 per-call 루프가 순회하는 uniform 이름 목록을 그대로 세므로, 그 루프를 지우면 예측값도 함께 무너져 테스트가 죽는다. `graphics_gl_render_tests` 는 실제 컨텍스트에서 `Apply` 를 호출해 카운터 증가분이 그 예측과 정확히 일치하는지 확인한다 — 셰이더에 없는 uniform 은 `glUniform` 호출 자체가 없으므로, 계수 규칙이 실제 GL 호출 수와 어긋나면 여기서 갈라진다.
+```text
+    Start  6: gl_step05_binding_contract
+1/2 Test  #6: gl_step05_binding_contract .......   Passed    0.03 sec
+    Start 10: gl_step05_binding_render
+2/2 Test #10: gl_step05_binding_render .........   Passed    0.25 sec
+
+100% tests passed out of 2
+```
+
+계약 쪽은 GL 컨텍스트 없이 돌면서 `CountBindingCost(mode, n)` 의 결과가 `ExpectedBindingCost(mode, n)` 와 같은지, 그리고 per-call 이 `1 + 2N`, UBO/SSBO 가 `{uniform 1, buffer 1}` 인지 절대값으로 검사한다.
+
+```powershell
+build\Release\graphics_gl_contract_tests.exe step05   # Linux/macOS: ./build/graphics_gl_contract_tests step05
+```
+
+```text
+[step05] binding_cost_model ... ok
+[step05] counted_binding_cost ... ok
+[step05] per_call_uniform_names ... ok
+graphics_gl_contract_tests: 3/3 passed (filter=step05)
+```
+
+<!-- snippet: tests/graphics_gl_contract_tests.cpp#TestCountedBindingCostMatchesModel -->
+```cpp
+// 절대 기준 — per-call 은 광원당 2 회 + uLightCount 1 회.
+CHECK(gllab::CountBindingCost(gllab::BindingMode::PerCallUniform, 32)
+          .uniformUpdates == 65);
+CHECK(gllab::CountBindingCost(gllab::BindingMode::PerCallUniform, 64)
+          .uniformUpdates == 129);
+CHECK(gllab::CountBindingCost(gllab::BindingMode::UBO, 64).uniformUpdates == 1);
+CHECK(gllab::CountBindingCost(gllab::BindingMode::UBO, 64).bufferUpdates == 1);
+// 광원 수가 늘어도 UBO 경로는 상수 — 이 lab 의 핵심 주장.
+CHECK(gllab::CountBindingCost(gllab::BindingMode::UBO, 8).uniformUpdates ==
+      gllab::CountBindingCost(gllab::BindingMode::UBO, 64).uniformUpdates);
+```
+
+`CountBindingCost` 는 `Apply` 의 per-call 루프가 순회하는 uniform 이름 목록을 그대로 세므로, 그 루프를 지우면 예측값도 함께 무너져 테스트가 죽는다.
+
+렌더 쪽은 실제 컨텍스트에서 `Apply` 를 호출해 카운터 증가분이 그 예측과 정확히 일치하는지 확인한다 — 셰이더에 없는 uniform 은 `glUniform` 호출 자체가 없으므로, 계수 규칙이 실제 GL 호출 수와 어긋나면 여기서 갈라진다.
+
+```powershell
+build\Release\graphics_gl_render_tests.exe step05   # Linux/macOS: ./build/graphics_gl_render_tests step05
+```
+
+```text
+[gl] vendor=Intel renderer=Intel(R) Iris(R) Xe Graphics version=4.5.0 - Build 32.0.101.7088
+[step05] binding_counters ... ok
+graphics_gl_render_tests: 1/1 passed (filter=step05)
+```
+
+<!-- snippet: tests/graphics_gl_render_tests.cpp#TestBindingCountersMatchModel -->
+```cpp
+lighting.Apply(mode, prog, counters);
+
+const auto model = gllab::CountBindingCost(mode, n);
+// ...
+CHECK(counters.uniformUpdates == model.uniformUpdates);
+CHECK(counters.bufferUpdates == model.bufferUpdates);
+```
+
+세 모드 × 광원 8 / 32 / 64 의 아홉 조합을 모두 돈다. 어긋나면 `[binding] mode=… runtime(u=…,b=…) model(u=…,b=…)` 한 줄이 함께 출력되어 어느 조합이 갈렸는지 남는다.
 
 ---
 

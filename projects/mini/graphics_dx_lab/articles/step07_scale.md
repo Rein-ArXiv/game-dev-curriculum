@@ -19,6 +19,7 @@ DX12 의 *오브젝트 스케일링* — 1k / 10k / 100k. graphics_gl_lab Step 7
 1. [Scene Rebuild 의 GPU 핸들 정리](#1-scene-rebuild-의-gpu-핸들-정리)
 2. [bottleneck 이동](#2-bottleneck-이동)
 3. [DX12 vs OpenGL 의 비교](#3-dx12-vs-opengl-의-비교)
+4. [규모 전환의 자동 검증](#4-규모-전환의-자동-검증)
 
 ---
 
@@ -105,6 +106,98 @@ graphics_gl_lab 과 *근본 동일* 한 측정 결과. API 차이는 *명시적 
 DX12 가 *명시적 모델로 CPU 효율 ↑*. OpenGL 의 *드라이버 자동 처리* 가 *어느 정도 비용 추가*.
 
 학습 곡선은 *DX12 가 압도적으로 큼* — RootSig / PSO / Barrier / Heap / Fence 모두 명시.
+
+## 4. 규모 전환의 자동 검증
+
+`Scene::Rebuild` 는 두 가지를 한다 — `BuildObjects` 로 격자를 다시 만들고, `EnsureInstanceBuffer` 로 인스턴스 업로드 버퍼를 다시 확보한다. 뒤엣것은 `ID3D12Device` 를 요구하므로 GPU 없이 부를 수 없다. 앞엣것은 순수 CPU 단계라 제품 코드를 그대로 돌릴 수 있고, 버퍼 교체 쪽도 *용량 밖을 쓰지 않는다* 는 계약만은 저장소를 대역으로 물려 확인할 수 있다.
+
+```powershell
+cmake --build build --config Release
+ctest --test-dir build -C Release -R graphics_dx_step07 --output-on-failure
+build\Release\graphics_dx_contract_tests.exe step07
+```
+
+```text
+1/1 Test #8: graphics_dx_step07_scale .........   Passed    0.04 sec
+
+100% tests passed out of 1
+
+  [step07] scene_rebuild_scales                        30 checks
+  [step07] scene_rebuild_is_repeatable                 304 checks
+  [step07] instance_storage_capacity_clamp             82 checks
+step07: 3 groups, 416 checks, 0 failures
+DirectX contract tests passed
+```
+
+등록은 이 한 줄이다. 실행 파일은 lab 이 원래 갖고 있던 계약 테스트 하나뿐이고, 인자가 이 규모 축의 그룹만 고른다.
+
+<!-- snippet: CMakeLists.txt@step07-target -->
+```cmake
+add_test(NAME graphics_dx_step07_scale        COMMAND graphics_dx_contract_tests step07)
+```
+
+`scene_rebuild_scales` 는 콤보가 오가는 세 규모를 실제로 만든 뒤 되돌아온다. 마지막에 다시 1,000 으로 내려가는 것이 요점이다 — 재빌드가 이전 격자를 지우지 않으면 오브젝트 수가 누적돼 그 자리에서 드러난다.
+
+<!-- snippet: tests/graphics_dx_contract_tests.cpp#TestSceneRebuildScales -->
+```cpp
+void TestSceneRebuildScales() {
+    dxlab::Scene scene;
+    const int scales[] = {1000, 10000, 100000, 1000};
+    for (int count : scales) {
+        scene.BuildObjects(count);
+        CHECK(scene.ObjectCount() == count);
+        CHECK(dxlab::ExpectedDrawSubmissions(dxlab::DrawMode::PerDraw, count) ==
+              count);
+        CHECK(dxlab::ExpectedDrawSubmissions(dxlab::DrawMode::Instanced, count) == 1);
+
+        FakeCmdList cmd;
+        dxlab::GlCounters counters{};
+        scene.RecordDraw(&cmd, dxlab::DrawMode::Instanced,
+                         dxlab::RootSigPolicy::Global,
+                         dxlab::PsoSwitchPolicy::PerPass, FakeRootSig(),
+                         FakePsoA(), nullptr, counters);
+        CHECK(cmd.draws.size() == 1);
+        if (!cmd.draws.empty()) CHECK(cmd.draws[0].instanceCount == (UINT)count);
+        CHECK(counters.instancedDraws == 1);
+        CHECK(counters.drawCalls == 0);
+    }
+    // ... Per-Draw 로도 한 번 돌려 드로우 수가 규모와 같은지 본다.
+}
+```
+
+위 표에서 `100k + Instanced` 만 CPU 0.6 ms 로 남는 근거가 이 루프의 세 번째 바퀴다. 규모가 100,000 으로 커져도 `DrawIndexedInstanced` 는 한 번이고, 늘어나는 것은 그 한 번의 instance count 뿐이다.
+
+두 번째 그룹은 교체 순간의 위험을 본다. 규모를 키우면 격자는 즉시 커지지만 인스턴스 버퍼는 아직 이전 용량일 수 있다. 그 틈에 기록부가 용량 밖을 쓰면 남의 메모리를 밟는다.
+
+<!-- snippet: tests/graphics_dx_contract_tests.cpp#TestInstanceStorageCapacityClamp -->
+```cpp
+void TestInstanceStorageCapacityClamp() {
+    const size_t capacity = 16;
+    const int objectCount = 64;
+    const float sentinel = -12345.0f;
+    std::vector<dxlab::Instance> storage((size_t)objectCount);
+    for (auto& inst : storage) inst.model.m[3][3] = sentinel;
+
+    dxlab::Scene scene;
+    scene.BindInstanceStorage(storage.data(), capacity);
+    scene.BuildObjects(objectCount);    // 알린 용량보다 큰 격자.
+    // ...
+    // 앞 capacity 칸은 채워졌고(alpha 1), 뒤 여유 칸은 손대지 않았다.
+    for (size_t i = 0; i < capacity; ++i) {
+        CHECK(NearF(storage[i].color.w, 1.0f));
+        CHECK(NearF(storage[i].model.m[3][3], 1.0f));
+    }
+    for (size_t i = capacity; i < storage.size(); ++i)
+        CHECK(NearF(storage[i].model.m[3][3], sentinel));
+    // ...
+}
+```
+
+저장소를 오브젝트 수만큼 잡되 *용량은 그보다 작게* 알리는 것이 설계다. 기록부의 클램프를 빼면 뒤 48 칸의 sentinel 이 덮여 판정이 48 건 깨진다 — 실제 버퍼 밖을 밟아 죽는 대신 어디까지 썼는지가 그대로 남는다.
+
+세 번째 그룹 `scene_rebuild_is_repeatable` 은 1,000 → 10,000 → 1,000 으로 왕복한 뒤 앞뒤 격자의 model 행렬과 색을 대조한다. 고정 시드가 실제로 같은 장면을 내야 §2 의 표를 재측정할 수 있기 때문이다.
+
+남는 것은 GPU 자원 교체 자체다. `Flush()` 가 실제로 in-flight 를 비웠는지, `EnsureInstanceBuffer` 가 옛 버퍼를 `Unmap` 했는지는 디바이스가 있어야 관측되므로 위 판정 밖에 있다. 그 부분은 실행 후 패널에서 `object count` 를 왕복시키며 Debug Layer 경고가 없는지로 확인한다.
 
 ---
 

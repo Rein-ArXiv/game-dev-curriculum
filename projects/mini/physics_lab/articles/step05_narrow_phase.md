@@ -350,17 +350,32 @@ target_include_directories(physics_collision_tests PRIVATE
     ${raygui_SOURCE_DIR}/src)
 target_link_libraries(physics_collision_tests PRIVATE raylib)
 add_test(NAME physics_collision_tests COMMAND physics_collision_tests)
+# 실행 파일은 `argv[1]` 로 케이스 필터를 받는다. 여기서 추가한 것만 도는 진입점.
+add_test(NAME step05.narrow_phase COMMAND physics_collision_tests step05)
 ```
 
-```bash
-ctest --test-dir build -C Release --output-on-failure
+```powershell
+cmake --build build --config Release -j
+ctest --test-dir build -C Release -R step05 --output-on-failure
+.\build\Release\physics_collision_tests.exe step05   # 같은 것을 직접 — 관측값까지 본다
 ```
 
-기대 출력:
+`ctest` 는 통과 / 실패만 알려 준다. 두 번째 줄을 직접 돌리면 네 케이스가 각각 무엇을 쟀는지 보인다.
 
 ```text
-    Start 2: physics_collision_tests
-2/6 Test #2: physics_collision_tests ..........   Passed    0.07 sec
+[step05] separated_and_overlapping
+  analytic depths 0.5 / 0.75 matched; boundary touch depth=0 normal=(1,-0)
+  ok
+[step05] deep_overlap_reference
+  45deg cocentric: sat=2.41421 epa=2.41421 mtd=2.41421 intersection=2
+  ok
+[step05] sat_matches_epa
+  7 containment cases: max |sat-epa|=0, max (mtd - intersection)=1.5
+  ok
+[step05] randomized_agreement
+  100 random placements: hits=79 misses=21 containment=15
+  ok
+4 case(s) ok: physics collision [step05]
 ```
 
 이 타깃은 hit / miss 판정과 normal 의 단위 길이만 보지 않는다. 반크기 1 정사각형은 침투 깊이가 해석적으로 정해지므로 (중심거리 1.5 → 0.5, 중심거리 1.25 를 세로로 → 0.75) 그 값을 리터럴로 못 박고, `a` 에서 `b` 로 향하는 법선 부호 규약도 검사한다. 화면의 `bothAgree_` 띠와 같은 depth 대조도 ctest 안에 있다.
@@ -379,6 +394,20 @@ ctest --test-dir build -C Release --output-on-failure
 - `(normal, depth)` 계약의 양면 검사 — `normal` 로 `depth` 보다 조금 *더* 밀면 반드시 떨어지고, 조금 *덜* 밀면 반드시 아직 겹친다. 깊이만 맞고 법선이 엉뚱한 축을 가리키면 여기서 걸린다.
 
 세 번째가 특히 중요하다. 깊이 식을 MTD 로 바꾸면 *최소 축이 달라질 수 있어* 법선 결정 로직도 같이 맞춰야 하는데, 이 검사가 그 둘이 따로 놀지 않는지를 본다. 옛 식으로 되돌려 보면 이 타깃은 65 개 CHECK 가 깨진다.
+
+45 도 배치를 못 박은 네 줄이 그 회귀를 붙잡는 자리다. 마지막 줄이 핵심이다 — 두 값이 0.41 만큼 떨어져 있으므로 이 검사는 허용 오차를 조이는 것이 아니라 *식 자체* 를 고정한다.
+
+<!-- snippet: tests/physics_collision_tests.cpp@mtd-vs-intersection -->
+```cpp
+// 두 구현 모두 진짜 MTD 를 낸다 — 해석해와 직접 비교.
+CHECK(std::fabs(gjkDepth - (1.0f + std::sqrt(2.0f))) < 1e-3f);
+CHECK(std::fabs(satDepth - (1.0f + std::sqrt(2.0f))) < 1e-4f);
+
+// 교집합 길이(2.0) 를 쓰던 옛 식이면 여기서 걸린다. 두 값이 0.41 만큼
+// 떨어져 있으므로 이 검사는 허용 오차 문제가 아니라 식 자체를 고정한다.
+CHECK(std::fabs(satDepth - ref.intersect) > 0.4f);
+CHECK(satDepth > 0.0f);
+```
 
 ## 더 읽을거리
 

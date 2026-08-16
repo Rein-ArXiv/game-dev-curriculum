@@ -138,17 +138,65 @@ Assign(second, matchId, server, now);
 
 ## 실행 확인
 
-core의 상태 전이는 고정된 `DateTimeOffset`을 넣는 contract test가 실행한다.
+core의 상태 전이는 고정된 `DateTimeOffset`을 넣는 contract test가 실행한다. 검사는 실행
+단위가 문서 하나씩으로 나뉘어 있고, 인자로 이름을 주면 그 이름의 검사만 돈다. 인자를 빼면
+전체가 돈다.
 
 ```powershell
 dotnet run `
   --project projects/mini/live_service_lab/tests/LiveService.Tests/LiveService.Tests.csproj `
-  -c Release
+  -c Release -- step01
 ```
 
 ```text
-live_service_tests: all checks passed
+live_service_tests: filter=step01 -> 3 check(s)
+  step01 TicketOwnership     ok
+  step01 AtomicTransitions   ok
+  step01 InjectedClock       ok
+live_service_tests: step01 3/3 checks passed
 ```
+
+세 검사가 위의 세 가지 주장을 하나씩 잡는다.
+
+`TicketOwnership`은 소유권 투영을 확인한다. 같은 ticket ID라도 호출자의 player ID가 다르면
+`null`이고, 존재하지 않는 ticket ID도 `null`이다. 두 경우를 구분하지 않는 것은 남의 ticket이
+있는지 없는지를 노출하지 않기 위해서다.
+
+<!-- snippet: tests/LiveService.Tests/Program.cs@ticket-ownership -->
+```csharp
+Require(plane.GetTicket(mine, "owner-a", when) is not null,
+    name + ": 소유자는 자기 ticket을 읽는다");
+Require(plane.GetTicket(mine, "owner-b", when) is null,
+    name + ": 다른 player는 남의 ticket을 읽지 못한다");
+Require(plane.GetTicket(yours, "owner-a", when) is null,
+    name + ": 반대 방향도 거부된다");
+Require(plane.GetTicket("00000000000000000000000000000000", "owner-a", when) is null,
+    name + ": 없는 ticket ID는 null이다");
+```
+
+`AtomicTransitions`는 lock 경계를 잡는다. capacity 3인 서버 하나에 40명이 동시에 `Enqueue`를
+호출해도 match는 정확히 3개, 배정된 ticket은 6개, 대기는 34개다. capacity 비교가 후보 필터
+밖으로 나가거나 lock이 사라지면 이 등식이 깨진다.
+
+<!-- snippet: tests/LiveService.Tests/Program.cs@atomic-transitions -->
+```csharp
+Parallel.For(0, players, index =>
+{
+    ticketIds[index] = plane.Enqueue(
+        new QueueRequest($"atomic-{index:D2}", 1500, "kr"), t0);
+});
+ControlPlaneMetrics metrics = plane.Metrics(t0);
+Require(metrics.ActiveMatches == 3,
+    name + ": 동시 요청 40건도 capacity 3을 넘겨 match를 만들지 않는다");
+Require(metrics.WaitingTickets == players - 6,
+    name + ": 배정된 6명을 뺀 34명이 대기로 남는다");
+Require(ticketIds.Distinct(StringComparer.Ordinal).Count() == players,
+    name + ": 40명이 각자 다른 ticket을 받는다");
+```
+
+`InjectedClock`은 같은 시나리오를 1990년·2026년·2099년 epoch에서 돌리고 결과 tuple 셋이 모두
+같은지 본다. 배정 여부, heartbeat timeout 뒤 ready 서버 수, game token의 유효·만료 판정을
+한꺼번에 담으므로 core 어딘가가 `DateTimeOffset.UtcNow`를 읽으면 세 결과가 갈라진다.
 
 이 실행에는 실제 port도 sleep도 없다. 상태 전이가 깨지면 실패한 검사 이름이 예외 메시지로
 출력되고 프로세스 종료 코드가 0이 아니다.

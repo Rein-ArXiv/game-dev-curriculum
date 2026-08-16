@@ -75,6 +75,41 @@ GPU-driven rendering 에서는 CPU 가 draw 마다 descriptor 를 바꿀 수 없
 
 ## 5. 빌드와 실행 결과
 
+“bindless 가 아니다”는 주장은 눈으로 볼 것이 없다. 대신 그 주장의 실체 — set 0 의 binding 표가 어떤 모양인가 — 는 `VkDevice` 없이 성립하므로, binding 표와 그로부터 파생되는 pool 크기를 `SceneSetBindings`(`src/device/descriptor_layout.h`)라는 순수 함수로 빼 두고 그 모양을 직접 검사한다.
+
+```powershell
+cmake --build build --config Release
+ctest --test-dir build -C Release -R vk_step06_bindless --output-on-failure
+.\build\Release\graphics_vk_contract_tests.exe step06
+```
+
+```text
+    Start 7: vk_step06_bindless
+1/1 Test #7: vk_step06_bindless ...............   Passed    0.03 sec
+
+100% tests passed out of 1
+
+[step06] descriptor_set_shape ... ok (22 checks)
+step06: 1 test(s), 22 checks, 0 failed
+```
+
+22개 CHECK 중 핵심은 두 줄이다. 모든 binding 의 `descriptorCount` 가 1 이라는 것 — 배열 descriptor 가 하나도 없다는 뜻이다 — 과 layout flag 에 update-after-bind 가 없다는 것이다.
+
+<!-- snippet: tests/graphics_vk_contract_tests.cpp@descriptor-not-bindless -->
+```cpp
+for (const VkDescriptorSetLayoutBinding& b : binds) {
+    CHECK(b.descriptorCount == 1);
+    CHECK(b.pImmutableSamplers == nullptr);
+}
+CHECK(vklab::SceneSetLayoutFlags() == 0);
+CHECK((vklab::SceneSetLayoutFlags() &
+       VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT) == 0);
+```
+
+나머지는 binding 인덱스·타입·stage 와 pool 정합성이다. pool 크기는 binding 표에서 파생되므로, binding 을 늘리고 pool 을 그대로 두는 어긋남이 여기서 잡힌다. §2 가 말한 “feature 와 layout flag 와 pool flag 가 함께 맞아야 한다”의 마지막 한 축이 이것이다.
+
+이 실행이 확인하지 못하는 것은 `vkCreateDescriptorSetLayout` 가 그 표를 받아 실제로 성공하는가다. 그쪽은 실행으로 본다.
+
 ```powershell
 cmake --build build --config Debug
 build\Debug\graphics_vk_lab.exe

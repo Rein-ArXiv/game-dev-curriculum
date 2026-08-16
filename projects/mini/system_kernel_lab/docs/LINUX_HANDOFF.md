@@ -7,7 +7,7 @@
 - 작성: 2026-08-15
 - 작성 환경: Ubuntu 26.04 / WSL2 / 커널 `6.18.33.2-microsoft-standard-WSL2` / 16 논리 코어 /
   g++ 15.2.0 / cmake 4.2.3 / liburing 2.14 / **`sudo` 사용 불가**
-- 작성 환경의 현재 상태: `ctest` **8/8 통과**, 문서 검사 0 error
+- 작성 환경의 현재 상태: `ctest` **25/25 통과**, 문서 검사 0 error
 
 ## 0. 이 문서가 시키는 일
 
@@ -153,23 +153,52 @@ strict 케이스가 실패하는 것이 정상이다** — 빌드에 그 backend
 ctest --test-dir ~/build-skl --output-on-failure
 ```
 
-기대 출력 (작성 환경 실측, 총 2.33 초):
+기대 출력 (작성 환경 실측, 총 4.01 초):
 
 ```text
-1/8 Test #1: system_core_tests ........................   Passed    0.90 sec
-2/8 Test #2: system_fault_tests .......................   Passed    0.03 sec
-3/8 Test #3: system_io_path_tests .....................   Passed    0.65 sec
-4/8 Test #4: system_core_tests_strict .................   Passed    0.73 sec
-5/8 Test #5: system_kernel_bench_smoke ................   Passed    0.00 sec
-6/8 Test #6: system_kernel_bench_smoke_workers ........   Passed    0.00 sec
-7/8 Test #7: system_kernel_bench_fault_channel ........   Passed    0.00 sec
-8/8 Test #8: system_kernel_bench_rejects_bad_toggle ...   Passed    0.00 sec
+ 1/25 Test  #1: system_core_tests ........................   Passed    0.77 sec
+ 2/25 Test  #2: system_fault_tests .......................   Passed    0.02 sec
+ 3/25 Test  #3: system_io_path_tests .....................   Passed    0.64 sec
+ 4/25 Test  #4: system_core_tests_strict .................   Passed    0.86 sec
+ 5/25 Test  #5: system_kernel_bench_smoke ................   Passed    0.01 sec
+ 6/25 Test  #6: system_kernel_bench_smoke_workers ........   Passed    0.01 sec
+ 7/25 Test  #7: system_kernel_bench_fault_channel ........   Passed    0.01 sec
+ 8/25 Test  #8: system_kernel_bench_rejects_bad_toggle ...   Passed    0.00 sec
+ 9/25 Test  #9: skl_step01_core ..........................   Passed    0.00 sec
+10/25 Test #10: skl_step02_core ..........................   Passed    0.00 sec
+11/25 Test #11: skl_step02_fault .........................   Passed    0.00 sec
+12/25 Test #12: skl_step02_io_path .......................   Passed    0.31 sec
+13/25 Test #13: skl_step03_core ..........................   Passed    0.00 sec
+14/25 Test #14: skl_step03_fault .........................   Passed    0.00 sec
+15/25 Test #15: skl_step03_io_path .......................   Passed    0.00 sec
+16/25 Test #16: skl_step04_core ..........................   Passed    0.00 sec
+17/25 Test #17: skl_step04_fault .........................   Passed    0.01 sec
+18/25 Test #18: skl_step04_io_path .......................   Passed    0.33 sec
+19/25 Test #19: skl_step05_core ..........................   Passed    0.94 sec
+20/25 Test #20: skl_step05_fault .........................   Passed    0.00 sec
+21/25 Test #21: skl_step06_fault .........................   Passed    0.00 sec
+22/25 Test #22: skl_step07_core ..........................   Passed    0.04 sec
+23/25 Test #23: skl_step07_fault .........................   Passed    0.00 sec
+24/25 Test #24: skl_step08_core ..........................   Passed    0.00 sec
+25/25 Test #25: skl_step08_fault .........................   Passed    0.00 sec
 
-100% tests passed, 0 tests failed out of 8
+100% tests passed, 0 tests failed out of 25
 ```
 
 `system_kernel_bench_rejects_bad_toggle` 은 `WILL_FAIL TRUE` 다 — **실패해야 통과** 하는
-케이스이므로 "8/8 Passed" 안에 들어 있는 것이 맞다.
+케이스이므로 "25/25 Passed" 안에 들어 있는 것이 맞다.
+
+앞의 여덟은 실행 파일 전체를 도는 케이스이고, `skl_stepNN_*` 열일곱은 같은 검사들을
+step 입도로 다시 건 것이다. 소속은 세 테스트 소스 끝의 `{step, 이름, 함수}` 대응표가
+정하고, 실행 파일이 `--step=N` 으로 그 표를 필터링한다.
+
+```bash
+ctest --test-dir ~/build-skl -R skl_step05 --output-on-failure   # 한 단계만
+~/build-skl/system_core_tests --list                             # 대응표 확인
+```
+
+대응표에 없는 step 을 CMake 가 걸면 실행 파일이 *선택된 검사가 0개* 라며 종료 코드 2 로
+실패한다. 배선이 어긋난 채 초록이 되는 케이스는 없다.
 
 ### 2.3 개별 실행과 요약 라인
 
@@ -178,16 +207,20 @@ ctest 는 통과한 테스트의 stdout 을 감춘다. 이 lab 은 **감춰지�
 
 ```bash
 cd ~/build-skl
-./system_core_tests | grep -E '^\[backends\]|^\[strict\]|^\[handoff\]'
+./system_core_tests | grep -E '^\[backends\]|^\[strict\]|^\[handoff\]|^\[models\]'
 ```
 
 기대 출력 (작성 환경 실측):
 
 ```text
-[backends] read=read pread=pread mmap=mmap aio=aio io_uring=io_uring
 [strict] SKL_REQUIRE_BACKENDS=<unset> (fallback tolerated)
+[backends] read: read=read
+[backends] pread/mmap: pread=pread mmap=mmap
+[backends] aio/io_uring: aio=aio io_uring=io_uring
+[models] ctx=pthread: 20 combos x 4 cycles; backends exercised: read(readx128) pread(preadx128) mmap(mmapx128) aio(aio_readx128) io_uring(io_uring_submitx128)
 [handoff] 4 sync types x 8000 cycles with 8 workers; remaining_ underflow observations=0
 [handoff] deterministic straggler rendezvous reproduced
+[models] ctx=coroutine: 20 combos x 4 cycles; backends exercised: read(readx128) pread(preadx128) mmap(mmapx128) aio(aio_readx128) io_uring(io_uring_submitx128)
 ```
 
 `[backends]` 의 `요청=실제` 가 어긋나면 그 backend 는 런타임에 폴백한 것이다
@@ -215,9 +248,9 @@ ctest --test-dir ~/build-skl -LE strict    # 폴백 허용 (이식성 모드)
 | 변수 | 읽는 곳 | 문법 | 기본 | 하는 일 |
 |---|---|---|---|---|
 | `SKL_FAULT` | `src/fault/fault_inject.cpp:174` (프로세스 시작 시 1회) | `op[:skip[:ERRNO[:times]]]` 를 `,` 로 나열 | 없음 | syscall seam 에 실패를 주입한다 |
-| `SKL_REQUIRE_BACKENDS` | `tests/system_core_tests.cpp:103` | backend 이름을 `,` 로 나열 | 미설정 = 폴백 허용 | 목록에 있는 backend 가 폴백하면 테스트 실패 |
+| `SKL_REQUIRE_BACKENDS` | `tests/system_core_tests.cpp:111` | backend 이름을 `,` 로 나열 | 미설정 = 폴백 허용 | 목록에 있는 backend 가 폴백하면 테스트 실패 |
 | `SKL_CGROUP_DIR` | `src/sched/sched_policy.cpp:64` | cgroup 절대 경로 하나 | 미설정 = 거부 | 이 경로가 현재 cgroup 과 **정확히 일치할 때만** `cpu.weight` 쓰기 허용 |
-| `SKL_STRESS_CYCLES` | `tests/system_core_tests.cpp:423` | 정수 | 8000 | 큐 인계 스트레스 사이클 수. **바닥이 8000이라 줄일 수 없다** (`std::max`) |
+| `SKL_STRESS_CYCLES` | `tests/system_core_tests.cpp:470` | 정수 | 8000 | 큐 인계 스트레스 사이클 수. **바닥이 8000이라 줄일 수 없다** (`std::max`) |
 
 #### `SKL_FAULT` 문법
 
@@ -387,7 +420,7 @@ sudo rmdir /sys/fs/cgroup/skl-bench
 
 **주의.** `system_fault_tests` 로는 이 항목을 확인할 수 없다. 그 테스트는 `cpu.weight` 가
 쓰기 가능하면 "실제 cgroup 을 바꿀 위험" 때문에 **통째로 건너뛴다**
-(`system_fault_tests.cpp:550-555`). 위임 cgroup 안에서 돌리면 다음 줄이 나오고 그게 정상이다.
+(`system_fault_tests.cpp:595-600`). 위임 cgroup 안에서 돌리면 다음 줄이 나오고 그게 정상이다.
 
 ```text
   /sys/fs/cgroup/skl-bench/cpu.weight is writable — skipping (would mutate a real cgroup)
@@ -591,11 +624,11 @@ FIFO 는 한 번의 읽기가 파이프에 들어 있는 만큼만 돌려주므�
 **규약은 닫혔는가 — 닫혔다(다른 방식으로).**
 
 - 부분 읽기 계약 자체(`io_backend.h` 의 short read 계약: path 당 `onRead` 정확히 1회,
-  실제 읽은 크기, 짧은 파일은 EOF 이지 오류가 아님)는 `TestShortReadContract` 가
+  실제 읽은 크기, 짧은 파일은 EOF 이지 오류가 아님)는 `CheckShortReadContract` 가
   **정규 파일** 로 5개 backend 전수 검증한다 — 딱 맞는 파일·요청의 절반·4097바이트·
   1바이트·빈 파일·요청보다 큰 파일을 한 사이클에 섞어 같은 `(크기, 체크섬)` 목록을 내는지 본다.
 - aio/uring 의 EINTR 은 **부분 읽기 루프가 아니라 대기 지점** 에서 검증했다 —
-  `aio_suspend` 와 `io_uring_wait_cqe` (`TestFifoBlockingWaitEintr`).
+  `aio_suspend` 와 `io_uring_wait_cqe` (`TestFifoBlockingAsyncWaitEintr`).
 
 즉 "FIFO 위에서 aio/uring 이 부분 읽기 루프를 돈다" 는 **애초에 이 코드의 성질이 아니다.**
 검증 공백이 아니라 존재하지 않는 경로다.
@@ -616,7 +649,7 @@ FIFO 는 seek 불가라 offset 인자를 받는 읽기가 성립하지 않고, �
 **규약은 닫혔는가 — 닫혔다.**
 
 두 backend 가 FIFO 를 **조용히 0 바이트로 돌려주지 않고 명시적으로 거부한다** 는 것을
-`TestFifoRejectedByNonStreamBackends` 가 못 박았다(`system_io_path_tests.cpp:607-622`).
+`TestFifoRejectedByNonStreamBackends` 가 못 박았다(`system_io_path_tests.cpp:650-668`).
 
 - `pread` → throw, 메시지에 `"pread failed"` 포함.
 - `mmap` → throw, 메시지에 `"requires a regular file"` 포함.
@@ -838,7 +871,7 @@ skl: reading /sys/fs/cgroup/init.scope/cpu.weight failed — keeping default   �
 
 리눅스 기기에서 끝났을 때 아래가 전부 채워져야 한다.
 
-- [ ] §2.2 `ctest` **8/8 통과** (네이티브 리눅스 기준선 확보)
+- [ ] §2.2 `ctest` **25/25 통과** (네이티브 리눅스 기준선 확보)
 - [ ] §2.4 `ctest -L strict` 통과 (io_uring·aio 가 실제로 돌았다)
 - [ ] §3-1 `during=200` · `after=<원래 값>` · CSV `sched_applied=1`
 - [ ] §3-2 `SCHED_FIFO applied without injection: yes (privileged)`

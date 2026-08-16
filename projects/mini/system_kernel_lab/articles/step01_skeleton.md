@@ -27,6 +27,7 @@
 7. ImGui HUD: stats + 두 그래프
 8. main 루프와 ImGui SDL2 OpenGL 통합
 9. 빌드와 실행 결과
+10. 검증 — 골격이 재현 가능한가
 
 ---
 
@@ -309,6 +310,7 @@ void FillDeterministicBytes(std::vector<unsigned char>& buf,
 
 파일 생성 함수는 디렉토리를 만들고, 이미 같은 크기의 파일이 있으면 그대로 사용한다.
 
+<!-- snippet: src/workload/file_io_workload.cpp#FileIoWorkload::GenerateFixture -->
 ```cpp
 void FileIoWorkload::GenerateFixture(std::size_t fileCount,
                                      std::size_t fileBytes) {
@@ -527,6 +529,7 @@ ImGui는 *즉시 모드* GUI다. 매 프레임 위젯 함수를 호출하고 ImG
 
 `ImGui::PlotLines` 는 *연속 배열* 을 받는다. 우리 슬라이딩 윈도우는 *링 버퍼* 라 head가 어디든 *오래된 → 최신* 순서로 풀어낸 임시 배열이 필요하다.
 
+<!-- snippet: src/ui/hud.cpp -->
 ```cpp
 // src/ui/hud.cpp 일부
 
@@ -846,6 +849,78 @@ fixture dir : /tmp/system_kernel_lab_data
 - 시스템 콜 카운트는 정확히 일치한다 (커널 자체 동작).
 
 현재 범위 밖의 확장에서 *비교* 를 핵심 결과로 다루고, *절대값 인용* 은 환경 명시와 함께만 한다.
+
+## 10. 검증 — 골격이 재현 가능한가
+
+위 체크리스트는 사람이 화면을 보고 판단한다. 그 판단은 화면을 본 사람에게만 남고, 무엇보다 *수치가 같은지* 를 눈으로는 못 본다. 이 lab의 값은 전부 비교로 읽히므로 "같은 조건이면 같은 값" 이 먼저 서야 한다.
+
+지금 만든 것 중 창 없이 확인할 수 있는 것이 둘이다. 결정적 fixture 위의 단일 스레드 사이클, 그리고 사이클 값을 담는 슬라이딩 윈도우. 둘 다 SDL2·OpenGL·ImGui 의존이 없으므로 GUI를 띄우지 않고 검사할 수 있다.
+
+<!-- snippet: tests/system_core_tests.cpp@workload-skeleton -->
+```cpp
+// tests/system_core_tests.cpp
+
+void TestWorkloadSkeleton() {
+    constexpr std::size_t kFileCount = 6;
+    constexpr std::size_t kFileBytes = 4096;
+    // ...
+    std::size_t onDisk = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        if (!entry.is_regular_file()) continue;
+        ++onDisk;
+        CHECK(std::filesystem::file_size(entry.path()) == kFileBytes);
+    }
+    CHECK(onDisk == kFileCount);
+
+    const std::uint64_t bytes = workload.RunCycle();
+    const std::uint64_t checksum = workload.LastChecksum();
+    CHECK(bytes == kFileCount * kFileBytes);
+    CHECK(checksum != 0);
+    for (int cycle = 0; cycle < 4; ++cycle) {
+        CHECK(workload.RunCycle() == bytes);
+        CHECK(workload.LastChecksum() == checksum);
+    }
+    // ...
+}
+```
+
+파일 개수만 세지 않고 *크기까지* 보는 이유는, 쓰기가 중간에 끊긴 fixture도 개수로는 정상으로 보이기 때문이다. 그리고 fixture 디렉터리를 통째로 지우고 다시 만든 뒤에도 같은 체크섬이 나오는지까지 확인한다 — `GenerateFixture` 가 같은 시드로 재생성한다는 성질이 여기서 검사된다. 이게 깨지면 어제 잰 값과 오늘 잰 값을 나란히 놓을 수 없다.
+
+프레임 타이머 쪽은 시간이 아니라 *회계* 를 본다. 경과 시간은 머신마다 다르지만 링 버퍼의 규칙은 아니다 — 600 사이클을 채우면 `Head()` 가 0으로 되감기고, 한 사이클을 더 넣어도 `Filled()` 는 600에서 멈추며, 누계는 사이클 수와 바이트 수를 그대로 따라가야 한다. 이 회계가 어긋나면 그래프는 그럴듯하게 그려지면서 엉뚱한 구간을 보여 준다.
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+ctest --test-dir build -R skl_step01 --output-on-failure
+```
+
+```text
+    Start 9: skl_step01_core
+1/1 Test #9: skl_step01_core ..................   Passed    0.00 sec
+
+100% tests passed, 0 tests failed out of 1
+```
+
+ctest는 통과한 케이스의 stdout을 감춘다. *무엇을* 확인했는지 보려면 같은 검사를 실행 파일로 직접 부른다. `--step=01` 은 실행 파일이 가진 검사 중 이 단계가 추가한 것만 고르는 필터다.
+
+```bash
+./build/system_core_tests --step=01
+```
+
+```text
+[strict] SKL_REQUIRE_BACKENDS=<unset> (fallback tolerated)
+[ run  ] step01  workload skeleton (deterministic fixture, single thread)
+[skeleton] 6 files x 4096 B; bytes/cycle=24576 checksum=1651 (stable across 5 cycles and one regeneration)
+[  ok  ] step01  workload skeleton (deterministic fixture, single thread)
+[ run  ] step01  frame timer sliding window
+[timer] capacity=600 head=1 filled=600 totalCycles=601 totalBytes=616448
+[  ok  ] step01  frame timer sliding window
+system_core_tests --step=1: 2/11 check(s) run, 0 failed
+```
+
+`2/11` 은 이 실행 파일의 검사 열한 개 중 둘만 골랐다는 뜻이다. 나머지 아홉은 여기에 아직 없는 코드를 보므로 이 필터에 걸리지 않는다. 체크섬 `1651` 은 fixture 시드에서 나온 값이라 같은 코드라면 어느 머신에서도 같다 — 숫자가 다르게 나오면 fixture 생성이 결정적이지 않다는 뜻이다.
+
+`[timer]` 줄의 `head=1 filled=600 totalCycles=601` 이 링 버퍼 회계 그 자체다. 601번째 사이클에서 head만 전진하고 filled는 용량에서 멈췄다.
 
 ---
 

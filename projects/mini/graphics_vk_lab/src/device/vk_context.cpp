@@ -1,5 +1,7 @@
 #include "device/vk_context.h"
 
+#include "device/queue_select.h"
+
 #include <stdexcept>
 #include <vector>
 #include <cstring>
@@ -118,31 +120,22 @@ void VkContext::PickPhysicalDevice(VkSurfaceKHR surface) {
         std::vector<VkQueueFamilyProperties> qfs(qfc);
         vkGetPhysicalDeviceQueueFamilyProperties(d, &qfc, qfs.data());
 
-        uint32_t g = ~0u, c = ~0u, t = ~0u;
+        std::vector<VkBool32> presentSupport(qfc, VK_TRUE);
         for (uint32_t i = 0; i < qfc; ++i) {
             VkBool32 presentSupported = VK_TRUE;
             if (surface != VK_NULL_HANDLE) {
                 vkGetPhysicalDeviceSurfaceSupportKHR(d, i, surface, &presentSupported);
             }
-
-            if ((qfs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) &&
-                presentSupported && g == ~0u) {
-                g = i;
-            }
-            if ((qfs[i].queueFlags & VK_QUEUE_COMPUTE_BIT) &&
-                !(qfs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && c == ~0u) {
-                c = i;
-            }
-            if ((qfs[i].queueFlags & VK_QUEUE_TRANSFER_BIT) &&
-                !(qfs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) &&
-                !(qfs[i].queueFlags & VK_QUEUE_COMPUTE_BIT) && t == ~0u) {
-                t = i;
-            }
+            presentSupport[i] = presentSupported;
         }
 
-        if (g == ~0u) continue;
-        if (c == ~0u) c = g;
-        if (t == ~0u) t = g;
+        // 어느 family 를 고르고 무엇으로 대체하는가는 Vulkan 핸들과 무관한
+        // 판정이라 순수 함수로 나가 있다 — 헤드리스 테스트가 도는 지점이다.
+        QueueFamilies picked;
+        if (!SelectQueueFamilies(qfs, presentSupport, picked)) continue;
+        const uint32_t g = picked.graphics;
+        const uint32_t c = picked.compute;
+        const uint32_t t = picked.transfer;
 
         if (best == VK_NULL_HANDLE ||
             props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {

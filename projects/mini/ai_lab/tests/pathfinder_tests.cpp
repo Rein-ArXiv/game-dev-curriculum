@@ -1,5 +1,6 @@
 #include "grid/grid.h"
 #include "pathfind/pathfinder.h"
+#include "scenes/pathfind_scene.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -33,6 +34,20 @@ int failures = 0;
 
 bool Near(float a, float b, float epsilon = 1e-4f) {
     return std::fabs(a - b) <= epsilon;
+}
+
+// "A;B;C" 에서 index 번째 라벨. raygui 콤보는 이 순서대로 인덱스를 돌려주므로,
+// 라벨 순서가 열거형 순서와 어긋나면 GUI 선택이 다른 알고리즘을 고른다.
+std::string ComboLabel(const char* names, int index) {
+    const std::string all(names);
+    size_t begin = 0;
+    for (int i = 0; i < index; ++i) {
+        const size_t next = all.find(';', begin);
+        if (next == std::string::npos) return "";
+        begin = next + 1;
+    }
+    const size_t end = all.find(';', begin);
+    return all.substr(begin, end == std::string::npos ? end : end - begin);
 }
 
 // 이 lab 의 이동 비용 모델 (step02 "공정한 비교 조건" 1번).
@@ -89,6 +104,7 @@ void CheckPathShape(const ailab::Grid& grid,
 
     CHECK_CTX(!path.empty(), context);
     if (path.empty()) return;
+    // snippet-begin: path-contract
     CHECK_CTX((int)path.size() == stats.pathLen, context);
     CHECK_CTX(path.front() == grid.Start(), context);
     CHECK_CTX(path.back() == grid.Goal(), context);
@@ -104,6 +120,7 @@ void CheckPathShape(const ailab::Grid& grid,
         traced += (dx != 0 && dy != 0) ? kDiagonalCost : 1.0f;
     }
     CHECK_CTX(Near(traced, stats.pathCost, 1e-3f), context);
+    // snippet-end: path-contract
 }
 
 void CheckAllPathShapes(const ailab::Grid& grid, const char* mapName) {
@@ -337,6 +354,42 @@ void TestGreedyAndManhattanSuboptimality() {
     }
 }
 
+// GUI 기본 선택이 lab 의 정본(A* / Octile)과 어긋나지 않는지.
+//
+// 콤보 인덱스는 열거형 값 그대로여야 한다. heurIdx_ 에 3 이 손으로 적혀 있어
+// 주석은 Octile 인데 실제로는 Chebyshev 로 시작했다 — 테스트·문서가 모두
+// Octile 을 정본으로 삼는데 화면만 다른 휴리스틱이었다.
+void TestSceneDefaultsMatchEnums() {
+    CHECK(static_cast<ailab::Algo>(ailab::PathfindScene::kDefaultAlgoIdx)
+          == ailab::Algo::AStar);
+    CHECK(static_cast<ailab::Heur>(ailab::PathfindScene::kDefaultHeurIdx)
+          == ailab::Heur::Octile);
+
+    // 콤보 라벨 순서 == 열거형 순서. 이게 깨지면 인덱스가 의미를 잃는다.
+    CHECK(ComboLabel(ailab::AlgoNames(), (int)ailab::Algo::AStar) == "A*");
+    CHECK(ComboLabel(ailab::AlgoNames(), (int)ailab::Algo::Dijkstra) == "Dijkstra");
+    CHECK(ComboLabel(ailab::AlgoNames(), (int)ailab::Algo::Greedy) == "Greedy");
+    CHECK(ComboLabel(ailab::AlgoNames(), (int)ailab::Algo::JPS) == "JPS");
+    CHECK(ComboLabel(ailab::HeurNames(), (int)ailab::Heur::Manhattan) == "Manhattan");
+    CHECK(ComboLabel(ailab::HeurNames(), (int)ailab::Heur::Euclidean) == "Euclidean");
+    CHECK(ComboLabel(ailab::HeurNames(), (int)ailab::Heur::Octile) == "Octile");
+    CHECK(ComboLabel(ailab::HeurNames(), (int)ailab::Heur::Chebyshev) == "Chebyshev");
+
+    // 기본값이 화면 숫자로 나타나는 지점까지 고정한다. step02 가 GUI 수치로
+    // 적어 둔 48x48 Random walls(시드 1337+48) 맵에서 A* expanded = 186.
+    // Chebyshev 로 시작하면 같은 맵에서 357 이 되어 문서와 어긋난다.
+    ailab::Grid grid;
+    grid.Init(48, 48);
+    grid.RandomWalls(1385u, 0.25f);
+    const auto gui = Solve(grid, ailab::Algo::AStar,
+                           static_cast<ailab::Heur>(ailab::PathfindScene::kDefaultHeurIdx));
+    const auto octile = Solve(grid, ailab::Algo::AStar, ailab::Heur::Octile);
+    const auto chebyshev = Solve(grid, ailab::Algo::AStar, ailab::Heur::Chebyshev);
+    CHECK(gui.expanded == octile.expanded);
+    CHECK(gui.expanded == 186);
+    CHECK(chebyshev.expanded > octile.expanded);   // 두 휴리스틱은 실제로 다르다
+}
+
 void TestUnreachable() {
     ailab::Grid grid;
     grid.Init(20, 12);
@@ -363,18 +416,53 @@ void TestStartEqualsGoal() {
     CheckAllPathShapes(grid, "start==goal 8x8");
 }
 
+struct TestCase {
+    const char* step;
+    const char* name;
+    void (*fn)();
+};
+
+// 어느 케이스가 어느 step 소속인가 — 그 step 이 무엇을 추가했는지로 정한다.
+// 이 파일이 검증하는 `pathfind/pathfinder.h` 는 탐색 step 이 통째로 들여온
+// 것이므로 열 케이스가 모두 그 step 에 속한다.
+const TestCase kCases[] = {
+    {"step02", "open-grid/heuristic-equivalence", TestOpenGrid},
+    {"step02", "forced-neighbors/cardinal",       TestForcedNeighbors},
+    {"step02", "forced-neighbors/diagonal",       TestDiagonalForcedNeighbors},
+    {"step02", "jps-equals-dijkstra/200-maps",    TestJpsMatchesDijkstraOnRandomMaps},
+    {"step02", "cost-model/absolute",             TestAbsoluteCostModel},
+    {"step02", "search-effort/inequalities",      TestSearchEffort},
+    {"step02", "suboptimality/greedy-manhattan",  TestGreedyAndManhattanSuboptimality},
+    {"step02", "gui-defaults/enum-order",         TestSceneDefaultsMatchEnums},
+    {"step02", "unreachable/no-path",             TestUnreachable},
+    {"step02", "degenerate/start-equals-goal",    TestStartEqualsGoal},
+};
+
 }  // namespace
 
-int main() {
-    TestOpenGrid();
-    TestForcedNeighbors();
-    TestDiagonalForcedNeighbors();
-    TestJpsMatchesDijkstraOnRandomMaps();
-    TestAbsoluteCostModel();
-    TestSearchEffort();
-    TestGreedyAndManhattanSuboptimality();
-    TestUnreachable();
-    TestStartEqualsGoal();
+// 인자가 없으면 전부, `step02` 같은 step 이름이나 케이스 이름 전체를 주면
+// 그것만 돈다. 아무것도 고르지 못한 필터는 조용히 통과하지 않고 실패한다.
+int main(int argc, char** argv) {
+    const std::string filter = (argc > 1) ? argv[1] : "";
+    std::vector<const TestCase*> selected;
+    for (const TestCase& c : kCases)
+        if (filter.empty() || filter == c.step || filter == c.name)
+            selected.push_back(&c);
+
+    if (selected.empty()) {
+        std::cerr << "no case matches filter '" << filter << "'\n";
+        return 2;
+    }
+
+    std::cout << "ai_pathfinder_tests [" << (filter.empty() ? "all" : filter)
+              << "] " << selected.size() << " case(s)\n";
+    for (const TestCase* c : selected) {
+        const int before = failures;
+        c->fn();
+        std::cout << "  " << (failures == before ? "ok" : "FAIL") << "  "
+                  << c->name << "\n";
+    }
+
     if (failures != 0) {
         std::cerr << failures << " pathfinder test(s) failed\n";
         return 1;

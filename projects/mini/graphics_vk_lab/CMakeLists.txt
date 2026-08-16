@@ -104,6 +104,8 @@ add_executable(${PROJECT_NAME}
     src/device/vk_context.cpp
     src/device/vk_swapchain.cpp
     src/device/swapchain_select.cpp
+    src/device/queue_select.cpp
+    src/device/descriptor_layout.cpp
     src/device/vk_alloc.cpp
     src/pipeline/pipeline_cache.cpp
     src/barrier/barrier_helpers.cpp
@@ -144,16 +146,21 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
             $<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders)
 
 enable_testing()
-# 테스트 타깃은 디바이스가 필요 없는 제품 TU 를 전부 링크한다. 여기 없는 TU 는
-# 자동 검증 밖이라는 뜻이므로, 순수 로직을 새로 분리하면 이 목록에 추가한다.
+# 테스트 타깃은 검사 대상 제품 TU 를 실제로 링크하고, 그중 디바이스 호출이 없는
+# 코드만 실행한다. 여기 없는 TU 는 자동 검증 밖이라는 뜻이므로, 순수 로직을 새로
+# 분리하면 이 목록에 추가한다.
+# snippet-begin: contract-test-sources
 add_executable(graphics_vk_contract_tests
     tests/graphics_vk_contract_tests.cpp
     src/barrier/barrier_helpers.cpp
+    src/device/descriptor_layout.cpp
+    src/device/queue_select.cpp
     src/device/swapchain_select.cpp
     src/measure/query_ring.cpp
     src/scene/scene_core.cpp
     src/sync/frame_completion.cpp
     src/sync/timeline_sync.cpp)
+# snippet-end: contract-test-sources
 target_include_directories(graphics_vk_contract_tests PRIVATE
     src
     ${vma_SOURCE_DIR}/include)
@@ -164,7 +171,21 @@ target_link_libraries(graphics_vk_contract_tests PRIVATE
 target_compile_definitions(graphics_vk_contract_tests PRIVATE
     GLM_FORCE_DEPTH_ZERO_TO_ONE
     GLM_FORCE_RADIANS)
+# 전체 실행 — 인자 없이 부르면 표의 모든 항목을 돈다.
 add_test(NAME graphics_vk_contract_tests COMMAND graphics_vk_contract_tests)
+
+# step 별 실행 단위. 인자는 tests/graphics_vk_contract_tests.cpp 의
+# {step, 이름, 함수} 표를 거르는 필터이고, 각 타깃은 그 step 이 추가한 계약만
+# 돈다. 전체 실행 타깃은 그대로 두고 *더한다* — 어느 쪽으로도 검사가 줄지 않는다.
+# snippet-begin: per-step-tests
+add_test(NAME vk_step01_skeleton    COMMAND graphics_vk_contract_tests step01)
+add_test(NAME vk_step02_measure     COMMAND graphics_vk_contract_tests step02)
+add_test(NAME vk_step03_barrier     COMMAND graphics_vk_contract_tests step03)
+add_test(NAME vk_step04_multi_queue COMMAND graphics_vk_contract_tests step04)
+add_test(NAME vk_step05_semaphore   COMMAND graphics_vk_contract_tests step05)
+add_test(NAME vk_step06_bindless    COMMAND graphics_vk_contract_tests step06)
+add_test(NAME vk_step07_mesh_scale  COMMAND graphics_vk_contract_tests step07)
+# snippet-end: per-step-tests
 
 if(UNIX AND NOT APPLE)
     target_compile_definitions(${PROJECT_NAME} PRIVATE VKLAB_LINUX=1)

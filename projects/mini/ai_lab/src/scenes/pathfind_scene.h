@@ -15,14 +15,20 @@ public:
     void DrawPanel(int px, int py, int pw, int ph) override;
     std::string_view Name() const override { return "Pathfind"; }
 
+    // 콤보 박스의 초기 선택. 인덱스를 손으로 적으면 열거형 순서와 조용히
+    // 어긋난다 (heurIdx_ 가 3 = Chebyshev 인데 주석은 Octile 이었다).
+    // 열거형에서 유도하면 다시 어긋날 수 없다.
+    static constexpr int kDefaultAlgoIdx = static_cast<int>(Algo::AStar);
+    static constexpr int kDefaultHeurIdx = static_cast<int>(Heur::Octile);
+
 private:
     void Restart();   // 현재 알고리즘/맵으로 탐색 초기화
 
     Grid       grid_;
     Pathfinder pf_;
 
-    int   algoIdx_  = 0;   // Algo
-    int   heurIdx_  = 3;   // Heur (Octile)
+    int   algoIdx_  = kDefaultAlgoIdx;   // Algo (A*)
+    int   heurIdx_  = kDefaultHeurIdx;   // Heur (Octile)
     int   gridDim_  = 48;  // 정사각 그리드 변 길이
     bool  autoRun_  = true;
     float stepRate_ = 200.0f;   // 초당 step 수
@@ -34,7 +40,7 @@ private:
     bool  pendingStep_ = false;
     bool  pendingRun_  = false;
 
-    // 콤보 박스 편집 상태 (raygui 는 클릭 시 드롭다운 모드).
+    // 미사용 — 패널은 편집 상태가 없는 GuiComboBox 로 알고리즘/휴리스틱을 고른다.
     bool  algoEdit_ = false;
     bool  heurEdit_ = false;
 };

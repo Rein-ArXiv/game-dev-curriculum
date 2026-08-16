@@ -19,37 +19,64 @@ Influence Map은 월드를 “누가 어디에 있는가”가 아니라 “어�
 
 ## 2. Stamp·Spread·Decay
 
-`InfluenceScene::Step`은 세 단계로 진행한다.
+`InfluenceScene::Step`은 아군과 적, 두 필드에 같은 순수 함수를 각각 적용한다. 두 필드는 서로를 읽지 않으므로 한 장짜리 함수로 나눌 수 있고, 그래야 창 없이 검사할 수 있다.
+
+<!-- snippet: src/scenes/influence_scene.cpp#InfluenceScene::Step -->
+```cpp
+void InfluenceScene::Step() {
+    const int W = grid_.Width(), H = grid_.Height();
+    const InfluenceParams params{decay_, spread_, iters_};
+    const auto walkable = [&](int x, int y) { return grid_.Walkable(x, y); };
+
+    StepInfluenceField(W, H, fField_, friendly_, params, walkable);
+    StepInfluenceField(W, H, eField_, enemy_, params, walkable);
+}
+```
+
+`StepInfluenceField`는 필드 하나를 세 단계로 진행한다.
 
 1. **Decay**: 오래된 영향력을 줄인다.
 2. **Stamp**: 현재 유닛 위치에 새 값을 주입한다.
 3. **Spread**: 이웃 셀로 값을 확산한다.
 
-순서를 고정해야 같은 입력에서 같은 결과가 나온다. spread를 제자리 갱신하면 순회 방향에 따라 결과가 달라지므로, 읽기 버퍼와 쓰기 버퍼를 분리하는 것이 안전하다.
+순서를 고정해야 같은 입력에서 같은 결과가 나온다. spread를 제자리 갱신하면 순회 방향에 따라 결과가 달라지므로, 읽기 버퍼와 쓰기 버퍼를 분리한다.
 
+<!-- snippet: src/model/influence.h#StepInfluenceField -->
 ```cpp
-auto spreadOne = [&](std::vector<float>& field) {
-    std::vector<float> next = field;
-    for (int y = 0; y < H; ++y)
-        for (int x = 0; x < W; ++x) {
+// 1) decay (과거 망각).
+for (float& v : field) v *= params.decay;
+
+// 2) stamp (현재 유닛 강도 주입).
+for (const auto& c : stamps) {
+    if (c.x < 0 || c.y < 0 || c.x >= width || c.y >= height) continue;
+    field[(size_t)(c.y * width + c.x)] = 1.0f;
+}
+
+// 3) spread (벽 우회, 거리 감쇠 — 반복 확산).
+static const int dx[8] = {1, -1, 0, 0, 1, 1, -1, -1};
+static const int dy[8] = {0, 0, 1, -1, 1, -1, 1, -1};
+std::vector<float> next;
+for (int i = 0; i < params.iterations; ++i) {
+    next = field;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const int idx = y * width + x;
             // 벽 셀은 값을 보존하지 않는다. 이 분기가 없으면 벽이
             // stamp/decay 로 얻은 값을 다시 뿌려 "벽 우회"가 깨진다.
-            if (!grid_.Walkable(x, y)) {
-                next[(size_t)grid_.Index(x, y)] = 0.0f;
-                continue;
-            }
-            float best = field[(size_t)grid_.Index(x, y)];
+            if (!walkable(x, y)) { next[(size_t)idx] = 0.0f; continue; }
+            float best = field[(size_t)idx];
             for (int k = 0; k < 8; ++k) {
-                int nx = x + dx[k], ny = y + dy[k];
-                if (!grid_.Walkable(nx, ny)) continue;
-                best = std::max(
-                    best,
-                    field[(size_t)grid_.Index(nx, ny)] * spread_);
+                const int nx = x + dx[k], ny = y + dy[k];
+                if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+                if (!walkable(nx, ny)) continue;
+                const float in = field[(size_t)(ny * width + nx)] * params.spread;
+                if (in > best) best = in;
             }
-            next[(size_t)grid_.Index(x, y)] = best;
+            next[(size_t)idx] = best;
         }
+    }
     field.swap(next);
-};
+}
 ```
 
 ## 3. 파생 뷰
@@ -60,6 +87,7 @@ auto spreadOne = [&](std::vector<float>& field) {
 
 같은 원본 장에서 목적별 파생 값을 만들 수 있다는 점이 핵심이다. 한 숫자를 모든 의사결정에 그대로 쓰기보다 질문에 맞는 함수를 정의한다.
 
+<!-- snippet: src/model/ai_model.h#CombineInfluence -->
 ```cpp
 switch (view) {
 case InfluenceView::Control:
@@ -87,20 +115,56 @@ case InfluenceView::Vulnerability:
 
 ```bash
 cmake --build build --config Release
-ctest --test-dir build -C Release -R ai_model_tests --output-on-failure
-./build/Release/ai_model_tests    # 직접 실행하면 "AI model tests passed"
+ctest --test-dir build -C Release -R ai_step06_influence --output-on-failure
+./build/Release/ai_model_tests step06   # 같은 두 케이스를 직접 실행
 ```
 
 ```text
-1/1 Test #1: ai_model_tests ...................   Passed
+1/1 Test #6: ai_step06_influence ..............   Passed
 100% tests passed out of 1
+
+ai_model_tests [step06] 2 case(s)
+  ok  influence/derived-views
+  ok  influence/field-step
+AI model tests passed
 ```
+
+필터를 빼고 `./build/Release/ai_model_tests` 를 그냥 부르면 이 실행 파일에 쌓인 열 개
+케이스가 전부 돈다. 지금까지 만든 계산 코어가 한 번에 초록불인지 보고 싶을 때 쓴다.
 
 이 테스트는 파생 뷰 세 개의 값을 고정한다. $f=0.8$, $e=0.2$ 에서 control 0.6, tension 0.4, vulnerability 0.04 이고, $f=0$·$e=1$ 이면 vulnerability 가 1.0 로 최대가 된다.
 
 decay → stamp → spread 루프도 함께 검증한다. 두 세력의 장은 서로를 읽지 않으므로 한 장짜리 순수 함수 `StepInfluenceField` 로 나누어 두었고, Scene 은 그것을 아군·적에 각각 적용한다. 검사 항목은 네 가지다.
 
-- **확산 거리와 감쇠.** decay 1.0, spread 0.5 로 (3,3) 에 유닛 하나를 찍으면 iters 1 에서 이웃이 정확히 0.5, 거리 2 는 0 이고 iters 2 에서 거리 2 가 0.25 다. 반복 횟수가 곧 도달 거리이고 감쇠는 $spread^{거리}$ 다.
+- **확산 거리와 감쇠.** decay 1.0, spread 0.5 로 (3,3) 에 유닛 하나를 찍으면 iters 1 에서 이웃이 정확히 0.5, 거리 2 는 0 이고 iters 2 에서 거리 2 가 0.25 다. 반복 횟수가 곧 도달 거리이고 감쇠는 $spread^{거리}$ 다. 이 항목은 이렇게 적힌다.
+
+<!-- snippet: tests/ai_model_tests.cpp@influence-spread-distance -->
+```cpp
+{
+    std::vector<float> field((size_t)(W * H), 0.0f);
+    const std::vector<ailab::GridPoint> stamps{{3, 3}};
+    ailab::StepInfluenceField(W, H, field, stamps,
+                              ailab::InfluenceParams{1.0f, 0.5f, 1}, openGrid);
+    CHECK(Near(at(field, 3, 3), 1.0f));
+    CHECK(Near(at(field, 4, 3), 0.5f));
+    CHECK(Near(at(field, 4, 4), 0.5f));
+    CHECK(Near(at(field, 5, 3), 0.0f));
+}
+{
+    std::vector<float> field((size_t)(W * H), 0.0f);
+    const std::vector<ailab::GridPoint> stamps{{3, 3}};
+    ailab::StepInfluenceField(W, H, field, stamps,
+                              ailab::InfluenceParams{1.0f, 0.5f, 2}, openGrid);
+    CHECK(Near(at(field, 4, 3), 0.5f));
+    CHECK(Near(at(field, 5, 3), 0.25f));
+    CHECK(Near(at(field, 6, 3), 0.0f));
+}
+```
+
+  `at(field, 5, 3)` 이 첫 블록에서 0 이고 둘째 블록에서 0.25 라는 두 줄이 붙어 있어야
+  `iterations` 가 실제로 소비되는지 잡힌다. 한 블록만 보면 반복 수를 무시하고 항상 한 번만
+  확산하는 구현도, 항상 격자 전체를 채우는 구현도 통과한다. 대각 이웃 (4,4) 가 직교 이웃과
+  같은 0.5 인 것은 이 확산이 8방향 등방성이라는 뜻이다 — 거리 가중이 없다.
 - **감쇠 계수.** 유닛을 걷어낸 다음 틱에 값이 정확히 decay 배로 줄어든다.
 - **벽.** x=3 열을 벽으로 막고 (1,3) 에 유닛을 둔 채 10틱을 돌리면 벽 셀은 전부 0, 벽 너머도 전부 0 이다. stamp 는 통행 가능 여부를 보지 않으므로 벽 위 (3,2) 에 유닛을 놓아도 확산 단계의 0 초기화가 그 값을 지워야 한다.
 - **결정론.** 같은 배치·설정으로 12틱을 두 번 돌린 결과 벡터가 완전히 같고, 모든 값이 $[0, 1]$ 안에 있다.

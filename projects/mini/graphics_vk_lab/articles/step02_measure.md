@@ -41,32 +41,50 @@ double ms = double(ts1 - ts0) * timestampPeriodNs / 1.0e6;
 
 query 결과는 GPU 가 해당 명령을 실행한 뒤에만 유효하다. 따라서 최소 2~3 frame ring 을 둔다. ring 이 꽉 찬 상태에서 가장 오래된 query 가 아직 준비되지 않았다면, 같은 slot 을 reset 하면 안 된다. 이때는 CPU 를 기다리게 하지 말고 새 timestamp 기록을 한 프레임 건너뛴다.
 
+인덱싱 규칙 자체에는 `VkDevice` 가 필요 없다. 그래서 `writeIdx_` / `inFlight_` / `recording_` 세 상태와 슬롯 계산은 `QueryRing`(`src/measure/query_ring.h`)이라는 순수 클래스로 분리되어 있고 `TimestampQuery` 가 그것을 갖고 있다.
+
+<!-- snippet: src/measure/query_ring.cpp -->
 ```cpp
-// Begin: unread slot 을 덮어쓰지 않는다.
-if (inFlight >= kRingSize) {
-    recording = false;
-    return; // full ring: do not reset an unread query slot
+int QueryRing::Begin() {
+    if (inFlight_ >= kRingSize) {   // 아직 읽지 않은 슬롯을 덮어쓰지 않는다
+        recording_ = false;
+        return -1;
+    }
+    recording_ = true;
+    return writeIdx_;
 }
-
-// Poll: 가장 오래된 query 만 non-blocking 으로 읽는다.
-int readIdx = (writeIdx - inFlight + kRingSize) % kRingSize;
-VkResult r = vkGetQueryPoolResults(
-    device, pool, readIdx * 2, 2,
-    sizeof(ts), ts, sizeof(uint64_t),
-    VK_QUERY_RESULT_64_BIT);
-
-if (r == VK_NOT_READY) return;
+// ...
+int QueryRing::ReadIndex() const {   // 수확 대상은 언제나 가장 오래된 슬롯
+    if (inFlight_ == 0) return -1;
+    return (writeIdx_ - inFlight_ + kRingSize) % kRingSize;
+}
 ```
 
-이 패턴의 의미는 “측정 때문에 GPU/CPU 동기화를 만들지 않는다”이다. 최신 프레임 값이 아니라 몇 프레임 전 값이지만 성능 그래프에는 충분하다.
+수확은 그 인덱스를 non-blocking 으로 읽는다. 결과가 아직 없으면 `vkGetQueryPoolResults` 가 `VK_NOT_READY` 를 돌려주고, 그대로 돌아가 다음 프레임에 다시 시도한다 — `VK_QUERY_RESULT_WAIT_BIT` 를 넣지 않는 것이 핵심이다.
 
-인덱싱 규칙 자체에는 `VkDevice` 가 필요 없다. 그래서 `writeIdx` / `inFlight` / `recording` 세 상태와 위 두 계산은 `QueryRing`(`src/measure/query_ring.h`)이라는 순수 클래스로 분리되어 있고 `TimestampQuery` 가 그것을 갖고 있다. 덕분에 다음 계약이 헤드리스 테스트로 고정된다.
+<!-- snippet: src/measure/timestamp_query.cpp#TimestampQuery::Poll -->
+```cpp
+void TimestampQuery::Poll(VkContext& ctx) {
+    const int readIdx = ring_.ReadIndex();
+    if (readIdx < 0) return;
+    uint64_t ts[2] = {0, 0};
+    VkResult r = vkGetQueryPoolResults(ctx.Device(), pool_,
+                                        readIdx * 2, 2,
+                                        sizeof(ts), ts, sizeof(uint64_t),
+                                        VK_QUERY_RESULT_64_BIT);
+    if (r != VK_SUCCESS) return;   // VK_NOT_READY 포함 — 기다리지 않는다
+    ring_.Retire();
+    // ...
+}
+```
 
-- 수확 없이 `kRingSize`(3)개까지 슬롯을 열 수 있고, 그 뒤 `Begin()` 은 -1 을 돌려주며 `recording` 은 false 로 남는다.
-- 수확 대상은 항상 가장 오래된 슬롯이다 — `(writeIdx - inFlight + kRingSize) % kRingSize`.
-- 100 프레임을 돌려도 write/read 인덱스가 `[0, kRingSize)` 를 벗어나지 않고 `inFlight` 가 `kRingSize` 를 넘지 않는다.
+이 패턴의 의미는 “측정 때문에 GPU/CPU 동기화를 만들지 않는다”이다. 최신 프레임 값이 아니라 몇 프레임 전 값이지만 성능 그래프에는 충분하다. 덕분에 다음 계약이 헤드리스 테스트로 고정된다.
 
-full ring 가드를 지우거나 read 인덱스 계산을 `writeIdx` 로 바꾸면 이 세 검사가 곧바로 깨진다.
+- 수확 없이 `kRingSize`(3)개까지 슬롯을 열 수 있고, 그 뒤 `Begin()` 은 -1 을 돌려주며 `recording_` 은 false 로 남는다.
+- 수확 대상은 항상 가장 오래된 슬롯이다 — `(writeIdx_ - inFlight_ + kRingSize) % kRingSize`.
+- 100 프레임을 돌려도 write/read 인덱스가 `[0, kRingSize)` 를 벗어나지 않고 `inFlight_` 가 `kRingSize` 를 넘지 않는다.
+
+full ring 가드를 지우거나 read 인덱스 계산을 `writeIdx_` 로 바꾸면 이 세 검사가 곧바로 깨진다.
 
 ## 3. Validation Log
 
@@ -96,6 +114,44 @@ timestamp 는 GPU 구간 시간을 말한다. CPU submit 비용이나 validation
 Vulkan 에서 성능 그래프가 의미 있으려면 validation 이 먼저 조용해야 한다. 잘못된 layout 위에서 얻은 GPU 시간은 최적화 근거가 될 수 없다.
 
 ## 5. 빌드와 실행 결과
+
+인덱싱 규칙은 `VkDevice` 없이 성립하므로 먼저 헤드리스로 돌린다.
+
+```powershell
+cmake --build build --config Release
+ctest --test-dir build -C Release -R vk_step02_measure --output-on-failure
+.\build\Release\graphics_vk_contract_tests.exe step02
+```
+
+```text
+    Start 3: vk_step02_measure
+1/1 Test #3: vk_step02_measure ................   Passed    0.03 sec
+
+100% tests passed out of 1
+
+[step02] timestamp_ring ... ok (536 checks)
+step02: 1 test(s), 536 checks, 0 failed
+```
+
+536개 CHECK 중 대부분은 100 프레임 루프의 불변식이다 — 매 프레임 write/read 인덱스가 `[0, kRingSize)` 안에 있고 `inFlight_` 가 `kRingSize` 를 넘지 않는지 확인하므로 개수가 프레임 수만큼 늘어난다. 나머지가 full ring 가드와 수확 인덱스 계산이다.
+
+<!-- snippet: tests/graphics_vk_contract_tests.cpp@ring-full-guard -->
+```cpp
+// ring full — 새 기록을 열지 않는다.
+CHECK(ring.Begin() == -1);
+CHECK(!ring.Recording());
+CHECK(ring.End() == -1);
+CHECK(ring.InFlight() == 3);
+
+// 수확하면 다시 열린다. readIdx = (writeIdx - inFlight + kRingSize) % kRingSize.
+ring.Retire();
+CHECK(ring.InFlight() == 2);
+CHECK(ring.ReadIndex() == 1);
+```
+
+`inFlight_ >= kRingSize` 가드를 지우면 첫 두 줄이, `ReadIndex()` 를 `writeIdx_` 로 바꾸면 마지막 줄이 곧바로 깨진다.
+
+GPU 시간과 validation 메시지 자체는 실제 디바이스가 있어야 나오므로 그쪽은 실행으로 본다.
 
 ```powershell
 cmake --build build --config Debug

@@ -33,10 +33,19 @@ $$
 
 개별 규칙을 먼저 과도하게 clamp하면 가중치의 의미가 달라지므로, 이 구현은 합성한 가속도를 그대로 적분하고 절단은 속도 한 단계에서만 한다. 절단은 상한 maxSpeed와 하한 maxSpeed*0.3의 두 값을 함께 쓴다. 하한이 있으면 이웃이 없거나 세 규칙이 서로 상쇄돼도 개체가 멈추지 않고 무리가 계속 흐른다. 대신 힘 자체에는 상한이 없으므로 가중치를 크게 올리면 한 프레임 안에서 방향이 급격히 꺾인다.
 
+<!-- snippet: src/scenes/boids_scene.cpp#BoidsScene::Update -->
+```cpp
+Vector2 v = Add(b.vel, Mul(acc, dt));
+const auto limited =
+    LimitSpeed({v.x, v.y}, maxSpeed_ * 0.3f, maxSpeed_);
+v = {limited.x, limited.y};
+```
+
 ## 3. 이웃 탐색 비용
 
 모든 쌍을 검사하면 개체 수 $n$에서 $O(n^2)$이다. 이 구현은 매 프레임 spatial hash를 다시 만들고 셀 크기를 perception 반경으로 둔다. 그러면 한 Boid는 자신의 셀과 인접한 8개 셀만 조회하면 된다.
 
+<!-- snippet: src/scenes/boids_scene.cpp#BoidsScene::Update -->
 ```cpp
 float cell = std::max(8.0f, perception_);
 hash_.clear();
@@ -45,13 +54,13 @@ for (int i = 0; i < (int)boids_.size(); ++i) {
     int cy = (int)std::floor(boids_[(size_t)i].pos.y / cell);
     hash_[HashCell(cx, cy)].push_back(i);
 }
-
+// ... 개체마다 자기 셀 (cx, cy) 를 구한 뒤
 for (int oy = -1; oy <= 1; ++oy)
     for (int ox = -1; ox <= 1; ++ox) {
         auto it = hash_.find(HashCell(cx + ox, cy + oy));
         if (it == hash_.end()) continue;
         for (int j : it->second) {
-            // 거리 제곱으로 perception 안의 실제 이웃만 거른다.
+            // ... 거리 제곱으로 perception 안의 실제 이웃만 거른다.
         }
     }
 ```
@@ -74,16 +83,57 @@ for (int oy = -1; oy <= 1; ++oy)
 
 ```bash
 cmake --build build --config Release
-ctest --test-dir build -C Release -R ai_model_tests --output-on-failure
-./build/Release/ai_model_tests    # 직접 실행하면 "AI model tests passed"
+ctest --test-dir build -C Release -R ai_step05_boids --output-on-failure
+./build/Release/ai_model_tests step05   # 같은 두 케이스를 직접 실행
 ```
 
 ```text
-1/1 Test #1: ai_model_tests ...................   Passed
+1/1 Test #5: ai_step05_boids ..................   Passed
 100% tests passed out of 1
+
+ai_model_tests [step05] 2 case(s)
+  ok  boids/reflect-axis
+  ok  boids/speed-limits
+AI model tests passed
 ```
 
-경계 조건 쪽은 이 테스트가 고정한다. 구간을 두 번 이상 넘는 위치(-2 → 2, 27 → 7)도 반사가 구간 안으로 되돌리고 해당 축 속도의 부호를 뒤집으며, 속도 절단은 상한뿐 아니라 하한도 적용한다. 세 규칙의 합성 자체는 Scene 안에 있어 자동 검증 대상이 아니다.
+두 케이스가 이 단계 소속인 이유는 호출부에 있다. `ReflectAxis` 와 하한 인자를 받는
+`LimitSpeed` 는 `BoidsScene::Update` 만 부른다 — 국소 제어 Scene 은 자기 감쇠 반사를
+따로 쓰고 힘 단계에서 절단한다. 이 단계가 요구해서 생긴 두 함수이므로 검증도 여기 있다.
+
+경계 조건은 `boids/reflect-axis` 가 고정한다.
+
+<!-- snippet: tests/ai_model_tests.cpp#TestReflectAxis -->
+```cpp
+void TestReflectAxis() {
+    float position = -2.0f;
+    float velocity = -4.0f;
+    ailab::ReflectAxis(position, velocity, 0.0f, 10.0f);
+    CHECK(Near(position, 2.0f));
+    CHECK(Near(velocity, 4.0f));
+
+    position = 27.0f;
+    velocity = 4.0f;
+    ailab::ReflectAxis(position, velocity, 0.0f, 10.0f);
+    CHECK(Near(position, 7.0f));
+    CHECK(Near(velocity, 4.0f));
+
+    position = 5.0f;
+    velocity = 3.0f;
+    ailab::ReflectAxis(position, velocity, 2.0f, 2.0f);
+    CHECK(Near(position, 2.0f));
+    CHECK(Near(velocity, 0.0f));
+}
+```
+
+두 번째 블록이 반복 반사를 겨냥한다. 27 은 구간 [0, 10] 을 두 번 넘은 위치라 한 번만
+clamp 하는 구현은 10 을 돌려주지만, 반복 반사는 27 → -7 → 7 로 접어 넣는다. 큰 `dt` 로
+개체가 화면 밖 멀리 나가는 것이 이 lab 에서 실제로 일어나는 일이므로 이 차이가 화면에
+그대로 나타난다. 세 번째 블록은 구간 폭이 0 인 퇴화 입력에서 무한 루프에 빠지지 않고
+속도를 죽이는지 본다. `boids/speed-limits` 는 `LimitSpeed({3,4}, 2, 4)` 가 방향비 3:4 를
+유지한 채 크기만 4 로 줄이고, 하한 2 가 느린 개체를 다시 밀어 올리는지 확인한다.
+
+세 규칙의 합성 자체는 Scene 안에 있어 자동 검증 대상이 아니다.
 
 Boids 탭의 기본값은 count 300, perception 36, separation 1.5, alignment 1.0, cohesion 1.0, max speed 140 이다. alignment 와 cohesion 을 0 으로 내리면 개체가 서로 밀어내며 화면 전체로 흩어지고, separation 만 0 으로 내리면 한 점으로 뭉친다. count 를 2000 까지 올리면 하단 푸터의 `ms` 가 뚜렷하게 커지는데, 이때 perception 을 12 로 내리면 개체 수를 그대로 둔 채 다시 내려간다 — 비용을 지배하는 것이 개체 수 자체가 아니라 셀당 이웃 후보 수라는 뜻이다.
 

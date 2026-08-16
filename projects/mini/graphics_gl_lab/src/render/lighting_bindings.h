@@ -7,7 +7,7 @@
 //   - UBO            : glBufferSubData 한 번 + 셰이더가 std140 UBO 읽기.
 //   - SSBO           : 같은 패턴 + 더 큰 / 가변 길이 지원.
 //
-// 광원 수 토글 — 8 / 32 / 64.
+// 광원 수 토글 — 1~64 슬라이더 (상한은 Init(maxLights) 로 잡은 값).
 
 #include <glad/gl.h>
 #include <glm/glm.hpp>

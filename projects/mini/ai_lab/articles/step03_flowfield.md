@@ -23,6 +23,15 @@ goal = 0
 그 이웃 = 이전 최소 비용 + 이동 비용
 ```
 
+Dijkstra 자체는 raylib을 모르는 순수 함수 `BuildIntegrationField`에 있다. Scene은 격자 크기와 통행 판정, goal 좌표만 넘긴다 — 그래서 같은 필드 생성 코드를 창 없이 검사할 수 있다.
+
+<!-- snippet: src/scenes/flowfield_scene.cpp#FlowFieldScene::Rebuild -->
+```cpp
+Cell goal = grid_.Goal();
+integration_ = BuildIntegrationField(
+    W, H, [&](int nx, int ny) { return grid_.Walkable(nx, ny); }, goal.x, goal.y);
+```
+
 도달 불가능한 셀은 무한대로 남는다. 이 값을 히트맵으로 그리면 장애물 뒤에서 비용이 우회하며 커지는 모습이 보인다.
 
 ## 2. 방향장 생성
@@ -37,6 +46,7 @@ $$
 
 대각선 비용이 $\sqrt{2}$이고 직교 이동 비용이 1이라면 이 항을 생략했을 때 더 낮은 이웃 값만 보고 실제로는 비싼 대각선을 선택할 수 있다. 구현은 선택한 후보가 현재 비용보다 커지는 낡은 장에서도 0 방향을 반환한다.
 
+<!-- snippet: src/scenes/flowfield_scene.cpp#FlowFieldScene::Rebuild -->
 ```cpp
 const GridDirection step = SelectFlowDirection(
     x, y,
@@ -78,20 +88,46 @@ Flow Field는 전역 경로 방향을 제공하지만 국소 충돌 회피까지
 
 ```bash
 cmake --build build --config Release
-ctest --test-dir build -C Release -R ai_model_tests --output-on-failure
-./build/Release/ai_model_tests    # 직접 실행하면 "AI model tests passed"
+ctest --test-dir build -C Release -R ai_step03_flowfield --output-on-failure
+./build/Release/ai_model_tests step03   # 같은 두 케이스를 직접 실행
 ```
 
 ```text
-1/1 Test #1: ai_model_tests ...................   Passed
+1/1 Test #3: ai_step03_flowfield ..............   Passed
 100% tests passed out of 1
+
+ai_model_tests [step03] 2 case(s)
+  ok  flow/direction-edge-cost
+  ok  flow/integration-field
+AI model tests passed
 ```
+
+두 케이스는 이 단계가 들여온 `model/flow_field.h` 와 `SelectFlowDirection` 만 겨냥한다.
+같은 실행 파일에 다른 단계의 케이스도 들어 있지만 `step03` 필터가 그것들을 뺀다 — 그래서
+여기서 초록불이 뜨면 그 초록불은 방금 만든 것에 대한 초록불이다.
 
 이 테스트가 고정하는 것은 방향 선택 규칙과 필드 생성 둘 다다.
 
 방향 선택은 `SelectFlowDirection` 이다. 대각 이웃의 integration 값이 더 작아도 $\sqrt{2}$ 간선 비용을 더하면 직교 이웃이 싸지는 배치에서 `(dx,dy)=(1,0)` 이 나와야 하고, 목표 셀과 값이 무한대인 셀에서는 `(0,0)` 이 나와야 한다.
 
-필드 생성은 `BuildIntegrationField` 다. Scene 이 raylib 없이 부를 수 있는 순수 함수로 두었기 때문에 헤드리스로 검사할 수 있다. 빈 8x6 격자에서 goal (0,0) 기준 값이 octile 거리와 정확히 같아야 하고((2,2) 는 $2\sqrt{2}$, (7,5) 는 $2+5\sqrt{2}$), x=4 열을 통째로 막으면 벽 셀과 벽 너머가 전부 무한대로 남아야 하며, x=4 열에 (4,5) 한 칸만 뚫으면 (7,0) 의 비용이 우회를 반영해 $3+7\sqrt{2}=12.899$ 가 되어야 한다. 우회 값이 직선 배치보다 크다는 것만 보면 대각 비용을 1 로 바꿔도 통과하므로 해석해를 그대로 비교한다.
+필드 생성은 `BuildIntegrationField` 다. Scene 이 raylib 없이 부를 수 있는 순수 함수로 두었기 때문에 헤드리스로 검사할 수 있다. 빈 8x6 격자에서 goal (0,0) 기준 값이 octile 거리와 정확히 같아야 하고((2,2) 는 $2\sqrt{2}$, (7,5) 는 $2+5\sqrt{2}$), x=4 열을 통째로 막으면 벽 셀과 벽 너머가 전부 무한대로 남아야 하며, x=4 열에 (4,5) 한 칸만 뚫으면 (7,0) 의 비용이 우회를 반영해 $3+7\sqrt{2}=12.899$ 가 되어야 한다.
+
+우회 검사가 왜 부등호로 끝나면 안 되는지가 이 케이스의 요점이다.
+
+<!-- snippet: tests/ai_model_tests.cpp@integration-field-detour -->
+```cpp
+const float detour = at(corridor, 7, 0);
+CHECK(std::isfinite(detour));
+CHECK(detour > at(open, 7, 0) + 1e-3f);
+// 구멍 (4,5) 를 반드시 지난다. 해석해:
+//   (0,0)→(4,5) = 1 + 4√2,  (4,5)→(7,0) = 2 + 3√2,  합 = 3 + 7√2.
+CHECK(Near(at(corridor, 4, 5), 1.0f + 4.0f * 1.41421356f, 1e-4f));
+CHECK(Near(detour, 3.0f + 7.0f * 1.41421356f, 1e-3f));
+```
+
+세 번째 줄만 있으면 "우회가 직선보다 비싸다"는 사실만 잡히고, 대각 비용 상수를 1 로
+바꿔도 통과한다. 뒤 두 줄이 해석해를 그대로 못 박아 이동 비용 모델 자체를 검증 범위에
+넣는다.
 
 GUI 는 FlowField 탭에서 40x40 격자, 에이전트 200으로 시작한다. `show arrows` 를 켜면 도달 가능한 셀마다 화살표가 하나씩 보이고, 히트맵은 goal 에서 멀수록 붉어진다. `Random walls` 로 벽을 깔면 벽 뒤 셀의 색이 직선 거리보다 더 먼 쪽으로 밀리고(우회 비용), 벽으로 완전히 둘러싸인 영역은 색도 화살표도 없다(무한대). 에이전트 슬라이더를 0에서 1000까지 올려도 필드는 다시 계산되지 않는다 — 재빌드는 벽·격자 크기가 바뀔 때만 일어난다.
 

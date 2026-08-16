@@ -20,6 +20,7 @@ void ProjectionScene::Update(float) {}
 void ProjectionScene::DrawWorld(int cx, int cy, int cw, int ch) {
     if (mode_ == Mode::DepthPrecision) {
         // 그래프 영역.
+        // snippet-begin: depth-graph-axes
         int   margin = 60;
         int   gx     = cx + margin;
         int   gy     = cy + 60;
@@ -30,7 +31,9 @@ void ProjectionScene::DrawWorld(int cx, int cy, int cw, int ch) {
         // 축
         DrawLine(gx, gy + gh, gx + gw, gy + gh, Color{180, 180, 180, 255});
         DrawLine(gx, gy,      gx,      gy + gh, Color{180, 180, 180, 255});
+        // snippet-end: depth-graph-axes
 
+        // snippet-begin: depth-plot-path
         const int N = 256;
         // X 축 — viewZ 가 [-near, -far] 까지 (linear or log)
         // Y 축 — NDC z (0 ~ 1)
@@ -40,6 +43,7 @@ void ProjectionScene::DrawWorld(int cx, int cy, int cw, int ch) {
                 float t1 = (float)(i + 1) / (float)(N - 1);
                 if (i == N - 1) break;
                 float vz0, vz1;
+                // snippet-begin: depth-log-scale
                 if (logScale_) {
                     // log: near 에서 far 로 log 분포
                     float ln_n = std::log(near_);
@@ -50,6 +54,7 @@ void ProjectionScene::DrawWorld(int cx, int cy, int cw, int ch) {
                     vz0 = -(near_ + (far_ - near_) * t0);
                     vz1 = -(near_ + (far_ - near_) * t1);
                 }
+                // snippet-end: depth-log-scale
                 float y0 = formula(vz0, near_, far_);
                 float y1 = formula(vz1, near_, far_);
                 int   px0 = gx + (int)(t0 * gw);
@@ -66,13 +71,16 @@ void ProjectionScene::DrawWorld(int cx, int cy, int cw, int ch) {
         if (showReverse_) {
             plotPath(ReverseNdcZ, Color{255, 200, 80, 255});
         }
+        // snippet-end: depth-plot-path
 
         // 축 라벨
+        // snippet-begin: depth-graph-labels
         DrawText("View Z (near → far)", gx + gw / 2 - 60,
                   gy + gh + 6, 12, Color{200, 200, 200, 255});
         DrawText("NDC z", gx - 50, gy + gh / 2, 12, Color{200, 200, 200, 255});
         DrawText("0", gx - 16, gy + gh - 6, 12, Color{200, 200, 200, 255});
         DrawText("1", gx - 16, gy - 6, 12, Color{200, 200, 200, 255});
+        // snippet-end: depth-graph-labels
 
         // 범례
         if (showStandard_) {
@@ -120,6 +128,7 @@ void ProjectionScene::DrawWorld(int cx, int cy, int cw, int ch) {
         exactSum += (double)kahanBig_;
 
         // Naive (float)
+        // snippet-begin: kahan-error-series
         float naive = 0.0f;
         // Kahan (float, 보상) — 누적 규칙은 algo/kahan.h 한 곳에만 둔다.
         KahanAccumulator kahan;
@@ -145,12 +154,15 @@ void ProjectionScene::DrawWorld(int cx, int cy, int cw, int ch) {
                                          0.0f + errK});
             }
         }
+        // snippet-end: kahan-error-series
 
         // 추가로 *큰 수 + 작은 수* 케이스: kahanBig_ 한 번 add 후 작은 수 N 회.
         // 위 그래프와 별개의 메시지 — naive 에서는 작은 값이 큰 값의 ULP에 묻힘.
+        // snippet-begin: absorption-case
         float  naive2 = NaiveSum(kahanBig_, kahanSmall_, N);
         float  kSum2  = KahanSum(kahanBig_, kahanSmall_, N);
         double truth2 = (double)kahanBig_ + (double)kahanSmall_ * N;
+        // snippet-end: absorption-case
 
         // 위 시각: 오차 추세를 *시간 (i)* 축, *오차* 를 Y 축에 (선형 스케일).
         // 오차 범위 자동 산정.
@@ -184,10 +196,12 @@ void ProjectionScene::DrawWorld(int cx, int cy, int cw, int ch) {
         DrawText(buf, cx + 10, cy + 30, 12, Color{200, 200, 200, 255});
 
         // absorption / loss-of-significance 케이스 결과 표시.
+        // snippet-begin: absorption-text
         std::snprintf(buf, sizeof(buf),
                        "Big + small case (big=%.1f): naive=%.6f, kahan=%.6f, truth=%.6f",
                        kahanBig_, naive2, kSum2, truth2);
         DrawText(buf, cx + 10, cy + ch - 30, 12, Color{220, 220, 220, 255});
+        // snippet-end: absorption-text
     }
     (void)cw; (void)ch;
 }

@@ -122,21 +122,48 @@ server lease, ticket claim, match insert를 transaction 또는 compare-and-swap�
 
 ## 실행 확인
 
-배정 정책은 시각을 인자로 넣는 contract test가 실행한다.
+배정 정책은 시각을 인자로 넣는 contract test가 실행한다. 검사 이름을 인자로 주면 이 문서가
+추가한 여섯 개만 돈다.
 
 ```powershell
 dotnet run `
   --project projects/mini/live_service_lab/tests/LiveService.Tests/LiveService.Tests.csproj `
-  -c Release
+  -c Release -- step03
 ```
 
 ```text
-live_service_tests: all checks passed
+live_service_tests: filter=step03 -> 6 check(s)
+  step03 RangeGuards         ok
+  step03 MatchAllocation     ok
+  step03 ServerHealth        ok
+  step03 ProgressiveWidening ok
+  step03 RegionAffinity      ok
+  step03 ServerDrain         ok
+live_service_tests: step03 6/6 checks passed
 ```
 
-이 실행은 rating 1500과 1550인 두 ticket이 같은 match와 같은 endpoint를 받는 것, drain 선언 뒤
-들어온 두 ticket이 `Waiting`으로 남는 것, `now`가 enqueue 시각보다 이른 경우에도 기본 허용 폭이
-유지되는 것을 확인한다.
+`RangeGuards`는 capacity 0·음수 등록과 음수·상한 초과 rating, party size 2를 거부하는지 본다.
+`MatchAllocation`은 capacity 1인 서버 두 대에 네 명을 넣어 각 쌍이 서로 다른 match와 서로 다른
+endpoint를 받는 것, queue 재시도가 ticket을 늘리지 않는 것을 확인한다. `ServerHealth`는 16초
+공백 뒤 배정 거부와 늦은 heartbeat 한 번으로 복구되지 않는 것을, `ServerDrain`은 drain 뒤 신규
+배정 거부와 진행 중 match 보존을, `RegionAffinity`는 region이 어긋난 ticket·server 조합을 잡는다.
+
+범위 확대는 경계 두 개를 붙여 재현한다. 34초와 35초는 허용 폭 440과 450으로 갈리므로 rating
+차 450인 두 ticket의 상태가 이 1초 사이에 바뀐다.
+
+<!-- snippet: tests/LiveService.Tests/Program.cs@widening-boundary -->
+```csharp
+Require(plane.GetTicket(w1, "widen-a", t0.AddSeconds(34))?.Status ==
+    TicketStatus.Waiting,
+    name + ": 34초에는 허용 폭이 440이라 아직 대기한다");
+Require(plane.GetTicket(w1, "widen-a", t0.AddSeconds(35))?.Status ==
+    TicketStatus.Assigned,
+    name + ": 35초에 허용 폭이 450이 되어 배정된다");
+```
+
+한쪽만 검사하면 확대가 아예 없어도, 처음부터 무한대여도 통과한다. 두 줄을 붙여야 시작값
+100과 기울기 10이 함께 측정된다. 상한 500과 음수 경과 시간 clamp는 같은 검사의 뒷부분에서
+rating 차 600인 쌍과 `now`가 enqueue 시각보다 이른 쌍으로 확인한다.
 
 ---
 

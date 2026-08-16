@@ -19,7 +19,7 @@ API 중립 GPU 아키텍처 문서는 Vulkan 기초에서 `stage0_adv_01_gpu_arc
 | 좌표·변환·투영·NDC·법선 변환 | `stage0_fund_02_coordinate_transform` |
 | 래스터화·보간 | `stage0_fund_03_rasterization` |
 | 색·감마·HDR·톤매핑 | `stage0_fund_04_color_gamma` |
-| 반사 모델·PBR·고급 재질 | `stage0_fund_05_shading_materials` |
+| 반사 모델·광원 모델·거리 감쇠·PBR·고급 재질 | `stage0_fund_05_shading_materials` |
 | 깊이·가시성·컬링·AA | `stage0_fund_06_depth_visibility` |
 | 텍스처링·필터링·밉맵 | `stage0_fund_07_texturing_sampling` |
 | 프레임버퍼·멀티패스·G-buffer·그림자 골격 | `stage0_fund_08_framebuffer_multipass` |

@@ -4,6 +4,8 @@
 #include "scenes/response_scene.h"
 #include "core/physics_core.h"
 
+#include "step_cases.h"
+
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -50,12 +52,17 @@ void TestGatherContactsGeometry() {
     CHECK(contacts.size() == 1);
     if (contacts.size() != 1) return;
     const auto& c = contacts.front();
+    // snippet-begin: contact-geometry
+    // 반지름 8 두 개의 중심거리가 12 면 깊이는 정확히 4, 법선은 i -> j 방향.
     CHECK(c.i == 0);
     CHECK(c.j == 1);
     CHECK(std::fabs(c.depth - 4.0f) < 1e-4f);
     CHECK(std::fabs(c.normal.x - 1.0f) < 1e-5f);
     CHECK(std::fabs(c.normal.y) < 1e-5f);
     CHECK(c.lambda == 0.0f);
+    // snippet-end: contact-geometry
+    std::cout << "  pair contact: depth=" << c.depth << " normal=("
+              << c.normal.x << ',' << c.normal.y << ")\n";
 
     // 정확히 맞닿으면(거리 == 반지름 합) 접촉이 아니다 — dist < r 규약.
     physlab::ResponseScene touching = MakePairScene(16.0f);
@@ -75,6 +82,8 @@ void TestGatherContactsGeometry() {
         CHECK(std::fabs(wallContacts[0].depth - 4.0f) < 1e-4f);
         CHECK(wallContacts[0].normal.x == 1.0f);
         CHECK(wallContacts[0].normal.y == 0.0f);
+        std::cout << "  wall contact: j=" << wallContacts[0].j << " depth="
+                  << wallContacts[0].depth << '\n';
     }
 }
 
@@ -94,6 +103,9 @@ void TestPositionCorrectionAmount() {
     const float after1 = scene.Bodies()[1].pos.x;
     CHECK(std::fabs((before0 - after0) - 0.35f) < 1e-4f);
     CHECK(std::fabs((after1 - before1) - 0.35f) < 1e-4f);
+    std::cout << "  (depth 4 - slop " << scene.Slop() << ") * factor "
+              << scene.PositionCorrectFactor() << " split two ways: "
+              << (before0 - after0) << " each\n";
 
     // slop 이하의 얕은 침투는 건드리지 않는다 (지터 방지).
     physlab::ResponseScene shallow = MakePairScene(15.8f);   // depth 0.2
@@ -143,6 +155,8 @@ void TestSequentialImpulseConverges() {
         -200.0f, fast.Restitution(), 50.0f);
     CHECK(std::fabs(expected - 20.0f) < 1e-4f);
     CHECK(std::fabs(fastRelative - 20.0f) < 1e-2f);
+    std::cout << "  approach -40 -> relative " << relative
+              << " ; approach -200 -> relative " << fastRelative << '\n';
 
     // 이미 분리 중인 접촉은 임펄스를 만들지 않는다 (λ >= 0 클램프).
     physlab::ResponseScene separating = MakePairScene(12.0f);
@@ -183,6 +197,7 @@ void TestIterationConvergence() {
         std::cout << "  iterations=" << iterationCounts[k]
                   << " avgPen=" << pen[k] << '\n';
     }
+    // snippet-begin: iteration-convergence
     for (int k = 1; k < 5; ++k) {
         if (!(pen[k] <= pen[k - 1] + 1e-4f)) {
             std::cerr << "[not monotone] iterations=" << iterationCounts[k]
@@ -193,19 +208,20 @@ void TestIterationConvergence() {
     CHECK(pen[4] <= slop + 1.0f);
     // 1 회 반복은 실제로 더 깊게 파고들어야 한다 (전부 같은 값이면 무의미).
     CHECK(pen[0] > pen[4] + 1e-3f);
+    // snippet-end: iteration-convergence
 }
+
+const physlab::testkit::StepCase kCases[] = {
+    {"step06", "gather_contacts",     TestGatherContactsGeometry},
+    {"step06", "position_correction", TestPositionCorrectionAmount},
+    {"step06", "sequential_impulse",  TestSequentialImpulseConverges},
+    {"step06", "iteration_convergence", TestIterationConvergence},
+};
 
 }  // namespace
 
-int main() {
-    TestGatherContactsGeometry();
-    TestPositionCorrectionAmount();
-    TestSequentialImpulseConverges();
-    TestIterationConvergence();
-    if (failures != 0) {
-        std::cerr << failures << " response test(s) failed\n";
-        return 1;
-    }
-    std::cout << "physics response tests passed\n";
-    return 0;
+int main(int argc, char** argv) {
+    return physlab::testkit::RunStepCases(
+        argc, argv, kCases, (int)(sizeof(kCases) / sizeof(kCases[0])),
+        "physics response", &failures);
 }

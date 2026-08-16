@@ -2,8 +2,8 @@
 
 // FrameTimer — CPU 측 프레임 시간 측정.
 //
-// Step 1 시점에는 *CPU 만*. Step 2 에서 GL_TIME_ELAPSED 쿼리 (GPU 측) + KHR_debug
-// 가 추가되면 별도 클래스 (`GpuTimer`) 가 같은 패턴으로 들어온다.
+// 이 클래스가 재는 것은 *CPU 만*. GPU 측 GL_TIME_ELAPSED 쿼리는 같은 패턴의
+// 별도 클래스 (`GpuTimer`) 가 맡는다.
 //
 // EMA (지수 이동 평균) 으로 *순간 ms* 가 아닌 *평활화된 ms* 도 함께 제공 — UI 가
 // 깜빡이지 않도록.

@@ -1,3 +1,4 @@
+#include "bench_program.hpp"
 #include "language.hpp"
 
 #include <chrono>
@@ -7,9 +8,9 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-constexpr const char* kSource =
-    "let x = 1; let sum = 0;"
-    "while (x <= 100) { sum = sum + x; x = x + 1; }";
+// 측정 대상 소스는 `bench_program.hpp` 가 소유한다. 정확성 테스트가 같은 상수를
+// 읽고 sum·명령 수를 못 박는다.
+using lab::lang::bench::kSource;
 
 template <class Function>
 double Milliseconds(Function&& function) {
@@ -22,7 +23,7 @@ double Milliseconds(Function&& function) {
 }  // namespace
 
 int main() {
-    constexpr int iterations = 10000;
+    constexpr int iterations = lab::lang::bench::kIterations;
     lab::lang::Compiler compiler;
     const auto compiled = compiler.Compile(kSource);
     if (!compiled.program) return 1;

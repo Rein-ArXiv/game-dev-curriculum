@@ -2,6 +2,8 @@
 
 #include "scenes/constraints_scene.h"
 
+#include "step_cases.h"
+
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -52,7 +54,8 @@ void TestChainSetup() {
         CHECK(std::fabs(std::sqrt(dx * dx + dy * dy) - 36.0f) < 1e-3f);
         CHECK(std::fabs(l.rest - 36.0f) < 1e-6f);
     }
-    // 한 스텝 뒤에도 anchor 는 제자리.
+    // snippet-begin: anchor-invariant
+    // 한 스텝 뒤에도 anchor 는 제자리 — invMass 0 은 어떤 보정도 받지 않는다.
     const Vector2 anchor = scene.Particles()[0].pos;
     scene.Step(1.0f / 120.0f);
     CHECK(scene.Particles()[0].pos.x == anchor.x);
@@ -61,6 +64,10 @@ void TestChainSetup() {
     CHECK(scene.Particles()[0].vel.y == 0.0f);
     // 나머지는 중력으로 내려갔어야 한다.
     CHECK(scene.Particles()[11].pos.y > anchor.y);
+    // snippet-end: anchor-invariant
+    std::cout << "  chain: " << scene.Particles().size() << " particles, "
+              << scene.Links().size() << " links, anchor fixed at ("
+              << anchor.x << ',' << anchor.y << ")\n";
 }
 
 // (2) PBD 는 iteration 이 stiffness — 반복을 늘리면 평균 stretch 가 단조 감소.
@@ -108,17 +115,17 @@ void TestSiIterationStiffness() {
     CHECK(many < few);
 }
 
+const physlab::testkit::StepCase kCases[] = {
+    {"step07", "chain_setup",           TestChainSetup},
+    {"step07", "pbd_iteration_stiffness", TestPbdIterationStiffness},
+    {"step07", "baumgarte_drift",       TestBaumgarteReducesDrift},
+    {"step07", "si_iteration_stiffness", TestSiIterationStiffness},
+};
+
 }  // namespace
 
-int main() {
-    TestChainSetup();
-    TestPbdIterationStiffness();
-    TestBaumgarteReducesDrift();
-    TestSiIterationStiffness();
-    if (failures != 0) {
-        std::cerr << failures << " constraint test(s) failed\n";
-        return 1;
-    }
-    std::cout << "physics constraint tests passed\n";
-    return 0;
+int main(int argc, char** argv) {
+    return physlab::testkit::RunStepCases(
+        argc, argv, kCases, (int)(sizeof(kCases) / sizeof(kCases[0])),
+        "physics constraint", &failures);
 }

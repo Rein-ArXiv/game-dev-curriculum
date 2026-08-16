@@ -1,4 +1,7 @@
 // db_tests — WalKv 단위 테스트 (ctest 대상)
+//
+// 인자 없이 돌리면 전부 실행한다. `--step=NN` 을 주면 그 step 이 추가한 검사만
+// 골라 이름과 함께 찍는다 — 파일 맨 아래 kCases 표가 소속을 정한다.
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -84,6 +87,49 @@ static std::vector<uint8_t> FrameBytes(const walkv::Frame& fr) {
     walkv::AppendU32(out, walkv::Crc32(payload.data(), payload.size()));
     out.insert(out.end(), payload.begin(), payload.end());
     return out;
+}
+
+// ---------- step01: 프레임 형식 그 자체 ----------
+// 파일도 트랜잭션도 없이 인코더와 CRC 만 본다. step01 을 막 끝낸 독자가 확인할 수
+// 있는 것은 여기까지다 — WalKv 는 step02 에서야 생긴다.
+static void TestFrameCodecBytes() {
+    // (1) u32 는 항상 little-endian 이다. 호스트 엔디언에 끌려가면 로그가 기계마다
+    //     다른 형식이 된다.
+    std::vector<uint8_t> le;
+    walkv::AppendU32(le, 0x01020304u);
+    CHECK(le.size() == 4);
+    CHECK(le[0] == 0x04 && le[1] == 0x03 && le[2] == 0x02 && le[3] == 0x01);
+    CHECK(walkv::ReadU32Le(le.data()) == 0x01020304u);
+
+    // (2) Put payload 의 배치: op(1) + [keylen(4)+key] + [vallen(4)+value]
+    const std::vector<uint8_t> put = walkv::EncodePayload({walkv::Op::Put, "ab", "xyz"});
+    CHECK(put.size() == 1 + 4 + 2 + 4 + 3);
+    CHECK(put[0] == uint8_t(walkv::Op::Put));
+    CHECK(walkv::ReadU32Le(put.data() + 1) == 2u);
+    CHECK(std::string(put.begin() + 5, put.begin() + 7) == "ab");
+    CHECK(walkv::ReadU32Le(put.data() + 7) == 3u);
+    CHECK(std::string(put.begin() + 11, put.end()) == "xyz");
+
+    // (3) Del 은 key 만 싣고, Commit 은 op 바이트 하나뿐이다 — 커밋 마커의 가격.
+    const std::vector<uint8_t> del = walkv::EncodePayload({walkv::Op::Del, "ab", "ignored"});
+    CHECK(del.size() == 1 + 4 + 2);
+    CHECK(del[0] == uint8_t(walkv::Op::Del));
+    const std::vector<uint8_t> commit = walkv::EncodePayload({walkv::Op::Commit, {}, {}});
+    CHECK(commit.size() == 1);
+    CHECK(commit[0] == uint8_t(walkv::Op::Commit));
+
+    // (4) CRC32 는 표준 IEEE 여야 한다. "123456789" 의 검사값 0xCBF43926 은 이
+    //     조합(반사, init 0xFFFFFFFF, 최종 xor)에서만 나온다 — 다항식이나 반사를
+    //     바꾸면 이 한 줄이 죽는다.
+    const std::string check_vector = "123456789";
+    CHECK(walkv::Crc32(reinterpret_cast<const uint8_t*>(check_vector.data()),
+                       check_vector.size()) == 0xCBF43926u);
+
+    // (5) 한 바이트만 달라져도 CRC 가 달라진다 — 찢긴 쓰기 검출의 근거.
+    std::vector<uint8_t> flipped = put;
+    flipped.back() ^= 0xFF;
+    CHECK(walkv::Crc32(put.data(), put.size()) !=
+          walkv::Crc32(flipped.data(), flipped.size()));
 }
 
 // 기본: put/get/del, 커밋 전 비가시
@@ -306,7 +352,7 @@ static void TestGarbageLengthRejected() {
         CHECK(rs.committed_txns == 1);
         CHECK(rs.discarded_bytes == 8);
         CHECK(idx.size() == 1);
-        // 40바이트짜리 로그의 재생은 마이크로초 규모다. 2초를 넘겼다면 len 가드가
+        // 37바이트짜리 로그의 재생은 마이크로초 규모다. 2초를 넘겼다면 len 가드가
         // 없어 4GB 버퍼를 잡으려 한 것이다.
         CHECK(ms < 2000.0);
     }
@@ -344,18 +390,63 @@ static void TestOversizedFrameRejected() {
     Reset();
 }
 
-int main() {
-    TestBasic();
-    TestReopen();
-    TestUncommittedTailDiscarded();
-    TestCorruptionDetected();
-    TestCorruptionMidLogDiscardsTail();
-    TestDelSurvivesRestart();
-    TestFsyncOnCommitDurable();
-    TestGarbageLengthRejected();
-    TestOversizedFrameRejected();
+// ---------- step 별 실행 단위 ----------
+// 소속은 '그 step 이 무엇을 추가했는가' 로 정한다. step01 은 프레임 형식·CRC·파싱
+// 경계를 추가했고, step02 는 트랜잭션 경계와 복구 규칙을 추가했다. 길이 가드 두 건은
+// Replay 를 통해 돌지만 단정하는 대상은 step01 이 정한 파싱 경계다.
+struct Case {
+    const char* step;
+    const char* name;
+    void (*fn)();
+};
+
+static const Case kCases[] = {
+    {"01", "frame_codec_bytes",           TestFrameCodecBytes},
+    {"01", "crc_mismatch_stops_replay",   TestCorruptionDetected},
+    {"01", "garbage_length_rejected",     TestGarbageLengthRejected},
+    {"01", "oversized_frame_rejected",    TestOversizedFrameRejected},
+    {"02", "commit_visibility",           TestBasic},
+    {"02", "reopen_keeps_committed",      TestReopen},
+    {"02", "uncommitted_tail_discarded",  TestUncommittedTailDiscarded},
+    {"02", "midlog_corruption_drops_tail",TestCorruptionMidLogDiscardsTail},
+    {"02", "del_survives_restart",        TestDelSurvivesRestart},
+    {"02", "fsync_on_commit_durable",     TestFsyncOnCommitDurable},
+};
+
+int main(int argc, char** argv) {
+    std::string step;
+    if (argc > 1) {
+        const std::string arg = argv[1];
+        if (arg.rfind("--step=", 0) != 0) {
+            std::printf("usage: db_tests [--step=NN]\n");
+            return 2;
+        }
+        step = arg.substr(7);
+    }
+
+    int selected = 0;
+    for (const Case& c : kCases) {
+        if (!step.empty() && step != c.step) continue;
+        ++selected;
+        const int before = g_failed;
+        c.fn();
+        // 필터를 준 실행은 '무엇을 확인했는지' 를 줄 단위로 남긴다. 전체 실행의
+        // 출력은 예전 그대로 둔다 — 기존 문서와 CI 로그가 그 한 줄을 본다.
+        if (!step.empty())
+            std::printf("  %-4s %s\n", (g_failed == before) ? "ok" : "FAIL", c.name);
+    }
     std::remove(kPath.c_str());
-    if (g_failed == 0) { std::printf("db_tests: all passed\n"); return 0; }
-    std::printf("db_tests: %d check(s) failed\n", g_failed);
-    return 1;
+
+    if (!step.empty() && selected == 0) {
+        // 이름이 틀린 필터가 '0개 실행 = 성공' 으로 지나가면 안 된다.
+        std::printf("db_tests: no case belongs to step%s\n", step.c_str());
+        return 2;
+    }
+    if (g_failed != 0) {
+        std::printf("db_tests: %d check(s) failed\n", g_failed);
+        return 1;
+    }
+    if (step.empty()) std::printf("db_tests: all passed\n");
+    else std::printf("db_tests[step%s]: %d/%d passed\n", step.c_str(), selected, selected);
+    return 0;
 }

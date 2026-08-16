@@ -119,7 +119,7 @@ void DrawLineGraph(Rectangle rect,
                   kAxisColor);
     }
 
-    // 좌측 y 축 라벨 (상 / 0 / 하).
+    // 좌측 y 축 라벨 (상 / 하).
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%.2g", yHi);
     DrawText(buf, (int)rect.x + 4, (int)plot.y - 2, 10, kLabelColor);

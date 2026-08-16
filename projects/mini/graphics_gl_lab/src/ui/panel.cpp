@@ -84,8 +84,10 @@ void Panel::Draw(const FrameTimer& cpuTimer,
         ImPlot::SetupAxes("frame", "ms",
                           ImPlotAxisFlags_AutoFit,
                           ImPlotAxisFlags_AutoFit);
+        // snippet-begin: ms-plot
         ImPlot::PlotLine("CPU", cpuHist.data(), FrameTimer::kHistorySize);
         ImPlot::PlotLine("GPU", gpuHist.data(), GpuTimer::kHistorySize);
+        // snippet-end: ms-plot
         ImPlot::EndPlot();
     }
 
@@ -167,11 +169,13 @@ void Panel::Draw(const FrameTimer& cpuTimer,
             "DXT5 / BC3",
             "BC7",
         };
+        // snippet-begin: texture-combo
         if (ImGui::Combo("texture", &tmInt, tmNames, IM_ARRAYSIZE(tmNames))) {
             const auto requested = (TextureMode)tmInt;
             if (textures.IsSupported(requested))
                 textureMode = requested;
         }
+        // snippet-end: texture-combo
         ImGui::Text("RGBA8:  %d bytes", textures.BytesFor(TextureMode::Uncompressed));
         auto showCompressed = [&](const char* name, TextureMode mode) {
             if (!textures.IsSupported(mode)) {

@@ -86,47 +86,75 @@ domain exception을 모두 같은 status로 바꾸면 client가 재시도 가능
 ## core 결정적 테스트
 
 core test는 고정된 `DateTimeOffset`과 32바이트 test secret을 사용한다. sleep이나 실제 port 없이
-계약 단위로 나뉜 13개 함수가 각각 정상 경로 한 건과 실패 주입 한 건 이상을 검사한다.
+계약 단위로 나뉜 함수가 각각 정상 경로 한 건과 실패 주입 한 건 이상을 검사한다.
 
-| 함수 | 정상 경로 | 실패 주입 |
-|---|---|---|
-| `AccessTokenContract` | 발급 직후 검증 통과 | 만료 후 거부, 마지막 문자 변조 거부 |
-| `TokenAudience` | 배정된 server ID로 game token 열림 | 다른 server ID 거부, player·match·token ID 공백 claim 거부 |
-| `TokenExpiry` | 만료 1초 전 통과와 45초 만료 시각 일치 | 만료 시각 이후와 하루 뒤 거부 |
-| `IdentifierContract` | 정상 등록 통과 | 공백 식별자, capacity 0·음수, 음수 rating, party size 2 거부 |
-| `MatchAllocation` | 두 server가 endpoint를 각자 전달 | capacity 1 server에 4명 → 2명만 배정, queue 재시도 ticket 재사용 |
-| `ServerHealth` | heartbeat가 health window 갱신 | 16초 공백 뒤 배정 거부, 늦은 heartbeat로 복구 안 됨, 신선하지 않은 후보 회피 |
-| `ProgressiveWidening` | rating 차 450이 35초에 배정 | 34초에는 대기, 차 600은 100초에도 대기, 음수 경과 시간 clamp |
-| `RegionAffinity` | 같은 region 쌍 배정 | 다른 region server 거부, region이 다른 두 ticket 비매칭 |
-| `TicketOwnership` | 소유자가 자기 ticket 조회 | 다른 player와 없는 ticket ID는 null |
-| `ServerDrain` | ready server가 match 수용 | drain 뒤 신규 배정 거부, 진행 중 match 보존 |
-| `IdempotentResult` | 첫 receipt와 재시도 receipt 동일 | null·빈 score map, 없는 match, player 집합 불일치, 남의 match, 이중 완료 거부 |
-| `PayloadConflict` | 삽입 순서만 다른 payload는 중복 | 같은 key에 다른 score·다른 match ID는 충돌 |
-| `TicketLifecycle` | 완료 뒤 새 ticket 발급 | 새 ticket이 완료된 match를 재사용하지 않음 |
+검사는 이름표를 가진 표 하나로 모여 있다. 실행 단위를 step 문서 하나씩으로 가르는 장치가 이
+표다. 인자를 주지 않으면 전체가, `step03`처럼 이름을 주면 그 이름의 검사만 돈다.
 
-<!-- snippet: tests/LiveService.Tests/Program.cs#IdempotentResult -->
+<!-- snippet: tests/LiveService.Tests/Program.cs@check-table -->
 ```csharp
-ResultReceipt receipt = plane.RecordResult(
-    new MatchResultRequest("res-1", firstMatch.MatchId!,
-        new Dictionary<string, int> { ["res-a"] = 1, ["res-b"] = 0 }),
-    "result-owner", t0.AddMinutes(1));
-Require(!receipt.Duplicate, name + ": 첫 제출은 duplicate가 아니다");
-ResultReceipt again = plane.RecordResult(
-    new MatchResultRequest("res-1", firstMatch.MatchId!,
-        new Dictionary<string, int> { ["res-a"] = 1, ["res-b"] = 0 }),
-    "result-owner", t0.AddMinutes(2));
-Require(again.Duplicate && again.ResultId == receipt.ResultId &&
-    again.RecordedAt == receipt.RecordedAt,
-    name + ": 재시도는 처음 기록한 receipt를 그대로 돌려준다");
+(string Step, string Name, Action Run)[] checks =
+[
+    ("step01", "TicketOwnership", TicketOwnership),
+    ("step01", "AtomicTransitions", AtomicTransitions),
+    ("step01", "InjectedClock", InjectedClock),
+    // ...
+    ("step05", "HttpAuthBoundary", HttpAuthBoundary),
+    ("step05", "HttpErrorMapping", HttpErrorMapping),
+];
 ```
 
-`name`은 각 함수 첫 줄의 상수이므로 모든 `Require` 메시지가 함수 이름으로 시작한다. 실패한 줄만
-보고 어느 계약이 깨졌는지 알 수 있다. 중복 receipt 검사는 같은 인스턴스를 두 번 넘기지 않고
-내용이 같은 새 인스턴스를 만들어 넘긴다. 같은 객체를 재사용하면 fingerprint 비교가 항등식이 되어
-정렬 규칙을 지워도 통과한다. 재시도 시각도 1분 뒤로 옮겨 receipt의 `RecordedAt`이 처음 기록한
-값 그대로인지 확인한다.
+| 소속 | 검사 | 정상 경로 | 실패 주입 |
+|---|---|---|---|
+| step01 | `TicketOwnership` | 소유자가 자기 ticket 조회 | 다른 player와 없는 ticket ID는 null |
+| step01 | `AtomicTransitions` | 동시 40건에서 match 3개와 대기 34개 | capacity 비교를 느슨하게 하면 등식이 깨짐 |
+| step01 | `InjectedClock` | 세 epoch에서 같은 결과 tuple | wall clock을 읽으면 세 결과가 갈라짐 |
+| step02 | `AccessTokenContract` | 발급 직후 검증 통과 | 만료 후 거부, 마지막 문자 변조 거부 |
+| step02 | `TokenAudience` | 배정된 server ID로 game token 열림 | 다른 server ID 거부, player·match·token ID 공백 claim 거부 |
+| step02 | `TokenExpiry` | 만료 1초 전 통과와 45초 만료 시각 일치 | 만료 시각 이후와 하루 뒤 거부 |
+| step02 | `IdentifierContract` | 정상 등록 통과 | 공백·64자 초과·허용되지 않는 문자가 든 식별자 거부 |
+| step03 | `RangeGuards` | capacity 1 등록 통과 | capacity 0·음수, 음수·상한 초과 rating, party size 2 거부 |
+| step03 | `MatchAllocation` | 두 server가 endpoint를 각자 전달 | capacity 1 server에 4명 중 2명만 배정, queue 재시도 ticket 재사용 |
+| step03 | `ServerHealth` | heartbeat가 health window 갱신 | 16초 공백 뒤 배정 거부, 늦은 heartbeat로 복구 안 됨, 신선하지 않은 후보 회피 |
+| step03 | `ProgressiveWidening` | rating 차 450이 35초에 배정 | 34초에는 대기, 차 600은 100초에도 대기, 음수 경과 시간 clamp |
+| step03 | `RegionAffinity` | 같은 region 쌍 배정 | 다른 region server 거부, region이 다른 두 ticket 비매칭 |
+| step03 | `ServerDrain` | ready server가 match 수용 | drain 뒤 신규 배정 거부, 진행 중 match 보존 |
+| step04 | `IdempotentResult` | 첫 receipt와 재시도 receipt 동일 | null·빈 score map, 없는 match, player 집합 불일치, 남의 match, 이중 완료 거부 |
+| step04 | `PayloadConflict` | 삽입 순서만 다른 payload는 중복 | 같은 key에 다른 score·다른 match ID는 충돌 |
+| step04 | `TicketLifecycle` | 완료 뒤 새 ticket 발급 | 새 ticket이 완료된 match를 재사용하지 않음 |
+| step05 | `HttpAuthBoundary` | 맞는 server key와 bearer token은 200 | key 없음·틀린 key·변조 token·남의 ticket·`X-Server-Id` 없음 거부 |
+| step05 | `HttpErrorMapping` | 첫 제출 200, 재시도 200 duplicate | 빈 score map 400, 없는 match 404, 남의 match 401, 다른 payload와 이중 완료 409 |
 
-시간을 인자로 넣었기 때문에 token 만료와 heartbeat timeout을 테스트 시간 증가 없이 재현할 수 있다.
+`name`은 각 함수 첫 줄의 상수이므로 모든 `Require` 메시지가 함수 이름으로 시작한다. 실패한 줄만
+보고 어느 계약이 깨졌는지 알 수 있다. 시간을 인자로 넣었기 때문에 token 만료와 heartbeat
+timeout도 테스트 시간 증가 없이 재현한다.
+
+이 표에서 `HttpAuthBoundary`와 `HttpErrorMapping`만 socket을 연다. 나머지는 `ControlPlane`을
+직접 호출하므로 앞에 실은 status code 변환 코드를 한 줄도 실행하지 않는다. 두 검사는 빌드된
+API 실행 파일을 빈 loopback port에 띄우고 실제 응답 코드를 읽는다.
+
+<!-- snippet: tests/LiveService.Tests/Program.cs@http-status-mapping -->
+```csharp
+Require(Call(client, HttpMethod.Post, "/results",
+    new { resultId = "map-r0", matchId, scores = new Dictionary<string, int>() },
+    serverHeader, owner).Status == 400,
+    name + ": 빈 score map은 400이다");
+Require(Call(client, HttpMethod.Post, "/results",
+    new { resultId = "map-r0", matchId = "ghost-match", scores },
+    serverHeader, owner).Status == 404,
+    name + ": 없는 match는 404다");
+Require(Call(client, HttpMethod.Post, "/results",
+    new { resultId = "map-r0", matchId, scores },
+    serverHeader, ("X-Server-Id", "http-map-other")).Status == 401,
+    name + ": 남의 match에 대한 result 제출은 401이다");
+// ...
+Require(retry.Status == 200 && BoolField(retry.Body, "duplicate"),
+    name + ": 같은 요청의 재시도는 409가 아니라 200 duplicate다");
+```
+
+네 요청은 같은 `/results` 경로에 거의 같은 payload를 보내고 한 군데씩만 다르다. score map을
+비우면 400, match ID를 없는 값으로 바꾸면 404, `X-Server-Id`만 남의 것으로 바꾸면 401,
+그대로 다시 보내면 200이다. exception 하나를 다른 status로 바꾸면 그 줄만 실패한다.
 
 ## process smoke
 
@@ -143,9 +171,10 @@ Require(again.Duplicate && again.ResultId == receipt.ResultId &&
 API ready를 고정 sleep 하나로 가정하지 않고 `/metrics/state`를 짧게 polling한다. test 종료의 `finally`
 블록은 process를 정리해 실패한 smoke가 개발 포트를 계속 점유하지 않게 한다.
 
-이 smoke는 행복 경로만 실행한다. `/results` 제출과 중복 receipt, 그리고 위 오류 매핑 표의 401·400·
-404·409 응답은 자동으로 확인되지 않는 범위다. core 테스트는 `ControlPlane`을 직접 호출하므로 HTTP
-status 변환 코드를 실행하지 않는다.
+이 smoke는 행복 경로만 실행한다. `/results` 제출과 중복 receipt, 오류 매핑 표의 401·400·404·409
+응답은 여기서 밟히지 않고 `HttpAuthBoundary`와 `HttpErrorMapping`이 맡는다. 두 검사는 게임 서버
+없이 HTTP 응답 코드만 읽고, 반대로 UDP admission handshake와 교차 언어 token 검증은 이 smoke에만
+있다. 남는 공백은 여러 API instance와 실제 fleet agent가 관여하는 경로다.
 
 ## 운영 범위
 
@@ -159,7 +188,28 @@ process가 register, heartbeat, result HTTP를 직접 호출하지는 않는다.
 
 ## 실행 확인
 
-API를 Release로 빌드하고 loopback에 띄운다.
+HTTP 계약 두 검사는 API 실행 파일을 스스로 띄운다. test project가 API project를 참조하므로
+같은 구성으로 함께 빌드되고, 준비 명령은 따로 없다.
+
+```powershell
+dotnet run `
+  --project projects/mini/live_service_lab/tests/LiveService.Tests/LiveService.Tests.csproj `
+  -c Release -- step05
+```
+
+```text
+live_service_tests: filter=step05 -> 2 check(s)
+  step05 HttpAuthBoundary    ok
+  step05 HttpErrorMapping    ok
+live_service_tests: step05 2/2 checks passed
+```
+
+각 검사는 빈 loopback port를 잡고, 임시 secret과 임시 server key를 환경 변수로 넘기고,
+`/metrics/state`가 200을 낼 때까지 짧게 polling한 뒤 요청을 보낸다. `finally`에서 프로세스를
+반드시 죽이므로 실패한 검사가 포트를 붙들지 않는다. 인자를 빼면 18개 검사가 모두 돌고 마지막
+줄이 `live_service_tests: all checks passed`가 된다.
+
+손으로 띄워 볼 때는 API를 Release로 빌드하고 loopback에 붙인다.
 
 ```powershell
 dotnet build `

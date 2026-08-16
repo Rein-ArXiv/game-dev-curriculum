@@ -51,7 +51,7 @@
 |---|---|
 | `physics/` | 시간 적분, 강체 동역학, 충돌 응답, 제약 해법, 물리 기반 게임플레이 |
 | graphics API 트랙 | OpenGL, DirectX, Vulkan 고유의 자원·동기화·제출 계약 |
-| `db/` | 저장 엔진, 트랜잭션, 복구, 복제, 샤딩, 게임 경제 무결성 |
+| `db/` | 저장 엔진, 트랜잭션, 복구, 복제, 샤딩, 게임 경제 무결성, 분석 저장소의 레이아웃, 데이터 운영 |
 | `live_service/` | 패치, 이벤트, 경제 운영, 분석, 관측, 지원, 계정, 매치메이킹, 게임 서버 fleet |
 | `network/` 전문 경로 | replay·관전, 음성 통신, anti-cheat의 시간·신뢰·품질 모델 |
 | `ai/` 고급 경로 | GOAP·HTN, 군집과 전술, 강화·모방학습, 신경망 NPC, 고급 질의 |
@@ -59,6 +59,16 @@
 ### 실무 참고
 
 `platform/`, `tools/`, `git.md`는 핵심 원리를 다시 강의하지 않는다. 플랫폼 제약, 제작 파이프라인, 배포와 협업처럼 제품 제작에서 필요한 적용 지식을 소유한다.
+
+#### `tools/`의 빈 번호
+
+`tools/`의 파일 번호는 `part01`, `part03`~`part06`으로 이어지고 `part02` 자리가 비어 있다. 결번이 아니라 이동의 흔적이다.
+
+| 원본 번호 | 판정 | 처리 방향 |
+|---|---|---|
+| part02 스크립팅 | 이동 완료 | `languages/part06_engine_scripting.md`가 VM 통합과 메모리 소유권, 바인딩 레이어와 네이티브 경계 비용, 핫 리로드의 상태 보존, 샌드박스, 스크립트 디버깅을 소유한다. 임베디드 언어의 실행 모델은 언어 런타임의 문제이므로 제작 도구 축에 남길 근거가 없다. |
+
+남은 다섯 편은 번호를 다시 연속화하지 않는다. `parts/`의 재연속화는 32편 중 8편이 빠져 번호가 여러 곳에서 끊긴 대규모 재배치의 일부였지만, `tools/`는 한 편이 빠진 자리 하나다. 번호를 바꾸면 검수 기록이 인용하는 문서 번호와 `diagrams/`의 파일 이름이 함께 어긋나고, 그 기록을 지금 번호로 고쳐 쓰면 검수 시점의 사실이 아니게 된다. `tools/`는 번호순 통독이 아니라 필요할 때 찾아보는 실무 참고 축이라 연속성이 주는 이득도 작다. 번호를 유지하고 빈자리의 뜻을 여기에 적는 쪽을 택한다.
 
 ## 주요 개념의 경계
 
@@ -78,6 +88,7 @@
 | 전송과 실시간 권위 | `network` | system은 OS I/O 내부를, live service는 session 배정과 영속 결과를 다룬다. |
 | 보안 기초 | `network`·`system` | DB·live service는 위협 모델별 영속 정책을 적용한다. |
 | 분산 일관성 | `db` | live service는 부분 실패 운영, network는 한 match의 실시간 권위 상태를 다룬다. |
+| 분석 | `live_service` | 이벤트 설계·수집 경로와 지표의 정의·해석이 여기 있다. `db`는 그 데이터를 담는 저장소의 레이아웃·이관 경로·재계산 계약만 소유한다. |
 | 입력·카메라·리소스 | `engine` | platform·tools·graphics는 API별 어댑터와 제작 경로를 제공한다. |
 
 ## `parts/` 재배치 판정
@@ -127,6 +138,7 @@ DAMON의 sampling·adaptive region·working-set 관측은 가상 메모리 장�
 |---|---|
 | 좌표계·행렬·투영 | `math`가 선형대수와 사상 유도, graphics가 clip/NDC/depth/API 규약을 소유한다. |
 | SAT·GJK·EPA | `math`가 기하 정리와 퇴화 조건, physics가 contact 생성과 solver 입력을 소유한다. |
+| 형상 캐스트(sweep)·ToI·conservative advancement | `math`가 질의의 계약, 터널링의 임계 조건, 안전 전진의 수렴과 그 전제, 종료 밴드와 정밀도를 소유한다. physics는 그 질의를 부르는 이동 규칙(move-and-slide·ground snap·발사체 관통)과 solver 안의 CCD 정책(ToI 이벤트 예산, speculative contact의 임펄스 처리)을 소유한다. `math` 쪽은 speculative contact의 *기하량* — 접촉 생성 반경과 분리 속도 하한 — 까지만 다룬다. |
 | BVH·공간 해시 | `math`가 자료구조와 질의 복잡도, physics·AI·graphics가 동적 갱신 정책을 소유한다. |
 | 광선 교차 | `math`가 강건한 교차 판정, graphics가 가시성·ray tracing 파이프라인을 소유한다. |
 | 수치 안정성 | `math`가 부동소수점·오차 모델, physics가 적분기·제약 solver의 에너지와 안정성을 소유한다. |

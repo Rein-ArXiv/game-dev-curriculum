@@ -23,7 +23,9 @@
 
 호스트는 허용할 함수만 이름과 함께 등록한다.
 
+<!-- snippet: src/language.hpp#VirtualMachine -->
 ```cpp
+// language.hpp: VirtualMachine 의 공개 바인딩 면 전문
 using NativeFunction = std::function<double(double)>;
 
 void Bind(std::string name, NativeFunction function) {
@@ -34,10 +36,11 @@ void Bind(std::string name, NativeFunction function) {
 현재 ABI는 `double -> double` 하나다. 제한적이지만 변환 규칙이 완전히 명시된다. 임의
 포인터, 참조, 예외 객체가 언어 경계를 넘지 않는다.
 
+데모는 밸런스 계산 스크립트에 상한·하한 한 개만 노출한다.
+
+<!-- snippet: src/main.cpp#main -->
 ```cpp
-vm.Bind("clamp", [](double value) {
-    return std::clamp(value, 1.0, 1000.0);
-});
+vm.Bind("clamp", [](double value) { return std::clamp(value, 1.0, 1000.0); });
 ```
 
 ## 2. 호출 의미론
@@ -46,6 +49,7 @@ vm.Bind("clamp", [](double value) {
 VM 인스턴스의 등록표에 달려 있다. 같은 바이트코드를 도구 환경과 Shipping 환경에서 서로
 다른 권한 집합으로 실행할 수 있다.
 
+<!-- snippet: src/language.hpp#Run -->
 ```cpp
 // language.hpp: VirtualMachine::Run 의 CallNative 처리 발췌
 const std::string& name =
@@ -92,23 +96,29 @@ vm.Bind("enemy_count", [worldHandle](double) {
 
 등록된 함수는 결과를 만들고, 등록되지 않은 같은 이름은 런타임 오류가 되어야 한다.
 
+<!-- snippet: src/tests.cpp#TestHostBoundary -->
 ```cpp
-auto compiled = Compiler{}.Compile("let result = twice(21);");
-VirtualMachine vm;
+auto compiled = lab::lang::Compiler{}.Compile("let result = twice(21);");
+// ...
+lab::lang::VirtualMachine vm;
 vm.Bind("twice", [](double value) { return value * 2.0; });
-CHECK(vm.Run(*compiled.program).ok);
-CHECK(vm.Global(*compiled.program, "result") == 42.0);
+const auto run = vm.Run(*compiled.program);
+CHECK(run.ok);
+CHECK(vm.Global(*compiled.program, "result").value_or(0.0) == 42.0);
 ```
 
 성공 경로만 보면 미등록 이름 거부를 항등 함수로 바꿔도 통과한다. 실패 경로는 메시지와 소스
 위치까지 함께 못 박는다. 프로세스 크래시나 기본값 대체가 아니라 소스 위치가 붙은 오류여야
 한다.
 
+<!-- snippet: src/tests.cpp#TestHostBoundaryRejectsUnregisteredName -->
 ```cpp
-auto compiled = Compiler{}.Compile("let x = ghost(1);");
-VirtualMachine vm;
+auto compiled = lab::lang::Compiler{}.Compile("let x = ghost(1);");
+// ...
+lab::lang::VirtualMachine vm;
 const auto run = vm.Run(*compiled.program);
 CHECK(!run.ok);
+// ...
 CHECK(run.diagnostic->message == "등록되지 않은 호스트 함수: ghost");
 CHECK(run.diagnostic->location.line == 1);
 CHECK(run.diagnostic->location.column == 9);  // `ghost`의 시작 열
@@ -118,14 +128,25 @@ CHECK(run.diagnostic->location.column == 9);  // `ghost`의 시작 열
 `compiled.program`을 `ghost`를 바인딩한 VM과 아무것도 바인딩하지 않은 VM에 각각 넘기면
 전자만 성공한다. 권한이 프로그램이 아니라 VM 인스턴스에 있다는 뜻이다.
 
+두 사례는 등록표에서 `step05` 라벨을 달고 있다. 성공 경로와 거부 경로를 한 타깃 안에
+두는 것이 요점이다 — 한쪽만 있으면 경계가 아니라 편의 함수다.
+
 ```powershell
-ctest --test-dir build -C Release --output-on-failure
+ctest --test-dir build -C Release -R languages_step05 --output-on-failure
+.\build\Release\languages_tests.exe step05
 ```
 
 ```text
-1/1 Test #1: languages_tests ..................   Passed
+1/1 Test #6: languages_step05_host_binding ....   Passed
 100% tests passed out of 1
+[step05] host_boundary ok
+[step05] host_boundary_rejects_unregistered_name ok
+languages_tests [step05]: all checks passed (2 case(s), 12 check(s))
 ```
+
+12개 단언 중 9개가 `host_boundary_rejects_unregistered_name`에 있다. 거부 경로가 성공
+경로보다 확인할 것이 많다는 뜻이다 — 실패 여부, 진단 존재, 메시지, 줄, 열, 그리고 같은
+바이트코드를 권한이 다른 VM 두 개에 넘긴 대조까지다.
 
 ---
 

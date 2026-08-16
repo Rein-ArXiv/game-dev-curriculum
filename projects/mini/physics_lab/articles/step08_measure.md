@@ -230,17 +230,30 @@ ctest --test-dir build -C Release --output-on-failure
 ```
 
 ```text
-1/6 Test #1: physics_core_tests ...............   Passed    0.05 sec
-2/6 Test #2: physics_collision_tests ..........   Passed    0.05 sec
-3/6 Test #3: physics_broad_tests ..............   Passed    0.14 sec
-4/6 Test #4: physics_response_tests ...........   Passed    0.08 sec
-5/6 Test #5: physics_constraints_tests ........   Passed    0.06 sec
-6/6 Test #6: physics_determinism_tests ........   Passed    0.54 sec
+ 1/19 Test  #1: physics_core_tests ...............   Passed    0.07 sec
+ 2/19 Test  #2: physics_chrome_tests .............   Passed    0.07 sec
+ 3/19 Test  #3: physics_forces_tests .............   Passed    0.07 sec
+ 4/19 Test  #4: physics_collision_tests ..........   Passed    0.09 sec
+ 5/19 Test  #5: physics_broad_tests ..............   Passed    0.12 sec
+ 6/19 Test  #6: physics_response_tests ...........   Passed    0.10 sec
+ 7/19 Test  #7: physics_constraints_tests ........   Passed    0.08 sec
+ 8/19 Test  #8: physics_determinism_tests ........   Passed    0.12 sec
+ 9/19 Test  #9: step01.layout ....................   Passed    0.03 sec
+10/19 Test #10: step02.integrators ...............   Passed    0.02 sec
+11/19 Test #11: step03.forces ....................   Passed    0.03 sec
+12/19 Test #12: step04.aabb_overlap ..............   Passed    0.02 sec
+13/19 Test #13: step04.broad_phase ...............   Passed    0.06 sec
+14/19 Test #14: step05.narrow_phase ..............   Passed    0.03 sec
+15/19 Test #15: step06.contact_impulse ...........   Passed    0.02 sec
+16/19 Test #16: step06.response ..................   Passed    0.04 sec
+17/19 Test #17: step07.distance_projection .......   Passed    0.03 sec
+18/19 Test #18: step07.constraints ...............   Passed    0.03 sec
+19/19 Test #19: step08.determinism ...............   Passed    0.07 sec
 
-100% tests passed out of 6
+100% tests passed out of 19
 ```
 
-ctest 가 도는 것은 여섯 개다 — core 헤더 (적분기 오차 차수와 에너지 거동 / restitution target / 누적 impulse 클램프 / AABB / 거리 projection), narrow phase (SAT·GJK+EPA 의 hit·깊이·법선), broad phase (overlap 쌍 집합 대조), response (접촉 수집·SI 수렴·위치 보정량), constraints (chain stiffness·Baumgarte drift), 그리고 이 Scene 의 결정성이다.
+등록된 이름이 두 층이다. 앞의 여덟 개는 *실행 파일 하나를 통째로* 도는 이름이고 — chrome (레이아웃 분할), core 헤더 (적분기 오차 차수와 에너지 거동 / restitution target / 누적 impulse 클램프 / AABB / 거리 projection), forces (force 항·종단 속도·에너지 소산), narrow phase (SAT·GJK+EPA 의 hit·깊이·법선), broad phase (overlap 쌍 집합 대조), response (접촉 수집·SI 수렴·위치 보정량), constraints (chain stiffness·Baumgarte drift), 그리고 이 Scene 의 결정성 — 뒤의 열한 개는 *그 실행 파일들을 step 단위로 자른* 이름이다. 각 실행 파일이 `argv[1]` 로 케이스 필터를 받으므로 (`tests/step_cases.h` 의 {step, 이름, 함수} 표), Step k 를 막 끝낸 독자는 `ctest -R stepNN` 으로 그 시점에 존재하는 검사만 돌릴 수 있다. `physics_core_tests` 처럼 한 파일이 네 step 에 걸친 경우 — core 헤더는 여러 주제가 모이는 자리다 — 그 파일은 `step02` / `step04` / `step06` / `step07` 네 이름으로 나뉜다.
 
 `physics_determinism_tests` 는 `MeasureScene` 의 `InitBodies` / `StepSim` / `RunDeterminismTest` 를 창 없이 부른다. GUI 가 `DrawWorld` 에서 넘겨주던 캔버스 좌표만 `SetCanvas` 로 주입하면 `T` 키가 밟는 것과 같은 경로다.
 
@@ -248,6 +261,48 @@ ctest 가 도는 것은 여섯 개다 — core 헤더 (적분기 오차 차수�
 - `SetShuffleContacts(true)` 면 두 실행이 갈라진다 (실측 max delta 0.400). Gauss-Seidel 풀이의 순서 의존이 자동 검사로 남는다.
 - 반복성만 보면 *아무것도 하지 않는 `StepSim`* 도 통과하므로 절대 기준을 함께 건다 — 900 스텝 뒤 모든 body 가 벽과 바닥 안에 있고 (최저점 316.6, 바닥 316), 운동 에너지가 0 에 가깝고 (3.2e-4), 평균 침투가 slop 근처 (0.70) 인지.
 - **같은 워크로드를 Response Scene 과 나란히 240 스텝 돌려 위치·속도가 bit-exact 인지** — 두 Scene 이 정말 같은 솔버를 도는지를 ctest 가 직접 확인한다 (실측 max pos delta `0`, max vel delta `0`).
+
+마지막 줄이 이 Scene 전체의 전제를 떠받치는 자리다. `== 0.0f` 로 못 박는다 — 허용 오차를 두면 "거의 같은 사본" 이 통과한다.
+
+<!-- snippet: tests/physics_determinism_tests.cpp@same-solver -->
+```cpp
+// 두 Scene 이 정말 같은 솔버를 도는가. 갈라지면 측정은 교재의 솔버가 아니라
+// 사본을 재고 있는 것이고, 그때의 '결정적' 판정은 아무것도 보증하지 않는다.
+CHECK(n == 24);
+CHECK(worstPos == 0.0f);
+CHECK(worstVel == 0.0f);
+```
+
+이 Scene 이 추가한 것만 돌리려면:
+
+```powershell
+ctest --test-dir build -C Release -R step08 --output-on-failure
+.\build\Release\physics_determinism_tests.exe step08   # 같은 것을 직접 — 관측값까지 본다
+```
+
+```text
+[step08] bit_exact_repeat
+  ordered maxDelta=0 after 600 steps
+  ok
+[step08] settles_in_canvas
+  settled: lowest=316.583 left=3.31975 right=396.781 ke=0.000323441
+  settled avgPen=0.696468
+  ok
+[step08] shuffle_diverges
+  shuffled maxDelta=0.399962
+  ok
+[step08] scene_report
+  ok
+[step08] metrics
+  metrics: overlapping avgPen=16 separated avgPen=0 one body at 100 px/s KE=0.5
+  ok
+[step08] same_solver_as_response
+  measure vs response: maxPosDelta=0 maxVelDelta=0
+  ok
+6 case(s) ok: physics determinism [step08]
+```
+
+위 네 줄의 목록이 그대로 관측값으로 나온다 — 반복 실행의 델타 `0`, shuffle 의 델타 `0.400`, 900 스텝 뒤 최저점 `316.583` 과 KE `3.23e-4`, 그리고 두 Scene 의 델타 `0` / `0`.
 
 **통합으로 측정값이 움직였고, 그게 정상이다.** 예전 `StepSim` 은 위치 보정을 자체 구현하면서 iteration 안에서 쌍을 하나 밀 때마다 *그 자리의 최신 위치로* 다음 쌍의 침투를 다시 쟀고, 벽·바닥은 body-body 보정이 전부 끝난 *뒤* 의 위치로 계산했다. 공유 구현은 Response 가 하던 대로 iteration 시작 시점에 접촉을 한 번 수집해 *그 스냅숏* 으로 모든 보정을 적용한다. 같은 물리, 다른 갱신 순서다 — 그리고 Gauss-Seidel 계열 풀이에서 갱신 순서는 결과다. 그래서 900 스텝 뒤 평균 침투가 0.6946 → 0.6965, 최저점이 316.572 → 316.583, KE 가 3.26e-4 → 3.23e-4 로 움직였고 shuffle 실험의 max delta 는 0.700 → 0.400 이 됐다. 반대로 유효질량 리터럴(`2.0f` / `1.0f`)은 이 워크로드의 `invMass` 가 1 이라 *숫자로는* 아무 차이도 만들지 않았다 — 값이 맞았기 때문이 아니라 가정이 우연히 성립했기 때문이고, 그래서 더 오래 숨어 있었다. 중요한 것은 어느 쪽이 더 예쁜 숫자인가가 아니라 **이전 숫자가 무엇을 재고 있었는가** 다. 이전 값들은 Response 가 가르친 위치 보정이 아니라 이 Scene 안에만 존재하던 사본의 거동이었다. 통합 직전에 두 Scene 을 같은 조건으로 240 스텝 돌려 보면 위치가 0.557 px, 속도가 4.77 px/s 벌어져 있었다. 지금은 둘 다 정확히 0 이고, 그 사실이 위 목록의 마지막 줄로 ctest 에 남는다.
 

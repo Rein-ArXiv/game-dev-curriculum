@@ -2,20 +2,30 @@
 //
 // 이 바이너리는 제품 TU 를 실제로 링크한다 (CMakeLists 의 graphics_vk_contract_tests
 // 소스 목록). 배리어 구조체 빌더뿐 아니라 실제 기록 경로(ImageLayoutTransition),
-// Scene 의 draw 기록 규칙, timestamp ring 인덱싱, swapchain 선택 규칙,
-// frame/image 완료 추적까지가 검사 대상이다.
+// Scene 의 draw 기록 규칙, timestamp ring 인덱싱, swapchain 선택 규칙, queue family
+// 선택, descriptor set 모양, frame/image 완료 추적까지가 검사 대상이다.
+//
+// 실행 단위는 step 이다. 인자 없이 부르면 전부 돌고, `step04` 처럼 step 이름이나
+// `queue_family_selection` 처럼 개별 이름을 주면 그것만 돈다. 어느 CHECK 가 어느
+// step 소속인지는 파일 끝의 kStepTests 표에 있다.
 //
 // 실행: ctest --test-dir build -C Release --output-on-failure
+//       ctest --test-dir build -C Release -R vk_step04_multi_queue
+//       ./build/Release/graphics_vk_contract_tests step04
 
 #include "barrier/barrier_helpers.h"
+#include "device/descriptor_layout.h"
+#include "device/queue_select.h"
 #include "device/swapchain_select.h"
 #include "measure/query_ring.h"
 #include "scene/scene.h"
 #include "sync/frame_completion.h"
 #include "sync/timeline_sync.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -25,9 +35,11 @@
 namespace {
 
 int failures = 0;
+int checks = 0;
 
 #define CHECK(expr)                                                          \
     do {                                                                     \
+        ++checks;                                                            \
         if (!(expr)) {                                                       \
             std::cerr << "CHECK failed: " #expr << " (" << __FILE__ << ':' \
                       << __LINE__ << ")\n";                                  \
@@ -47,9 +59,11 @@ Handle FakeHandle(uint64_t bits) {
     }
 }
 
-// ── 1. 배리어 구조체 ─────────────────────────────────────────────────────
+// ── 0. 토글 이름 ─────────────────────────────────────────────────────────
+// 패널이 읽어 주는 이름은 그 토글을 도입한 step 소속이다. 셋을 한 함수에 두면
+// 어느 step 을 돌려도 같은 CHECK 가 섞여 들어와 실행 단위가 흐려진다.
 
-void TestDrawSubmissions() {
+void TestDrawModeNames() {
     CHECK(vklab::ExpectedDrawSubmissions(vklab::DrawMode::PerDraw, 10000) == 10000);
     CHECK(vklab::ExpectedDrawSubmissions(vklab::DrawMode::Instanced, 10000) == 1);
     CHECK(vklab::ExpectedDrawSubmissions(vklab::DrawMode::Instanced, 0) == 0);
@@ -58,15 +72,23 @@ void TestDrawSubmissions() {
           "Per-Draw (push constants x N)");
     CHECK(std::string(vklab::DrawModeName(vklab::DrawMode::Instanced)) ==
           "Instanced (1 vkCmdDrawIndexed)");
+}
+
+void TestBarrierPolicyNames() {
     CHECK(std::string(vklab::BarrierPolicyName(vklab::BarrierPolicy::Minimal)) ==
           "minimal (precise)");
     CHECK(std::string(vklab::BarrierPolicyName(vklab::BarrierPolicy::OverSync)) ==
           "over-sync (full)");
+}
+
+void TestSyncModeNames() {
     CHECK(std::string(vklab::SyncModeName(vklab::SyncMode::Binary)) ==
           "Fence completion tracking");
     CHECK(std::string(vklab::SyncModeName(vklab::SyncMode::Timeline)) ==
           "Timeline completion tracking");
 }
+
+// ── 1. 배리어 구조체 ─────────────────────────────────────────────────────
 
 // image / oldLayout / newLayout / subresourceRange 는 이 lab 의 학습 주제 자체다.
 // 셋 중 하나라도 상수로 고정되면 여기서 잡혀야 한다.
@@ -341,6 +363,7 @@ void TestBarrierInjection() {
     // 같은 순서(ShouldRecordBarrier → ApplyInjection → ImageLayoutTransitions).
     const VkCommandBuffer fakeCmd = FakeHandle<VkCommandBuffer>(0xC0DEu);
     vklab::SetPipelineBarrier2Hook(&CaptureBarrier2);
+    // snippet-begin: barrier-injection-record
     for (const vklab::BarrierInjection& inj : {none, skip, wrong}) {
         g_captureCalls = 0;
         int recorded = 0;
@@ -353,6 +376,7 @@ void TestBarrierInjection() {
         CHECK(recorded == vklab::ExpectedBarrierCalls(inj, 2));
         CHECK(g_captureCalls == vklab::ExpectedBarrierCalls(inj, 2));
     }
+    // snippet-end: barrier-injection-record
     CHECK(g_captured.first.srcAccessMask == 0);   // 마지막이 wrong 주입.
     vklab::SetPipelineBarrier2Hook(nullptr);
 }
@@ -391,6 +415,7 @@ void TestRecordDrawMatchesExpectedSubmissions() {
             vklab::GlCounters counters{};
             scene.RecordDraw(rec, mode, counters);
 
+            // snippet-begin: draw-submission-match
             const int expected = vklab::ExpectedDrawSubmissions(mode, n);
             CHECK(counters.drawCalls + counters.instancedDraws == expected);
             CHECK(rec.draws == expected);
@@ -401,6 +426,7 @@ void TestRecordDrawMatchesExpectedSubmissions() {
             CHECK(rec.totalInstances == (uint64_t)n);
             CHECK(rec.maxInstances ==
                   (mode == vklab::DrawMode::PerDraw ? 1u : (uint32_t)n));
+            // snippet-end: draw-submission-match
             CHECK(rec.lastMode == (mode == vklab::DrawMode::PerDraw ? 0u : 1u));
             // mesh 업로드가 없으므로 indexCount 는 0 이지만, RecordDraw 가
             // Scene 의 indexCount_ 를 그대로 넘기는지는 확인된다.
@@ -500,6 +526,7 @@ void TestQueryRing() {
         CHECK(ring.ReadIndex() == 0);   // 가장 오래된 것은 계속 0번.
     }
 
+    // snippet-begin: ring-full-guard
     // ring full — 새 기록을 열지 않는다.
     CHECK(ring.Begin() == -1);
     CHECK(!ring.Recording());
@@ -510,6 +537,7 @@ void TestQueryRing() {
     ring.Retire();
     CHECK(ring.InFlight() == 2);
     CHECK(ring.ReadIndex() == 1);
+    // snippet-end: ring-full-guard
     CHECK(ring.Begin() == 0);           // writeIdx 는 한 바퀴 돌아 0.
     CHECK(ring.End() == 0);
     CHECK(ring.InFlight() == 3);
@@ -588,6 +616,145 @@ void TestSwapchainSelection() {
     CHECK(threw);
 }
 
+// ── 6d. push constant 예산 ───────────────────────────────────────────────
+// PC 블록은 shader 의 push_constant 블록과 같은 레이아웃이어야 하고, 사양이
+// 보장하는 최소 maxPushConstantsSize(128 bytes) 안에 들어와야 한다. 프레임
+// 데이터까지 여기 넣으면 128 bytes 한도 장치에서 깨진다.
+
+void TestPushConstantBudget() {
+    CHECK(sizeof(vklab::PushConstants) == 84);      // mat4(64) + vec4(16) + uint(4).
+    CHECK(sizeof(vklab::PushConstants) <= 128);     // 사양이 보장하는 최소 한도.
+    CHECK(offsetof(vklab::PushConstants, model) == 0);
+    CHECK(offsetof(vklab::PushConstants, color) == 64);
+    CHECK(offsetof(vklab::PushConstants, mode) == 80);
+
+    // 인스턴스 항목은 std430 의 mat4 + vec4 그대로 — 80 bytes/instance.
+    CHECK(sizeof(vklab::InstanceData) == 80);
+    CHECK(offsetof(vklab::InstanceData, color) == 64);
+
+    // 프레임 데이터를 push constant 에 합치면 한도를 넘는다. UBO 로 나눈 이유다.
+    CHECK(sizeof(vklab::FrameUBO) == 96);
+    CHECK(sizeof(vklab::PushConstants) + sizeof(vklab::FrameUBO) > 128);
+}
+
+// ── 6e. queue family 선택 ────────────────────────────────────────────────
+
+std::vector<VkQueueFamilyProperties> MakeFamilies(
+    std::initializer_list<VkQueueFlags> flags) {
+    std::vector<VkQueueFamilyProperties> families;
+    for (VkQueueFlags f : flags) {
+        VkQueueFamilyProperties p{};
+        p.queueFlags = f;
+        p.queueCount = 1;
+        families.push_back(p);
+    }
+    return families;
+}
+
+void TestQueueFamilySelection() {
+    // universal(graphics+compute+transfer) / dedicated compute / dedicated transfer.
+    constexpr VkQueueFlags kG = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT |
+                                VK_QUEUE_TRANSFER_BIT;
+    constexpr VkQueueFlags kC = VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT;
+    constexpr VkQueueFlags kT = VK_QUEUE_TRANSFER_BIT;
+
+    // snippet-begin: queue-family-fallback
+    // (a) dedicated 가 다 있는 장치 — 셋이 서로 다른 family 로 갈린다.
+    vklab::QueueFamilies q;
+    CHECK(vklab::SelectQueueFamilies(MakeFamilies({kG, kC, kT}), {}, q));
+    CHECK(q.graphics == 0);
+    CHECK(q.compute == 1);
+    CHECK(q.transfer == 2);
+
+    // (b) dedicated 가 하나도 없으면 셋 다 graphics family 로 접힌다.
+    vklab::QueueFamilies only;
+    CHECK(vklab::SelectQueueFamilies(MakeFamilies({kG}), {}, only));
+    CHECK(only.graphics == 0);
+    CHECK(only.compute == 0);          // c == kNoQueueFamily → c = g.
+    CHECK(only.transfer == 0);         // t == kNoQueueFamily → t = g.
+    // snippet-end: queue-family-fallback
+
+    // (c) graphics 비트를 함께 가진 family 는 dedicated compute 가 아니다.
+    vklab::QueueFamilies twoUniversal;
+    CHECK(vklab::SelectQueueFamilies(MakeFamilies({kG, kG}), {}, twoUniversal));
+    CHECK(twoUniversal.graphics == 0);
+    CHECK(twoUniversal.compute == 0);
+    CHECK(twoUniversal.transfer == 0);
+
+    // (d) transfer 는 graphics·compute 비트가 모두 없어야 dedicated 이다.
+    vklab::QueueFamilies noDedicatedTransfer;
+    CHECK(vklab::SelectQueueFamilies(MakeFamilies({kG, kC}), {},
+                                     noDedicatedTransfer));
+    CHECK(noDedicatedTransfer.compute == 1);
+    CHECK(noDedicatedTransfer.transfer == 0);   // family 1 은 compute 비트를 가진다.
+
+    // (e) present 를 지원하지 않는 graphics family 는 건너뛴다.
+    vklab::QueueFamilies present;
+    CHECK(vklab::SelectQueueFamilies(MakeFamilies({kG, kG}),
+                                     {VK_FALSE, VK_TRUE}, present));
+    CHECK(present.graphics == 1);
+
+    // (f) present 가능한 graphics family 가 없으면 그 장치는 후보에서 빠진다.
+    vklab::QueueFamilies none;
+    CHECK(!vklab::SelectQueueFamilies(MakeFamilies({kG, kC}),
+                                      {VK_FALSE, VK_FALSE}, none));
+    CHECK(!vklab::SelectQueueFamilies(MakeFamilies({kC, kT}), {}, none));
+    CHECK(!vklab::SelectQueueFamilies({}, {}, none));
+    CHECK(none.graphics == vklab::kNoQueueFamily);   // 실패 시 out 을 건드리지 않는다.
+    CHECK(none.compute == vklab::kNoQueueFamily);
+    CHECK(none.transfer == vklab::kNoQueueFamily);
+
+    // (g) presentSupport 가 family 수보다 짧으면 모자란 쪽은 지원으로 본다.
+    //     surface 없이 장치만 고르는 경로가 이 형태다.
+    vklab::QueueFamilies partial;
+    CHECK(vklab::SelectQueueFamilies(MakeFamilies({kG, kC}), {VK_TRUE}, partial));
+    CHECK(partial.graphics == 0);
+    CHECK(partial.compute == 1);
+}
+
+// ── 6f. descriptor set 모양 ──────────────────────────────────────────────
+// 이 lab 의 set 0 은 UBO 1 + SSBO 1 이고 descriptor array 가 없다. 그래서
+// descriptorIndexing / runtimeDescriptorArray 를 켜지 않아도 device 생성이
+// 성공한다. 그 판단의 근거가 되는 모양을 여기서 고정한다.
+
+void TestDescriptorSetShape() {
+    const auto binds = vklab::SceneSetBindings();
+    CHECK(binds.size() == 2);
+    CHECK(binds[0].binding == 0);
+    CHECK(binds[0].descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+    CHECK(binds[0].stageFlags ==
+          (VkShaderStageFlags)(VK_SHADER_STAGE_VERTEX_BIT |
+                               VK_SHADER_STAGE_FRAGMENT_BIT));
+    CHECK(binds[1].binding == 1);
+    CHECK(binds[1].descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    CHECK(binds[1].stageFlags == (VkShaderStageFlags)VK_SHADER_STAGE_VERTEX_BIT);
+
+    // snippet-begin: descriptor-not-bindless
+    // "bindless 가 아니다"의 실체 — 모든 binding 이 원소 하나짜리이고, layout 에
+    // update-after-bind 플래그가 없다. 배열 descriptor 를 넣는 순간 깨진다.
+    for (const VkDescriptorSetLayoutBinding& b : binds) {
+        CHECK(b.descriptorCount == 1);
+        CHECK(b.pImmutableSamplers == nullptr);
+    }
+    CHECK(vklab::SceneSetLayoutFlags() == 0);
+    CHECK((vklab::SceneSetLayoutFlags() &
+           VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT) == 0);
+    // snippet-end: descriptor-not-bindless
+
+    // pool 은 layout 에서 파생된다 — binding 을 늘리고 pool 을 그대로 두면 여기서
+    // 잡힌다. 실제 호출부는 setCount = kFramesInFlight 로 부른다.
+    for (uint32_t sets : {1u, 2u, 4u}) {
+        const auto sizes = vklab::SceneDescriptorPoolSizes(sets);
+        CHECK(sizes.size() == binds.size());   // 두 타입이 달라 접히지 않는다.
+        for (const VkDescriptorSetLayoutBinding& b : binds) {
+            uint32_t available = 0;
+            for (const VkDescriptorPoolSize& s : sizes)
+                if (s.type == b.descriptorType) available += s.descriptorCount;
+            CHECK(available >= b.descriptorCount * sets);
+        }
+    }
+}
+
 // ── 15. frame/image 완료 추적 ────────────────────────────────────────────
 
 void TestFrameCompletionTracker() {
@@ -632,6 +799,7 @@ void TestFrameCompletionTracker() {
     }
 
     // (b) 모드 전환 — fence 추적값과 timeline 값이 서로 오염되지 않는다.
+    // snippet-begin: sync-mode-isolation
     CHECK(t.OnSyncModeChanged(SyncMode::Binary));
     for (uint32_t i = 0; i < kImages; ++i) {
         uint64_t w = 0;
@@ -644,6 +812,7 @@ void TestFrameCompletionTracker() {
         CHECK(!t.NeedsSlotWait(s, w));
         CHECK(t.SlotValue(s) == 0);
     }
+    // snippet-end: sync-mode-isolation
 
     // Binary 모드: image 를 마지막으로 쓴 slot 을 기억한다.
     t.OnSubmit(1, 2, 0);
@@ -695,21 +864,65 @@ void TestTimelineCounter() {
     CHECK(timeline.Current() == 2);
 }
 
+// ── 실행 단위 ────────────────────────────────────────────────────────────
+// 소속은 "그 step 이 무엇을 추가했는가"로 정한다. swapchain 협상과 push
+// constant 예산은 골격 단계가 세운 계약이고, ring 은 측정 인프라, 배리어 네
+// 항목은 barrier 정책, queue family 는 queue 모델, 완료 추적은 semaphore 토글,
+// descriptor 모양은 bindless 판단, draw 제출 수와 규모는 스케일 실험이 세운다.
+// snippet-begin: step-test-table
+struct StepTest {
+    const char* step;
+    const char* name;
+    void (*fn)();
+};
+
+const StepTest kStepTests[] = {
+    {"step01", "swapchain_negotiation",     &TestSwapchainSelection},
+    {"step01", "push_constant_budget",      &TestPushConstantBudget},
+    {"step02", "timestamp_ring",            &TestQueryRing},
+    {"step03", "barrier_policy_names",      &TestBarrierPolicyNames},
+    {"step03", "minimal_barriers",          &TestMinimalBarriers},
+    {"step03", "oversync_barriers",         &TestOverSyncBarriers},
+    {"step03", "barrier_record_path",       &TestImageLayoutTransitionRecords},
+    {"step03", "barrier_injection",         &TestBarrierInjection},
+    {"step04", "queue_family_selection",    &TestQueueFamilySelection},
+    {"step05", "sync_mode_names",           &TestSyncModeNames},
+    {"step05", "timeline_counter",          &TestTimelineCounter},
+    {"step05", "frame_completion_tracking", &TestFrameCompletionTracker},
+    {"step06", "descriptor_set_shape",      &TestDescriptorSetShape},
+    {"step07", "draw_mode_names",           &TestDrawModeNames},
+    {"step07", "draw_submission_counts",    &TestRecordDrawMatchesExpectedSubmissions},
+    {"step07", "scene_scale_contract",      &TestSceneScaleContract},
+};
+// snippet-end: step-test-table
+
 }  // namespace
 
-int main() {
-    TestDrawSubmissions();
-    TestMinimalBarriers();
-    TestOverSyncBarriers();
-    TestImageLayoutTransitionRecords();
-    TestBarrierInjection();
-    TestRecordDrawMatchesExpectedSubmissions();
-    TestSceneScaleContract();
-    TestQueryRing();
-    TestSwapchainSelection();
-    TestFrameCompletionTracker();
-    TestTimelineCounter();
-    if (failures != 0) return 1;
-    std::cout << "Vulkan contract tests passed\n";
-    return 0;
+int main(int argc, char** argv) {
+    const char* filter = argc > 1 ? argv[1] : nullptr;
+
+    int ran = 0;
+    for (const StepTest& t : kStepTests) {
+        if (filter && std::strcmp(filter, t.step) != 0 &&
+            std::strcmp(filter, t.name) != 0) {
+            continue;
+        }
+        const int checksBefore = checks;
+        const int failuresBefore = failures;
+        t.fn();
+        ++ran;
+        std::cout << '[' << t.step << "] " << t.name << " ... "
+                  << (failures == failuresBefore ? "ok" : "FAILED")
+                  << " (" << checks - checksBefore << " checks)\n";
+    }
+
+    if (ran == 0) {
+        std::cerr << "no test matches `" << (filter ? filter : "") << "` — "
+                     "step01..step07 또는 개별 이름을 주십시오.\n";
+        return 2;
+    }
+
+    std::cout << (filter ? filter : "all") << ": " << ran << " test(s), "
+              << checks << " checks, " << failures << " failed\n";
+    return failures == 0 ? 0 : 1;
 }

@@ -36,6 +36,9 @@ private:
                    const ContainerBenchmark& cbench,
                    int x, int y);
     void DrawTogglePanel(Toggles& toggles, int x, int y);
+    // 토글 패널을 두 패스로 나눠 그린다. openPass=false 는 닫힌 위젯(잠긴 상태),
+    // true 는 열린 콤보 하나. 열린 콤보를 마지막에 그려야 펼친 목록이 위에 온다.
+    void DrawTogglePanelPass(Toggles& toggles, int x, int y, bool openPass);
     void DrawFrameGraph(const FrameTimer& timer, int x, int y, int w, int h);
 
     int windowW_ = 0;

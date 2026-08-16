@@ -902,45 +902,39 @@ Unity DOTS, Flecs 등 현대 ECS 엔진은 **Archetype** 기반 아키텍처를 
 
 각 Archetype은 컴포넌트를 **Structure of Arrays (SoA)** 레이아웃으로 저장한다.
 
-### SoA vs AoS: 메모리 레이아웃의 중요성
+### 청크가 결정하는 것
 
-#### Array of Structures (AoS) - 전통적 방식
+Archetype 청크는 컴포넌트마다 별도 배열을 두고 같은 인덱스로 한 엔티티를 표현한다. 컴포넌트별로 배열이 갈라져 있으므로 시스템은 자기가 읽는 컴포넌트의 배열만 순회하고, 만지지 않는 컴포넌트는 전송되지 않는다. 이 배치 자체는 Archetype의 발명이 아니다. Archetype이 정하는 것은 그 배열들을 **어떤 단위로 묶을 것인가**다. 그 단위가 청크이고, 청크 크기가 세 가지 결정을 한꺼번에 규정한다.
 
-```cpp
-struct Entity {
-    Position position;
-    Velocity velocity;
-    Health health;
-};
+**첫째, 청크 용량은 컴포넌트 크기의 합에서 역산한다.** `Position`(12바이트) + `Velocity`(12바이트) + `Health`(8바이트) 조합이라면 엔티티당 32바이트다. 청크를 16KB로 잡으면 다음과 같다.
 
-std::vector<Entity> entities;
-// 메모리: [P|V|H][P|V|H][P|V|H]...
+$$\text{capacity} = \left\lfloor \frac{16{,}384}{32} \right\rfloor = 512$$
 
-// 물리 시스템: Position과 Velocity만 필요
-for (auto& entity : entities) {
-    entity.position += entity.velocity * dt;
-    // Health도 캐시에 로드됨 (낭비!)
-}
-```
+512개 엔티티가 한 청크에 들어간다. 청크 크기를 고정하고 용량을 역산하는 이유는, 컴포넌트 조합이 무엇이든 **청크 하나를 순회하는 동안 만지는 총 바이트가 일정하게 유지**되기 때문이다. 조합이 무거우면 엔티티 수가 줄고, 가벼우면 늘어난다. 순회 단위를 캐시 용량에 맞춰 고정하려는 설계다.
 
-CPU는 캐시 라인 단위(64바이트)로 메모리를 가져온다. 위 코드에서는 Health 데이터도 함께 로드되지만 사용하지 않으므로 낭비이다.
-
-#### Structure of Arrays (SoA) - Archetype 방식
+**둘째, 컴포넌트 추가·삭제는 archetype 이동이 된다.** 엔티티의 컴포넌트 조합이 바뀌면 그 엔티티는 다른 archetype에 속하게 되므로, 가지고 있던 모든 컴포넌트를 새 청크로 복사하고 원래 자리는 마지막 엔티티로 메워야 한다.
 
 ```cpp
-struct Archetype_PosVel {
-    std::vector<Position> positions;  // [P][P][P]...
-    std::vector<Velocity> velocities; // [V][V][V]...
-};
-
-// 물리 시스템: 필요한 데이터만 순차 접근
-for (size_t i = 0; i < archetype.positions.size(); ++i) {
-    archetype.positions[i] += archetype.velocities[i] * dt;
-    // 이 시스템이 사용하는 필드만 별도 스트림으로 순회
-}
+// 구조적 변경 한 번의 실제 작업량
+// 1. 새 archetype의 청크에서 슬롯 확보
+// 2. 기존 컴포넌트 전부 복사 (여기서는 32바이트)
+// 3. 새 컴포넌트 초기화
+// 4. 원래 청크에서 swap-remove (마지막 엔티티를 빈 자리로)
+// 5. 이동한 두 엔티티의 인덱스 갱신
 ```
 
-SoA는 일부 필드만 대량 순회할 때 불필요한 바이트 전송을 줄이고 각 스트림의 벡터화를 쉽게 한다. 반대로 한 객체의 모든 필드를 함께 사용하는 코드에서는 여러 배열을 함께 따라가야 하므로 AoS가 더 단순하거나 유리할 수 있다. 비교는 실제 시스템의 필드 접근 집합과 byte/element를 기준으로 한다.
+Sparse set은 배열 하나만 건드리므로 이 비용이 없다. 대신 순회할 때 컴포넌트마다 다른 dense 배열을 따라가야 한다. **비용을 순회에서 낼 것인가 구조적 변경에서 낼 것인가**가 두 구조의 실제 갈림길이다.
+
+| 기준 | Sparse Set | Archetype 청크 |
+|---|---|---|
+| 컴포넌트 하나 순회 | dense 배열 순차 접근 | 청크 안 배열 순차 접근 |
+| 여러 컴포넌트 동시 순회 | 컴포넌트마다 sparse 조회로 교차 | 같은 인덱스로 바로 접근 |
+| 컴포넌트 추가·삭제 | 해당 배열에 push/swap-remove | 조합 전체 복사 후 archetype 이동 |
+| 조합이 많을 때 | 영향 없음 | archetype 수가 늘어남 |
+
+**셋째, 조합이 많아지면 청크 점유율이 떨어진다.** 컴포넌트 타입이 $k$개면 가능한 조합은 최대 $2^k$개다. 실제로 등장하는 조합만 archetype이 되지만, 조합이 다양한 게임에서는 각 archetype에 엔티티가 몇 개씩만 들어간 청크가 대량으로 생긴다. 512개 용량의 청크에 3개만 들어 있으면 순회는 청크 헤더를 읽고 3개를 처리한 뒤 다음 청크로 점프한다. 연속 순회의 이점이 사라지고, 청크 경계 자체가 오버헤드가 된다.
+
+그래서 archetype 방식의 성능 조건은 "SoA를 쓴다"가 아니라 **"엔티티가 소수의 무거운 archetype에 몰려 있고 구조적 변경이 드물다"** 이다. 이 조건이 깨지면 같은 레이아웃에서도 sparse set보다 느려진다. 판정 지표는 archetype 개수, 청크당 평균 점유율, 프레임당 구조적 변경 횟수 세 가지다.
 
 ### Archetype ECS 구현 (간소화 버전)
 
@@ -1090,44 +1084,26 @@ Unity DOTS의 핵심 기능:
 
 DOTS가 GameObject 기반 코드보다 얼마나 빠른지는 component 구성, structural change 빈도, chunk occupancy, Burst가 생성한 코드와 job scheduling 비용에 따라 달라진다. 비교할 때는 같은 동작과 같은 결과를 구현하고 main-thread time, worker utilization, cache miss, frame-time 분포를 함께 측정해야 한다. 홍보 사례의 최대 배수는 일반적인 보장이 아니다.
 
-### SIMD 최적화
+### 청크 경계가 만드는 tail
 
-SoA 레이아웃은 SIMD(Single Instruction Multiple Data) 벡터화에 최적이다:
+청크 안의 컴포넌트 배열은 연속이므로 시스템 루프는 배열 하나를 처음부터 끝까지 훑는 형태가 된다. 여기서 archetype 저장이 추가로 만드는 조건이 하나 있다. **순회 길이가 전체 엔티티 수가 아니라 청크마다의 점유 수**라는 점이다.
 
 ```cpp
-// 순차 코드 (자동 벡터화 가능)
-void updatePositions(std::vector<Position>& positions,
-                     const std::vector<Velocity>& velocities,
-                     float dt) {
-    size_t count = positions.size();
-
-    #pragma omp simd  // 컴파일러에게 벡터화 힌트
-    for (size_t i = 0; i < count; ++i) {
-        positions[i].x += velocities[i].x * dt;
-        positions[i].y += velocities[i].y * dt;
-        positions[i].z += velocities[i].z * dt;
-    }
-}
-
-// AVX2 명시적 사용 (8개씩 처리)
-void updatePositionsAVX2(float* posX, const float* velX, size_t count, float dt) {
-    __m256 dt_vec = _mm256_set1_ps(dt);
-
-    // 정렬 미보장 시 loadu/storeu 사용 (aligned 버전은 32바이트 정렬 필수)
-    size_t i = 0;
-    for (; i + 8 <= count; i += 8) {
-        __m256 px = _mm256_loadu_ps(&posX[i]);
-        __m256 vx = _mm256_loadu_ps(&velX[i]);
-        px = _mm256_fmadd_ps(vx, dt_vec, px);  // px += vx * dt
-        _mm256_storeu_ps(&posX[i], px);
-    }
-    for (; i < count; ++i) {
-        posX[i] += velX[i] * dt;
+// 순회 단위는 청크다. 길이는 청크마다 다르다.
+for (Chunk& chunk : archetype.chunks) {
+    Position* p = chunk.array<Position>();
+    Velocity* v = chunk.array<Velocity>();
+    for (size_t i = 0; i < chunk.count; ++i) {   // count는 capacity 이하
+        p[i].x += v[i].x * dt;
     }
 }
 ```
 
-AVX2 레지스터는 8개의 `float` lane을 담지만 그것이 곧 8배의 함수 속도를 뜻하지 않는다. 스칼라 baseline도 자동 벡터화될 수 있고, load/store 대역폭, FMA 처리량, tail 처리, 정렬과 CPU 주파수 변화가 상한을 결정한다. 생성된 명령과 elements/cycle을 측정해 비교한다.
+전체 엔티티가 10,000개고 청크 용량이 512라면 청크는 20개이고, 마지막 청크만 부분적으로 찬다. 루프를 폭 $w$의 벡터 명령으로 처리한다면 tail은 전체에서 한 번이 아니라 **청크마다 한 번씩** 생긴다. 청크 20개에 $w = 8$이면 처리되지 않고 남는 원소가 최악의 경우 $20 \times 7 = 140$개다. 전체를 하나의 배열로 두었을 때의 7개와 비교하면 20배다.
+
+여기서 나오는 설계 결정이 **청크 용량을 벡터 폭의 배수로 잡는 것**이다. 512는 8과 16 모두의 배수이므로 꽉 찬 청크에서는 tail이 없고, 부분적으로 찬 마지막 청크에서만 남는다. 용량을 500 같은 값으로 잡으면 꽉 찬 청크에서도 매번 tail이 생긴다. 컴포넌트 크기의 합에서 용량을 역산할 때 그 값을 내림하는 대신 벡터 폭의 배수로 내림하는 이유다.
+
+같은 이유로 청크의 각 컴포넌트 배열은 청크 헤더 뒤에서 정렬 경계에 맞춰 시작하도록 오프셋을 계산한다. 배열 시작이 정렬되어 있지 않으면 청크마다 앞쪽에서도 정렬 맞추기 구간이 생겨 tail이 양쪽에 붙는다.
 
 ## 6. 종합 비교 및 선택 가이드
 

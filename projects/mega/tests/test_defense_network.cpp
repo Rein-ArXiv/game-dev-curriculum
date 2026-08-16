@@ -152,7 +152,7 @@ static wire::Snapshot ReplicaSnapshot(uint32_t tick, float x, float hp) {
 }
 
 static void TestClientReplicaInterpolation() {
-    // main.cpp 의 클라이언트와 같은 시계 설정: 8개 보관, 3틱 뒤에서 시작,
+    // 제품 클라이언트(game/defense_app.hpp)와 같은 시계 설정: 8개 보관, 3틱 뒤에서 시작,
     // 최신에 2틱보다 가까이 붙지 않음.
     wire::SnapshotView replicas(net::InterpolationClock{3.0, 2.0, 8});
     CHECK(!replicas.Ready());
@@ -182,7 +182,8 @@ static void TestClientReplicaInterpolation() {
 }
 
 static void TestHostCommandChannelSuppressesReplayAndReorders() {
-    // 호스트가 클라이언트 명령을 받는 경로 그대로(main.cpp · server_main.cpp).
+    // 호스트가 클라이언트 명령을 받는 경로 그대로
+    // (game/defense_app.hpp 의 PumpHost · game/defense_server.hpp 의 HandleDatagram).
     net::ReliableOrderedReceiver<wire::Command> remoteCommands(1);
     wire::Command command;
     command.type = wire::CommandType::Place;

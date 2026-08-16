@@ -5,6 +5,7 @@
 
 #include "app/app.h"
 #include "ui/panel.h"
+#include "device/descriptor_layout.h"
 #include "measure/validation_log.h"
 
 #include <GLFW/glfw3.h>
@@ -173,30 +174,24 @@ void App::DestroyDepth() {
 void App::CreateDescriptors() {
     VkDevice dev = ctx_.Device();
 
-    VkDescriptorSetLayoutBinding binds[2]{};
-    binds[0].binding = 0;
-    binds[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    binds[0].descriptorCount = 1;
-    binds[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    binds[1].binding = 1;
-    binds[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    binds[1].descriptorCount = 1;
-    binds[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    // set 0 의 binding 표와 그로부터 파생되는 pool 크기는 디바이스와 무관해
+    // 순수 함수로 나가 있다 — 헤드리스 테스트가 그 모양을 고정한다.
+    const std::vector<VkDescriptorSetLayoutBinding> binds = SceneSetBindings();
 
     VkDescriptorSetLayoutCreateInfo lci{};
     lci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    lci.bindingCount = 2;
-    lci.pBindings = binds;
+    lci.flags = SceneSetLayoutFlags();
+    lci.bindingCount = (uint32_t)binds.size();
+    lci.pBindings = binds.data();
     vkCreateDescriptorSetLayout(dev, &lci, nullptr, &setLayout_);
 
-    VkDescriptorPoolSize sizes[2];
-    sizes[0] = { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kFramesInFlight };
-    sizes[1] = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kFramesInFlight };
+    const std::vector<VkDescriptorPoolSize> sizes =
+        SceneDescriptorPoolSizes(kFramesInFlight);
     VkDescriptorPoolCreateInfo pci{};
     pci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pci.maxSets = kFramesInFlight;
-    pci.poolSizeCount = 2;
-    pci.pPoolSizes = sizes;
+    pci.poolSizeCount = (uint32_t)sizes.size();
+    pci.pPoolSizes = sizes.data();
     vkCreateDescriptorPool(dev, &pci, nullptr, &descPool_);
 
     for (auto& fr : frames_) {

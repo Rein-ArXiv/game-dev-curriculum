@@ -72,7 +72,7 @@ void BoidsScene::Update(float dt) {
                     // alignment / cohesion: 지각 반경 전체.
                     aliSum = Add(aliSum, o.vel); ++aliCount;
                     cohSum = Add(cohSum, o.pos); ++cohCount;
-                    // separation: 더 가까운 이웃만, 거리 반비례.
+                    // separation: 더 가까운 이웃만, 멀어지는 단위 벡터의 합.
                     if (d2 < sepR2) sep = Add(sep, Mul(d, 1.0f / std::sqrt(d2)));
                 }
             }

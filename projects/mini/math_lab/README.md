@@ -55,7 +55,7 @@
 | 관측값 | 화면의 기하(호/곡선/분리축/노드 박스/등고선) + 패널의 수치(쿼터니언 성분, norm(q), GJK iteration, BVH 노드 수, naive vs kahan 합) |
 | 기대 결과 | norm(q) = 1, Slerp 가 호 위·Nlerp 가 현 근처, 분리축이 있으면 비충돌, 광선이 놓친 노드는 방문하지 않음, k→0 에서 smin→min |
 | 실패 주입 | Slerp: 큰 호(2.6 rad)에서 인접 샘플 각도의 max/min 비 — Nlerp 로 바꾸면 1.0 대에서 1.5 대로 튄다. SAT: B 의 면 법선에서만 분리되는 배치 — 후보축을 A 것만 쓰면 충돌로 오판한다. BVH: 노드별 median 분할 불변식과 brute force 대조 — 분할·정렬·가지치기 중 하나만 없애도 깨진다. 노이즈: 표본 분산 하한 — hash 나 그라디언트를 상수로 바꾸면 0 이 된다. Kahan: big=1e5, small=1e-4, N=1e5 에서 naive 와의 차이. 이 항목들은 모두 `tests/core_tests.cpp` 에 들어 있으며, 대응 변이를 실제로 주입해 테스트가 실패하는 것을 확인했다 |
-| 자동 테스트 | `tests/core_tests.cpp` — GUI 없이 quaternion(+slerp 등각속도/짐벌락) / curves / collision / sdf / bvh / noise / depth / kahan / vector / matrix 12개 함수. 무작위 교차 검증 3종(OBB 20,000쌍 SAT⇔GJK, 광선 3,000개 BVH⇔brute force, smin 500 표본)을 고정 seed 로 돌린다. `ctest --test-dir build -C Release` 로 실행 |
+| 자동 테스트 | `tests/core_tests.cpp` — GUI 없이 layout / quaternion(+slerp 등각속도/짐벌락) / curves / collision / sdf / bvh / noise / depth / kahan / vector / matrix 13개 함수. 무작위 교차 검증 3종(OBB 20,000쌍 SAT⇔GJK, 광선 3,000개 BVH⇔brute force, smin 500 표본)을 고정 seed 로 돌린다. 파일 끝의 `kCases` 표가 각 함수를 그것을 들여온 step 에 묶어, `ctest` 타깃이 step별로 나뉜다(`math_stepNN_*`) |
 
 ## 기술 스택
 
@@ -91,7 +91,8 @@ math_lab/
       handle.{h,cpp}            마우스로 끄는 점
       scene_chrome.{h,cpp}  raygui_impl.cpp
   tests/
-    core_tests.cpp              GUI 없는 코어 검증 (ctest 타깃 math_core_tests)
+    core_tests.cpp              GUI 없는 코어 검증. {step, 이름, 함수} 표 + 첫 인자 step 필터.
+                                ctest 타깃은 math_core_tests(전체) + math_stepNN_*(step별) 9개
   # raylib / raygui 는 CMake FetchContent 가 build/_deps 아래 자동으로 가져옴.
 ```
 
@@ -103,11 +104,23 @@ cmake --build build -j
 ./build/math_lab
 ```
 
-자동 검증은 GUI 없이 별도 타깃으로 돈다.
+자동 검증은 GUI 없이 별도 타깃으로 돈다. 실행 단위는 step 입도다 — step별 8개 + 전체 1개.
 
 ```bash
 ctest --test-dir build -C Release --output-on-failure
-# 1/1 Test #1: math_core_tests .................. Passed
+# 1/9 Test #1: math_step01_skeleton ............. Passed
+# ...
+# 9/9 Test #9: math_core_tests .................. Passed
+# 100% tests passed out of 9
+```
+
+한 step 만 다시 돌리려면 이름으로 거른다. 실행 파일을 직접 부르면 어떤 검증이 몇 개 돌았는지가 보인다.
+
+```bash
+ctest --test-dir build -C Release -R math_step05_collision --output-on-failure
+./build/Release/math_core_tests.exe step05
+# [step05] collision/sat_vs_gjk ............ 14 checks, 0 failed
+# step05: 1 case(s), 14 check(s), 0 failure(s)
 ```
 
 상단 탭으로 씬을 전환한다. 각 씬은 독립이며 따로 빌드하지 않아도 즉시 전환 가능하다.

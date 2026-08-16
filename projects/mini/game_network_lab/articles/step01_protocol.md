@@ -46,12 +46,13 @@ control header는 12바이트다.
 직렬화는 C++ 구조체를 그대로 복사하지 않는다. 구조체 padding, host endian, ABI가 wire format에
 섞이기 때문이다. 값을 큰 바이트부터 명시적으로 추가한다.
 
+<!-- snippet: src/protocol.cpp#AppendU32 -->
 ```cpp
-void AppendU32(std::vector<std::byte>& out, std::uint32_t value) {
-    out.push_back(static_cast<std::byte>((value >> 24u) & 0xffu));
-    out.push_back(static_cast<std::byte>((value >> 16u) & 0xffu));
-    out.push_back(static_cast<std::byte>((value >> 8u) & 0xffu));
-    out.push_back(static_cast<std::byte>(value & 0xffu));
+void AppendU32(std::vector<std::byte>& output, std::uint32_t value) {
+    output.push_back(static_cast<std::byte>((value >> 24u) & 0xffu));
+    output.push_back(static_cast<std::byte>((value >> 16u) & 0xffu));
+    output.push_back(static_cast<std::byte>((value >> 8u) & 0xffu));
+    output.push_back(static_cast<std::byte>(value & 0xffu));
 }
 ```
 
@@ -67,14 +68,18 @@ payload 상한은 64KiB다. 이 상한은 메모리 최적화가 아니라 프�
 - 헤더는 있지만 frame 전체가 부족하다: 길이를 기억하고 대기한다.
 - magic, version, 길이가 불법이다: 연결을 복구하려 하지 않고 decoder를 실패 상태로 만든다.
 
+<!-- snippet: src/protocol.cpp#FrameDecoder::Pop -->
 ```cpp
 if (available < kFrameHeaderBytes) return std::nullopt;
+// ... 헤더 필드를 읽는다
 if (magic != kProtocolMagic || version != kProtocolVersion ||
     payloadBytes > kMaxControlPayload) {
     failed_ = true;
     return std::nullopt;
 }
-if (available < kFrameHeaderBytes + payloadBytes) return std::nullopt;
+
+std::size_t frameBytes = kFrameHeaderBytes + payloadBytes;
+if (available < frameBytes) return std::nullopt;
 ```
 
 불법 헤더 뒤에서 magic을 다시 검색하는 resynchronization을 하지 않는 이유는 TCP 연결 자체가
@@ -90,11 +95,18 @@ UDP header는 connection ID와 sequence를 포함한 24바이트다. payload 최
 제한한다. 이는 모든 인터넷 경로의 MTU를 보장한다는 뜻이 아니라, 일반적인 IPv6 최소 MTU
 1280바이트 안에서 IP·UDP 헤더와 일부 확장 여유를 남기는 보수적 애플리케이션 예산이다.
 
+디코더는 header 크기부터 확인하고, 일곱 필드를 모두 읽은 뒤 값 검사와 길이 일치 검사를 한다.
+필드 읽기가 하나라도 실패하면 값을 쓰지 않는다.
+
+<!-- snippet: src/protocol.cpp#DecodeDatagram -->
 ```cpp
 if (bytes.size() < kDatagramHeaderBytes) return std::nullopt;
-if (magic != kProtocolMagic || version != kProtocolVersion) return std::nullopt;
-if (payloadBytes > kMaxDatagramPayload) return std::nullopt;
-if (bytes.size() != kDatagramHeaderBytes + payloadBytes) return std::nullopt;
+// ... magic, version, type, connection, sequence, payloadBytes, reserved 를 읽는다
+if (!magic || !version || !type || !connection || !sequence ||
+    !payloadBytes || !reserved) return std::nullopt;
+if (*magic != kProtocolMagic || *version != kProtocolVersion ||
+    *reserved != 0 || *payloadBytes > kMaxDatagramPayload) return std::nullopt;
+if (bytes.size() != kDatagramHeaderBytes + *payloadBytes) return std::nullopt;
 ```
 
 reserved 필드는 0이어야 한다. 필드를 무시하지 않고 검사하면 확장 버전을 구버전 서버가 우연히
@@ -106,6 +118,7 @@ reserved 필드는 0이어야 한다. 필드를 무시하지 않고 검사하면
 `0xffffffff -> 0`에서 실패한다. 비교하려는 두 값의 거리가 sequence 공간 절반 미만이라는
 윈도우 불변식 아래 signed difference를 사용한다.
 
+<!-- snippet: src/protocol.cpp#IsNewerSequence -->
 ```cpp
 bool IsNewerSequence(std::uint32_t lhs, std::uint32_t rhs) {
     return lhs != rhs && static_cast<std::int32_t>(lhs - rhs) > 0;
@@ -121,6 +134,66 @@ bool IsNewerSequence(std::uint32_t lhs, std::uint32_t rhs) {
 payload를 나누고, 두 frame을 한 번에 넣는다. UDP는 마지막 바이트를 제거한 데이터그램과 선언
 길이가 실제 길이보다 큰 데이터그램을 거부해야 한다. sequence는 최댓값에서 0으로 넘어가는
 경우와 같은 번호의 중복을 별도로 확인한다.
+
+여기까지의 case는 `game_network_tests` 안에 `step01` 태그로 모여 있고, CTest 이름은
+`game_network_step01_protocol`이다.
+
+```powershell
+ctest --test-dir projects/mini/game_network_lab/build -C Release `
+      -R game_network_step01 --output-on-failure
+```
+
+```text
+    Start 6: game_network_step01_protocol
+1/1 Test #6: game_network_step01_protocol .....   Passed    0.03 sec
+
+100% tests passed out of 1
+
+Total Test time (real) =   0.04 sec
+```
+
+통과 여부는 이 정도만 말해 준다. 무엇을 봤는지는 실행 파일을 직접 부르면 case마다 나온다.
+
+```powershell
+projects/mini/game_network_lab/build/Release/game_network_tests.exe step01
+```
+
+```text
+[step01] golden_control_frame    ok  EncodeControl(Hello, 5B) = 17B, header 12B matched byte for byte
+[step01] golden_datagram         ok  EncodeDatagram(Input, 42, 99, 5B) = 29B, header 24B matched byte for byte
+[step01] framing                 ok  3+7+7 byte pushes -> 1 frame, one 29B push -> 2 frames
+[step01] datagram_round_trip     ok  connection=42 sequence=99 payload=5B
+[step01] datagram_rejection      ok  rejected: truncated, length +1 and -1, 2 reserved bytes, magic, version, short header; the original still decodes
+[step01] frame_header_rejection  ok  magic, version and a 65537 byte declared length each latch Failed(); BufferedBytes stayed 17
+[step01] frame_buffer_cap        ok  accumulation cap 65548B accepted, cap+1 refused in one push and in two
+[step01] sequence_wrap           ok  0 is newer than 0xffffffff, 0xffffffff is not newer than 0, 17 is not newer than 17
+game_network_tests: 8 case(s) passed [step01 8]
+```
+
+`frame_buffer_cap`이 그 상한을 어떻게 판정하는지가 이 형식의 대표다. 상한만큼은 받아들이고,
+한 바이트를 더하면 거부하며, 그 뒤로는 decoder가 아무것도 받지 않는다. 상한을 한 번에 넘기는
+push와 두 번에 나눠 넘기는 push를 따로 확인하는 이유는 누적 검사와 단발 검사가 다른 코드
+경로이기 때문이다.
+
+<!-- snippet: tests/protocol_tests.cpp#TestFrameBufferCap -->
+```cpp
+constexpr std::size_t kCap = kMaxControlPayload + kFrameHeaderBytes;
+
+{
+    FrameDecoder decoder;
+    Require(decoder.Push(std::vector<std::byte>(kCap)), "the cap itself fits");
+    Require(decoder.BufferedBytes() == kCap, "all of it is buffered");
+    Require(!decoder.Push(std::vector<std::byte>(1)), "one byte past the cap is refused");
+    Require(decoder.Failed(), "exceeding the cap fails the decoder");
+    // ...
+}
+{
+    FrameDecoder decoder;
+    Require(!decoder.Push(std::vector<std::byte>(kCap + 1)),
+            "a single oversized push is refused");
+    Require(decoder.Failed(), "a single oversized push fails the decoder");
+}
+```
 
 ---
 

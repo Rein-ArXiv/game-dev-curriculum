@@ -11,12 +11,18 @@
 //      aio/uring/mmap 은 워커풀·코루틴 경로를 한 번도 밟지 않았다.
 //   3. 작업 큐 인계(push → remaining_ store → unlock)의 경계가 안전한가.
 //      반복 스트레스와 *결정적* 랑데부 두 가지로 본다.
+//
+// 검사들은 파일 끝의 표에서 *그것을 추가한 step* 에 묶인다. 인자 없이 부르면
+// 전부 돌고, `--step=N` 은 그 step 이 추가한 검사만 돈다(tests/step_filter.h).
 
 #include "fault/fault_inject.h"
 #include "io/io_backend_factory.h"
+#include "measure/frame_timer.h"
 #include "sync/sync_factory.h"
 #include "testhook/test_hook.h"
 #include "workload/file_io_workload.h"
+
+#include "step_filter.h"
 
 #include <algorithm>
 #include <atomic>
@@ -40,6 +46,8 @@
 namespace {
 
 int failures = 0;
+
+int Failures() { return failures; }
 
 #define CHECK(expr)                                                           \
     do {                                                                      \
@@ -194,14 +202,18 @@ private:
     std::uint64_t expectedSum_ = 0;
 };
 
-void TestIoBackends() {
+// backend 를 추가한 step 단위로 부르기 위해 대상 목록을 인자로 받는다. 전체
+// 순회는 아래 세 그룹을 차례로 부르는 것과 같다.
+// snippet-begin: backend-equivalence
+void CheckIoBackends(const skl::BackendType* types, std::size_t count,
+                     const char* group) {
     constexpr std::size_t kFileCount = 4;
     constexpr std::size_t kFileBytes = 64 * 1024;
     TempFixture fixture(kFileCount, kFileBytes);
 
     std::string summary;
-    for (int raw = 0; raw < skl::kBackendTypeCount; ++raw) {
-        const auto requested = static_cast<skl::BackendType>(raw);
+    for (std::size_t idx = 0; idx < count; ++idx) {
+        const auto requested = types[idx];
         if (!summary.empty()) summary += ' ';
         summary += Label(requested);
         summary += '=';
@@ -234,13 +246,29 @@ void TestIoBackends() {
 
     // ctest 가 stdout 을 감추더라도 --output-on-failure 나 -V 에서 어느
     // backend 가 실제로 돌았는지 한 줄로 읽힌다.
-    std::cout << "[backends] " << summary << '\n';
-    std::cout << "[strict] SKL_REQUIRE_BACKENDS="
-              << (g_requireEnvSet ? std::getenv("SKL_REQUIRE_BACKENDS")
-                                  : "<unset> (fallback tolerated)")
-              << '\n';
+    std::cout << "[backends] " << group << ": " << summary << '\n';
+}
+// snippet-end: backend-equivalence
+
+// read backend 하나. 인터페이스와 factory 를 처음 세운 step 의 몫이다.
+constexpr skl::BackendType kReadBackend[] = {skl::BackendType::Read};
+// 동기 backend 두 개를 더 얹은 step.
+constexpr skl::BackendType kSyncBackends[] = {skl::BackendType::Pread,
+                                              skl::BackendType::Mmap};
+// 비동기 backend 두 개를 더 얹은 step.
+constexpr skl::BackendType kAsyncBackends[] = {skl::BackendType::Aio,
+                                               skl::BackendType::Uring};
+
+template <std::size_t N>
+void CheckGroup(const skl::BackendType (&types)[N], const char* group) {
+    CheckIoBackends(types, N, group);
 }
 
+void TestReadBackendEquivalence()  { CheckGroup(kReadBackend,  "read"); }
+void TestSyncBackendEquivalence()  { CheckGroup(kSyncBackends, "pread/mmap"); }
+void TestAsyncBackendEquivalence() { CheckGroup(kAsyncBackends, "aio/io_uring"); }
+
+// snippet-begin: sync-mutual-exclusion
 void TestSyncPrimitives() {
     constexpr int kThreads = 4;
     constexpr int kIterations = 20000;
@@ -263,7 +291,11 @@ void TestSyncPrimitives() {
                      static_cast<std::uint64_t>(kThreads * kIterations),
                  skl::kSyncTypeLabels[raw]);
     }
+    std::cout << "[sync] " << skl::kSyncTypeCount << " impls x " << kThreads
+              << " threads x " << kIterations << " increments; each ended at "
+              << kThreads * kIterations << '\n';
 }
+// snippet-end: sync-mutual-exclusion
 
 // 그 backend 만 부르는 syscall seam 이름. fault seam 을 *주입 없이* (skip 을
 // 아주 크게) 무장하면 호출 횟수만 세는 순수 관측 모드가 된다. 순회가 정말
@@ -281,17 +313,22 @@ const char* ProbeOp(skl::BackendType type) {
 }
 
 // ============================================================================
-// 실행 모델 × backend × sync 전수 순회.
+// 실행 모델 × backend × sync 순회.
 //
 // 기준값은 "단일 스레드 / read backend" 사이클 하나다. 나머지 조합은 실행
 // 단위도 backend 도 다르지만 *같은 파일 집합* 을 읽으므로 총 바이트와 체크섬이
 // 같아야 한다. 체크섬은 파일 단위 표본이라 처리 순서에 무관하다.
+//
+// 실행 단위(ctx)는 인자로 받는다. 워커 풀과 코루틴 풀은 서로 다른 step 이
+// 추가한 것이라 각자의 step 에서 따로 불려야 한다. 두 ctx 를 차례로 부르면
+// 예전의 전수 순회와 같은 조합을 밟는다.
 // ============================================================================
-void TestWorkloadExecutionModels() {
+void CheckWorkloadExecutionModel(skl::CtxType ctx) {
     constexpr std::size_t kFileCount = 8;
     constexpr std::size_t kFileBytes = 4097;
     constexpr std::size_t kWorkers = 4;   // 워커 4개 = uring ring 4개 동시 생성
     constexpr int kCyclesPerCombo = 4;
+    const char* ctxLabel = skl::kCtxTypeLabels[static_cast<int>(ctx)];
     TempFixture owner(1, 1);
 
     skl::FileIoWorkload workload;
@@ -315,8 +352,8 @@ void TestWorkloadExecutionModels() {
                  Label(backend));
 
         bool downgraded = false;
-        for (int rawCtx = 0; rawCtx < skl::kCtxTypeCount; ++rawCtx) {
-            const auto ctx = static_cast<skl::CtxType>(rawCtx);
+        // snippet-begin: execution-model-equivalence
+        {
             for (int rawSync = 0; rawSync < skl::kSyncTypeCount; ++rawSync) {
                 const auto sync = static_cast<skl::SyncType>(rawSync);
                 const std::string where = Combo(backend, ctx, sync, kWorkers);
@@ -333,6 +370,7 @@ void TestWorkloadExecutionModels() {
                 ++combos;
             }
         }
+        // snippet-end: execution-model-equivalence
 
         const std::size_t probeCalls = skl::FaultCallCount(probe);
         const std::size_t probeInjections = skl::FaultInjectionCount(probe);
@@ -357,9 +395,18 @@ void TestWorkloadExecutionModels() {
 
     // 순회가 조용히 비어 버리는(= BackendCompiledIn 이 전부 false) 상황을
     // 초록으로 넘기지 않는다.
-    CHECK(combos >= skl::kCtxTypeCount * skl::kSyncTypeCount);
-    std::cout << "[models] " << combos << " combos x " << kCyclesPerCombo
-              << " cycles; backends exercised: " << exercised << '\n';
+    CHECK(combos >= skl::kSyncTypeCount);
+    std::cout << "[models] ctx=" << ctxLabel << ": " << combos << " combos x "
+              << kCyclesPerCombo << " cycles; backends exercised: " << exercised
+              << '\n';
+}
+
+void TestWorkerPoolExecutionModel() {
+    CheckWorkloadExecutionModel(skl::CtxType::Pthread);
+}
+
+void TestCoroutinePoolExecutionModel() {
+    CheckWorkloadExecutionModel(skl::CtxType::Coroutine);
 }
 
 // ============================================================================
@@ -582,6 +629,7 @@ void TestQueueHandoffRegression() {
     skl::SetTestHook(skl::TestHookId::AfterQueueUnlock,
                      &queue_race::OnAfterQueueUnlock);
 
+    // snippet-begin: queue-handoff-rendezvous
     // 1) 이 사이클의 마지막 워커가 훅에 붙잡힌다.
     CHECK(workload.RunCycle() == expectedBytes);
 
@@ -641,6 +689,7 @@ void TestQueueHandoffRegression() {
         CHECK(queue_race::phase == queue_race::kStragglerConsumed);
         CHECK(queue_race::underflowSeen == 0);
     }
+    // snippet-end: queue-handoff-rendezvous
 
     skl::SetTestHook(skl::TestHookId::WorkerAfterDecrement, nullptr);
     skl::SetTestHook(skl::TestHookId::AfterQueueUnlock, nullptr);
@@ -654,19 +703,180 @@ void TestQueueHandoffRegression() {
     std::cout << "[handoff] deterministic straggler rendezvous reproduced\n";
 }
 
+// ============================================================================
+// 워크로드 골격 — 결정적 fixture + 단일 스레드 사이클.
+//
+// 토글도 워커도 없는 상태에서 이 도구가 재는 것이 무엇인지를 못 박는다.
+// fixture 가 요청한 개수·크기로 실제 디스크에 있고, 사이클이 그 전량을 읽고,
+// *반복해도 같은 값* 이 나와야 한다. 사이클마다 값이 달라지면 그 뒤의 어떤
+// 비교도 성립하지 않는다.
+// ============================================================================
+// snippet-begin: workload-skeleton
+void TestWorkloadSkeleton() {
+    constexpr std::size_t kFileCount = 6;
+    constexpr std::size_t kFileBytes = 4096;
+    TempFixture owner(1, 1);
+    const auto dir = owner.Dir() / "skeleton";
+
+    skl::FileIoWorkload workload;
+    workload.Init(skl::BackendType::Read, skl::SyncType::Mutex,
+                  skl::SchedType::Default, skl::CtxType::Pthread,
+                  1, kFileCount, kFileBytes, dir);
+
+    CHECK(workload.FileCount() == kFileCount);
+    CHECK(workload.FileBytes() == kFileBytes);
+    CHECK(workload.WorkerCount() == 1);
+    CHECK(workload.FixtureDir() == dir);
+
+    // fixture 가 *디스크에* 요청한 개수·크기로 있는가. 개수만 세면 크기가
+    // 어긋난 파일을 그대로 지나친다.
+    std::size_t onDisk = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        if (!entry.is_regular_file()) continue;
+        ++onDisk;
+        CHECK(std::filesystem::file_size(entry.path()) == kFileBytes);
+    }
+    CHECK(onDisk == kFileCount);
+
+    const std::uint64_t bytes = workload.RunCycle();
+    const std::uint64_t checksum = workload.LastChecksum();
+    CHECK(bytes == kFileCount * kFileBytes);
+    CHECK(checksum != 0);
+    for (int cycle = 0; cycle < 4; ++cycle) {
+        CHECK(workload.RunCycle() == bytes);
+        CHECK(workload.LastChecksum() == checksum);
+    }
+    workload.Shutdown();
+
+    // fixture 를 지우고 다시 만들어도 같은 체크섬 — 같은 시드로 재생성된다.
+    // 이게 깨지면 "어제 잰 값" 과 "오늘 잰 값" 을 비교할 수 없다.
+    std::filesystem::remove_all(dir);
+    skl::FileIoWorkload regenerated;
+    regenerated.Init(skl::BackendType::Read, skl::SyncType::Mutex,
+                     skl::SchedType::Default, skl::CtxType::Pthread,
+                     1, kFileCount, kFileBytes, dir);
+    CHECK(regenerated.RunCycle() == bytes);
+    CHECK(regenerated.LastChecksum() == checksum);
+    regenerated.Shutdown();
+
+    std::cout << "[skeleton] " << kFileCount << " files x " << kFileBytes
+              << " B; bytes/cycle=" << bytes << " checksum=" << checksum
+              << " (stable across 5 cycles and one regeneration)\n";
+}
+// snippet-end: workload-skeleton
+
+// ============================================================================
+// FrameTimer — 슬라이딩 윈도우와 누계.
+//
+// 시간은 머신마다 다르지만 *링 버퍼의 회계* 는 아니다. head 가 용량에서
+// 되감기고, filled 가 용량에서 멈추고, 누계가 사이클 수·바이트 수를 그대로
+// 따라가야 한다. 이게 어긋나면 그래프는 그럴듯하게 그려지면서 엉뚱한 구간을
+// 보여 준다.
+// ============================================================================
+void TestFrameTimerWindow() {
+    skl::FrameTimer timer;
+    CHECK(timer.Head() == 0);
+    CHECK(timer.Filled() == 0);
+    CHECK(timer.TotalCycles() == 0);
+    CHECK(timer.TotalBytes() == 0);
+
+    constexpr std::uint64_t kBytes = 1024;
+    const std::size_t cap = skl::FrameTimer::kCapacity;
+    for (std::size_t i = 0; i < cap; ++i) {
+        timer.BeginCycle();
+        timer.EndCycle(kBytes);
+    }
+    CHECK(timer.Head() == 0);            // 정확히 한 바퀴 → 되감김
+    CHECK(timer.Filled() == cap);        // 가득 참
+    CHECK(timer.TotalCycles() == cap);
+    CHECK(timer.TotalBytes() == cap * kBytes);
+    CHECK(timer.LastBytes() == kBytes);
+
+    // 한 바퀴를 넘겨도 filled 는 용량에서 멈추고 head 만 전진한다.
+    timer.BeginCycle();
+    timer.EndCycle(2 * kBytes);
+    CHECK(timer.Head() == 1);
+    CHECK(timer.Filled() == cap);
+    CHECK(timer.TotalCycles() == cap + 1);
+    CHECK(timer.TotalBytes() == cap * kBytes + 2 * kBytes);
+    CHECK(timer.LastBytes() == 2 * kBytes);
+    // 링에 마지막 값이 실제로 들어갔는가 (head 는 다음 칸을 가리킨다).
+    CHECK(timer.CycleMs()[0] == timer.LastCycleMs());
+    CHECK(timer.ThroughputMBs()[0] == timer.LastThroughputMBs());
+    // 처리량은 ms 로 나눈 값이라 시간에 의존하지만 부호와 유한성은 아니다.
+    CHECK(timer.LastCycleMs() >= 0.0f);
+    CHECK(timer.LastThroughputMBs() >= 0.0f);
+
+    std::cout << "[timer] capacity=" << cap << " head=" << timer.Head()
+              << " filled=" << timer.Filled()
+              << " totalCycles=" << timer.TotalCycles()
+              << " totalBytes=" << timer.TotalBytes() << '\n';
+}
+
+// ============================================================================
+// FrameTimer 의 카운터 두 채널.
+//
+// cycle ms 와 처리량만으로는 "왜 느려졌는가" 를 못 나눈다. 컨텍스트 스위치와
+// page fault 를 사이클 delta 로 받아 같은 윈도우에 싣는 채널이 그 자리다.
+// 값을 *가공하지 않고 그대로* 실어야 외부 도구의 수치와 대조할 수 있다.
+// ============================================================================
+void TestFrameTimerCounterChannels() {
+    skl::FrameTimer timer;
+
+    timer.BeginCycle();
+    timer.EndCycle(4096, /*ctxSwitchesDelta=*/37, /*pageFaultsDelta=*/11);
+    CHECK(timer.LastCtxSwitches() == 37.0f);
+    CHECK(timer.LastPageFaults() == 11.0f);
+    CHECK(timer.CtxSwitches()[0] == 37.0f);
+    CHECK(timer.PageFaults()[0] == 11.0f);
+
+    // 기본 인자 = 0. 카운터를 못 읽는 환경에서도 채널이 조용히 이전 값을
+    // 물고 있으면 안 된다.
+    timer.BeginCycle();
+    timer.EndCycle(4096);
+    CHECK(timer.LastCtxSwitches() == 0.0f);
+    CHECK(timer.LastPageFaults() == 0.0f);
+    CHECK(timer.CtxSwitches()[1] == 0.0f);
+    CHECK(timer.PageFaults()[1] == 0.0f);
+
+    // 네 채널이 같은 인덱스를 공유한다 — 그래프 네 개가 같은 사이클을 가리킨다.
+    CHECK(timer.Head() == 2);
+    CHECK(timer.Filled() == 2);
+    CHECK(timer.CycleMs()[1] == timer.LastCycleMs());
+
+    std::cout << "[channels] ctx_sw=" << timer.CtxSwitches()[0] << ','
+              << timer.CtxSwitches()[1] << " faults=" << timer.PageFaults()[0]
+              << ',' << timer.PageFaults()[1] << " (delta as given, no smoothing)"
+              << '\n';
+}
+
+// 검사 ↔ step 대응표. 소속은 *그 step 이 무엇을 추가했는가* 로 정한다.
+const skl_test::StepCase kCases[] = {
+    {1, "workload skeleton (deterministic fixture, single thread)",
+     &TestWorkloadSkeleton},
+    {1, "frame timer sliding window",        &TestFrameTimerWindow},
+    {2, "read backend equivalence",          &TestReadBackendEquivalence},
+    {3, "pread/mmap backend equivalence",    &TestSyncBackendEquivalence},
+    {4, "aio/io_uring backend equivalence",  &TestAsyncBackendEquivalence},
+    {5, "sync primitives mutual exclusion",  &TestSyncPrimitives},
+    {5, "worker pool execution model",       &TestWorkerPoolExecutionModel},
+    {5, "queue handoff stress",              &TestQueueHandoffStress},
+    {5, "queue handoff rendezvous",          &TestQueueHandoffRegression},
+    {7, "coroutine pool execution model",    &TestCoroutinePoolExecutionModel},
+    {8, "frame timer counter channels",      &TestFrameTimerCounterChannels},
+};
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     LoadRequiredBackends();
-    TestIoBackends();
-    TestSyncPrimitives();
-    TestWorkloadExecutionModels();
-    TestQueueHandoffStress();
-    TestQueueHandoffRegression();
-    if (failures != 0) {
-        std::cerr << failures << " system core test(s) failed\n";
-        return 1;
-    }
-    std::cout << "system core tests passed\n";
-    return 0;
+    // 폴백을 실패로 만드는 모드인지 한 번만 알린다. 아래 backend 검사들이
+    // 이 설정을 공유한다.
+    std::cout << "[strict] SKL_REQUIRE_BACKENDS="
+              << (g_requireEnvSet ? std::getenv("SKL_REQUIRE_BACKENDS")
+                                  : "<unset> (fallback tolerated)")
+              << '\n';
+    return skl_test::RunStepCases(argc, argv, "system_core_tests", kCases,
+                                  sizeof(kCases) / sizeof(kCases[0]),
+                                  &Failures, &skl::ClearFaults);
 }

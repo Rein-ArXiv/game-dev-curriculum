@@ -1,6 +1,6 @@
 # 그래픽스 시리즈
 
-저수준 그래픽스 프로그래밍을 *기초 이론* 에서 *세 가지 그래픽스 API* 까지 단계적으로 다루는 시리즈. API에 독립적인 개념(파이프라인·변환·래스터화·색·셰이딩·가시성)을 먼저 세우고, 같은 개념을 OpenGL·DirectX·Vulkan으로 차례로 구현한다.
+저수준 그래픽스 프로그래밍을 *기초 이론* 에서 *세 가지 그래픽스 API* 까지 단계적으로 다루는 시리즈. API에 독립적인 개념(파이프라인·변환·래스터화·색·셰이딩·광원·가시성)을 먼저 세우고, 같은 개념을 OpenGL·DirectX·Vulkan으로 차례로 구현한다.
 
 ## 읽는 순서
 
@@ -12,7 +12,7 @@ flowchart LR
     S1 -.개념 공유.- S2 -.개념 공유.- S3
 ```
 
-**stage0(기초)** 가 토대다. 여기서 세운 추상 — 파이프라인의 단계, 좌표 변환의 수학, 래스터화 알고리즘, 색·감마, 셰이딩 이론, 가시성 — 은 어느 API에서나 그대로 통한다. stage1~3은 *같은 개념* 을 각 API의 구체적 객체와 함수로 *구현* 할 뿐이다. 그래서 어떤 API부터 시작하든 **stage0를 먼저 읽기** 를 권한다 — 그러면 stage1~3에서 낯선 함수를 만나도 "이건 어느 추상 단계인가"로 제자리에 끼워 넣을 수 있다.
+**stage0(기초)** 가 토대다. 여기서 세운 추상 — 파이프라인의 단계, 좌표 변환의 수학, 래스터화 알고리즘, 색·감마, 셰이딩과 광원 이론, 가시성 — 은 어느 API에서나 그대로 통한다. stage1~3은 *같은 개념* 을 각 API의 구체적 객체와 함수로 *구현* 할 뿐이다. 그래서 어떤 API부터 시작하든 **stage0를 먼저 읽기** 를 권한다 — 그러면 stage1~3에서 낯선 함수를 만나도 "이건 어느 추상 단계인가"로 제자리에 끼워 넣을 수 있다.
 
 ## Stage 0 — 그래픽스 기초 (API 중립)
 
@@ -24,7 +24,7 @@ flowchart LR
 | 02 | [좌표계와 변환](stage0_fund_02_coordinate_transform.md) | 동차좌표·MVP·투영행렬 유도·원근 분할, NDC 컨벤션 API별 차이, 법선 변환 |
 | 03 | [래스터화](stage0_fund_03_rasterization.md) | 엣지 함수·무게중심 좌표·top-left 규칙·원근 보정 보간, 래스터라이저 의사코드 |
 | 04 | [색과 감마](stage0_fund_04_color_gamma.md) | 선형 vs sRGB, 감마 파이프라인, 알파 합성(over)·프리멀티플라이드, HDR·톤 매핑 |
-| 05 | [셰이딩과 머티리얼](stage0_fund_05_shading_materials.md) | Lambert·Blinn-Phong → BRDF·Cook-Torrance·이방성·SSS·투과·레이어드 머티리얼 |
+| 05 | [셰이딩과 머티리얼](stage0_fund_05_shading_materials.md) | Lambert·Blinn-Phong → BRDF·Cook-Torrance, 광원 모델(방향광·점광·스폿)·역제곱 감쇠·다중 광원 누적, 이방성·SSS·투과·레이어드 머티리얼 |
 | 06 | [깊이와 가시성](stage0_fund_06_depth_visibility.md) | 깊이 버퍼·reverse-Z·Z-fighting, 컬링, 투명 정렬·OIT, 앨리어싱·MSAA·TAA |
 | 07 | [텍스처링과 샘플링](stage0_fund_07_texturing_sampling.md) | UV 매핑·필터링(bilinear/trilinear)·밉맵·비등방·래핑, 텍스처 종류와 색공간 |
 | 08 | [프레임버퍼와 멀티패스](stage0_fund_08_framebuffer_multipass.md) | 오프스크린 렌더 타깃·후처리·MRT/G-buffer·포워드vs디퍼드·그림자 매핑 |
@@ -77,7 +77,7 @@ stage0의 각 기초가 API 회차의 어디서 구체화되는지의 빠른 참
 | 02 변환 | gl_fund_02 | (각 proj의 큐브/모델) | (각 proj의 큐브/모델) |
 | 03 래스터화 | (고정 함수, 파이프라인 회차) | dx_fund_04 | vk_fund_01 |
 | 04 색·감마 | gl_fund_04(텍스처)·05 | dx_fund_02 | vk_fund_01·02 |
-| 05 셰이딩·PBR | gl_proj_03 | dx_proj_03 | vk_proj_03 |
+| 05 셰이딩·광원·PBR | gl_proj_03 | dx_proj_03 | vk_proj_03 |
 | 06 깊이·가시성 | gl_fund_05·proj_04 | dx_proj_01·04 | vk_fund_01·proj_04 |
 | 07 텍스처·샘플링 | gl_fund_04 | dx_fund_02 | vk_proj_01·02 |
 | 08 프레임버퍼·멀티패스 | gl_fund_05·proj_05 | dx_proj_04 | vk_fund_01·proj_04 |

@@ -1,3 +1,5 @@
+#include "step_cases.h"
+
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -124,10 +126,11 @@ int WaitFor(pid_t process) {
 }
 #endif
 
-} // namespace
-
-int main(int argc, char** argv) {
-    (void)argc;
+// Both cases drive the same two real processes over loopback sockets. The only
+// difference is the burst of oversized datagrams sent before the honest client:
+// with it the run also proves that failed receive completions were reposted, so
+// error datagrams cannot drain the preposted receive depth.
+int RunProcessSmoke(bool sendOversizedFirst) {
 #if defined(_WIN32)
     WSADATA data{};
     if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return 1;
@@ -137,7 +140,7 @@ int main(int argc, char** argv) {
     if (tcpPort == 0 || udpPort == 0) return 2;
 
     const std::filesystem::path directory =
-        std::filesystem::absolute(argv[0]).parent_path();
+        std::filesystem::absolute(gnl_test::ProgramPath()).parent_path();
 #if defined(_WIN32)
     const std::string server = (directory / "game_server.exe").string();
     const std::string client = (directory / "game_client.exe").string();
@@ -155,8 +158,10 @@ int main(int argc, char** argv) {
 #endif
 
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    if (!SendOversizedDatagrams(udpPort)) return 4;
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (sendOversizedFirst) {
+        if (!SendOversizedDatagrams(udpPort)) return 4;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
 
 #if defined(_WIN32)
     PROCESS_INFORMATION clientProcess{};
@@ -179,6 +184,26 @@ int main(int argc, char** argv) {
                   << " server=" << serverCode << '\n';
         return 6;
     }
-    std::cout << "game_network_process_tests: oversized UDP recovery passed\n";
+    gnl_test::Observe(std::string(sendOversizedFirst ? "64 x 4KiB datagrams first, then "
+                                                     : "") +
+                      "handshake, endpoint binding and snapshots over loopback: client=" +
+                      std::to_string(clientCode) + " server=" +
+                      std::to_string(serverCode) + " within the time limit");
     return 0;
+}
+
+} // namespace
+
+// The oversized-datagram burst is a property of the backend that is compiled
+// here, so it is tagged with that backend's step. The plain two process run is
+// the smoke the verification step introduced.
+int main(int argc, char** argv) {
+    return gnl_test::Run(
+        "game_network_process_tests",
+        {
+            {gnl_test::kBackendStep, "oversized_datagram_recovery",
+             [] { return RunProcessSmoke(true); }},
+            {"step06", "two_process_smoke", [] { return RunProcessSmoke(false); }},
+        },
+        argc, argv);
 }

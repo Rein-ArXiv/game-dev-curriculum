@@ -60,6 +60,7 @@ void SpatialScene::DrawWorld(int cx, int cy, int cw, int ch) {
     }
 
     // 광선 트래버설 — visited 노드 set 만들기.
+    // snippet-begin: bvh-traversal-viz
     Vector2 ro = rayStart_.Position();
     Vector2 rd = {rayEnd_.Position().x - ro.x, rayEnd_.Position().y - ro.y};
     float L = std::sqrt(rd.x * rd.x + rd.y * rd.y);
@@ -96,6 +97,7 @@ void SpatialScene::DrawWorld(int cx, int cy, int cw, int ch) {
         DrawRectangleRec(
             Rectangle{b.min.x, b.min.y, b.Width(), b.Height()}, c);
     }
+    // snippet-end: bvh-traversal-viz
 
     // 광선
     if (showRay_) {

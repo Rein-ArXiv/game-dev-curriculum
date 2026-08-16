@@ -202,9 +202,60 @@ K, flush 후 0인 것도 함께 본다.
 상태와 같음*을 확인한다. 상태 사슬이 끊기면 Debug Layer를 켜기 전에 CTest가
 먼저 잡는다.
 
-```powershell
-ctest --test-dir build -C Release --output-on-failure
+<!-- snippet: tests/graphics_dx_contract_tests.cpp#TestBackBufferBarrierSequence -->
+```cpp
+void TestBackBufferBarrierSequence() {
+    dxlab::BarrierBatch batch;
+    FakeCmdList cmd;
+    const size_t entry = dxlab::RecordBackBufferBarriers(
+        batch, &cmd, FakeResource(), dxlab::BarrierPolicy::Immediate, true);
+    const size_t exit = dxlab::RecordBackBufferBarriers(
+        batch, &cmd, FakeResource(), dxlab::BarrierPolicy::Immediate, false);
+    CHECK(entry == 1);
+    CHECK(exit == 1);
+    CHECK(cmd.barriers.size() == 2);
+
+    const auto& first = cmd.barriers[0].list[0].Transition;
+    const auto& second = cmd.barriers[1].list[0].Transition;
+    CHECK(first.StateBefore == D3D12_RESOURCE_STATE_PRESENT);
+    CHECK(first.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET);
+    CHECK(second.StateBefore == D3D12_RESOURCE_STATE_RENDER_TARGET);
+    CHECK(second.StateAfter == D3D12_RESOURCE_STATE_PRESENT);
+    // 앞 전이의 도착 상태 == 뒤 전이의 출발 상태 (상태 사슬이 끊기지 않는다).
+    CHECK(first.StateAfter == second.StateBefore);
+    CHECK(first.pResource == second.pResource);
+    // ... Split 정책이면 같은 시퀀스를 begin/end 로 나눠 4 회 발급한다.
+}
 ```
+
+`entry` 와 `exit` 를 따로 받아 두는 것이 요점이다. 반환값이 실제 기록 수와 갈라지면 카운터가 조용히 거짓말을 하게 되는데, 여기서는 두 값과 `cmd.barriers.size()` 를 나란히 놓아 그 가능성을 닫는다.
+
+배리어 몫만 도는 등록은 이 한 줄이다.
+
+<!-- snippet: CMakeLists.txt@step06-target -->
+```cmake
+add_test(NAME graphics_dx_step06_barrier      COMMAND graphics_dx_contract_tests step06)
+```
+
+```powershell
+cmake --build build --config Release
+ctest --test-dir build -C Release -R graphics_dx_step06 --output-on-failure
+build\Release\graphics_dx_contract_tests.exe step06
+```
+
+```text
+1/1 Test #7: graphics_dx_step06_barrier .......   Passed    0.03 sec
+
+100% tests passed out of 1
+
+  [step06] barrier_description                         5 checks
+  [step06] barrier_flush_counts                        44 checks
+  [step06] back_buffer_barrier_sequence                12 checks
+step06: 3 groups, 61 checks, 0 failures
+DirectX contract tests passed
+```
+
+`barrier_flush_counts` 의 44 판정은 계류 K 를 0 · 1 · 3 으로 바꿔 가며 세 정책을 모두 돌린 결과다. K = 0 이 섞여 있는 것이 의도다 — 계류가 없을 때 Batched 가 빈 `ResourceBarrier` 를 발급하지 않는다는 것도 계약이기 때문이다.
 
 ---
 

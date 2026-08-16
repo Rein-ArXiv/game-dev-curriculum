@@ -3,17 +3,25 @@
 // 이 타깃은 raylib을 링크하지 않는다. 레이아웃 구현의 Draw()는 별도 번역 단위에
 // 있고 여기서는 컴파일하지 않으므로, 그래픽 스택 없이 Update/CopyState와
 // 할당자·벤치마크 워크로드만 검증한다.
+//
+// 실행 단위는 아래 kTests 표가 정한다. 인자 없이 부르면 전부 돌고,
+// 그룹 이름 하나를 주면(`parts_core_tests allocator`) 그 그룹만 돈다. CMake가
+// 그룹마다 add_test 를 하나씩 만들어 두므로 ctest 쪽 이름으로도 같은 분할이 보인다.
 #include "alloc/arena_allocator.h"
 #include "alloc/malloc_allocator.h"
 #include "alloc/pool_allocator.h"
 #include "alloc/slab_allocator.h"
 #include "measure/container_benchmark.h"
 #include "measure/event_benchmark.h"
+#include "measure/frame_timer.h"
 #include "sim/isimulation.h"
+#include "ui/hud_layout.h"
+#include "ui/toggles.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -22,9 +30,13 @@
 namespace {
 
 int failures = 0;
+// 지금까지 평가한 단언 수. 그룹마다 이 수가 다르므로, 실행 결과 한 줄이
+// "어느 step 을 돌렸는가" 를 그대로 말해 준다.
+long long checks = 0;
 
 #define CHECK(expr)                                                           \
     do {                                                                      \
+        ++checks;                                                             \
         if (!(expr)) {                                                        \
             std::cerr << "CHECK failed: " #expr << " (" << __FILE__ << ':'  \
                       << __LINE__ << ")\n";                                   \
@@ -35,6 +47,7 @@ int failures = 0;
 // 조합 순회 테스트용. 어떤 조합에서 깨졌는지 라벨을 함께 찍는다.
 #define CHECK_AT(expr, label)                                                 \
     do {                                                                      \
+        ++checks;                                                             \
         if (!(expr)) {                                                        \
             std::cerr << "CHECK failed: " #expr << " [" << (label) << "] ("  \
                       << __FILE__ << ':' << __LINE__ << ")\n";                \
@@ -54,6 +67,95 @@ bool NearStates(const std::vector<float>& a,
         if (std::fabs(a[i] - b[i]) > epsilon) return false;
     }
     return true;
+}
+
+// ── 측정 인프라 ───────────────────────────────────────────────────────
+
+// FrameTimer 의 슬라이딩 윈도우 계약. update/draw 를 나눠 재는 것과, 그 값이
+// 600칸 링 버퍼에 어떻게 쌓이는지가 이 클래스가 하는 일 전부다.
+// HUD 없이도 확인할 수 있는 순수 계산이라 여기서 고정한다.
+void TestFrameTimerWindow() {
+    ppl::FrameTimer timer;
+    CHECK(timer.Head() == 0);
+    CHECK(timer.Filled() == 0);
+    CHECK(timer.LastTotalMs() == 0.0f);
+
+    // steady_clock 은 뒤로 가지 않으므로 한 쌍의 Begin/End 는 음이 아닌 ms 를 남긴다.
+    timer.BeginUpdate();
+    timer.EndUpdate();
+    timer.BeginDraw();
+    timer.EndDraw();
+    CHECK(timer.LastUpdateMs() >= 0.0f);
+    CHECK(timer.LastDrawMs() >= 0.0f);
+    // total 은 두 구간의 합이다 — 어느 한쪽만 재거나 겹쳐 재면 이 등식이 깨진다.
+    CHECK(timer.LastTotalMs() == timer.LastUpdateMs() + timer.LastDrawMs());
+
+    // CommitFrame 은 현재 값을 head 자리에 쓰고 head 를 한 칸 민다.
+    const float committedUpdate = timer.LastUpdateMs();
+    const float committedDraw   = timer.LastDrawMs();
+    timer.CommitFrame();
+    CHECK(timer.Head() == 1);
+    CHECK(timer.Filled() == 1);
+    CHECK(timer.UpdateMs()[0] == committedUpdate);
+    CHECK(timer.DrawMs()[0] == committedDraw);
+
+    // 용량을 다 채우면 head 가 0으로 감기고 filled 는 kCapacity 에서 멈춘다.
+    // 이 포화가 없으면 그래프가 읽는 구간이 배열 밖으로 자란다.
+    constexpr std::size_t kCap = ppl::FrameTimer::kCapacity;
+    for (std::size_t i = 1; i < kCap; ++i) timer.CommitFrame();
+    CHECK(timer.Head() == 0);
+    CHECK(timer.Filled() == kCap);
+    timer.CommitFrame();
+    CHECK(timer.Head() == 1);
+    CHECK(timer.Filled() == kCap);
+}
+
+// 토글 축이 재구성을 요구하는지의 판정. main 루프가 프레임 끝에서 시뮬·벤치마크를
+// 다시 만들지 말지를 이 함수 하나로 정하므로, 어느 축이 어느 쪽인지가 계약이다.
+void TestToggleRestartRules() {
+    const ppl::Toggles base;
+    CHECK(base.entityPresetIdx == 1);
+    CHECK(base.EntityCount() == 10000);
+    CHECK(ppl::kEntityCountPresetCount == 3);
+    // 같은 값끼리는 재구성이 없다. 이게 깨지면 매 프레임 시뮬을 새로 만든다.
+    CHECK(!ppl::RequiresRestart(base, base));
+
+    // 데이터 구조를 다시 만들어야 하는 네 축.
+    ppl::Toggles entities = base;
+    entities.entityPresetIdx = 2;
+    CHECK(entities.EntityCount() == 100000);
+    CHECK(ppl::RequiresRestart(base, entities));
+    CHECK(ppl::RequiresRestart(entities, base));  // 판정은 방향에 무관하다
+
+    ppl::Toggles layout = base;
+    layout.layout = ppl::Layout::AoS;
+    CHECK(ppl::RequiresRestart(base, layout));
+
+    ppl::Toggles allocator = base;
+    allocator.allocator = ppl::Allocator::Pool;
+    CHECK(ppl::RequiresRestart(base, allocator));
+
+    ppl::Toggles container = base;
+    container.container = ppl::Container::StdList;
+    CHECK(ppl::RequiresRestart(base, container));
+
+    // 경로 선택만 바꾸는 두 축은 재구성 없이 다음 프레임부터 적용된다.
+    // 여기에 simd/branchless 가 끼면 토글할 때마다 화면이 깜박인다.
+    ppl::Toggles simd = base;
+    simd.simd = ppl::SimdWidth::AVX2;
+    CHECK(!ppl::RequiresRestart(base, simd));
+
+    ppl::Toggles branchless = base;
+    branchless.branchless = true;
+    CHECK(!ppl::RequiresRestart(base, branchless));
+
+    // 콤보박스가 보여 주는 라벨과 실제 엔티티 수가 어긋나면 측정이 거짓말을 한다.
+    CHECK(std::string(ppl::kEntityCountPresets[0].label) == "1k");
+    CHECK(ppl::kEntityCountPresets[0].count == 1000);
+    CHECK(std::string(ppl::kEntityCountPresets[1].label) == "10k");
+    CHECK(ppl::kEntityCountPresets[1].count == 10000);
+    CHECK(std::string(ppl::kEntityCountPresets[2].label) == "100k");
+    CHECK(ppl::kEntityCountPresets[2].count == 100000);
 }
 
 void TestAlignmentHelpers() {
@@ -373,31 +475,29 @@ void TestLayoutEquivalence() {
     }
 }
 
-void TestBranchAndSimdEquivalence() {
-    constexpr int kFrames = 240;
+// SIMD 폭 토글이 결과를 바꾸지 않는다는 것. 폭을 바꿔 ms 를 비교하려면
+// 세 폭이 *같은 계산* 이어야 하고, 그게 아니면 빨라진 게 아니라 덜 한 것이다.
+void TestSimdEquivalence() {
+    constexpr int   kFrames = 240;
+    constexpr float kDt     = 1.0f / 144.0f;
 
-    auto branched   = MakeAndInit(ppl::Layout::SoA);
-    auto predicated = MakeAndInit(ppl::Layout::SoA);
-    auto simd       = MakeAndInit(ppl::Layout::SoA);
+    auto scalar = MakeAndInit(ppl::Layout::SoA);
+    auto simd   = MakeAndInit(ppl::Layout::SoA);
 #if defined(PERF_LAB_AVX2)
     auto wide = MakeAndInit(ppl::Layout::SoA);
 #endif
 
     for (int i = 0; i < kFrames; ++i) {
-        constexpr float dt = 1.0f / 144.0f;
-        branched->Update(dt, ppl::SimdWidth::Scalar, false);
-        predicated->Update(dt, ppl::SimdWidth::Scalar, true);
-        simd->Update(dt, ppl::SimdWidth::SSE, true);
+        scalar->Update(kDt, ppl::SimdWidth::Scalar, false);
+        simd->Update(kDt, ppl::SimdWidth::SSE, true);
 #if defined(PERF_LAB_AVX2)
-        wide->Update(dt, ppl::SimdWidth::AVX2, true);
+        wide->Update(kDt, ppl::SimdWidth::AVX2, true);
 #endif
     }
 
-    std::vector<float> a, b, c;
-    branched->CopyState(a);
-    predicated->CopyState(b);
+    std::vector<float> a, c;
+    scalar->CopyState(a);
     simd->CopyState(c);
-    CHECK(NearStates(a, b));
     CHECK(NearStates(a, c, 1e-4f));
 #if defined(PERF_LAB_AVX2)
     // AVX2는 FMA로 pos += vel*dt 의 중간 반올림이 사라져 스칼라와 비트가 다르다.
@@ -409,6 +509,70 @@ void TestBranchAndSimdEquivalence() {
     // AVX2 토글이 실제로는 SSE/스칼라로 폴백하고 있다는 뜻이다.
     CHECK(!NearStates(a, d, 1e-6f));
 #endif
+
+    // AoS 는 SIMD 토글을 통째로 무시하고 언제나 scalar 경로를 돈다(stride 때문에
+    // 인트린식 이득이 없다). 그래서 세 폭의 결과가 *비트까지* 같아야 한다.
+    // 이 단언이 깨지면 AoS 에 조용히 SIMD 경로가 생겼거나 토글이 새고 있다는 뜻이다.
+    std::vector<float> aosState[ppl::kSimdCount];
+    const ppl::SimdWidth kWidths[] = {
+        ppl::SimdWidth::Scalar, ppl::SimdWidth::SSE, ppl::SimdWidth::AVX2};
+    for (int w = 0; w < ppl::kSimdCount; ++w) {
+        auto aos = MakeAndInit(ppl::Layout::AoS);
+        for (int i = 0; i < kFrames; ++i) aos->Update(kDt, kWidths[w], false);
+        aos->CopyState(aosState[w]);
+    }
+    CHECK(NearStates(aosState[0], aosState[1], 0.0f));
+    CHECK(NearStates(aosState[0], aosState[2], 0.0f));
+}
+
+// branchless 토글이 결과를 바꾸지 않는다는 것. predication 은 *같은 값* 을
+// 다른 명령으로 내는 변형이라, 결과가 달라지면 그것은 최적화가 아니라 버그다.
+void TestBranchlessEquivalence() {
+    constexpr int   kFrames = 240;
+    constexpr float kDt     = 1.0f / 144.0f;
+
+    auto branched   = MakeAndInit(ppl::Layout::SoA);
+    auto predicated = MakeAndInit(ppl::Layout::SoA);
+    for (int i = 0; i < kFrames; ++i) {
+        branched->Update(kDt, ppl::SimdWidth::Scalar, false);
+        predicated->Update(kDt, ppl::SimdWidth::Scalar, true);
+    }
+    std::vector<float> a, b;
+    branched->CopyState(a);
+    predicated->CopyState(b);
+    CHECK(NearStates(a, b));
+
+    // 세 레이아웃 모두에서 같은 성질이 성립해야 한다. clamp 는 범위 안에서
+    // 항등이므로 predication 이 무조건 clamp 를 걸어도 값이 달라지지 않는다.
+    for (int l = 0; l < ppl::kLayoutCount; ++l) {
+        const auto layout = static_cast<ppl::Layout>(l);
+        const char* label = ppl::LayoutName(layout);
+
+        auto off = MakeAndInit(layout);
+        auto on  = MakeAndInit(layout);
+        for (int i = 0; i < kFrames; ++i) {
+            off->Update(kDt, ppl::SimdWidth::Scalar, false);
+            on->Update(kDt, ppl::SimdWidth::Scalar, true);
+        }
+        std::vector<float> scalarOff, scalarOn;
+        off->CopyState(scalarOff);
+        on->CopyState(scalarOn);
+        CHECK_AT(NearStates(scalarOff, scalarOn), label);
+
+        // SIMD 경로는 이미 마스크 select 라 이 토글에 영향받지 않는다.
+        // "체크박스를 켜도 SSE 그래프는 평평하다" 는 관측의 근거가 이 등식이다.
+        // 비트까지 같아야 한다 — 같은 함수가 같은 인자로 도는 것이기 때문이다.
+        auto simdOff = MakeAndInit(layout);
+        auto simdOn  = MakeAndInit(layout);
+        for (int i = 0; i < kFrames; ++i) {
+            simdOff->Update(kDt, ppl::SimdWidth::SSE, false);
+            simdOn->Update(kDt, ppl::SimdWidth::SSE, true);
+        }
+        std::vector<float> sseOff, sseOn;
+        simdOff->CopyState(sseOff);
+        simdOn->CopyState(sseOn);
+        CHECK_AT(NearStates(sseOff, sseOn, 0.0f), label);
+    }
 }
 
 // 절대 기준 불변식. 구현 간 동등성만으로는 워크로드 규칙 자체를 지워도 통과하므로,
@@ -511,22 +675,168 @@ void TestBoundaryInvariants() {
     }
 }
 
+// HUD 토글 패널의 기하. raygui 위젯 자체는 창·입력 컨텍스트가 있어야 돌아가서
+// headless 로 클릭을 재현할 수 없지만, "펼친 목록이 아래 행 위젯을 덮는다" 는
+// 순수 계산이라 여기서 고정한다. 이 겹침이 hud.cpp 가 GuiLock + 지연 그리기를
+// 하는 이유 전부다. 레이아웃을 바꿔 이 CHECK 가 깨진다면 그 잠금·지연이 여전히
+// 필요한지 다시 판단하고 이 테스트를 함께 고쳐야 한다.
+void TestTogglePanelGeometry() {
+    using ppl::DropdownOpenRect;
+    using ppl::PanelColumn2X;
+    using ppl::PanelDrawsWidget;
+    using ppl::PanelFieldRect;
+    using ppl::PanelRowY;
+    using ppl::RectsOverlap;
+    using ppl::UiRect;
+
+    constexpr int x = 320;
+    constexpr int y = 700;
+
+    // 행 간격 24 > 위젯 높이 22. *접힌* 위젯끼리는 겹치지 않으므로 한 번의
+    // 클릭이 콤보를 둘 동시에 열 수 없다. hud.cpp 의 두 번째 패스가
+    // "열린 콤보는 최대 하나" 를 가정하는 근거다.
+    CHECK(ppl::kPanelRowH == 22);
+    CHECK(PanelRowY(y, 1) - PanelRowY(y, 0) == 24);
+    CHECK(!RectsOverlap(PanelFieldRect(x, y, 0), PanelFieldRect(x, y, 1)));
+
+    const UiRect entities  = PanelFieldRect(x, y, 0);
+    const UiRect allocator = PanelFieldRect(x, y, 1);
+    const UiRect layout    = PanelFieldRect(x, y, 2);
+
+    // 1열 세 콤보는 x·폭이 완전히 같다. 펼치면 세로로만 겹친다.
+    CHECK(entities.x == allocator.x && entities.x == layout.x);
+    CHECK(entities.w == allocator.w && entities.w == layout.w);
+
+    // raygui 4.0: boundsOpen.height = (itemCount+1)*(height + DROPDOWN_ITEMS_SPACING).
+    // entities 는 "1k;10k;100k" 세 항목 → 4 * (22+2) = 96.
+    const UiRect entitiesOpen = DropdownOpenRect(entities, 3);
+    CHECK(entitiesOpen.h == 96);
+
+    // 펼친 entities 목록이 allocator·layout 필드 자리를 덮는다(보고된 결함).
+    CHECK(RectsOverlap(entitiesOpen, allocator));
+    CHECK(RectsOverlap(entitiesOpen, layout));
+    // allocator 는 네 항목이라 5*24=120, 역시 layout 을 덮는다.
+    CHECK(DropdownOpenRect(allocator, 4).h == 120);
+    CHECK(RectsOverlap(DropdownOpenRect(allocator, 4), layout));
+
+    // 2열은 가로로 떨어져 있어 1열의 펼친 목록과 겹치지 않는다.
+    const UiRect container = PanelFieldRect(PanelColumn2X(x), y, 0);
+    CHECK(!RectsOverlap(entitiesOpen, container));
+    // 2열 안에서는 다시 겹친다(container 위에 simd).
+    CHECK(RectsOverlap(DropdownOpenRect(container, 3),
+                       PanelFieldRect(PanelColumn2X(x), y, 1)));
+
+    // 두 패스 그리기: 모든 위젯이 정확히 한 번 그려지고, 열린 콤보만 두 번째
+    // (= 마지막) 패스에 그려진다.
+    CHECK(PanelDrawsWidget(/*widgetOpen=*/false, /*openPass=*/false));
+    CHECK(!PanelDrawsWidget(/*widgetOpen=*/false, /*openPass=*/true));
+    CHECK(!PanelDrawsWidget(/*widgetOpen=*/true, /*openPass=*/false));
+    CHECK(PanelDrawsWidget(/*widgetOpen=*/true, /*openPass=*/true));
+}
+
+// 그래프 패널이 세 라인을 한 시간축에 겹쳐 그리려면 네 채널이 *같은 인덱스* 에서
+// 같은 프레임을 가리켜야 한다. alloc/container 는 벤치마크가 재서 넘겨 주는
+// 외부 측정값이라 FrameTimer 는 그것을 밀어 넣기만 한다.
+void TestFrameTimerChannels() {
+    ppl::FrameTimer timer;
+    timer.CommitFrame(0.25f, 1.5f);
+    CHECK(timer.LastAllocMs() == 0.25f);
+    CHECK(timer.LastContainerMs() == 1.5f);
+    CHECK(timer.AllocMs()[0] == 0.25f);
+    CHECK(timer.ContainerMs()[0] == 1.5f);
+
+    // 인자를 생략한 호출은 두 채널을 0으로 되돌린다 — 워크로드가 없는 프레임이
+    // 직전 값을 그대로 물려받아 그래프에 유령 라인을 남기면 안 된다.
+    timer.CommitFrame();
+    CHECK(timer.LastAllocMs() == 0.0f);
+    CHECK(timer.LastContainerMs() == 0.0f);
+    CHECK(timer.AllocMs()[1] == 0.0f);
+    CHECK(timer.ContainerMs()[1] == 0.0f);
+    CHECK(timer.Head() == 2);
+
+    // 링을 한 바퀴 넘겨도 네 채널이 같은 head 로 함께 밀린다.
+    constexpr std::size_t kCap = ppl::FrameTimer::kCapacity;
+    ppl::FrameTimer rolled;
+    for (std::size_t i = 0; i < kCap + 7; ++i) {
+        rolled.CommitFrame(static_cast<float>(i), static_cast<float>(i) * 2.0f);
+    }
+    CHECK(rolled.Filled() == kCap);
+    CHECK(rolled.Head() == 7);
+
+    int misaligned = 0;
+    for (std::size_t i = 0; i < kCap; ++i) {
+        if (rolled.ContainerMs()[i] != rolled.AllocMs()[i] * 2.0f) ++misaligned;
+    }
+    CHECK(misaligned == 0);
+
+    // head 는 *다음에 쓸* 자리다. 그래서 가장 최근 샘플은 head-1, 가장 오래된
+    // 샘플은 head 에 있다. 그래프가 왼쪽부터 그리는 순서가 이 규칙에서 나온다.
+    CHECK(rolled.AllocMs()[6] == static_cast<float>(kCap + 6));
+    CHECK(rolled.AllocMs()[7] == 7.0f);
+}
+
+// ── 실행 단위 ────────────────────────────────────────────────────────
+//
+// group 은 그 검사를 *추가한* step 을 가리킨다. CMake 가 group 마다 add_test 를
+// 하나씩 등록하므로, ctest 이름 하나가 문서 한 편에 대응한다.
+struct TestCase {
+    const char* group;
+    const char* name;
+    void (*run)();
+};
+
+const TestCase kTests[] = {
+    {"skeleton",  "FrameTimerWindow",       TestFrameTimerWindow},
+    {"toggles",   "ToggleRestartRules",     TestToggleRestartRules},
+    {"toggles",   "TogglePanelGeometry",    TestTogglePanelGeometry},
+    {"layout",    "LayoutEquivalence",      TestLayoutEquivalence},
+    {"layout",    "BoundaryInvariants",     TestBoundaryInvariants},
+    {"simd",      "SimdEquivalence",        TestSimdEquivalence},
+    {"branch",    "BranchlessEquivalence",  TestBranchlessEquivalence},
+    {"allocator", "AlignmentHelpers",       TestAlignmentHelpers},
+    {"allocator", "MallocAndArena",         TestMallocAndArena},
+    {"allocator", "PoolAndSlab",            TestPoolAndSlab},
+    {"allocator", "PoolExhaustion",         TestPoolExhaustion},
+    {"allocator", "EventBenchmarkContract", TestEventBenchmarkContract},
+    {"container", "ContainerEquivalence",   TestContainerEquivalence},
+    {"graph",     "FrameTimerChannels",     TestFrameTimerChannels},
+};
+constexpr int kTestCount = static_cast<int>(sizeof(kTests) / sizeof(kTests[0]));
+
 }  // namespace
 
-int main() {
-    TestAlignmentHelpers();
-    TestMallocAndArena();
-    TestPoolAndSlab();
-    TestPoolExhaustion();
-    TestContainerEquivalence();
-    TestEventBenchmarkContract();
-    TestLayoutEquivalence();
-    TestBranchAndSimdEquivalence();
-    TestBoundaryInvariants();
-    if (failures != 0) {
-        std::cerr << failures << " parts core test(s) failed\n";
-        return 1;
+int main(int argc, char** argv) {
+    const char* filter = (argc > 1) ? argv[1] : nullptr;
+    const char* label  = filter ? filter : "all";
+
+    std::cout << "parts_core_tests: group `" << label << "`\n";
+
+    int selected = 0;
+    for (const TestCase& test : kTests) {
+        if (filter && std::strcmp(filter, test.group) != 0) continue;
+        ++selected;
+
+        const long long before        = checks;
+        const int       beforeFailure = failures;
+        test.run();
+
+        std::cout << "  " << test.group << '/' << test.name << " ... "
+                  << (checks - before) << " check(s) "
+                  << (failures == beforeFailure ? "ok" : "FAILED") << '\n';
     }
-    std::cout << "parts core tests passed\n";
-    return 0;
+
+    if (selected == 0) {
+        std::cerr << "unknown group `" << label << "`. groups:";
+        for (int i = 0; i < kTestCount; ++i) {
+            if (i == 0 || std::strcmp(kTests[i].group, kTests[i - 1].group) != 0) {
+                std::cerr << ' ' << kTests[i].group;
+            }
+        }
+        std::cerr << '\n';
+        return 2;
+    }
+
+    std::cout << label << ": " << selected << " test(s), " << checks
+              << " check(s), " << failures << " failure(s)\n";
+    return failures == 0 ? 0 : 1;
 }

@@ -126,21 +126,79 @@ API transaction과 message broker publish를 순서대로 호출하면 둘 사�
 
 ## 실행 확인
 
-result 계약은 contract test가 실행한다.
+result 계약은 contract test가 실행한다. 검사 이름을 인자로 주면 이 문서가 추가한 세 개만 돈다.
 
 ```powershell
 dotnet run `
   --project projects/mini/live_service_lab/tests/LiveService.Tests/LiveService.Tests.csproj `
-  -c Release
+  -c Release -- step04
 ```
 
 ```text
-live_service_tests: all checks passed
+live_service_tests: filter=step04 -> 3 check(s)
+  step04 IdempotentResult    ok
+  step04 PayloadConflict     ok
+  step04 TicketLifecycle     ok
+live_service_tests: step04 3/3 checks passed
 ```
 
-이 실행은 같은 요청의 두 번째 제출이 `Duplicate=true` receipt를 받는 것, 다른 server ID의 조회가
-거부되는 것, score map이 없는 요청이 거부되는 것, 저장된 result 수가 1인 것, 완료된 match의 ticket이
-`Completed`가 되어 같은 플레이어가 새 ticket을 받는 것을 확인한다.
+`IdempotentResult`가 재시도 경로를 잡는다. 같은 요청을 두 번 보내되 두 번째는 시각을 1분 뒤로
+옮긴다. receipt의 `RecordedAt`이 처음 기록한 값 그대로여야 재시도가 새로 기록한 것이 아니라는
+뜻이다.
+
+<!-- snippet: tests/LiveService.Tests/Program.cs@idempotent-retry -->
+```csharp
+ResultReceipt receipt = plane.RecordResult(
+    new MatchResultRequest("res-1", firstMatch.MatchId!,
+        new Dictionary<string, int> { ["res-a"] = 1, ["res-b"] = 0 }),
+    "result-owner", t0.AddMinutes(1));
+Require(!receipt.Duplicate, name + ": 첫 제출은 duplicate가 아니다");
+ResultReceipt again = plane.RecordResult(
+    new MatchResultRequest("res-1", firstMatch.MatchId!,
+        new Dictionary<string, int> { ["res-a"] = 1, ["res-b"] = 0 }),
+    "result-owner", t0.AddMinutes(2));
+Require(again.Duplicate && again.ResultId == receipt.ResultId &&
+    again.RecordedAt == receipt.RecordedAt,
+    name + ": 재시도는 처음 기록한 receipt를 그대로 돌려준다");
+```
+
+두 번째 호출은 같은 인스턴스를 다시 넘기지 않고 내용이 같은 새 인스턴스를 만들어 넘긴다.
+같은 객체를 재사용하면 fingerprint 비교가 항등식이 되어 정렬 규칙을 지워도 통과한다. 같은
+검사가 뒤이어 null·빈 score map, 없는 match, allocation과 다른 player 집합, 남의 match,
+이중 완료를 예외 종류까지 지정해 거부하는지 확인한다.
+
+`PayloadConflict`는 fingerprint의 두 방향을 함께 본다. 삽입 순서만 다른 payload는 중복으로
+통과해야 하고, 값이 다른 payload는 충돌이어야 한다.
+
+<!-- snippet: tests/LiveService.Tests/Program.cs@payload-fingerprint -->
+```csharp
+ResultReceipt reordered;
+try
+{
+    reordered = plane.RecordResult(
+        new MatchResultRequest("conf-result", firstMatch.MatchId!,
+            new Dictionary<string, int> { ["conf-b"] = 0, ["conf-a"] = 1 }),
+        "conflict-1", t0.AddSeconds(5));
+}
+catch (InvalidOperationException error)
+{
+    throw new InvalidOperationException(
+        name + ": canonical fingerprint가 score map 삽입 순서를 무시해야 한다", error);
+}
+Require(reordered.Duplicate,
+    name + ": 순서만 다른 같은 payload는 duplicate로 처리된다");
+
+Expect<InvalidOperationException>(
+    () => plane.RecordResult(
+        new MatchResultRequest("conf-result", firstMatch.MatchId!,
+            new Dictionary<string, int> { ["conf-a"] = 0, ["conf-b"] = 1 }),
+        "conflict-1", t0.AddSeconds(6)),
+    name + ": 같은 result ID에 다른 score는 충돌이다");
+```
+
+정렬을 지우면 앞의 `try`가 잡는 예외로, fingerprint 비교 자체를 지우면 뒤의 `Expect`로
+드러난다. `TicketLifecycle`은 완료 전이가 ticket까지 내려가는지 본다. 결과 기록 뒤 같은
+플레이어가 새 ticket을 받고, 그 새 ticket이 완료된 match를 재사용하지 않는다.
 
 ---
 

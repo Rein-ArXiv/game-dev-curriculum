@@ -48,6 +48,7 @@ primary     -> NUMBER | "true" | "false" | IDENT
 
 파서는 현재 허용하는 최소 우선순위를 받고, 그보다 강한 중위 연산자를 계속 소비한다.
 
+<!-- snippet: src/language.hpp@parse-precedence mode=exact -->
 ```cpp
 // language.hpp: Compiler::ParsePrecedence 전문
 void ParsePrecedence(Precedence minimum) {
@@ -77,8 +78,11 @@ void ParsePrecedence(Precedence minimum) {
 
 이름은 프로그램의 문자열 테이블에 한 번만 보관하고 명령에는 정수 인덱스를 넣는다.
 
+<!-- snippet: src/language.hpp#VariableDeclaration -->
 ```cpp
+// language.hpp: Compiler::VariableDeclaration 중 이름 인턴 부분 발췌
 Expression();
+// ...
 Emit(OpCode::StoreGlobal, InternName(name.text), name.location);
 Emit(OpCode::Pop, 0, name.location);
 ```
@@ -95,6 +99,7 @@ Emit(OpCode::Pop, 0, name.location);
 분기 대상을 알기 전에 점프 명령을 방출해야 한다. 컴파일러는 임시 대상 `-1`을 기록하고
 블록의 끝을 알게 된 시점에 절대 명령 인덱스로 고친다.
 
+<!-- snippet: src/language.hpp#IfStatement -->
 ```cpp
 // language.hpp: Compiler::IfStatement 중 조건 뒤 부분 발췌
 const int32_t falseJump = Emit(OpCode::JumpIfFalse, -1, Previous().location);
@@ -115,9 +120,10 @@ PatchJump(endJump);
 
 테스트는 우선순위와 괄호가 다른 결과를 내는지 확인한다.
 
+<!-- snippet: src/tests.cpp#TestPrecedenceAndVariables -->
 ```cpp
-auto execution =
-    Execute("let a = 2 + 3 * 4; let b = (2 + 3) * 4;");
+auto execution = Execute("let a = 2 + 3 * 4; let b = (2 + 3) * 4;");
+// ...
 CHECK(Global(execution, "a") == 14.0);
 CHECK(Global(execution, "b") == 20.0);
 ```
@@ -126,28 +132,64 @@ CHECK(Global(execution, "b") == 20.0);
 `ParsePrecedence(precedence + 1)`을 `ParsePrecedence(precedence)`로 바꿔 파서를 우결합으로
 만들어도 통과한다. 결합 방향을 고정하려면 비결합 연산자를 써야 한다.
 
+<!-- snippet: src/tests.cpp#TestAssociativityAndUnaryPrecedence -->
 ```cpp
 auto execution = Execute(
     "let a = 8 - 3 - 2;"     // 좌결합 3, 우결합이면 7
     "let b = 16 / 4 / 2;"    // 좌결합 2, 우결합이면 8
     "let c = 1 < 2 == 1;"    // 비교가 상등보다 강하다
     "let d = -2 - 3;");      // 단항 마이너스의 우선순위
+// ...
 CHECK(Global(execution, "a") == 3.0);
 CHECK(Global(execution, "b") == 2.0);
 CHECK(Global(execution, "c") == 1.0);
 CHECK(Global(execution, "d") == -5.0);
 ```
 
-팩토리얼 프로그램은 선언, 비교, 반복, 할당, 조건 분기를 한 번에 통과한다. 컴파일 오류에는
-`Program`이 없어야 하며 진단 위치가 소스 범위 안이어야 한다.
+팩토리얼 프로그램은 선언, 비교, 반복, 할당, 조건 분기를 한 번에 통과한다. 백패치가
+어긋나면 반복이 끝나지 않거나 `else` 경로가 실행되어 값이 121이 아니게 된다.
+
+<!-- snippet: src/tests.cpp#TestControlFlow -->
+```cpp
+auto execution = Execute(
+    "let n = 5; let fact = 1;"
+    "while (n > 0) { fact = fact * n; n = n - 1; }"
+    "if (fact == 120) { fact = fact + 1; } else { fact = 0; }");
+CHECK(execution.run.ok);
+CHECK(Global(execution, "fact") == 121.0);
+```
+
+컴파일 오류에는 `Program`이 없어야 하며 진단 위치가 소스 범위 안이어야 한다. 실행 산출물과
+오류 산출물이 동시에 나오지 않는다는 불변식이 여기서 확인된다.
+
+<!-- snippet: src/tests.cpp#TestParserRejectsIncompleteExpression -->
+```cpp
+const auto syntax = lab::lang::Compiler{}.Compile("let x = 1 + ;");
+CHECK(!syntax.program.has_value());
+CHECK(!syntax.diagnostics.empty());
+CHECK(syntax.diagnostics.front().location.line == 1);
+```
+
+네 사례는 등록표에서 `step02` 라벨을 달고 있고, 같은 라벨의 ctest 타깃이 그것만 부른다.
 
 ```powershell
-.\build\Release\languages_tests.exe
+ctest --test-dir build -C Release -R languages_step02 --output-on-failure
+.\build\Release\languages_tests.exe step02
 ```
 
 ```text
-languages_tests: all checks passed
+1/1 Test #3: languages_step02_precedence_compiler ...   Passed
+100% tests passed out of 1
+[step02] precedence_and_variables ok
+[step02] associativity_and_unary_precedence ok
+[step02] control_flow ok
+[step02] parser_rejects_incomplete_expression ok
+languages_tests [step02]: all checks passed (4 case(s), 15 check(s))
 ```
+
+출력의 네 이름이 이 절의 네 주장 — 우선순위, 결합 방향, 백패치된 제어 흐름, 구문 오류
+거부 — 과 하나씩 짝을 이룬다. 렉서 계약은 이 타깃에 없다. 어휘 계약은 자기 라벨로
+따로 돌아가므로, 여기서 실패가 나면 원인은 파서·컴파일러 쪽이다.
 
 ---
 

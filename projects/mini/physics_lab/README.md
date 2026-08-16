@@ -87,20 +87,27 @@ physics_lab/
     measure/
       frame_timer.{h,cpp}
   tests/
-    physics_core_tests.cpp      core 헤더 단위 테스트 (ctest: physics_core_tests)
+    step_cases.h                {step, 이름, 함수} 표 + argv[1] 케이스 필터 하네스
+    physics_chrome_tests.cpp    ComputeLayout 의 분할 규약 (step01)
+    physics_core_tests.cpp      core 헤더 단위 테스트 (step02 / step04 / step06 / step07)
+    physics_forces_tests.cpp    force 항·종단 속도·에너지 소산 — forces_scene.cpp 를
+                                 그대로 컴파일 (step03)
     physics_collision_tests.cpp SAT / GJK+EPA 테스트 — narrow_phase_scene.cpp 를
-                                 그대로 컴파일 (ctest: physics_collision_tests)
+                                 그대로 컴파일 (step05)
     physics_broad_tests.cpp     brute / SAP / Spatial Hash 의 overlap 쌍 집합 대조
-                                 (ctest: physics_broad_tests)
-    physics_response_tests.cpp  접촉 수집 / SI / 위치 보정 (ctest: physics_response_tests)
-    physics_constraints_tests.cpp chain solve · Baumgarte drift
-                                 (ctest: physics_constraints_tests)
-    physics_determinism_tests.cpp 같은 seed 반복 재현성 (ctest: physics_determinism_tests)
+                                 (step04)
+    physics_response_tests.cpp  접촉 수집 / SI / 위치 보정 (step06)
+    physics_constraints_tests.cpp chain solve · Baumgarte drift (step07)
+    physics_determinism_tests.cpp 같은 seed 반복 재현성 (step08)
 ```
 
 Scene 테스트 타깃은 모두 *제품 TU 를 그대로 컴파일* 한다. 테스트 전용 사본은 두지
 않으며, GUI 진입점 (`DrawWorld` / `DrawPanel`) 을 부르지 않으므로 창 없이 돈다.
 캔버스 좌표처럼 GUI 가 넘겨주던 값은 각 Scene 의 `SetCanvas` 같은 세터로 주입한다.
+
+각 실행 파일은 `argv[1]` 로 케이스 필터를 받는다 (`step_cases.h`). 인자가 없으면
+표 전체를 돌고, `step04` 나 `aabb_overlap` 을 주면 그것만 돈다. `--list` 는 표를
+찍는다. 필터가 아무것도 고르지 못하면 조용히 통과하지 않고 exit 2 로 실패한다.
 
 ## 디렉토리 구조 (확장 / 리팩터링 목표)
 
@@ -139,18 +146,23 @@ ctest --test-dir build -C Release --output-on-failure
 ```
 
 특정 타깃만 돌릴 때는 `ctest --test-dir build -C Release -R physics_broad_tests` 처럼
-`-R` 로 이름을 건다.
+`-R` 로 이름을 건다. step 단위로 돌릴 때도 같은 방식이다 —
+`ctest --test-dir build -C Release -R step04` 는 그 step 이 추가한 검사만 돌린다.
 
-`ctest` 는 여섯 개를 돌린다 — 기대 출력은 `100% tests passed out of 6` (CMake 4.4 기준).
+`ctest` 는 19 개를 돌린다 — 기대 출력은 `100% tests passed out of 19` (CMake 4.4 기준).
+등록 이름이 두 층이다. 실행 파일 하나를 통째로 도는 이름 8 개와, 그 실행 파일들을
+step 단위로 자른 이름 11 개.
 
-| 타깃 | 검사 대상 |
-|---|---|
-| `physics_core_tests` | 적분기 오차 차수·에너지 거동, restitution target 리터럴, 누적 impulse 의 λ ≥ 0 클램프, AABB, 거리 projection |
-| `physics_collision_tests` | SAT / GJK+EPA 의 hit·miss, 해석적 침투 깊이 (0.5 / 0.75 / 1+√2), 법선 부호 규약, 포함 배치에서 두 구현의 깊이 일치, `normal` 로 `depth` 만큼 밀면 분리되는지, 무작위 100 배치 대조 |
-| `physics_broad_tests` | SAP / Spatial Hash 가 낸 overlap **쌍 집합** 이 brute 와 같은지 — 경계 접촉·음수 셀·`cellSize < bodyHalf`·무작위 50 배치 |
-| `physics_response_tests` | 접촉 수집의 깊이·법선, 위치 보정량 `(depth - slop) * factor`, SI 수렴, iteration 증가 시 침투 단조 감소 |
-| `physics_constraints_tests` | chain 구성, PBD iteration 이 stiffness 로 작동하는지, Baumgarte 가 SI 의 position drift 를 줄이는지 |
-| `physics_determinism_tests` | 같은 seed 600 스텝 두 번이 bit-exact 인지, contact 순서를 섞으면 갈라지는지, 900 스텝 뒤 캔버스 안에 가라앉는지 |
+| 타깃 | 검사 대상 | step 이름 |
+|---|---|---|
+| `physics_chrome_tests` | `ComputeLayout` 의 네 사각형 분할 규약 (빈틈·겹침 없음), 실제 창 1280×720 / 패널 280 의 좌표 리터럴, 퇴화 패널 폭 | `step01.layout` |
+| `physics_core_tests` | 적분기 오차 차수·에너지 거동, restitution target 리터럴, 누적 impulse 의 λ ≥ 0 클램프, AABB, 거리 projection | `step02.integrators` · `step04.aabb_overlap` · `step06.contact_impulse` · `step07.distance_projection` |
+| `physics_forces_tests` | 중력·스프링·선형/2 차 drag 의 크기와 부호, 두 drag 의 종단 속도 (200 / 316.23), 보존력만 있을 때 총 에너지의 평탄성과 drag 의 단조 감소 | `step03.forces` |
+| `physics_collision_tests` | SAT / GJK+EPA 의 hit·miss, 해석적 침투 깊이 (0.5 / 0.75 / 1+√2), 법선 부호 규약, 포함 배치에서 두 구현의 깊이 일치, `normal` 로 `depth` 만큼 밀면 분리되는지, 무작위 100 배치 대조 | `step05.narrow_phase` |
+| `physics_broad_tests` | SAP / Spatial Hash 가 낸 overlap **쌍 집합** 이 brute 와 같은지 — 경계 접촉·음수 셀·`cellSize < bodyHalf`·무작위 50 배치·퇴화 배치 | `step04.broad_phase` |
+| `physics_response_tests` | 접촉 수집의 깊이·법선, 위치 보정량 `(depth - slop) * factor`, SI 수렴, iteration 증가 시 침투 단조 감소 | `step06.response` |
+| `physics_constraints_tests` | chain 구성, PBD iteration 이 stiffness 로 작동하는지, Baumgarte 가 SI 의 position drift 를 줄이는지 | `step07.constraints` |
+| `physics_determinism_tests` | 같은 seed 600 스텝 두 번이 bit-exact 인지, contact 순서를 섞으면 갈라지는지, 900 스텝 뒤 캔버스 안에 가라앉는지, Response Scene 과 같은 솔버인지 | `step08.determinism` |
 
 8개 Scene (Welcome / Integrators / Forces / BroadPhase / NarrowPhase / Response / Constraints / Measure) 이 탭으로 전환된다. 좌측은 캔버스, 우측 280 px 패널이 토글 / 슬라이더 / 상태 라벨을 노출. 하단 24 px 푸터에 ms/fps 표시.
 

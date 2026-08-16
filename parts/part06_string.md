@@ -15,8 +15,6 @@
 5. [COW의 부상과 몰락](#5-cow의-부상과-몰락)
 6. [std::string_view: 소유권 없는 문자열](#6-stdstring_view-소유권-없는-문자열)
 7. [Length-prefix 실제 사례: BSTR](#7-length-prefix-실제-사례-bstr)
-8. [Windows 문자열 할당](#8-windows-문자열-할당)
-9. [Windows 문자열 RAII 래퍼](#9-windows-문자열-raii-래퍼)
 
 
 ---
@@ -856,303 +854,65 @@ public:
 
 ## 7. Length-prefix 실제 사례: BSTR
 
-지금까지 length-prefix가 이론적으로 어떤 이점이 있는지 살펴봤다. Windows의 COM(Component Object Model)에는 이를 실제로 구현한 표준 타입이 있다. BSTR이다.
+앞에서 length-prefix 표현이 이론적으로 무엇을 사고파는지 살펴봤다. 이 표현을 실제로 채택한 타입이 있다. Windows COM의 BSTR이다. 여기서 볼 것은 API 사용법이 아니라, **길이를 어디에 두는가라는 선택이 자료구조의 나머지를 어떻게 규정하는가**다.
 
-### 왜 BSTR인가
+### 길이를 버퍼 앞에 둔다
 
-C 스타일 문자열의 근본적 문제와 BSTR의 해결책을 비교하면 다음과 같다.
+BSTR은 `wchar_t*`이고, 포인터는 데이터의 첫 문자를 가리킨다. 길이는 그 *앞* 에 있다.
 
-| 문제 | C 문자열 | BSTR |
+| 오프셋 | 크기 | 내용 |
+|:------:|:----:|------|
+| -4 | 4바이트 | 바이트 길이 (종료 null 제외) |
+| 0 | 가변 | UTF-16 데이터 |
+| 끝 | 2바이트 | 종료 null |
+
+이 배치는 세 가지를 동시에 만족시킨다.
+
+```cpp
+UINT bytes = *((UINT*)bstr - 1);   // 길이 조회는 포인터 산술 한 번
+```
+
+- **길이 조회가 $O(1)$이다.** 종료 null을 찾아 훑을 필요가 없다.
+- **중간에 `U+0000`이 들어가도 된다.** 길이가 별도로 저장되므로 바이너리 데이터를 그대로 담을 수 있다.
+- **종료 null도 함께 둔다.** 그래서 길이를 모르는 기존 `wchar_t*` 코드에 그대로 넘길 수 있다.
+
+세 번째가 이 설계의 실용적 핵심이다. 길이 접두만 두고 종료 null을 버렸다면 기존 C 문자열 API와 섞어 쓸 수 없었다. 두 표현의 비용을 모두 내고 두 표현의 호환성을 모두 사는 선택이다.
+
+| 항목 | null 종료 문자열 | BSTR |
 |------|----------|------|
-| 길이 확인 | $O(n)$ - null 탐색 | $O(1)$ - 앞 4바이트 |
-| null 포함 | 불가능 | 가능 (바이너리 안전) |
-| 크기 정보 | 없음 | 앞에 저장됨 |
-| 언어 중립 | C/C++ 전용 | VB, JS, Python 등 연동 |
+| 길이 확인 | $O(n)$ 탐색 | $O(1)$ 필드 조회 |
+| 중간 null | 불가능 | 가능 |
+| 종료 null | 있음 | 있음 |
+| 고정 오버헤드 | 2바이트 | 6바이트 |
 
-COM은 언어 중립적 바이너리 인터페이스를 목표로 했다. Visual Basic, JavaScript, Python 등 다양한 언어가 COM 객체를 사용하는데, 각 언어의 문자열 표현이 다르다. BSTR은 이 문제를 해결한다.
+### 오버헤드는 짧은 문자열에서 지배적이다
 
-### 메모리 레이아웃
+길이 필드 4바이트와 종료 null 2바이트를 합쳐 문자열 하나당 6바이트가 고정으로 붙는다. $n$문자(UTF-16 코드 단위 기준) 문자열의 오버헤드 비율은 다음과 같다.
 
-```cpp
-BSTR bstr = SysAllocString(L"Hello");
-```
+$$\text{overhead} = \frac{6}{2n + 6}$$
 
-| 오프셋 | 크기 | 내용 | 값 (예시) |
-|:------:|:----:|------|-----------|
-| -4 | 4 bytes | 바이트 길이 (null 제외) | 10 (5문자 × 2바이트) |
-| 0 | 가변 | 문자열 데이터 (UTF-16LE) | H e l l o |
-| +10 | 2 bytes | null terminator | \0\0 |
+| 문자 수 | 데이터 | 총 크기 | 오버헤드 |
+|---:|---:|---:|---:|
+| 5 | 10바이트 | 16바이트 | 37.5% |
+| 20 | 40바이트 | 46바이트 | 13.0% |
+| 100 | 200바이트 | 206바이트 | 2.9% |
 
-핵심은 `BSTR` 포인터는 문자열 시작을 가리키고, 길이는 **포인터 - 4** 위치에 있다는 것이다.
+짧은 문자열이 많은 워크로드에서 이 비율은 무시할 수 없다. 그런데 이 표현에는 그 비용을 줄일 방법이 없다. 길이 필드가 데이터와 같은 할당 블록 안에 있어야 하므로 **짧은 문자열이라고 해서 할당을 생략할 수 없다.** 짧은 값을 객체 안에 인라인으로 담는 최적화가 원리적으로 불가능한 표현이다.
 
-```cpp
-BSTR bstr = SysAllocString(L"Hello");
+### 왜 `std::string`은 이 배치를 쓰지 않는가
 
-// 길이 접근 (내부 동작)
-UINT len = *((UINT*)bstr - 1);  // 10 (바이트 단위)
+`std::string`도 길이를 저장한다. 다만 **버퍼 앞이 아니라 객체 안에** 둔다. 같은 정보를 다른 곳에 두는 이 차이가 두 타입의 성질을 갈라놓는다.
 
-// 안전한 방법
-UINT len = SysStringLen(bstr);   // 5 (문자 단위)
-UINT bytes = SysStringByteLen(bstr);  // 10 (바이트 단위)
-```
+| | `std::string` | BSTR |
+|---|---|---|
+| 길이의 위치 | 객체 내부 필드 | 버퍼 앞 4바이트 |
+| 전달되는 것 | 객체 전체(포인터·길이·용량) | 포인터 하나 |
+| 짧은 값 최적화 | 가능 | 불가능 |
+| 경계를 넘을 수 있는가 | 같은 ABI·같은 구현 안에서만 | 언어 중립 |
 
-### BSTR vs LPWSTR
+갈림길은 **무엇이 경계를 넘어가는가**다. `std::string`은 값이 C++ 코드 안에 머물기 때문에 객체 표현을 마음대로 정할 수 있다. 반면 언어 중립 이진 인터페이스는 문자열을 **포인터 하나**로 주고받는다. 길이를 함께 실어 보낼 자리가 없으니, 길이를 데이터와 같은 블록에 붙이는 것 말고는 방법이 없다.
 
-둘 다 `wchar_t*`로 정의되지만, 의미가 다르다.
-
-```cpp
-typedef WCHAR* BSTR;    // 사실상 wchar_t*
-typedef WCHAR* LPWSTR;  // 역시 wchar_t*
-```
-
-| 특성 | BSTR | LPWSTR |
-|------|------|--------|
-| 길이 정보 | 포인터 앞 4바이트에 저장 | 없음 (null로 판단) |
-| 할당 | `SysAllocString` | `malloc`, `new`, 스택 등 |
-| 해제 | `SysFreeString` | 할당 방식에 따름 |
-| null 허용 | 문자열 중간에 null 가능 | null이 끝을 의미 |
-| COM 마샬링 | 자동 지원 | 수동 처리 필요 |
-
-타입은 같아도 의미와 계약이 다르므로, 잘못된 코드는 힙 손상으로 이어진다.
-
-```cpp
-// 잘못된 코드: 현대 C++에서는 const wchar_t[]를 BSTR(wchar_t*)로
-// 암시 변환할 수 없어 진단된다. 강제 캐스팅해도 BSTR 계약은 생기지 않는다.
-BSTR bstr = const_cast<BSTR>(L"Hello");
-SysFreeString(bstr);   // Automation allocator가 만든 포인터가 아니므로 잘못된 해제
-
-// 올바른 코드
-BSTR bstr = SysAllocString(L"Hello");
-SysFreeString(bstr);
-```
-
-### NULL BSTR의 의미
-
-| 값 | 의미 | `SysStringLen` 반환 |
-|----|------|:-------------------:|
-| `NULL` | 빈 문자열 (유효) | 0 |
-| `SysAllocString(L"")` | 빈 문자열 (할당됨) | 0 |
-| `SysAllocString(L"Hello")` | "Hello" | 5 |
-
-COM에서 `NULL` BSTR은 빈 문자열로 취급된다. 에러가 아니다.
-
-```cpp
-void ProcessString(BSTR bstr) {
-    // NULL 체크 후 사용
-    if (bstr && SysStringLen(bstr) > 0) {
-        // 비어있지 않은 문자열
-    }
-    // 또는 안전하게
-    UINT len = bstr ? SysStringLen(bstr) : 0;
-}
-```
-
-## 8. Windows 문자열 할당
-
-length-prefix만으로는 부족하다. 실제로 BSTR을 만들고 해제하려면 별도의 할당자가 필요하다. 왜인가?
-
-### 왜 별도의 할당자인가
-
-COM 객체는 프로세스 경계와 모듈 경계를 넘어 통신한다. DLL A에서 할당한 메모리를 DLL B에서 해제해야 하는 경우가 발생한다.
-
-| 상황 | 문제 | 해결책 |
-|------|------|--------|
-| DLL A: `malloc` → DLL B: `free` | 힙 손상 (각 DLL이 다른 CRT 힙 사용 가능) | 공유 할당자 사용 |
-| EXE: `new` → COM 객체: `delete` | 같은 문제 | `CoTaskMemAlloc` |
-
-### CoTaskMemAlloc vs malloc
-
-| 함수 | 할당자 | 용도 |
-|------|--------|------|
-| `malloc` / `free` | CRT 힙 | 모듈 내부 전용 |
-| `new` / `delete` | CRT 힙 | 모듈 내부 전용 |
-| `HeapAlloc` / `HeapFree` | 프로세스 힙 | 저수준 Windows API |
-| `CoTaskMemAlloc` / `CoTaskMemFree` | COM task allocator | COM 인터페이스 경계의 일반 버퍼 |
-| `SysAllocString` / `SysFreeString` | OLE Automation의 BSTR 전용 allocator | BSTR만 |
-
-```cpp
-// COM 인터페이스에서 문자열 반환
-HRESULT GetName(BSTR* pbstrName) {
-    // 호출자가 SysFreeString으로 해제
-    *pbstrName = SysAllocString(L"MyObject");
-    return S_OK;
-}
-
-// COM 인터페이스에서 배열 반환
-HRESULT GetData(BYTE** ppData, ULONG* pcb) {
-    *pcb = 100;
-    // 호출자가 CoTaskMemFree로 해제
-    *ppData = (BYTE*)CoTaskMemAlloc(*pcb);
-    return S_OK;
-}
-```
-
-### SysAllocString 계열 함수
-
-| 함수 | 용도 | 반환값 |
-|------|------|--------|
-| `SysAllocString(LPCOLESTR)` | null-terminated 문자열로부터 생성 | BSTR |
-| `SysAllocStringLen(LPCOLESTR, UINT)` | 길이 지정, null 포함 가능 | BSTR |
-| `SysAllocStringByteLen(LPCSTR, UINT)` | 바이트 배열로부터 생성 | BSTR |
-| `SysReAllocString(BSTR*, LPCOLESTR)` | 재할당 | BOOL |
-| `SysFreeString(BSTR)` | 해제 | void |
-| `SysStringLen(BSTR)` | 문자 수 반환 | UINT |
-| `SysStringByteLen(BSTR)` | 바이트 수 반환 | UINT |
-
-구현 세부 allocator는 공개 계약이 아니다. 소유 메모리를 직접 만드는 코드가 아니라 **레이아웃을 설명하기 위한 의사 코드**로만 보면 다음과 같다.
-
-```cpp
-void* automation_string_alloc(size_t);   // 구현 전용, 호출자가 대체할 수 없음
-void automation_string_free(void*);
-
-BSTR conceptual_SysAllocStringLen(const OLECHAR* psz, UINT len) {
-    // 할당: 길이 필드(4) + 문자열(len*2) + null(2)
-    UINT bytes = len * sizeof(OLECHAR);
-    BYTE* raw = (BYTE*)automation_string_alloc(4 + bytes + sizeof(OLECHAR));
-    if (!raw) return NULL;
-
-    // 길이 저장
-    *((UINT*)raw) = bytes;
-
-    // 문자열 복사
-    BSTR bstr = (BSTR)(raw + 4);
-    if (psz) {
-        memcpy(bstr, psz, bytes);
-    } else {
-        memset(bstr, 0, bytes);
-    }
-
-    // null terminator
-    bstr[len] = L'\0';
-
-    return bstr;
-}
-
-void conceptual_SysFreeString(BSTR bstr) {
-    if (bstr) {
-        BYTE* raw = (BYTE*)bstr - 4;
-        automation_string_free(raw);
-    }
-}
-
-UINT conceptual_SysStringLen(BSTR bstr) {
-    if (!bstr) return 0;
-    return *((UINT*)bstr - 1) / sizeof(OLECHAR);
-}
-```
-
-length-prefix 4바이트와 trailing null 2바이트를 합쳐 6바이트의 오버헤드가 있다. 그 대가로 $O(1)$ 길이 조회와 바이너리 안전성을 얻는다.
-
-### 흔한 실수와 디버깅
-
-| 실수 | 원인 | 해결 |
-|------|------|------|
-| BSTR 누수 | `SysFreeString` 누락 | 래퍼 클래스 사용 |
-| 이중 해제 | 소유권 혼란 | 규칙 명확화 |
-| 잘못된 할당자 | `malloc` + `SysFreeString` 혼용 | API 문서 확인 |
-| 리터럴 해제 | `BSTR b = L"Hello"; SysFreeString(b);` | 항상 `SysAllocString` 사용 |
-| 버퍼 오버런 | 길이 필드 덮어쓰기 | `SysReAllocStringLen` 사용 |
-
-디버거에서 BSTR 길이를 직접 확인할 수도 있다.
-
-```cpp
-BSTR bstr = SysAllocString(L"Test");
-UINT* pLen = (UINT*)bstr - 1;  // Watch: *pLen = 8
-// bstr-4 위치에서 시작하면 길이 필드 포함된 메모리 덤프 가능
-```
-
-## 9. Windows 문자열 RAII 래퍼
-
-`SysFreeString` 누락은 흔한 실수다. 현대 C++에서는 `std::string`이 RAII로 메모리를 관리하듯, BSTR과 COM 포인터에도 RAII 래퍼가 있다.
-
-### `_bstr_t` (comutil.h)
-
-```cpp
-#include <comutil.h>
-
-_bstr_t bstr1(L"Hello");              // 복사 생성
-_bstr_t bstr2 = L"World";             // 암시적 변환
-_bstr_t bstr3 = bstr1 + L" " + bstr2; // 연결
-
-// BSTR로 변환 (소유권 유지)
-BSTR raw = bstr3;  // 또는 bstr3.GetBSTR()
-
-// BSTR로 변환 (소유권 이전)
-BSTR detached = bstr3.Detach();  // bstr3는 이제 비어있음
-SysFreeString(detached);         // 수동 해제 필요
-```
-
-| 메서드 | 동작 |
-|--------|------|
-| `GetBSTR` | 내부 BSTR 반환 (소유권 유지) |
-| `GetAddress` | `BSTR*` 반환 (out 파라미터용) |
-| `Detach` | 소유권 이전 |
-| `Attach(BSTR)` | 기존 BSTR 소유권 획득 |
-| `copy` | 복사본 생성 (호출자 해제 책임) |
-
-### `CComBSTR` (atlbase.h)
-
-ATL 기반 코드에서는 `CComBSTR`을 사용한다.
-
-```cpp
-#include <atlbase.h>
-
-CComBSTR bstr1(L"Hello");
-CComBSTR bstr2(10);  // 10문자 공간 할당
-
-bstr1.Append(L" World");
-bstr1.AppendBSTR(bstr2);
-
-// 대소문자 무시 비교
-if (bstr1.CompareNoCase(L"HELLO WORLD") == 0) {
-    // 같음
-}
-
-// out 파라미터에는 비어 있는 객체를 사용한다.
-CComBSTR name;
-HRESULT hr = pObj->GetName(&name);
-if (SUCCEEDED(hr)) {
-    bstr1 = name;
-}
-```
-
-`CComBSTR::operator&`는 기존 문자열을 자동 해제하지 않는다. 비어 있지 않은 객체에 `&bstr1`을 사용하면 기존 포인터를 잃어 누수로 이어질 수 있고, 디버그 빌드는 이를 assertion으로 잡는다. 이미 값이 있는 변수와 분리된 빈 임시 객체로 out 값을 받은 뒤 성공 시 대입한다.
-
-### `ComPtr` (wrl/client.h) - Modern C++
-
-COM 객체 자체에 대해서도 RAII가 필요하다. WRL의 `ComPtr`이 가장 현대적인 선택이다.
-
-```cpp
-#include <wrl/client.h>
-using Microsoft::WRL::ComPtr;
-
-ComPtr<IUnknown> pUnk;
-HRESULT hr = CoCreateInstance(CLSID_Something, nullptr,
-    CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pUnk));
-
-// 자동 Release
-// 범위 벗어나면 Release 호출
-
-// QueryInterface
-ComPtr<IDispatch> pDisp;
-hr = pUnk.As(&pDisp);
-
-// out 파라미터
-ComPtr<IStream> pStream;
-hr = SHCreateStreamOnFile(L"test.txt", STGM_READ, &pStream);
-```
-
-### 래퍼 선택 기준
-
-| 래퍼 | 헤더 | 용도 |
-|------|------|------|
-| `_bstr_t` | comutil.h | BSTR 관리 (가벼움) |
-| `CComBSTR` | atlbase.h | BSTR 관리 (ATL) |
-| `CComPtr<T>` | atlbase.h | COM 포인터 관리 (ATL) |
-| `ComPtr<T>` | wrl/client.h | COM 포인터 관리 (Modern) |
-
-새 코드를 작성한다면 ATL 의존성이 없는 `_bstr_t`와 `ComPtr<T>` 조합이 가장 가볍다. 기존 ATL 프로젝트라면 `CComBSTR`/`CComPtr`을 그대로 사용한다.
-
+여기서 일반적인 결론이 나온다. **length-prefix는 "포인터 하나로 길이까지 전달해야 할 때" 나타나는 형태다.** 그 대가로 짧은 값 최적화를 잃고, 고정 오버헤드를 내며, 길이 필드가 사용자 코드에 타입으로 드러나지 않아 규약으로만 지켜진다. 같은 `wchar_t*`라도 길이 필드가 앞에 있는 포인터와 없는 포인터를 컴파일러는 구분하지 못한다. 그래서 이 표현을 채택한 환경은 전용 생성·해제 함수를 강제하고, 그 짝을 어기면 진단되지 않는 힙 손상이 된다. 표현의 이득을 규약의 부담으로 지불하는 셈이다.
 
 ---
 
@@ -1162,7 +922,7 @@ hr = SHCreateStreamOnFile(L"test.txt", STGM_READ, &pStream);
 
 null-terminated 표현은 길이 field 없이 C 배열과 pointer 연산에 맞지만, 길이 조회와 반복 append에서 선형 탐색 비용을 만든다. `strcat`을 반복하면 매번 끝을 다시 찾아 $O(n^2)$로 퇴화할 수 있으며, 현재 end와 capacity를 유지하는 builder가 이를 피한다. SSO는 짧은 값의 별도 allocation을 피하지만 inline capacity와 객체 크기의 교환이다. COW 문자열은 공유와 detach 비용을 선택하는 모델이며, 현대 `std::basic_string`의 iterator·reference와 동시성 요구에는 맞지 않는다.
 
-소유권의 명확성은 안전성을 좌우한다. `std::string`은 소유권이 명시적이라 안전하지만 비용이 따른다. `std::string_view`는 빠르지만 댕글링 위험이 있다. BSTR과 COM 객체는 길이 정보와 모듈 경계 안전성을 위해 별도의 할당자(`SysAllocString`, `CoTaskMemAlloc`)를 도입했고, 그 비용을 RAII 래퍼(`_bstr_t`, `ComPtr`)로 다시 추상화했다.
+소유권의 명확성은 안전성을 좌우한다. `std::string`은 소유권이 명시적이라 안전하지만 비용이 따른다. `std::string_view`는 빠르지만 댕글링 위험이 있다. BSTR은 길이를 버퍼 앞에 붙여 포인터 하나로 길이까지 전달하는 대신, 짧은 값 최적화와 타입 수준의 안전성을 포기했다. 세 표현 모두 같은 질문에 다르게 답한 결과다. 길이와 소유권 정보를 어디에 두면 그것을 쓰는 코드가 가장 적게 다치는가.
 
 
 ## 더 읽을거리
@@ -1178,7 +938,4 @@ null-terminated 표현은 길이 field 없이 C 배열과 pointer 연산에 맞�
 - [Facebook Folly: FBString Documentation](https://github.com/facebook/folly/blob/main/folly/docs/FBString.md) - Growth factor 1.5배 vs 2배 성능 비교
 - [Qt Documentation: Implicit Sharing](https://doc.qt.io/qt-6/implicit-sharing.html) - Qt가 여전히 COW를 사용하는 이유
 - [WG21 P0254R2: Integrating `std::string_view` and `std::string`](https://wg21.link/p0254r2)
-- [Microsoft Learn: BSTR](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/automat/bstr)
-- [Wine의 oleaut32 구현](https://source.winehq.org/git/wine.git/tree/HEAD:/dlls/oleaut32) - BSTR/VARIANT 오픈소스 구현
-- Box, D. (1998). *Essential COM* - COM의 바이블
-- Rector, B. & Sells, C. (1999). *ATL Internals*
+- [Microsoft Learn: BSTR](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/automat/bstr) - length-prefix 표현을 채택한 실제 타입의 명세

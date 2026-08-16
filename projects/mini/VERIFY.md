@@ -27,7 +27,7 @@ pwsh -File scripts/check_projects.ps1 -SkipConfigure
 ```
 
 `system_kernel_lab`은 Linux 전용이므로 이 스크립트에서 제외한다. WSL2 배포판 또는 별도 Linux 환경에서
-README의 빌드 절차를 실행한다. 2026-08-15 WSL2 Ubuntu 26.04(커널 6.18.33.2)에서 빌드·CTest 8개 통과를 확인했다.
+README의 빌드 절차를 실행한다. 2026-08-15 WSL2 Ubuntu 26.04(커널 6.18.33.2)에서 빌드·CTest 25개 통과를 확인했다.
 
 권한이 필요해 WSL2에서 검증하지 못한 항목(cgroup 쓰기 성공 경로, `SCHED_FIFO` 적용 성공 경로)과
 커널·하드웨어 제약으로 밟히지 않는 경로는 이 lab의 `docs/` 아래 인수인계 문서에 절차와 통과 조건이 정리돼 있다.
@@ -36,18 +36,18 @@ README의 빌드 절차를 실행한다. 2026-08-15 WSL2 Ubuntu 26.04(커널 6.1
 
 | Lab | Release build | 자동 테스트 | 단계 문서 |
 |---|---|---|---:|
-| `parts_perf_lab` | 통과 | CTest 1개 | 8 |
-| `languages_lab` | 통과 | CTest 1개 | 6 |
-| `math_lab` | 통과 | CTest 1개 | 8 |
-| `physics_lab` | 통과 | CTest 2개 | 8 |
-| `ai_lab` | 통과 | CTest 2개 | 6 |
-| `graphics_gl_lab` | 통과 | CTest 1개 | 7 |
-| `graphics_dx_lab` | 통과 | CTest 1개 | 7 |
-| `graphics_vk_lab` | 통과 | CTest 1개 | 7 |
-| `game_network_lab` | 통과 | protocol·oversized UDP 회복 process CTest 2개 | 6 |
-| `live_service_lab` | 통과 | core contract 테스트. 실패 주입 보강 필요, HTTP smoke는 mega 행 | 5 |
-| `db_lab` | 통과 | CTest 2개 통과 | 4 |
-| `system_kernel_lab` | 통과 (Linux 전용 — WSL2 Ubuntu 26.04) | CTest 8개. 5개 backend가 실제로 실행됨을 호출 카운터로 확인 | 8 |
+| `parts_perf_lab` | 통과 | CTest 9개. 전체 1개 + step별 8개(실행 파일이 첫 인자를 step 필터로 받는다) | 8 |
+| `languages_lab` | 통과 | CTest 7개. 전체 1개 + 계약별 6개(step 라벨로 등록표를 거른다) | 6 |
+| `math_lab` | 통과 | CTest 9개. 전체 1개 + step별 8개(실행 파일이 첫 인자를 step 필터로 받는다) | 8 |
+| `physics_lab` | 통과 | CTest 19개. 실행 파일 전체 8개 + step별 11개(실행 파일이 첫 인자를 step 필터로 받는다) | 8 |
+| `ai_lab` | 통과 | CTest 9개. 전체 2개(pathfinder·model) + step별 7개 | 6 |
+| `graphics_gl_lab` | 통과 | CTest 12개. 전체 2개(계약·렌더) + step별 10개(실행 파일이 첫 인자를 step 필터로 받는다) | 7 |
+| `graphics_dx_lab` | 통과 | CTest 8개. 전체 1개 + step별 7개(실행 파일이 첫 인자를 step 필터로 받는다) | 7 |
+| `graphics_vk_lab` | 통과 | CTest 8개. 전체 1개 + step별 7개(실행 파일이 첫 인자를 step 필터로 받는다) | 7 |
+| `game_network_lab` | 통과 (Windows IOCP + WSL2 Ubuntu 26.04 epoll) | CTest 12개. 실행 파일 전체 5개 + step 단위 7개(backend는 플랫폼마다 하나만 등록) | 6 |
+| `live_service_lab` | 통과 | step 단위로 나뉜 검사 18개(step01 3 · step02 4 · step03 6 · step04 3 · step05 2). step05 둘은 API를 loopback에 띄워 status code를 읽는다 | 5 |
+| `db_lab` | 통과 | CTest 5개. 전체 3개(단위·크래시 스윕·bench smoke) + step별 2개(`db_tests --step=NN`) | 4 |
+| `system_kernel_lab` | 통과 (Linux 전용 — WSL2 Ubuntu 26.04) | CTest 25개. 전체 8개(실행 파일 3 + strict 1 + bench 4) + step별 17개(`--step=NN` 필터). 5개 backend가 실제로 실행됨을 호출 카운터로 확인 | 8 |
 
 전체 스크립트의 마지막 검사는 C# Live Service의 실제 game token 두 개를 C++ Mega 전용 서버가
 검증하고 서로 다른 UDP 끝점 두 곳에 snapshot을 보내는 교차 언어 process smoke다.
@@ -59,13 +59,19 @@ CTest는 다음 핵심 계약을 검사한다.
 
 - `parts_perf_lab`: allocator 정렬·해제와 simulation 모드 계약
 - `math_lab`: 행렬·쿼터니언·교차 판정·수치 안정성
-- `physics_lab`: 적분기 차수, 임펄스, AABB/PBD, SAT·GJK/EPA
+- `physics_lab`: chrome 레이아웃 분할, 적분기 차수·에너지 거동, force 항과 종단 속도,
+  임펄스 클램프, AABB/PBD, SAT·GJK/EPA, 결정성과 Response 솔버 동일성
 - `ai_lab`: 경로 비용, flow field, 반사 경계, boid 속도, influence 결합
-- `graphics_gl_lab`: draw 제출 수, 바인딩 비용, mip 저장량 계산
+- `graphics_gl_lab`: draw 제출 수, 바인딩 비용, mip 저장량 계산, FrameTimer EMA·히스토리 링,
+  KHR_debug 원형 버퍼, 그리고 실제 컨텍스트에서 세 드로우 모드 픽셀 해시·셰이더 perm 구성·
+  Rebuild 핸들 수명·MSAA 폴백
 - `graphics_dx_lab`: draw 제출 수, descriptor 수명 계획, barrier 전이 기술
-- `graphics_vk_lab`: draw 제출 수 공식, barrier stage/access mask, timeline 값 증가 (자원 수명 정책은 자동 검증 없음)
+- `graphics_vk_lab`: draw 제출 수 공식, barrier stage/access mask와 기록 경로·실패 주입, timeline 값 증가와
+  모드 전환 격리, swapchain 협상, push constant 예산, queue family fallback, descriptor set 모양
+  (실제 GPU 제출·present와 validation 메시지 문구는 자동 검증 없음)
 - `game_network_lab`: TCP fragmentation·coalescing, sequence wrap, oversized UDP 오류 뒤 IOCP
-  receive 복구, server/client handshake와 snapshot
+  receive 복구, server/client handshake와 snapshot, 연결별 송신 queue 상한, backend drain 뒤
+  재시작, 고정 틱 catch-up 상한
 - `live_service_lab`: access token 위조·만료, match allocation, drain, 중복 result 경로의 server
   소유권, 완료된 match 뒤 재큐잉
 

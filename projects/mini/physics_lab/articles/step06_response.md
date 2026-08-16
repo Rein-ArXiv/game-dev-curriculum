@@ -21,6 +21,7 @@
 5. [PBD 응답](#5-pbd-응답)
 6. [분리된 위치 보정](#6-분리된-위치-보정)
 7. [무엇을 보는가](#7-무엇을-보는가)
+8. [그래프의 주장을 숫자로 받기](#8-그래프의-주장을-숫자로-받기)
 
 ---
 
@@ -261,6 +262,100 @@ flowchart LR
     D1 & D4 & E --> F[Measure: avg pen, KE, ms]
 ```
 
+## 8. 그래프의 주장을 숫자로 받기
+
+위 시나리오는 전부 *그래프의 추세* 를 읽는 확인이다. 추세는 방향만 알려 준다 — 침투가 줄어드는 것은 보여도, 보정량이 규약대로 `(depth - slop) * factor` 인지, 법선이 정말 `i → j` 방향인지는 그래프로 알 수 없다. 그래서 `GatherContacts` / `ApplySequentialImpulse` / `ApplyPositionCorrection` 을 창 없이 부르는 실행 파일을 둔다.
+
+```cmake
+physlab_add_scene_test(physics_response_tests src/scenes/response_scene.cpp)
+add_test(NAME step06.response        COMMAND physics_response_tests step06)
+add_test(NAME step06.contact_impulse COMMAND physics_core_tests     step06)
+```
+
+접촉 기하는 숫자가 딱 떨어지는 배치를 쓴다 — 반지름 8 원 두 개를 중심거리 12 로 두면 깊이는 정확히 4, 법선은 (1, 0) 이다.
+
+<!-- snippet: tests/physics_response_tests.cpp@contact-geometry -->
+```cpp
+// 반지름 8 두 개의 중심거리가 12 면 깊이는 정확히 4, 법선은 i -> j 방향.
+CHECK(c.i == 0);
+CHECK(c.j == 1);
+CHECK(std::fabs(c.depth - 4.0f) < 1e-4f);
+CHECK(std::fabs(c.normal.x - 1.0f) < 1e-5f);
+CHECK(std::fabs(c.normal.y) < 1e-5f);
+CHECK(c.lambda == 0.0f);
+```
+
+같은 배치에서 위치 보정량도 리터럴로 계산된다 — `(4 - slop 0.5) * factor 0.2 = 0.7` 을 질량 비율로 나눠 0.35 씩. slop 이하 (깊이 0.2) 는 아예 움직이지 않는지도 함께 본다.
+
+*iter 가 stiffness* 라는 그래프의 주장은 24 개 body 를 400 스텝 돌린 뒤 남은 평균 침투로 받는다. 단조 감소 + 최종 임계 + "1 회와 16 회가 실제로 다름" 세 가지를 동시에 요구해야 의미가 있다. 셋 중 하나라도 빠지면 전부 같은 값을 내는 구현이 통과한다.
+
+<!-- snippet: tests/physics_response_tests.cpp@iteration-convergence -->
+```cpp
+for (int k = 1; k < 5; ++k) {
+    // ...
+    CHECK(pen[k] <= pen[k - 1] + 1e-4f);
+}
+CHECK(pen[4] <= slop + 1.0f);
+// 1 회 반복은 실제로 더 깊게 파고들어야 한다 (전부 같은 값이면 무의미).
+CHECK(pen[0] > pen[4] + 1e-3f);
+```
+
+임펄스 누적의 λ ≥ 0 클램프는 core 헤더 쪽 케이스가 맡는다. *접촉은 밀 수는 있어도 당길 수 없다* 는 규약이라 부호를 세 상황에서 본다 — 이미 분리 중, 접근 중, 그리고 누적된 λ 를 되돌리는 경우.
+
+<!-- snippet: tests/physics_core_tests.cpp@lambda-clamp -->
+```cpp
+// 이미 분리 중인 접촉(법선 속도 +2)에 임펄스를 요구하면 음수 λ 가 되므로
+// 0 으로 잘려야 한다 — 접촉은 당길 수 없다.
+const float separating = physlab::core::AccumulateNormalImpulse(
+    2.0f, 0.0f, 2.0f, lambda);
+CHECK(separating == 0.0f);
+CHECK(lambda == 0.0f);
+// ...
+// 그 뒤 큰 분리(+10)가 오면 누적 λ 만큼만 되돌리고 0 에서 멈춘다.
+const float previousLambda = lambda;
+const float released = physlab::core::AccumulateNormalImpulse(
+    10.0f, 0.0f, 2.0f, lambda);
+CHECK(lambda == 0.0f);
+CHECK(std::fabs(released - (-previousLambda)) < 1e-6f);
+```
+
+```powershell
+cmake --build build --config Release -j
+ctest --test-dir build -C Release -R step06 --output-on-failure
+.\build\Release\physics_core_tests.exe     step06   # 같은 것을 직접 — 관측값까지 본다
+.\build\Release\physics_response_tests.exe step06
+```
+
+`ctest` 는 두 실행 파일의 통과 / 실패만 알려 준다. 직접 돌리면 그래프가 보여 주던 곡선이 숫자 다섯 개로 나온다.
+
+```text
+[step06] normal_impulse
+  restitution target=1 impulse=1.5 -> vi=-0.5 vj=0.5
+  ok
+[step06] normal_impulse_clamp
+  lambda clamp: separating=0 approaching=1 released=-1
+  ok
+[step06] gather_contacts
+  pair contact: depth=4 normal=(1,0)
+  wall contact: j=-1 depth=4
+  ok
+[step06] position_correction
+  (depth 4 - slop 0.5) * factor 0.2 split two ways: 0.349998 each
+  ok
+[step06] sequential_impulse
+  approach -40 -> relative 0 ; approach -200 -> relative 20
+  ok
+[step06] iteration_convergence
+  iterations=1 avgPen=1.34545
+  iterations=2 avgPen=1.00228
+  iterations=4 avgPen=0.706832
+  iterations=8 avgPen=0.539839
+  iterations=16 avgPen=0.485411
+  ok
+```
+
+`1.345 → 0.485` 가 iter 슬라이더를 1 에서 16 으로 올렸을 때 그래프에서 보던 그 감소다. position correction 을 지우면 16 회에서도 4.07 로 남아 실패한다. `approach -200 -> relative 20` 은 임계 (50 px/s) 를 넘는 접근에서만 반발이 살아난다는 규약이다 — e = 0.1 이므로 상대 속도 -200 이 +20 으로 튕겨 나간다.
+
 ---
 
 ## 결론
@@ -272,9 +367,7 @@ Step 6 에서 추가한 것.
 3. **분리된 position correction** — slop + correctFactor를 둔 단순 post-stabilization.
 4. **세 측정 그래프** — avg penetration / response ms / total KE. iter 가 stiffness 임을 *그래프 추이* 로 직접.
 
-5. **`physics_response_tests` 타깃** — `GatherContacts` / `ApplySequentialImpulse` / `ApplyPositionCorrection` 을 창 없이 부른다. 반지름 8 원 두 개를 중심거리 12 로 두면 깊이 4, 법선 (1, 0) 이고, 위치 보정량은 `(4 - slop 0.5) * factor 0.2 = 0.7` 을 둘로 나눈 0.35 씩 — 전부 리터럴로 못 박는다. slop 이하 (깊이 0.2) 는 아예 움직이지 않는지도 함께 본다.
-
-iter 가 stiffness 라는 그래프의 주장도 같은 타깃이 숫자로 받는다. 24 개 body 를 400 스텝 돌린 뒤 남은 평균 침투가 iteration 1 / 2 / 4 / 8 / 16 에서 단조 감소하고 (1.345 → 0.485), 16 회에서 `slop + 1px` 아래로 떨어진다. position correction 을 지우면 16 회에서도 4.07 로 남아 실패한다.
+5. **`physics_response_tests` 타깃 + `step06` 필터** — `ctest --test-dir build -C Release -R step06` 로 접촉 기하 (깊이 4 / 법선 (1,0)), 위치 보정량 0.35, λ ≥ 0 클램프, iteration 수렴 (1.345 → 0.485) 을 창 없이 검사.
 
 여기서 검증하는 세 함수는 `src/core/contact_solver.h` 의 공유 구현이므로, lab 의 결정성 타깃이 자기 워크로드로 돌리는 것도 *바로 이 코드* 다. 두 타깃이 같은 구현을 서로 다른 각도에서 — 하나는 해석적 리터럴로, 하나는 반복 재현성으로 — 누른다.
 

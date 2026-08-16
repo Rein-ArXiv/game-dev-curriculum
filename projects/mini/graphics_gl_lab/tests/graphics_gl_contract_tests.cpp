@@ -1,17 +1,32 @@
 // GL 컨텍스트 없이 도는 계약 테스트.
 //
 // 이 타깃은 tests/ 파일 하나만이 아니라 scene.cpp / lighting_bindings.cpp /
-// texture_modes.cpp / shader_program.cpp / msaa_target.cpp / khr_debug.cpp 를
-// 함께 컴파일한다. 여기서 부르는 진입점은 전부 GL 호출이 없는 순수 함수이므로
-// 컨텍스트 없이 실행되지만, 링크 대상은 앱이 실제로 쓰는 번역 단위와 같다.
+// texture_modes.cpp / shader_program.cpp / msaa_target.cpp / khr_debug.cpp /
+// frame_timer.cpp 를 함께 컴파일한다. 여기서 부르는 진입점은 전부 GL 호출이
+// 없는 순수 함수이므로 컨텍스트 없이 실행되지만, 링크 대상은 앱이 실제로 쓰는
+// 번역 단위와 같다.
+//
+// 실행 단위는 *step 입도* 다. 인자를 주면 그 step 이 추가한 검증만 돈다.
+//
+//     graphics_gl_contract_tests                    — 전체
+//     graphics_gl_contract_tests step03             — step03 이 추가한 것만
+//     graphics_gl_contract_tests indirect_commands  — 이름 하나만
+//
+// CMakeLists 의 add_test 가 이 인자로 step 별 ctest 항목을 만든다. 전체를 도는
+// 항목(`graphics_gl_contract_tests`)은 그대로 남아 있다.
 
+#include "measure/frame_timer.h"
+#include "measure/gl_counters.h"
+#include "measure/khr_debug.h"
 #include "render/lighting_bindings.h"
 #include "render/texture_modes.h"
 #include "scene/scene.h"
 
 #include <glm/gtc/matrix_access.hpp>
 
+#include <chrono>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -30,6 +45,124 @@ int failures = 0;
     } while (false)
 
 bool Near(float a, float b, float eps) { return std::fabs(a - b) <= eps; }
+
+// 시계가 반드시 전진하도록 최소 duration 만큼 돈다. steady_clock 은 단조이므로
+// 이 함수가 돌아온 시점의 경과는 *항상* d 이상이다 — sleep 과 달리 하한이 보장된다.
+void SpinFor(std::chrono::microseconds d) {
+    const auto deadline = std::chrono::steady_clock::now() + d;
+    while (std::chrono::steady_clock::now() < deadline) {}
+}
+
+// step01 이 추가한 FrameTimer — EMA 씨앗 규칙 + 240 슬롯 히스토리 링.
+// (시간 값 자체는 기계마다 다르므로, 고정된 것은 *계산 규칙* 이다.)
+void TestFrameTimerHistory() {
+    gllab::FrameTimer timer;
+    CHECK(timer.HistoryHead() == 0);
+    CHECK(timer.LastDeltaSeconds() == 0.0f);
+    CHECK(timer.EmaFrameMs() == 0.0f);
+    CHECK(timer.Fps() == 0.0f);
+    for (int i = 0; i < gllab::FrameTimer::kHistorySize; ++i)
+        CHECK(timer.History()[(size_t)i] == 0.0f);
+
+    // 첫 프레임 — dt 는 0 (이전 BeginFrame 이 없다), EMA 는 측정값을 그대로 씨앗으로 받는다.
+    timer.BeginFrame();
+    SpinFor(std::chrono::microseconds(300));
+    timer.EndFrame();
+    CHECK(timer.LastDeltaSeconds() == 0.0f);
+    CHECK(timer.LastFrameMs() >= 0.29f);          // 스핀 하한 0.3ms.
+    CHECK(Near(timer.EmaFrameMs(), timer.LastFrameMs(), 1e-6f));
+    CHECK(timer.HistoryHead() == 1);
+    CHECK(Near(timer.History()[0], timer.LastFrameMs(), 1e-6f));
+    CHECK(Near(timer.Fps(), 1000.0f / timer.EmaFrameMs(), 1e-2f));
+
+    // 둘째 프레임 — 씨앗 분기를 벗어나 α = 0.1 의 혼합이 된다. 두 값을 읽어
+    // 직접 계산하므로 이 단언은 실제 소요 시간과 무관하게 성립한다.
+    const float ema1 = timer.EmaFrameMs();
+    timer.BeginFrame();
+    SpinFor(std::chrono::microseconds(2000));
+    timer.EndFrame();
+    const float last2 = timer.LastFrameMs();
+    CHECK(ema1 > 0.0f);
+    CHECK(last2 > ema1);
+    CHECK(Near(timer.EmaFrameMs(), ema1 * 0.9f + last2 * 0.1f, 1e-3f));
+    CHECK(timer.LastDeltaSeconds() > 0.0f);       // dt 는 BeginFrame 간격이라 이제 0 이 아니다.
+    CHECK(timer.HistoryHead() == 2);
+    CHECK(Near(timer.History()[1], last2, 1e-6f));
+
+    // 히스토리는 링이다 — kHistorySize 프레임을 더 돌면 머리가 제자리로 돌아온다.
+    for (int i = 0; i < gllab::FrameTimer::kHistorySize; ++i) {
+        timer.BeginFrame();
+        timer.EndFrame();
+    }
+    CHECK(timer.HistoryHead() == 2);
+    CHECK(timer.History().size() == (size_t)gllab::FrameTimer::kHistorySize);
+}
+
+// step02 가 추가한 프레임 카운터 — Reset 이 일곱 칸을 모두 되돌리는가.
+// 한 칸이라도 살아남으면 다음 프레임의 수치가 누적되어 패널이 거짓말을 한다.
+void TestCounterReset() {
+    gllab::GlCounters c;
+    CHECK(c.drawCalls == 0 && c.instancedDraws == 0 && c.indirectDraws == 0);
+    CHECK(c.stateChanges == 0 && c.uniformUpdates == 0 && c.bufferUpdates == 0);
+    CHECK(c.barrierCalls == 0);
+
+    c.drawCalls      = 10000;
+    c.instancedDraws = 1;
+    c.indirectDraws  = 1;
+    c.stateChanges   = 2;
+    c.uniformUpdates = 20006;
+    c.bufferUpdates  = 3;
+    c.barrierCalls   = 4;
+    c.Reset();
+    CHECK(c.drawCalls == 0);
+    CHECK(c.instancedDraws == 0);
+    CHECK(c.indirectDraws == 0);
+    CHECK(c.stateChanges == 0);
+    CHECK(c.uniformUpdates == 0);
+    CHECK(c.bufferUpdates == 0);
+    CHECK(c.barrierCalls == 0);
+}
+
+// step02 가 추가한 KHR_debug 원형 버퍼 — 256 슬롯을 넘겨도 메모리가 늘지 않고
+// *가장 최근 256 개* 만 남는가. 드라이버가 초당 수백 메시지를 던지는 경로다.
+void TestDebugMessageRing() {
+    gllab::KHRDebug debug;
+    CHECK(debug.Count() == 0);
+    CHECK(debug.RingHead() == 0);
+
+    debug.PushAppMessage("first", gllab::DebugMessage::Severity::High);
+    CHECK(debug.Count() == 1);
+    CHECK(debug.RingHead() == 1);
+    CHECK(debug.Get(0).text == "first");
+    CHECK(debug.Get(0).severity == gllab::DebugMessage::Severity::High);
+    CHECK(debug.Get(0).source == GL_DEBUG_SOURCE_APPLICATION);
+    CHECK(debug.Get(0).type == GL_DEBUG_TYPE_OTHER);
+
+    debug.PushAppMessage("second");   // 앱 메시지의 기본 심각도는 Medium.
+    CHECK(debug.Count() == 2);
+    CHECK(debug.Get(1).severity == gllab::DebugMessage::Severity::Medium);
+
+    constexpr int kOverflow = gllab::KHRDebug::kRingSize + 10;
+    for (int i = 0; i < kOverflow; ++i)
+        debug.PushAppMessage("msg" + std::to_string(i));
+
+    // 슬롯 수는 링 크기에서 멈춘다 — push_back 누적이면 여기서 갈린다.
+    CHECK(debug.Count() == gllab::KHRDebug::kRingSize);
+    CHECK(debug.RingHead() == (2 + kOverflow) % gllab::KHRDebug::kRingSize);
+
+    // 가장 최근 메시지는 머리 바로 앞 칸이고, 가장 오래된 것은 덮여 사라졌다.
+    const int newest =
+        (debug.RingHead() + gllab::KHRDebug::kRingSize - 1) % gllab::KHRDebug::kRingSize;
+    CHECK(debug.Get(newest).text == "msg" + std::to_string(kOverflow - 1));
+    bool survivedFirst = false;
+    for (int i = 0; i < debug.Count(); ++i)
+        if (debug.Get(i).text == "first") survivedFirst = true;
+    CHECK(!survivedFirst);
+
+    debug.Clear();
+    CHECK(debug.Count() == 0);
+    CHECK(debug.RingHead() == 0);
+}
 
 void TestSubmissionCounts() {
     CHECK(gllab::ExpectedDrawSubmissions(gllab::DrawMode::Individual, 10000) == 10000);
@@ -285,18 +418,62 @@ void TestBlockBytes() {
     }
 }
 
+// 어느 검증이 어느 step 소속인지는 *그 step 이 무엇을 추가했는지* 로 정한다.
+//   step01 — 격자 씬 + 카메라 행렬 + FrameTimer.
+//   step02 — GlCounters + KHR_debug 링.
+//   step03 — 드로우 모드 제출 수 + MDI 커맨드 배열.
+//   step05 — 광원 binding 비용 모델.
+//   step06 — 텍스처 블록 바이트 + mip chain.
+// (step04 와 step07 은 GL 컨텍스트가 필요해 graphics_gl_render_tests 쪽에 있다.)
+struct TestCase {
+    const char* step;
+    const char* name;
+    void (*fn)();
+};
+
+const TestCase kTests[] = {
+    {"step01", "camera_matrices",        TestCameraMatrices},
+    {"step01", "frame_timer_history",    TestFrameTimerHistory},
+    {"step02", "counter_reset",          TestCounterReset},
+    {"step02", "debug_message_ring",     TestDebugMessageRing},
+    {"step03", "draw_submission_counts", TestSubmissionCounts},
+    {"step03", "indirect_commands",      TestIndirectCommands},
+    {"step05", "binding_cost_model",     TestBindingCosts},
+    {"step05", "counted_binding_cost",   TestCountedBindingCostMatchesModel},
+    {"step05", "per_call_uniform_names", TestPerCallUniformNames},
+    {"step06", "mip_chain_bytes",        TestMipStorage},
+    {"step06", "block_bytes",            TestBlockBytes},
+};
+
+bool Selected(const TestCase& t, const char* filter) {
+    if (!filter || !*filter) return true;
+    return std::strcmp(t.step, filter) == 0 || std::strcmp(t.name, filter) == 0 ||
+           std::strstr(t.name, filter) != nullptr;
+}
+
 }  // namespace
 
-int main() {
-    TestSubmissionCounts();
-    TestIndirectCommands();
-    TestCameraMatrices();
-    TestBindingCosts();
-    TestCountedBindingCostMatchesModel();
-    TestPerCallUniformNames();
-    TestMipStorage();
-    TestBlockBytes();
-    if (failures != 0) return 1;
-    std::cout << "OpenGL contract tests passed\n";
-    return 0;
+int main(int argc, char** argv) {
+    const char* filter = (argc > 1) ? argv[1] : nullptr;
+
+    int selected = 0;
+    int passed   = 0;
+    for (const TestCase& t : kTests) {
+        if (!Selected(t, filter)) continue;
+        ++selected;
+        const int before = failures;
+        t.fn();
+        const bool ok = (failures == before);
+        if (ok) ++passed;
+        std::cout << '[' << t.step << "] " << t.name
+                  << (ok ? " ... ok\n" : " ... FAILED\n");
+    }
+
+    if (selected == 0) {
+        std::cerr << "no test matched filter: " << filter << "\n";
+        return 2;
+    }
+    std::cout << "graphics_gl_contract_tests: " << passed << '/' << selected
+              << " passed (filter=" << (filter ? filter : "all") << ")\n";
+    return failures == 0 ? 0 : 1;
 }

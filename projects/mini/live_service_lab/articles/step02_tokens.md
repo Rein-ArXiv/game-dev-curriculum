@@ -118,20 +118,44 @@ HMAC은 payload를 숨기지 않는다. token을 본 사람은 JSON을 읽을 �
 
 ## 실행 확인
 
-token 계약은 고정된 32바이트 test secret을 쓰는 contract test가 실행한다.
+token 계약은 고정된 32바이트 test secret을 쓰는 contract test가 실행한다. 검사 이름을 인자로
+주면 이 문서가 추가한 네 개만 돈다.
 
 ```powershell
 dotnet run `
   --project projects/mini/live_service_lab/tests/LiveService.Tests/LiveService.Tests.csproj `
-  -c Release
+  -c Release -- step02
 ```
 
 ```text
-live_service_tests: all checks passed
+live_service_tests: filter=step02 -> 4 check(s)
+  step02 AccessTokenContract ok
+  step02 TokenAudience       ok
+  step02 TokenExpiry         ok
+  step02 IdentifierContract  ok
+live_service_tests: step02 4/4 checks passed
 ```
 
-이 실행의 앞부분 세 검사가 access token의 정상 검증, 만료, 마지막 문자 변조 거부를 확인하고,
-매치 배정 뒤의 검사가 game token의 audience·player claim과 빈 claim 거부를 확인한다.
+`AccessTokenContract`는 발급 직후 검증 통과, 만료 뒤 거부, 마지막 문자를 바꾼 token의 거부를
+차례로 확인한다. `TokenExpiry`는 만료 시각이 배정 시각 + 45초라는 값 자체를 비교하고 만료
+1초 전·1초 후·하루 뒤를 함께 넣는다. `IdentifierContract`는 공백·64자 초과·허용되지 않는
+문자가 든 식별자를 player와 server 양쪽에서 거부하는지 본다.
+
+audience 검사는 같은 token 문자열에 `expectedServerId`만 바꿔 넣는 두 줄이다.
+
+<!-- snippet: tests/LiveService.Tests/Program.cs@game-token-audience -->
+```csharp
+Require(tokens.TryValidateGameToken(
+        viewA.GameToken!, "audience-a", t0, out GameAdmission? admissionA) &&
+    admissionA!.PlayerId == "aud-a",
+    name + ": 소유 server가 game token을 연다");
+Require(!tokens.TryValidateGameToken(viewA.GameToken!, "audience-z", t0, out _),
+    name + ": 다른 server ID로는 game token이 열리지 않는다");
+```
+
+첫 줄만 있으면 audience 검사를 통째로 지워도 통과한다. 둘째 줄이 있어야 "같은 fleet secret을
+아는 다른 서버가 남의 token을 열 수 없다"가 실제로 측정된다. 나머지 검사도 같은 방식으로
+정상 경로 한 건과 실패 주입 한 건 이상을 짝지어 둔다.
 
 ---
 

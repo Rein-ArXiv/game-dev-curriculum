@@ -59,7 +59,8 @@ static void BuildLog(const std::string& path, uint32_t seed,
     db.Close();
 }
 
-// 절단 길이 cutAt 에서 복구가 되살려야 하는 트랜잭션 수 — 완전히 포함된 COMMIT 프레임 수.
+// 경계 cutAt(축 A 는 절단 길이, 축 B 는 손상 프레임의 시작) 이하로 끝나는 COMMIT 프레임 수
+// — 복구가 되살려야 하는 트랜잭션 수.
 static uint64_t ExpectedCommits(const std::vector<long long>& commit_ends, long long cutAt) {
     uint64_t n = 0;
     for (long long end : commit_ends) {
@@ -143,7 +144,7 @@ static void RestoreByte(const std::string& path, long long offset, int original)
 // 복구본의 불변식 검사. 실패 시 false.
 static bool CheckInvariants(const std::unordered_map<std::string, std::string>& idx,
                             uint64_t committed, uint64_t expected, std::string& why) {
-    // (3) 복구된 트랜잭션 수는 절단 길이가 허용하는 접두사와 정확히 같아야 한다.
+    // (3) 복구된 트랜잭션 수는 유효 경계가 허용하는 접두사와 정확히 같아야 한다.
     if (committed != expected) {
         why = "committed=" + std::to_string(committed) +
               " expected=" + std::to_string(expected);

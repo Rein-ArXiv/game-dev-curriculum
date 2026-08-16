@@ -115,7 +115,26 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-CTest 타깃은 두 개다. 둘 다 `scene.cpp` / `lighting_bindings.cpp` / `texture_modes.cpp` / `msaa_target.cpp` / `shader_program.cpp` / `khr_debug.cpp` 를 **앱과 같은 소스로 함께 컴파일**한다. 헤더의 예측 함수만 검사하던 이전 구성과 달리, 제품 코드를 망가뜨리면 테스트가 실제로 죽는다.
+실행 파일은 두 개고, CTest 항목은 **12 개**다 — 전체를 도는 두 개 + step 별 열 개. 두 실행 파일 모두 첫 인자를 필터로 받으므로(`graphics_gl_contract_tests step05`) step 별 항목은 새 실행 파일 없이 `add_test` 만 나뉜 것이다. step 문서의 검증 절은 자기 step 의 항목만 부른다.
+
+```bash
+ctest --test-dir build -C Release -R gl_step05 --output-on-failure   # step05 가 추가한 것만
+```
+
+| 항목 | 실행 파일 | 도는 검증 |
+|---|---|---|
+| `gl_step01_skeleton` | contract | `camera_matrices`, `frame_timer_history` |
+| `gl_step02_measure` | contract | `counter_reset`, `debug_message_ring` |
+| `gl_step03_drawcall_contract` | contract | `draw_submission_counts`, `indirect_commands` |
+| `gl_step03_drawcall_render` | render | `draw_mode_capture` |
+| `gl_step04_shader_perm` | render | `shader_permutations` |
+| `gl_step05_binding_contract` | contract | `binding_cost_model`, `counted_binding_cost`, `per_call_uniform_names` |
+| `gl_step05_binding_render` | render | `binding_counters` |
+| `gl_step06_texture_contract` | contract | `mip_chain_bytes`, `block_bytes` |
+| `gl_step06_texture_render` | render | `texture_vram` |
+| `gl_step07_scale_msaa` | render | `scene_rebuild_handles`, `msaa_fallback` |
+
+두 실행 파일 다 `scene.cpp` / `lighting_bindings.cpp` / `texture_modes.cpp` / `msaa_target.cpp` / `shader_program.cpp` / `khr_debug.cpp` / `frame_timer.cpp` 를 **앱과 같은 소스로 함께 컴파일**한다. 헤더의 예측 함수만 검사하던 이전 구성과 달리, 제품 코드를 망가뜨리면 테스트가 실제로 죽는다.
 
 ### `graphics_gl_contract_tests` — GL 컨텍스트 불필요
 
@@ -123,6 +142,9 @@ CTest 타깃은 두 개다. 둘 다 `scene.cpp` / `lighting_bindings.cpp` / `tex
 |---|---|---|
 | `BuildIndirectCommands` | `src/scene/scene.cpp` | MDI 커맨드 배열의 길이·`count`·`instanceCount`·`baseInstance` |
 | `ComputeCamera` | `src/scene/scene.cpp` | 원점의 NDC 중심 사상, 깊이 부호와 단조성, 격자 최외곽 큐브의 클립 볼륨 포함, aspect 가 `proj[0][0]` 만 바꾼다는 성질 |
+| `FrameTimer` | `src/measure/frame_timer.cpp` | EMA 씨앗 대입과 `α = 0.1` 혼합식, 240 슬롯 히스토리 링의 머리 회전 |
+| `GlCounters::Reset` | `src/measure/gl_counters.h` | 일곱 칸이 모두 0 으로 돌아가는가(프레임 경계) |
+| `KHRDebug` 링 | `src/measure/khr_debug.cpp` | 256 슬롯을 넘겨도 개수가 멈추고 최근 것만 남는가, 앱 메시지의 source/severity |
 | `CountBindingCost` / `BuildPerCallUniformNames` | `src/render/lighting_bindings.cpp` | 바인딩 모드별 uniform/buffer 갱신 수(`1 + 2N` vs `{1, 1}`)와 per-call uniform 이름 목록 |
 | `BlockBytesFor` | `src/render/texture_modes.cpp` | 포맷별 블록 바이트와 mip chain 합산, DXT1 = 1/8 · DXT5/BC7 = 1/4 압축비 |
 | `ExpectedDrawSubmissions` / `ExpectedBindingCost` / `ExpectedMipChainBytes` | 각 헤더 | 위 구현과 맞대는 예측 모델 |
@@ -135,6 +157,7 @@ CTest 타깃은 두 개다. 둘 다 `scene.cpp` / `lighting_bindings.cpp` / `tex
 - **자원 수명** — `Scene::Rebuild` 를 1000 회 반복한 뒤 핸들이 유효한지, 드라이버가 발급한 이름 값이 누적되지 않는지(누수 시 1000 단위로 올라간다), GL 에러와 `KHR_debug` HIGH 메시지가 0 건인지 확인한다.
 - **동기화·폴백 상태** — `MsaaTarget` 이 4x 를 정상 생성하는 경로와, `GL_MAX_RENDERBUFFER_SIZE` 초과 요청으로 FBO 를 불완전하게 만든 경로를 둘 다 밟아 폴백 후 `Current()`/`Requested()` 가 Off 이고 폴백 통지가 정확히 한 번만 소비되는지 검사한다.
 - **런타임 카운터 대조** — `LightingBindings::Apply` 를 실제 셰이더에 대해 호출해 `GlCounters` 증가분이 `CountBindingCost` 예측과 일치하는지, `TextureRegistry` 가 드라이버에서 읽은 mip chain 바이트가 `ExpectedMipChainBytes` 와 일치하는지(어긋나면 로그 통지가 남는지) 확인한다.
+- **셰이더 perm 구성** — `ShaderRegistry::Pick` 이 uber 에서는 세 모델에 같은 프로그램을, static permutation 에서는 서로 다른 세 프로그램을 돌려주는지, `uShadingModel` uniform 이 uber 에만 있는지(`SetInt` 반환값), `ProgramChangedSinceLast` 가 전환을 정직하게 잡는지 검사한다.
 
 `ctest` 출력에 GPU 이름과 세 모드의 픽셀 해시, 재빌드 후 핸들 값, 포맷별 VRAM 실측치가 그대로 찍힌다. 세 드로우 모드의 CPU/GPU 시간 분포처럼 값 자체가 머신마다 달라지는 항목은 여전히 실행 후 패널로 확인한다.
 

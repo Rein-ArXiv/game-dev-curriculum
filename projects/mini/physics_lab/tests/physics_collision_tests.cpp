@@ -1,5 +1,7 @@
 #include "scenes/narrow_phase_scene.h"
 
+#include "step_cases.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -99,8 +101,8 @@ AxisReference ReferenceDepths(const physlab::Polygon2D& a,
 
 // (normal, depth) 계약의 양면 검사 — 참조 구현만 쓰므로 SAT / EPA 어느 쪽도
 // 자기 자신을 채점하지 않는다.
-//   normal 로 depth 보다 조금 더 밀면 반드시 떨어진다  → depth 가 과대평가 아님
-//   normal 로 depth 보다 조금 덜 밀면 반드시 아직 겹친다 → depth 가 과소평가 아님
+//   normal 로 depth 보다 조금 더 밀면 반드시 떨어진다  → depth 가 과소평가 아님
+//   normal 로 depth 보다 조금 덜 밀면 반드시 아직 겹친다 → depth 가 과대평가 아님
 // depth 만 맞고 normal 이 엉뚱한 축이면 앞쪽에서 걸린다.
 void CheckPushSeparates(const physlab::Polygon2D& a,
                         const physlab::Polygon2D& b,
@@ -181,6 +183,8 @@ void TestSeparatedAndOverlappingBoxes() {
     Vector2 n{}; float d = -1.0f;
     CHECK(physlab::SATCollide(a, MakeBox(2.0f, 0.0f), n, d));
     CHECK(std::fabs(d) < 1e-6f);
+    std::cout << "  analytic depths 0.5 / 0.75 matched; boundary touch depth="
+              << d << " normal=(" << n.x << ',' << n.y << ")\n";
 }
 
 // 깊은 겹침에서 SAT 와 EPA 가 갈라지는 지점을 고정 케이스로 못 박는다.
@@ -198,6 +202,7 @@ void TestDeepOverlapReference() {
     CHECK(std::fabs(ref.push - (1.0f + std::sqrt(2.0f))) < 1e-4f);
     CHECK(std::fabs(ref.intersect - 2.0f) < 1e-4f);
 
+    // snippet-begin: mtd-vs-intersection
     // 두 구현 모두 진짜 MTD 를 낸다 — 해석해와 직접 비교.
     CHECK(std::fabs(gjkDepth - (1.0f + std::sqrt(2.0f))) < 1e-3f);
     CHECK(std::fabs(satDepth - (1.0f + std::sqrt(2.0f))) < 1e-4f);
@@ -206,8 +211,12 @@ void TestDeepOverlapReference() {
     // 떨어져 있으므로 이 검사는 허용 오차 문제가 아니라 식 자체를 고정한다.
     CHECK(std::fabs(satDepth - ref.intersect) > 0.4f);
     CHECK(satDepth > 0.0f);
+    // snippet-end: mtd-vs-intersection
     CheckPushSeparates(a, b, satNormal, satDepth, "deep-overlap SAT");
     CheckPushSeparates(a, b, gjkNormal, gjkDepth, "deep-overlap EPA");
+    std::cout << "  45deg cocentric: sat=" << satDepth << " epa=" << gjkDepth
+              << " mtd=" << ref.push << " intersection=" << ref.intersect
+              << '\n';
 }
 
 // 포함(containment) 배치 모음 — 한 축 투영 구간이 다른 쪽을 통째로 품는 경우.
@@ -233,6 +242,8 @@ void TestSatMatchesEpaOnDeepOverlap() {
          MakeSquare(0, 0, 0.0f, 0.5f), MakeSquare(0.2f, 0.1f, 0.0f, 2.0f)},
     };
 
+    float worstGap = 0.0f;
+    float worstSpread = 0.0f;
     for (const auto& c : cases) {
         Vector2 satNormal{}, gjkNormal{};
         float satDepth = 0.0f, gjkDepth = 0.0f;
@@ -260,7 +271,12 @@ void TestSatMatchesEpaOnDeepOverlap() {
         CHECK(std::fabs(satDepth - ref.push) < 1e-3f);
         CheckPushSeparates(c.a, c.b, satNormal, satDepth, c.name);
         CheckPushSeparates(c.a, c.b, gjkNormal, gjkDepth, c.name);
+
+        worstGap    = std::max(worstGap, std::fabs(satDepth - gjkDepth));
+        worstSpread = std::max(worstSpread, ref.push - ref.intersect);
     }
+    std::cout << "  7 containment cases: max |sat-epa|=" << worstGap
+              << ", max (mtd - intersection)=" << worstSpread << '\n';
 }
 
 // 결정적 LCG — 시드 고정이라 어디서든 같은 배치가 나온다.
@@ -337,19 +353,22 @@ void TestRandomizedAgreement() {
     CHECK(hits > 40);
     CHECK(misses > 10);
     CHECK(containment > 0);
+    std::cout << "  100 random placements: hits=" << hits
+              << " misses=" << misses << " containment=" << containment
+              << '\n';
 }
+
+const physlab::testkit::StepCase kCases[] = {
+    {"step05", "separated_and_overlapping", TestSeparatedAndOverlappingBoxes},
+    {"step05", "deep_overlap_reference",    TestDeepOverlapReference},
+    {"step05", "sat_matches_epa",           TestSatMatchesEpaOnDeepOverlap},
+    {"step05", "randomized_agreement",      TestRandomizedAgreement},
+};
 
 }  // namespace
 
-int main() {
-    TestSeparatedAndOverlappingBoxes();
-    TestDeepOverlapReference();
-    TestSatMatchesEpaOnDeepOverlap();
-    TestRandomizedAgreement();
-    if (failures != 0) {
-        std::cerr << failures << " collision test(s) failed\n";
-        return 1;
-    }
-    std::cout << "physics collision tests passed\n";
-    return 0;
+int main(int argc, char** argv) {
+    return physlab::testkit::RunStepCases(
+        argc, argv, kCases, (int)(sizeof(kCases) / sizeof(kCases[0])),
+        "physics collision", &failures);
 }

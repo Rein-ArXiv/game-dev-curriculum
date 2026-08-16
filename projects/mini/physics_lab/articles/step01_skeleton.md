@@ -25,6 +25,7 @@
 6. [화면 chrome (탭 / 패널 / 푸터)](#6-화면-chrome-탭--패널--푸터)
 7. [Welcome Scene 과 main 루프](#7-welcome-scene-과-main-루프)
 8. [빌드와 실행 결과](#8-빌드와-실행-결과)
+9. [레이아웃 계산을 창 없이 확인하기](#9-레이아웃-계산을-창-없이-확인하기)
 
 ---
 
@@ -385,6 +386,65 @@ cmake --build build --config Release -j
 
 실행하면 *상단 탭 (Welcome 한 개), 중앙 캔버스 (원 강체가 중력으로 떨어지며 바닥에 튕김), 우측 패널 (pos / vel / speed / 적분기 종류 / restitution 표시), 하단 푸터 (frame ms, fps)* 가 보인다. 캔버스에서 강체를 마우스로 끌면 *그 위치로 즉시 옮겨지고 속도 0 으로 reset* — 떨어지는 시뮬을 *원하는 위치에서 다시 시작* 가능. 반발 계수 0.6 으로 *몇 번 튕긴 뒤 정지*.
 
+## 9. 레이아웃 계산을 창 없이 확인하기
+
+여기서 만든 것 대부분은 창과 마우스가 있어야 도는 코드다. 예외가 하나 있다 — `ComputeLayout` 은 화면 크기와 패널 폭만 받아 네 사각형을 나누는 순수 함수이고, *모든 Scene 이 받는 캔버스 좌표가 여기서 나온다*. 이 계산이 틀어지면 Scene 은 자기가 그리는 영역을 잘못 알게 되는데, 화면으로는 "뭔가 어긋나 보인다" 이상으로 짚어내기 어렵다. 그래서 이것만 따로 실행 파일로 뺀다.
+
+```cmake
+physlab_add_scene_test(physics_chrome_tests src/ui/scene_chrome.cpp)
+add_test(NAME step01.layout COMMAND physics_chrome_tests step01)
+```
+
+각 테스트 실행 파일은 `argv[1]` 로 케이스 필터를 받는다. 인자가 없으면 표 전체를 돌고, `step01` 을 주면 이 step 이 추가한 케이스만 돈다.
+
+검사의 뼈대는 *분할 규약* 이다 — 네 사각형이 화면을 빈틈없이, 겹치지 않게 나누는가.
+
+<!-- snippet: tests/physics_chrome_tests.cpp@layout-partition -->
+```cpp
+// 가로 — 캔버스와 패널이 화면 폭을 나눠 갖고, 패널은 캔버스 바로 오른쪽이다.
+CHECK(L.canvas.x == 0.0f);
+CHECK(std::fabs(L.canvas.width + L.panel.width - (float)screenW) < 1e-4f);
+CHECK(std::fabs(L.panel.x - (L.canvas.x + L.canvas.width)) < 1e-4f);
+CHECK(std::fabs(L.panel.width - (float)panelW) < 1e-4f);
+
+// 세로 — 탭바 / 본문 / 푸터가 위에서 아래로 정확히 맞물린다. 한 픽셀이라도
+// 벌어지면 Scene 이 받는 캔버스 높이가 화면과 어긋난다.
+CHECK(L.tabBar.y == 0.0f);
+CHECK(std::fabs(L.canvas.y - (L.tabBar.y + L.tabBar.height)) < 1e-4f);
+CHECK(std::fabs(L.footer.y - (L.canvas.y + L.canvas.height)) < 1e-4f);
+CHECK(std::fabs(L.footer.y + L.footer.height - (float)screenH) < 1e-4f);
+CHECK(L.canvas.y == L.panel.y);
+CHECK(L.canvas.height == L.panel.height);
+```
+
+규약만으로는 상수가 바뀌는 것을 못 잡는다. 그래서 실제로 쓰는 창 (1280×720, 패널 280) 의 값을 리터럴로 못 박는 케이스를 따로 둔다 — 탭바 32 / 푸터 24 가 바뀌면 `canvas 1000x664` 가 어긋나며 걸린다.
+
+```powershell
+cmake --build build --config Release -j
+ctest --test-dir build -C Release -R step01 --output-on-failure
+.\build\Release\physics_chrome_tests.exe step01   # 같은 것을 직접 — 관측값까지 본다
+```
+
+`ctest` 는 통과 / 실패만 알려 준다. 두 번째 줄을 직접 돌리면 무엇을 쟀는지가 보인다.
+
+```text
+[step01] layout_partition
+  1280x720/280: canvas 1000x664 at (0,32)  panel x=1000 w=280
+  800x600/200: canvas 600x544 at (0,32)  panel x=600 w=200
+  1920x1080/320: canvas 1600x1024 at (0,32)  panel x=1600 w=320
+  ok
+[step01] shipped_window
+  shipped window: tabBar h=32 canvas 1000x664 footer y=696
+  ok
+[step01] degenerate_panel
+  no panel: canvas 1024x712 at (0,32)  panel x=1024 w=0
+  panel == screen: canvas 0x712 at (0,32)  panel x=0 w=1024
+  ok
+3 case(s) ok: physics chrome [step01]
+```
+
+이 실행 파일이 보증하는 범위는 딱 저기까지다. Scene 생명주기 (`OnEnter` / `OnExit` 호출 순서), DragHandle 의 한 핸들 capture 정책, Welcome 강체의 튕김은 마우스 입력과 창이 있어야 도는 코드라 여기서 다루지 않는다 — 그 셋은 앱을 띄워 눈으로 확인하는 수밖에 없다.
+
 ---
 
 ## 결론
@@ -396,8 +456,9 @@ Step 1 에서 만든 것.
 3. **scene_chrome** — 상단 탭 / 우측 패널 / 하단 푸터 + 레이아웃 계산.
 4. **FrameTimer** — `BeginFrame / EndFrame` + EMA 로 ms / fps 안정 표시.
 5. **Welcome Scene + main 루프** — 단일 강체 + semi-implicit Euler + 바닥 / 벽 충돌. 골격이 동작하는지 검증.
+6. **`physics_chrome_tests` 타깃** — `ctest --test-dir build -C Release -R step01` 로 `ComputeLayout` 의 분할 규약과 실제 창 (1280×720, 패널 280) 의 좌표를 창 없이 검사.
 
-이 단계가 보장하는 것은 여기까지다 — Scene 생명주기, fixed dt 누적기, chrome, 그리고 강체 한 개의 동작. 적분기 비교, 외력, Broad / Narrow Phase, 충돌 응답, 제약, 종합 측정은 아직 코드에 없고 자동 테스트도 없다.
+이 골격이 보장하는 것은 여기까지다 — Scene 생명주기, fixed dt 누적기, chrome, 그리고 강체 한 개의 동작. 적분기 비교, 외력, Broad / Narrow Phase, 충돌 응답, 제약, 종합 측정은 아직 코드에 없다. 자동으로 검사되는 것도 레이아웃 계산 하나뿐이고, 나머지 넷은 앱을 띄워 눈으로 본다.
 
 ## 더 읽을거리
 

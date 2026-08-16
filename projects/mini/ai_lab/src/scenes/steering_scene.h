@@ -9,7 +9,8 @@
 namespace ailab {
 
 // Steering Scene — Seek / Arrive / Wander / Pursue 를 한 에이전트로 시연.
-// 목표는 마우스 위치. 최근 궤적을 fade-out trail 로 그린다 (ai/part11).
+// 목표는 마우스 위치 (Pursue 만 원운동 가상 타깃).
+// 최근 궤적을 fade-out trail 로 그린다 (ai/part11).
 class SteeringScene : public IScene {
 public:
     void OnEnter() override;

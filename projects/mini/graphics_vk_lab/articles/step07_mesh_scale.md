@@ -32,9 +32,10 @@ Mesh Shader는 이 측정 결과를 해석할 때 등장하는 선택적 수단�
 
 오브젝트 수를 바꿀 때 `vkDeviceWaitIdle`로 기존 프레임의 사용을 끝낸 뒤 CPU 객체 배열을 재구축한다. 이 대기 시간은 설정 변경 비용이며 정상 상태의 프레임 비용이 아니다. 토글 직후의 spike를 버리고 충분히 안정된 구간을 비교해야 한다.
 
+<!-- snippet: src/app/app.cpp#App::OnFrame -->
 ```cpp
 if (pendingCount_ != objectCount_) {
-    vkDeviceWaitIdle(device);
+    vkDeviceWaitIdle(dev);
     objectCount_ = pendingCount_;
     scene_.Build(objectCount_);
 }
@@ -44,17 +45,23 @@ if (pendingCount_ != objectCount_) {
 
 ## 2. Per-Draw와 Instanced 경로
 
-Per-Draw 모드는 오브젝트마다 model matrix와 color를 push constant로 기록하고 `vkCmdDrawIndexed`를 호출한다.
+기록 규칙은 `Scene::RecordDraw` 하나에 모여 있다. 이 함수는 `VkCommandBuffer` 대신 `IDrawRecorder` 를 받으므로 디바이스 없이 돌릴 수 있고, Vulkan 구현이 그대로 `vkCmdPushConstants` / `vkCmdDrawIndexed` 로 내려보낸다(§6).
 
+Per-Draw 모드는 오브젝트마다 model matrix와 color를 push constant로 기록하고 draw를 한 번씩 낸다.
+
+<!-- snippet: src/scene/scene_core.cpp#Scene::RecordDraw -->
 ```cpp
-for (const Object& object : objects_) {
+for (size_t i = 0; i < objects_.size(); ++i) {
+    const auto& o = objects_[i];
     PushConstants pc{};
-    pc.model = ModelMatrix(object);
-    pc.color = glm::vec4(object.color, 1.0f);
-    pc.mode = 0u;
-    vkCmdPushConstants(cmd, layout, shaderStages,
-                       0, sizeof(PushConstants), &pc);
-    vkCmdDrawIndexed(cmd, indexCount_, 1, 0, 0, 0);
+    pc.model = ModelMatrix(o);
+    pc.color = glm::vec4(o.color, 1.0f);
+    pc.mode  = 0u;
+    recorder.PushConstants(pc);
+    counters.pushConstants++;
+
+    recorder.DrawIndexed(indexCount_, 1);
+    counters.drawCalls++;
 }
 ```
 
@@ -67,15 +74,17 @@ $$
 
 Instanced 모드는 한 번의 push constant로 모드만 알리고 instance count가 $N$인 draw를 한 번 기록한다.
 
+<!-- snippet: src/scene/scene_core.cpp#Scene::RecordDraw -->
 ```cpp
 PushConstants pc{};
 pc.model = glm::mat4(1.0f);
 pc.color = glm::vec4(1.0f);
-pc.mode = 1u;
-vkCmdPushConstants(cmd, layout, shaderStages,
-                   0, sizeof(PushConstants), &pc);
-vkCmdDrawIndexed(cmd, indexCount_,
-                 (uint32_t)objects_.size(), 0, 0, 0);
+pc.mode  = 1u;
+recorder.PushConstants(pc);
+counters.pushConstants++;
+
+recorder.DrawIndexed(indexCount_, (uint32_t)objects_.size());
+counters.instancedDraws++;
 ```
 
 이때 CPU command 제출 횟수는 $O(1)$이 되지만 GPU가 처리하는 인스턴스와 정점 수는 줄지 않는다. 큐브 한 개의 index 수를 $I$라 하면 두 모드 모두 대략 $N I$개의 인덱스를 소비한다.
@@ -91,19 +100,22 @@ vkCmdDrawIndexed(cmd, indexCount_,
 
 Instanced 모드는 model matrix와 color를 SSBO에 연속으로 쓴다. vertex shader는 `gl_InstanceIndex`로 자기 데이터를 읽는다.
 
+<!-- snippet: shaders/cube.vert -->
 ```glsl
 struct Instance {
     mat4 model;
     vec4 color;
 };
-
 layout(set = 0, binding = 1) readonly buffer Instances {
     Instance instances[];
 };
-
+// ...
 if (pc.mode == 1u) {
     model = instances[gl_InstanceIndex].model;
-    col = instances[gl_InstanceIndex].color.rgb;
+    col   = instances[gl_InstanceIndex].color.rgb;
+} else {
+    model = pc.model;
+    col   = pc.color.rgb;
 }
 ```
 
@@ -115,12 +127,12 @@ $$
 
 100k에서는 프레임당 약 8MB이고, 60fps라면 payload만 약 480MB/s다. 메모리 할당 메타데이터, cache writeback, flush 범위는 이 계산에 포함되지 않는다.
 
+<!-- snippet: src/app/app.cpp#App::UpdateFrameData -->
 ```cpp
 if (drawMode_ == DrawMode::Instanced) {
-    const int count = scene_.WriteInstances(frame.ssboMapped, kMaxObjects);
-    vmaFlushAllocation(
-        allocator, frame.ssboAlloc, 0,
-        (VkDeviceSize)count * sizeof(InstanceData));
+    int n = scene_.WriteInstances(fr.ssboMapped, kMaxObjects);
+    vmaFlushAllocation(alloc_.Allocator(), fr.ssboAlloc, 0,
+                       (VkDeviceSize)n * sizeof(InstanceData));
 }
 ```
 
@@ -189,13 +201,43 @@ Task Shader(optional) -> Mesh Shader -> Rasterizer -> Fragment Shader
 
 ```powershell
 cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
+ctest --test-dir build -C Release -R vk_step07_mesh_scale --output-on-failure
+.\build\Release\graphics_vk_contract_tests.exe step07
 build\Release\graphics_vk_lab.exe
 ```
 
+```text
+    Start 8: vk_step07_mesh_scale
+1/1 Test #8: vk_step07_mesh_scale .............   Passed    0.03 sec
+
+100% tests passed out of 1
+
+[step07] draw_mode_names ... ok (5 checks)
+[step07] draw_submission_counts ... ok (55 checks)
+[step07] scene_scale_contract ... ok (13 checks)
+step07: 3 test(s), 73 checks, 0 failed
+```
+
+`draw_submission_counts` 의 55개가 §6 의 1·2 다. 1·1000·10000 세 규모 × 두 모드마다 fake recorder 가 센 수를 공식과 대조하므로 개수가 그렇게 늘어난다.
+
+<!-- snippet: tests/graphics_vk_contract_tests.cpp@draw-submission-match -->
+```cpp
+const int expected = vklab::ExpectedDrawSubmissions(mode, n);
+CHECK(counters.drawCalls + counters.instancedDraws == expected);
+CHECK(rec.draws == expected);
+CHECK(counters.pushConstants ==
+      (mode == vklab::DrawMode::PerDraw ? n : 1));
+CHECK(rec.pushes == counters.pushConstants);
+// Instanced 는 1회 draw 에 N 인스턴스, PerDraw 는 N회 draw 에 1씩.
+CHECK(rec.totalInstances == (uint64_t)n);
+CHECK(rec.maxInstances ==
+      (mode == vklab::DrawMode::PerDraw ? 1u : (uint32_t)n));
+```
+
+`counters` 는 `RecordDraw` 가 올린 값이고 `rec` 는 recorder 가 받은 실제 호출 수다. 둘을 함께 보므로 카운터만 맞고 기록은 다른 어긋남이 남지 않는다. `scene_scale_contract` 의 13개가 §6 의 3·4이고, `draw_mode_names` 는 패널 콤보에 뜨는 두 모드 이름이다.
+
 관측 항목.
 
-- `ctest` 는 `100% tests passed out of 1` 을 출력한다. 여기서 확인되는 것은 위 1~4 네 항목이다.
 - 패널에서 `Object count` 를 10k 로 두고 `Draw mode` 를 `Per-Draw` 로 하면 카운터가 `draws 10000  instanced 0`, `push 10000` 이 된다. `Instanced` 로 바꾸면 같은 화면에서 `draws 0  instanced 1`, `push 1` 로 떨어진다. 이 한 줄이 이 step 의 조작 변수와 결과다.
 - `Active objects` 는 선택한 1k / 10k / 100k 값과 같아야 한다. 값 변경은 다음 프레임의 scene rebuild 후 반영된다.
 - 두 모드의 `CPU ms` / `GPU ms` 를 오브젝트 수마다 적어 두면 §4 의 다섯 가지 병목 패턴 중 어디에 해당하는지 판정할 수 있다. VSync 를 켠 채 비교하면 present pacing 이 차이를 가리므로 끄고 본다.

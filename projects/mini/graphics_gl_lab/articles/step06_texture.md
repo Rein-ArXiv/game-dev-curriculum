@@ -86,10 +86,11 @@ glTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_BPTC_UNORM,
 
 확장을 요청했다고 GPU 가 지원한다는 뜻은 아니다. `gladLoadGL` 이후 플래그를 읽어 *지원되는 모드만 업로드* 한다.
 
+<!-- snippet: src/render/texture_modes.cpp#TextureRegistry::Init -->
 ```cpp
 supportsS3tc_ = GLAD_GL_EXT_texture_compression_s3tc != 0;
 supportsBptc_ = GLAD_GL_ARB_texture_compression_bptc != 0;
-
+// ... 프로시저 텍스처 생성 + uncompressed 업로드
 if (supportsS3tc_) {
     glGenTextures(1, &texDxt1_);
     Upload(texDxt1_, GL_COMPRESSED_RGB_S3TC_DXT1_EXT, size, rgba);
@@ -104,17 +105,21 @@ if (supportsBptc_) {
 
 플래그가 있어도 드라이버가 압축을 거부해 크기 측정이 0 이 나올 수 있으므로, *측정 결과까지 본 뒤* 지원 여부를 확정한다.
 
+<!-- snippet: src/render/texture_modes.cpp#TextureRegistry::Init -->
 ```cpp
-supportsS3tc_ = supportsS3tc_ && bytesDxt1_ > 0 && bytesDxt5_ > 0;
+supportsS3tc_ = supportsS3tc_ &&
+                bytesDxt1_ > 0 && bytesDxt5_ > 0;
 supportsBptc_ = supportsBptc_ && bytesBc7_ > 0;
 ```
 
 UI 는 `IsSupported(mode)` 로 걸러 *미지원 모드는 선택 자체를 막고* 크기 자리에 `unsupported` 를 적는다.
 
+<!-- snippet: src/ui/panel.cpp@texture-combo -->
 ```cpp
 if (ImGui::Combo("texture", &tmInt, tmNames, IM_ARRAYSIZE(tmNames))) {
     const auto requested = (TextureMode)tmInt;
-    if (textures.IsSupported(requested)) textureMode = requested;
+    if (textures.IsSupported(requested))
+        textureMode = requested;
 }
 ```
 
@@ -132,20 +137,19 @@ if (ImGui::Combo("texture", &tmInt, tmNames, IM_ARRAYSIZE(tmNames))) {
 
 ## 3. VRAM 측정
 
+<!-- snippet: src/render/texture_modes.cpp@vram-measure -->
 ```cpp
-glBindTexture(GL_TEXTURE_2D, tex);
+glBindTexture(GL_TEXTURE_2D, t);
 int total = 0;
-
 for (int level = 0;; ++level) {
     GLint w = 0, h = 0;
     glGetTexLevelParameteriv(GL_TEXTURE_2D, level, GL_TEXTURE_WIDTH, &w);
     glGetTexLevelParameteriv(GL_TEXTURE_2D, level, GL_TEXTURE_HEIGHT, &h);
     if (w <= 0 || h <= 0) break;
 
-    GLint compressed = 0;
-    glGetTexLevelParameteriv(GL_TEXTURE_2D, level,
-                             GL_TEXTURE_COMPRESSED, &compressed);
-    if (!compressed) {
+    GLint comp = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, level, GL_TEXTURE_COMPRESSED, &comp);
+    if (!comp) {
         total += w * h * 4;
         continue;
     }
@@ -155,7 +159,6 @@ for (int level = 0;; ++level) {
                               GL_TEXTURE_COMPRESSED_IMAGE_SIZE, &sz);
     total += sz;
 }
-
 return total;
 ```
 
@@ -176,6 +179,7 @@ DXT1 이 *가장 작음 (1/8)*, DXT5 / BC7 이 *동일 크기 (1/4)*. *BC7 의 �
 
 학습 lab 의 텍스처 — *외부 이미지 파일 의존 없이* *코드로 생성*. 체크보드 + 색 그라데이션 + 약간의 노이즈.
 
+<!-- snippet: src/render/texture_modes.cpp#TextureRegistry::GenProcedural -->
 ```cpp
 for (int y = 0; y < size; ++y) {
     for (int x = 0; x < size; ++x) {
@@ -197,6 +201,7 @@ for (int y = 0; y < size; ++y) {
 
 큐브 메시는 *UV 좌표 없음* (위치 + 법선만). 셰이더가 *world position + normal* 로 *Triplanar projection* — 세 축 텍스처 합산.
 
+<!-- snippet: shaders/textured.frag#main -->
 ```glsl
 vec3 absN = abs(N);
 absN /= (absN.x + absN.y + absN.z);
@@ -267,22 +272,79 @@ build\Release\graphics_gl_lab.exe      # Linux/macOS: ./build/graphics_gl_lab
 
 패널의 *Texture compression (Step 6)* 섹션에서 네 줄의 바이트 수와 배수가 함께 출력된다 (`RGBA8: … / DXT1: … (8.0x) / DXT5: … (4.0x) / BC7 : … (4.0x)`). 미지원 GPU 에서는 해당 줄이 `unsupported` 로 나오고 콤보 선택도 무시된다. 화면은 큐브에 triplanar 로 매핑된 체크보드 텍스처로 바뀐다.
 
-```bash
-ctest --test-dir build -C Release --output-on-failure
+### 이 step 의 검증
+
+```powershell
+ctest --test-dir build -C Release -R gl_step06 --output-on-failure
 ```
 
-`graphics_gl_contract_tests` 가 `BlockBytesFor(mode, w, h)` 와 그것을 레벨마다 더하는 `ExpectedMipChainBytes` 를 검사한다. 4 의 배수가 아닌 크기의 블록 올림, DXT1 = 1/8 · DXT5/BC7 = 1/4 의 압축비, mip chain 합이 base level 의 4/3 배를 넘지 않는다는 성질까지 절대값으로 고정한다. 블록 바이트를 하나만 바꿔도 이 단언들이 함께 무너진다.
+```text
+    Start  7: gl_step06_texture_contract
+1/2 Test  #7: gl_step06_texture_contract .......   Passed    0.03 sec
+    Start 11: gl_step06_texture_render
+2/2 Test #11: gl_step06_texture_render .........   Passed    0.64 sec
 
-`graphics_gl_render_tests` 는 실제 컨텍스트에서 텍스처를 올린 뒤 `BytesFor` 가 돌려주는 *드라이버 실측치* 를 같은 예측식과 대조한다. `Init` 은 두 값이 어긋나면 로그 창에 `VRAM model mismatch: …` 를 남기고, 테스트는 '어긋난 포맷 수' 와 '남은 통지 수' 가 같은지 확인해 조용한 폴백을 막는다. 다음은 Intel Iris Xe 에서 256² 로 돌린 출력이다.
+100% tests passed out of 2
+```
+
+계약 쪽이 `BlockBytesFor(mode, w, h)` 와 그것을 레벨마다 더하는 `ExpectedMipChainBytes` 를 검사한다. 4 의 배수가 아닌 크기의 블록 올림, DXT1 = 1/8 · DXT5/BC7 = 1/4 의 압축비, mip chain 합이 base level 의 4/3 배를 넘지 않는다는 성질까지 절대값으로 고정한다.
+
+```powershell
+build\Release\graphics_gl_contract_tests.exe step06   # Linux/macOS: ./build/graphics_gl_contract_tests step06
+```
 
 ```text
+[step06] mip_chain_bytes ... ok
+[step06] block_bytes ... ok
+graphics_gl_contract_tests: 2/2 passed (filter=step06)
+```
+
+<!-- snippet: tests/graphics_gl_contract_tests.cpp#TestBlockBytes -->
+```cpp
+// 4 의 배수가 아닌 크기는 블록 단위로 올림한다.
+CHECK(gllab::BlockBytesFor(gllab::TextureMode::DXT1, 5, 3) == 2 * 1 * 8);
+CHECK(gllab::BlockBytesFor(gllab::TextureMode::BC7, 1, 1) == 16);
+// ...
+// 압축비 주장 — DXT1 은 RGBA8 의 1/8, DXT5/BC7 은 1/4.
+const int raw  = gllab::BlockBytesFor(gllab::TextureMode::Uncompressed, 512, 512);
+const int dxt1 = gllab::BlockBytesFor(gllab::TextureMode::DXT1, 512, 512);
+const int dxt5 = gllab::BlockBytesFor(gllab::TextureMode::DXT5, 512, 512);
+const int bc7  = gllab::BlockBytesFor(gllab::TextureMode::BC7, 512, 512);
+CHECK(raw == dxt1 * 8);
+CHECK(raw == dxt5 * 4);
+CHECK(dxt5 == bc7);
+```
+
+블록 바이트를 하나만 바꿔도 이 단언들이 함께 무너진다. 위 *예상 결과* 표의 네 줄은 이 두 함수의 출력이지 손으로 적은 수가 아니다.
+
+렌더 쪽은 실제 컨텍스트에서 텍스처를 올린 뒤 `BytesFor` 가 돌려주는 *드라이버 실측치* 를 같은 예측식과 대조한다. `Init` 은 두 값이 어긋나면 로그 창에 `VRAM model mismatch: …` 를 남기고, 테스트는 '어긋난 포맷 수' 와 '남은 통지 수' 가 같은지 확인해 조용한 폴백을 막는다. 다음은 Intel Iris Xe 에서 256² 로 돌린 출력이다.
+
+```powershell
+build\Release\graphics_gl_render_tests.exe step06   # Linux/macOS: ./build/graphics_gl_render_tests step06
+```
+
+```text
+[gl] vendor=Intel renderer=Intel(R) Iris(R) Xe Graphics version=4.5.0 - Build 32.0.101.7088
 [vram] RGBA8 (uncompressed) measured=349524 model=349524
 [vram] DXT1 / BC1 (RGB, 4 bpp) measured=43704 model=43704
 [vram] DXT5 / BC3 (RGBA, 8 bpp) measured=87408 model=87408
+[vram] BC7 (RGBA, 8 bpp + 고품질) measured=87408 model=87408
 [vram] mismatches=0 notices=0
 ```
 
-압축 결과 크기는 드라이버의 온라인 인코더가 정하므로 다른 GPU 에서 예측식과 갈라질 수 있다. 그때는 테스트가 실패하고 동시에 로그에 어느 포맷이 얼마나 어긋났는지가 남는다.
+<!-- snippet: tests/graphics_gl_render_tests.cpp#TestTextureVram -->
+```cpp
+const int measured = textures.BytesFor(m);
+const int model    = gllab::ExpectedMipChainBytes(m, 256, 256);
+// ...
+CHECK(measured > 0);
+if (m != gllab::TextureMode::Uncompressed) {
+    CHECK(measured < raw);   // 압축은 반드시 더 작다.
+}
+CHECK(measured == model);
+```
+
+미지원 포맷은 `unsupported on this driver — skipped` 한 줄을 남기고 건너뛴다 (위 출력에서는 네 포맷이 모두 지원됐다). 압축 결과 크기는 드라이버의 온라인 인코더가 정하므로 다른 GPU 에서 예측식과 갈라질 수 있다. 그때는 테스트가 실패하고 동시에 로그에 어느 포맷이 얼마나 어긋났는지가 남는다 — `mismatches` 와 `notices` 가 같아야 한다는 마지막 단언이 그 통지를 강제한다.
 
 ---
 

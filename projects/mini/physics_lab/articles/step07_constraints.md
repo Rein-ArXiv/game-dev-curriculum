@@ -24,6 +24,7 @@
 3. [Sequential Impulse joint (Baumgarte)](#3-sequential-impulse-joint-baumgarte)
 4. [Step 흐름 두 갈래](#4-step-흐름-두-갈래)
 5. [무엇을 보는가](#5-무엇을-보는가)
+6. [stretch 를 창 없이 재기](#6-stretch-를-창-없이-재기)
 
 ---
 
@@ -221,6 +222,88 @@ flowchart TB
     F --> G[stretch 측정]
 ```
 
+## 6. stretch 를 창 없이 재기
+
+시나리오 A ~ D 는 전부 avg stretch 라벨과 그래프를 눈으로 읽는 확인이다. 그런데 네 시나리오가 주장하는 것은 *부등식* 이다 — iter 를 늘리면 stretch 가 줄고, baumgarte 를 0 으로 두면 drift 가 남는다. 부등식은 기계가 읽을 수 있다.
+
+`SetCanvas` / `SetSolver` / `SetIterations` / `SetBaumgarte` 로 창 없이 chain 을 세우고 `Step` 을 돌린 뒤 `LastAvgStretch()` 를 읽으면, GUI 가 라벨에 찍던 바로 그 값이 나온다.
+
+```cmake
+physlab_add_scene_test(physics_constraints_tests src/scenes/constraints_scene.cpp)
+add_test(NAME step07.constraints         COMMAND physics_constraints_tests step07)
+add_test(NAME step07.distance_projection COMMAND physics_core_tests        step07)
+```
+
+먼저 chain 구성 자체의 불변식이다. anchor 는 invMass 0 이라 *어떤 보정도 받지 않아야* 한다 — 이게 깨지면 chain 전체가 서서히 떨어진다.
+
+<!-- snippet: tests/physics_constraints_tests.cpp@anchor-invariant -->
+```cpp
+// 한 스텝 뒤에도 anchor 는 제자리 — invMass 0 은 어떤 보정도 받지 않는다.
+const Vector2 anchor = scene.Particles()[0].pos;
+scene.Step(1.0f / 120.0f);
+CHECK(scene.Particles()[0].pos.x == anchor.x);
+CHECK(scene.Particles()[0].pos.y == anchor.y);
+CHECK(scene.Particles()[0].vel.x == 0.0f);
+CHECK(scene.Particles()[0].vel.y == 0.0f);
+// 나머지는 중력으로 내려갔어야 한다.
+CHECK(scene.Particles()[11].pos.y > anchor.y);
+```
+
+그 anchor 규약을 만드는 것은 `core::ProjectDistance` 의 질량 분배다. invMass 0 인 끝은 움직이지 않고, 질량이 같으면 보정량을 절반씩 나눠 가진다 — 둘 다 리터럴로 떨어진다.
+
+<!-- snippet: tests/physics_core_tests.cpp@projection-mass-split -->
+```cpp
+// invMass 0 인 끝(anchor)은 움직이지 않고, 반대쪽만 rest 길이로 끌려온다.
+float ax = 0.0f, ay = 0.0f;
+float bx = 3.0f, by = 4.0f;                     // 거리 5, rest 2
+CHECK(physlab::core::ProjectDistance(
+    ax, ay, 0.0f, bx, by, 1.0f, 2.0f));
+CHECK(ax == 0.0f && ay == 0.0f);
+CHECK(std::fabs(std::sqrt(bx * bx + by * by) - 2.0f) < 1e-5f);
+
+// 질량이 같으면 보정량을 절반씩 나눠 가진다: (-2,0),(2,0) → (-1,0),(1,0).
+ax = -2.0f; ay = 0.0f;
+bx = 2.0f; by = 0.0f;
+CHECK(physlab::core::ProjectDistance(
+    ax, ay, 1.0f, bx, by, 1.0f, 2.0f));
+CHECK(std::fabs(ax + 1.0f) < 1e-6f);
+CHECK(std::fabs(bx - 1.0f) < 1e-6f);
+```
+
+```powershell
+cmake --build build --config Release -j
+ctest --test-dir build -C Release -R step07 --output-on-failure
+.\build\Release\physics_core_tests.exe        step07   # 같은 것을 직접 — 관측값까지 본다
+.\build\Release\physics_constraints_tests.exe step07
+```
+
+`ctest` 는 두 실행 파일의 통과 / 실패만 알려 준다. 직접 돌리면 네 시나리오의 부등식이 숫자로 나온다.
+
+```text
+[step07] distance_projection
+  equal mass split: a=(-1,0) b=(1,0)
+  ok
+[step07] chain_setup
+  chain: 12 particles, 11 links, anchor fixed at (200,60)
+  ok
+[step07] pbd_iteration_stiffness
+  PBD iterations=1 avgStretch=0.00616442
+  PBD iterations=2 avgStretch=0.00282238
+  PBD iterations=4 avgStretch=0.0013172
+  PBD iterations=8 avgStretch=0.000625437
+  PBD iterations=16 avgStretch=0.000283607
+  ok
+[step07] baumgarte_drift
+  SI drift baumgarte=0 -> 0.161739, baumgarte=0.2 -> 0.00467657
+  ok
+[step07] si_iteration_stiffness
+  SI iterations=1 -> 0.0380258, iterations=16 -> 0.00351695
+  ok
+4 case(s) ok: physics constraint [step07]
+```
+
+시나리오 B (iter 부족) 와 C (baumgarte = 0) 가 각각 세 번째 / 네 번째 줄이다. PBD 는 1 회에서 16 회로 가며 stretch 가 22 배 줄고 (0.0062 → 0.00028), SI 는 bias 를 끄면 drift 가 35 배로 남는다 (0.0047 → 0.162). `SolvePBD` 의 반복을 1 회로 고정하면 다섯 값이 같아져 실패하고, bias 항을 0 으로 만들면 두 값이 같아져 실패한다.
+
 ---
 
 ## 결론
@@ -235,10 +318,9 @@ Step 7 에서 추가한 것.
 
 이 chain 시뮬을 *cloth 격자* 로 확장하면 *Step 7 의 코드를 거의 그대로* — Particle 배열을 2D 격자 + diagonal constraint 추가. *Soft body* 도 tetrahedral mesh 의 edge 마다 DistanceConstraint. PBD 의 일반성이 여기 있다.
 
-눈으로 보는 avg stretch 라벨 외에 `physics_constraints_tests` 타깃이 같은 계산을 ctest 로 검사한다. `SetCanvas` / `SetSolver` / `SetIterations` / `SetBaumgarte` 로 창 없이 chain 을 세우고 `Step` 을 돌린 뒤 `LastAvgStretch()` 를 읽는다.
+6. **`physics_constraints_tests` 타깃 + `step07` 필터** — `ctest --test-dir build -C Release -R step07` 로 anchor 고정, PBD 의 iteration = stiffness (0.0062 → 0.00028), SI 의 Baumgarte drift (0.162 대 0.0047) 를 창 없이 검사.
 
-- PBD 는 iteration 이 곧 stiffness — 1 / 2 / 4 / 8 / 16 회에서 평균 stretch 가 단조 감소한다 (0.0062 → 0.00028). `SolvePBD` 의 반복을 1 회로 고정하면 다섯 값이 같아져 실패한다.
-- SI 는 baumgarte = 0 이면 position drift 가 남는다 — 200 스텝 뒤 0.162 대 0.0047 로 35 배 차이. bias 항을 0 으로 만들면 두 값이 같아져 실패한다.
+자동으로 갈리는 것은 저 부등식들까지다. link 색이 anchor 에서 멀어질수록 진해지는 propagation 의 *모양* 은 화면에서 읽는다.
 
 ## 더 읽을거리
 

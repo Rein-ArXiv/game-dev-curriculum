@@ -27,6 +27,7 @@ worker 수가 1이면 단일 스레드 동작 (sync 토글 무관). >= 2가 되�
 5. Toggles 확장과 Reconfigure
 6. HUD 콤보 추가
 7. 빌드와 측정 결과
+8. 검증 — 인계 경계를 확률에 맡기지 않는다
 
 ---
 
@@ -70,6 +71,7 @@ worker 수가 1이면 단일 스레드 동작 (sync 토글 무관). >= 2가 되�
 
 ### 인터페이스
 
+<!-- snippet: src/sync/i_sync.h#ISync -->
 ```cpp
 // src/sync/i_sync.h
 
@@ -88,6 +90,7 @@ public:
 
 ### SpinSync — atomic_flag
 
+<!-- snippet: src/sync/spin_sync.h#SpinSync -->
 ```cpp
 // src/sync/spin_sync.h
 
@@ -114,6 +117,7 @@ private:
 
 ### MutexSync — std::mutex
 
+<!-- snippet: src/sync/mutex_sync.h#MutexSync -->
 ```cpp
 // src/sync/mutex_sync.h
 
@@ -136,6 +140,7 @@ private:
 
 Drepper의 3-state futex mutex 패턴.
 
+<!-- snippet: src/sync/futex_sync.h#FutexSync -->
 ```cpp
 // src/sync/futex_sync.h
 
@@ -152,13 +157,16 @@ public:
     }
 
     void Unlock() override {
+        // fetch_sub: 1 → 0 이면 waiters 없음, 2 → 1 이면 waiters 있음.
         if (state_.fetch_sub(1, std::memory_order_release) != 1) {
             state_.store(0, std::memory_order_release);
             FutexWake(1);
         }
     }
+    // ...
 private:
-    void LockSlow() { /* contended path: state를 2로 올린 뒤 SYS_futex WAIT */ }
+    // ... LockSlow: contended path에서 state를 2로 올린 뒤 SYS_futex WAIT.
+    //     FutexWait / FutexWake: ::syscall(SYS_futex, ...) 직접 호출.
     std::atomic<std::uint32_t> state_{0};  // 0=unlocked, 1=locked, 2=locked+waiters
 };
 ```
@@ -173,6 +181,7 @@ uncontended fast path는 0→1 CAS 한 번이고 *시스템 콜 없음*. 이게 
 
 ### CasSync — atomic<uint32_t> CAS
 
+<!-- snippet: src/sync/cas_sync.h#CasSync -->
 ```cpp
 // src/sync/cas_sync.h
 
@@ -190,6 +199,7 @@ public:
     void Unlock() override {
         state_.store(0, std::memory_order_release);
     }
+    // ...
 private:
     std::atomic<std::uint32_t> state_{0};
 };
@@ -238,6 +248,7 @@ backend가 *임시 버퍼·링버퍼* 같은 상태를 들고 있어 *동시 사
 
 워커 풀 모드에서 onRead가 *동시 호출* 된다. 워크로드는 atomic add로 checksum을 누적해 안전을 보장한다.
 
+<!-- snippet: src/workload/file_io_workload.cpp#AccumulateChecksum -->
 ```cpp
 inline void AccumulateChecksum(std::atomic<std::uint64_t>& target,
                                 const unsigned char* data,
@@ -350,6 +361,7 @@ while (running_.load(std::memory_order_acquire)) {
 
 여기서 "뒤" 가 어디인지를 따져야 한다. `RunTestHook(AfterQueueUnlock)` 은 `Unlock()` 바로 다음 줄이므로, store를 내릴 자리는 사실 *두 곳* 이다.
 
+<!-- snippet: src/workload/file_io_workload.cpp#FileIoWorkload::RunCycleMulti -->
 ```cpp
 queueSync_->Unlock();
 // (A) 여기 — Unlock 과 훅 사이
@@ -527,6 +539,99 @@ sync 토글을 mutex → spinlock → futex → CAS 로 바꾸면 *workers ≥ 2
 - **glibc 버전 의존** — std::mutex의 내부 구현이 glibc 버전마다 미세하게 달라 측정값이 영향받는다.
 
 도구는 *내 머신·내 빌드 환경* 의 결과를 보여 준다. 시리즈 글에 인용할 때는 환경을 함께 명시한다.
+
+## 8. 검증 — 인계 경계를 확률에 맡기지 않는다
+
+이 단계가 얹은 것은 두 종류다. 상호배제를 제공하는 구현 넷, 그리고 메인과 워커 사이의 작업 인계. 앞의 것은 값싸게 확인된다 — 네 구현 각각을 4스레드 × 20000회 증가에 물리고 최종값이 정확히 80000인지 본다.
+
+<!-- snippet: tests/system_core_tests.cpp@sync-mutual-exclusion -->
+```cpp
+// tests/system_core_tests.cpp
+
+void TestSyncPrimitives() {
+    constexpr int kThreads = 4;
+    constexpr int kIterations = 20000;
+
+    for (int raw = 0; raw < skl::kSyncTypeCount; ++raw) {
+        auto sync = skl::CreateSync(static_cast<skl::SyncType>(raw));
+        std::uint64_t protectedCounter = 0;
+        // ...
+        for (auto& worker : workers) worker.join();
+        CHECK_IN(protectedCounter ==
+                     static_cast<std::uint64_t>(kThreads * kIterations),
+                 skl::kSyncTypeLabels[raw]);
+    }
+    // ...
+}
+```
+
+문제는 뒤의 것이다. `RunCycleMulti` 는 사이클마다 push → `remaining_` 설정 → unlock 을 반복하는데, `remaining_.store` 가 unlock *뒤* 로 내려가면 직전 사이클의 마지막 작업을 막 끝낸 워커가 그 틈에 새 항목을 pop 해 `0` 에서 `fetch_sub(1)` 을 한다. `SIZE_MAX` 언더플로가 되고, 뒤이은 `store(N)` 이 그 감산을 통째로 지워 완료 대기가 영영 끝나지 않는다. *실패* 가 아니라 *멈춤* 으로 나타나는 종류의 회귀다.
+
+그 창은 수십 ns다. 반복 스트레스만으로는 잡히는 날과 안 잡히는 날이 갈린다. 그래서 훅 두 개로 그 인터리빙을 직접 만든다 — 마지막 작업을 끝낸 워커를 pop 루프 안에서 붙잡아 두고, 메인이 다음 사이클의 push를 끝내고 락을 푼 직후에 풀어 준다.
+
+<!-- snippet: tests/system_core_tests.cpp@queue-handoff-rendezvous -->
+```cpp
+// tests/system_core_tests.cpp
+
+// 1) 이 사이클의 마지막 워커가 훅에 붙잡힌다.
+CHECK(workload.RunCycle() == expectedBytes);
+
+// 2) 정말 붙잡혔는지 확인한 뒤에 다음 push 를 낸다. 이 대기가 있어야
+//    "워커가 pop 루프 안에 있는 상태에서의 push" 가 보장된다.
+{
+    std::unique_lock<std::mutex> lock(queue_race::mtx);
+    const bool parked = queue_race::cv.wait_for(
+        lock, std::chrono::seconds(10),
+        [] { return queue_race::phase >= queue_race::kStragglerParked; });
+    CHECK(parked);
+}
+// ...
+{
+    std::lock_guard<std::mutex> lock(queue_race::mtx);
+    CHECK(queue_race::phase == queue_race::kStragglerConsumed);
+    CHECK(queue_race::underflowSeen == 0);
+}
+```
+
+마지막 두 `CHECK` 이 이 검사를 자기 검증으로 만든다. 랑데부가 성립하지 않았다면 아무것도 재현하지 않은 것이고, 그건 통과가 아니라 실패다.
+
+```bash
+cmake --build build -j
+ctest --test-dir build -R skl_step05 --output-on-failure
+```
+
+```text
+    Start 19: skl_step05_core
+1/2 Test #19: skl_step05_core ..................   Passed    0.59 sec
+    Start 20: skl_step05_fault
+2/2 Test #20: skl_step05_fault .................   Passed    0.00 sec
+
+100% tests passed, 0 tests failed out of 2
+```
+
+```bash
+./build/system_core_tests --step=05
+```
+
+```text
+[ run  ] step05  sync primitives mutual exclusion
+[sync] 4 impls x 4 threads x 20000 increments; each ended at 80000
+[  ok  ] step05  sync primitives mutual exclusion
+[ run  ] step05  worker pool execution model
+[models] ctx=pthread: 20 combos x 4 cycles; backends exercised: read(readx128) pread(preadx128) mmap(mmapx128) aio(aio_readx128) io_uring(io_uring_submitx128)
+[  ok  ] step05  worker pool execution model
+[ run  ] step05  queue handoff stress
+[handoff] 4 sync types x 8000 cycles with 8 workers; remaining_ underflow observations=0
+[  ok  ] step05  queue handoff stress
+[ run  ] step05  queue handoff rendezvous
+[handoff] deterministic straggler rendezvous reproduced
+[  ok  ] step05  queue handoff rendezvous
+system_core_tests --step=5: 4/11 check(s) run, 0 failed
+```
+
+`20 combos` 는 backend 5종 × sync 4종이다. 각 조합을 워커 4개로 네 사이클씩 돌려 단일 스레드 기준값과 총 바이트·체크섬이 같은지 본다. 뒤의 `read(readx128) ... io_uring(io_uring_submitx128)` 이 더 중요한 줄이다 — 주입 없이 seam 호출만 세는 관측 모드로, *그 backend가 워커 경로에서 실제로 자기 syscall을 불렀다* 는 증거다. 바이트·체크섬만 비교하면 조용히 read로 폴백한 실행과 구별되지 않는다.
+
+`remaining_ underflow observations=0` 은 8000 사이클 × sync 4종을 워커 8개로 돌리는 동안 언더플로가 한 번도 관측되지 않았다는 뜻이다. 감시 스레드가 1 ms 주기로 이 카운터를 읽으므로, 언더플로가 나면 멈춤이 타임아웃으로 익기 전에 밀리초 단위로 실패한다.
 
 ---
 

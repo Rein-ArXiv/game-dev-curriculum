@@ -18,6 +18,7 @@ operation을 먼저 제출하고, 커널이 완료 결과를 completion port에 
 4. 송신 직렬화
 5. 완료 오류 해석
 6. 안전한 종료
+7. 검증 실행
 
 ---
 
@@ -36,6 +37,7 @@ worker는 `GetQueuedCompletionStatus`로 세 값을 받는다.
 completion key는 socket이나 서버 역할을 식별할 수 있고, `OVERLAPPED*`는 구체적인 operation을
 식별한다. 구현은 `OVERLAPPED`를 operation의 첫 멤버로 두고 원래 객체로 복원한다.
 
+<!-- snippet: src/iocp_server.cpp#IoOperation -->
 ```cpp
 struct IoOperation {
     // IOCP returns the same pointer passed to Winsock. Keep this first.
@@ -66,13 +68,14 @@ overlapped 호출이 `WSA_IO_PENDING`을 반환하면 실패가 아니다. 작�
 온다는 뜻이다. 함수가 즉시 성공해도 completion routine을 사용하지 않는 IOCP 연결 소켓은 완료
 packet이 queue된다. 그러므로 두 경우 모두 operation 소유권을 worker에 넘긴다.
 
+<!-- snippet: src/iocp_server.cpp#PostReceive -->
 ```cpp
 AddOutstanding();
-int rc = WSARecv(socket, &op->wsabuf, 1, &bytes, &op->flags,
-                 &op->overlapped, nullptr);
+int rc = WSARecv(session->socket, &operation->wsabuf, 1, &received,
+                 &operation->flags, &operation->overlapped, nullptr);
 if (rc == 0 || WSAGetLastError() == WSA_IO_PENDING) return true;
 RemoveOutstanding();
-delete op;
+delete operation;
 return false;
 ```
 
@@ -125,17 +128,27 @@ TCP receive의 transferred bytes가 0이면 orderly shutdown이다. 실패 error
 정확히 한 번 감소시킨다. 종료 시 socket을 닫아 pending I/O를 취소한 뒤 counter가 0이 될 때까지
 기다린다.
 
+<!-- snippet: src/iocp_server.cpp#RemoveOutstanding -->
 ```cpp
 void RemoveOutstanding() {
-    if (outstanding.fetch_sub(1) != 1) return;
-    { std::lock_guard lock(outstandingMutex); }  // 대기자 등록 구간과 배타
-    outstandingCv.notify_all();
+    if (outstanding_.fetch_sub(1) != 1) return;
+    // 대기자 등록 구간과 배타
+    { std::lock_guard lock(outstandingMutex_); }
+    outstandingCv_.notify_all();
 }
+```
 
-std::unique_lock lock(outstandingMutex);
-outstandingCv.wait(lock, [&] { return outstanding.load() == 0; });
-for (std::uint32_t i = 0; i < workerCount; ++i)
-    PostQueuedCompletionStatus(port, 0, shutdownKey, nullptr);
+종료 측은 같은 mutex로 대기한 뒤에야 worker 종료 packet을 보낸다.
+
+<!-- snippet: src/iocp_server.cpp@shutdown-drain -->
+```cpp
+std::unique_lock lock(outstandingMutex_);
+outstandingCv_.wait(lock, [this] { return outstanding_.load() == 0; });
+lock.unlock();
+
+for (std::uint32_t i = 0; i < workerCount_; ++i) {
+    PostQueuedCompletionStatus(port_, 0, kShutdownKey, nullptr);
+}
 ```
 
 counter가 atomic이어도 감소와 통지는 대기 mutex 밖에서 하면 안 된다. 종료 스레드가 predicate를
@@ -144,6 +157,72 @@ false로 평가한 뒤 대기자로 등록되기 전에 마지막 completion이 
 
 worker 종료 packet은 drain 뒤에 보낸다. 먼저 worker를 멈추면 취소 completion을 회수할 주체가
 사라져 counter가 0이 되지 않는다.
+
+## 검증 실행
+
+drain과 재게시는 서버가 살아 있는 동안에는 관측되지 않는다. 두 case가 그것을 밖으로 끌어낸다.
+`backend_restart`는 같은 객체를 세 번 Start·Stop하고, `oversized_datagram_recovery`는 실패하는
+UDP completion을 먼저 만든 뒤 정상 client를 붙인다. 두 case 모두 지금 컴파일된 backend를
+대상으로 하므로, Windows 빌드에서는 이 글이 만든 IOCP 경로가 판정 대상이다.
+
+```powershell
+ctest --test-dir projects/mini/game_network_lab/build -C Release `
+      -R game_network_step03 --output-on-failure
+```
+
+```text
+    Start 11: game_network_step03_backend_restart
+1/2 Test #11: game_network_step03_backend_restart .....   Passed    0.06 sec
+    Start 12: game_network_step03_datagram_recovery
+2/2 Test #12: game_network_step03_datagram_recovery ...   Passed    4.15 sec
+
+100% tests passed out of 2
+
+Total Test time (real) =   4.22 sec
+```
+
+두 실행 파일을 직접 부르면 각 case가 무엇을 봤는지 나온다.
+
+```powershell
+projects/mini/game_network_lab/build/Release/game_network_lifecycle_tests.exe step03
+projects/mini/game_network_lab/build/Release/game_network_process_tests.exe step03
+```
+
+```text
+[step03] backend_restart  ok  3 Start/Stop rounds: each refused a second Start(), then accepted a loopback connection and reported its close
+game_network_lifecycle_tests: 1 case(s) passed [step03 1]
+[step03] oversized_datagram_recovery  ok  64 x 4KiB datagrams first, then handshake, endpoint binding and snapshots over loopback: client=0 server=0 within the time limit
+game_network_process_tests: 1 case(s) passed [step03 1]
+```
+
+`Start()`가 true를 돌려줬다는 사실만 확인하면 drain이 깨진 서버도 통과한다. `stopping_`
+latch를 지우지 않고 다시 시작한 서버는 preposted `AcceptEx`가 전부 즉시 거부되므로 살아
+있지만 아무것도 받지 못한다. `connect()`도 증거가 되지 못한다. 커널이 listen backlog에서
+연결을 완성하므로 accept가 하나도 걸려 있지 않아도 성공한다. 그래서 판정은 `Connected`
+이벤트가 실제로 올라오는지로 한다.
+
+<!-- snippet: tests/lifecycle_tests.cpp#AcceptsConnection -->
+```cpp
+SocketHandle client = ConnectLoopback(port);
+if (client == kInvalidSocket) return false;
+
+std::vector<gnl::NetworkEvent> events;
+gnl::ConnectionId connection = 0;
+for (int attempt = 0; attempt < 60 && connection == 0; ++attempt) {
+    server.Poll(events, std::chrono::milliseconds(50));
+    for (const gnl::NetworkEvent& event : events) {
+        if (event.kind == gnl::NetworkEventKind::Connected) connection = event.connection;
+    }
+    events.clear();
+}
+if (connection == 0) {
+    CloseSocket(client);
+    return false;
+}
+```
+
+같은 이유로 종료 사건까지 기다린 뒤에 다음 round를 시작한다. 서버가 능동 종료자가 되면
+listening port가 곧바로 재사용되지 않아 round 사이에 다른 실패가 섞인다.
 
 ---
 

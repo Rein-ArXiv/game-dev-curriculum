@@ -320,12 +320,37 @@ graphics 시리즈의 *"PSO 변경이 CPU 빌드를 N 배 느리게"* 주장이 
 
 ## 5. 자동 검증
 
-위 표의 호출 수는 육안 관측이 아니라 CTest가 판정한다.
+위 표의 호출 수는 육안 관측이 아니라 CTest가 판정한다. 드로우 모드와 PSO 정책 몫만 도는 등록이 따로 있다.
+
+<!-- snippet: CMakeLists.txt@step03-target -->
+```cmake
+add_test(NAME graphics_dx_step03_drawcall_pso COMMAND graphics_dx_contract_tests step03)
+```
 
 ```powershell
 cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
+ctest --test-dir build -C Release -R graphics_dx_step03 --output-on-failure
+build\Release\graphics_dx_contract_tests.exe step03
 ```
+
+```text
+1/1 Test #4: graphics_dx_step03_drawcall_pso ...   Passed    0.04 sec
+
+100% tests passed out of 1
+
+  [step03] draw_submissions_helper                     3 checks
+  [step03] records_per_draw                            110 checks
+  [step03] records_global_pso_policy                   3 checks
+  [step03] records_instanced                           8 checks
+  [step03] records_per_material                        5 checks
+  [step03] recorded_matches_helper                     8 checks
+  [step03] instance_model_matrix                       19 checks
+  [step03] instance_upload_matches_root_constants      226 checks
+step03: 8 groups, 382 checks, 0 failures
+DirectX contract tests passed
+```
+
+여덟 그룹의 이름이 이 단계가 더한 계약의 목록이다. 루트 시그니처 정책은 이 목록에 없다 — 기록부의 같은 함수를 쓰지만 그 축은 이 단계가 추가한 것이 아니다.
 
 계약 테스트는 명령 기록부를 GPU 없이 그대로 호출한다. `Scene::Draw`의 본문은
 `ID3D12GraphicsCommandList*`와 오브젝트 배열만 쓰는 `Scene::RecordDraw`로
@@ -337,6 +362,45 @@ ctest --test-dir build -C Release --output-on-failure
 - PSO 정책 Per-Draw에서 `SetPipelineState` 100회, Per-Pass에서 0회, Per-Material에서 정확히 2회.
 - 드로우마다 루트 상수가 `(index 0, 1 DWORD, offset 0)`, `(0, 16, 4)`, `(0, 4, 20)` 순서로 기록된다.
 - 기록된 제출 수가 예측 헬퍼 `ExpectedDrawSubmissions(mode, N)`와 같다.
+
+`records_instanced` 그룹이 그중 두 번째·네 번째 항목을 판정한다. 드로우가 하나로 접히면서 루트 상수 갱신도 `useInstancing` 한 번으로 줄어드는 것 — 그것이 표의 `0.3 ms` 가 나오는 이유다.
+
+<!-- snippet: tests/graphics_dx_contract_tests.cpp#TestSceneRecordsInstanced -->
+```cpp
+void TestSceneRecordsInstanced() {
+    RecordResult r;
+    RunRecord(r, 100, dxlab::DrawMode::Instanced, dxlab::RootSigPolicy::Global,
+              dxlab::PsoSwitchPolicy::PerPass);
+    CHECK(r.cmd.draws.size() == 1);
+    if (!r.cmd.draws.empty()) CHECK(r.cmd.draws[0].instanceCount == 100);
+    CHECK(r.counters.instancedDraws == 1);
+    CHECK(r.counters.drawCalls == 0);
+    // 루트 상수는 useInstancing 1개만, 값은 1.
+    CHECK(r.cmd.rootConsts.size() == 1);
+    if (!r.cmd.rootConsts.empty()) {
+        CHECK(r.cmd.rootConsts[0].num == 1);
+        CHECK(r.cmd.rootConsts[0].destOffset == 0);
+        CHECK(r.cmd.rootConsts[0].data[0] == 1u);
+    }
+}
+```
+
+PSO 정책 쪽에서 가장 얇은 얼음은 `Per-Material` 이다. "머티리얼별로 묶었다" 는 주장은 `SetPipelineState` 가 *정확히 2 회* 이고 그 순서가 primary → secondary 일 때만 참이다.
+
+<!-- snippet: tests/graphics_dx_contract_tests.cpp#TestSceneRecordsPerMaterial -->
+```cpp
+void TestSceneRecordsPerMaterial() {
+    // PerMaterial 은 머티리얼 2그룹으로 나눠 PSO 를 2회만 바꾼다.
+    RecordResult r;
+    RunRecord(r, 100, dxlab::DrawMode::PerDraw, dxlab::RootSigPolicy::Global,
+              dxlab::PsoSwitchPolicy::PerMaterial, FakePsoB());
+    CHECK(r.cmd.psoSets.size() == 2);
+    CHECK(r.cmd.psoSets[0] == FakePsoA());
+    CHECK(r.cmd.psoSets[1] == FakePsoB());
+    CHECK(r.cmd.draws.size() == 100);
+    CHECK(r.counters.drawCalls == 100);
+}
+```
 
 예측 헬퍼는 표에 적힌 숫자를 코드로 옮긴 것이다.
 

@@ -5,8 +5,23 @@
 //  (b) 자원 수명 — Scene::Rebuild 반복 후 핸들이 유효하고 이름이 누적되지 않는지,
 //      GL 에러와 KHR_debug HIGH 메시지가 없는지 확인한다.
 //  (c) 동기화/폴백 상태 — MsaaTarget 의 FBO 불완전 폴백이 한 번만 통지되는지.
+//  (d) 바인딩 비용 — LightingBindings::Apply 의 실제 카운터가 GL 없는 예측
+//      모델 (CountBindingCost) 과 일치하는지.
+//  (e) 텍스처 VRAM — 드라이버가 보고한 mip chain 크기가 예측 모델과 일치하고,
+//      어긋나면 Init 이 통지를 남기는지.
+//  (f) 셰이더 perm — uber 한 벌과 static 세 벌의 프로그램 동일성/분리, 그리고
+//      프로그램 전환 감지.
 //
 // 컨텍스트를 만들 수 없는 환경(헤드리스 CI)에서는 77 로 종료해 CTest 가 skip 한다.
+//
+// 실행 단위는 *step 입도* 다. 인자를 주면 그 step 이 추가한 검증만 돈다.
+//
+//     graphics_gl_render_tests            — 전체
+//     graphics_gl_render_tests step07     — step07 이 추가한 것만
+//     graphics_gl_render_tests msaa_fallback
+//
+// CMakeLists 의 add_test 가 이 인자로 step 별 ctest 항목을 만든다. 전체를 도는
+// 항목(`graphics_gl_render_tests`)은 그대로 남아 있다.
 
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
@@ -23,6 +38,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -30,6 +46,12 @@
 namespace {
 
 int failures = 0;
+
+// 컨텍스트가 만들어진 뒤 한 번만 초기화되는 것들. 각 검증은 이것만 받는다.
+struct Context {
+    gllab::ShaderRegistry& shaders;
+    gllab::KHRDebug&       debug;
+};
 
 #define CHECK(expr)                                                          \
     do {                                                                     \
@@ -120,7 +142,8 @@ uint64_t CapturePixels(Offscreen& target, gllab::Scene& scene,
 }
 
 // (a) 세 드로우 모드의 픽셀이 같은지 + 카운터가 계약대로 움직이는지.
-void TestDrawModeCaptureRegression(gllab::ShaderRegistry& shaders) {
+void TestDrawModeCaptureRegression(Context& ctx) {
+    gllab::ShaderRegistry& shaders = ctx.shaders;
     Offscreen target;
     if (!target.Create(kCaptureSize, kCaptureSize)) {
         std::cerr << "CHECK failed: offscreen FBO incomplete\n";
@@ -186,7 +209,8 @@ void TestDrawModeCaptureRegression(gllab::ShaderRegistry& shaders) {
 }
 
 // (b) Scene::Rebuild 를 반복해도 GL 이름이 누적되지 않는가 (핸들 누수 검출).
-void TestSceneResourceLifetime(gllab::KHRDebug& debug) {
+void TestSceneResourceLifetime(Context& ctx) {
+    gllab::KHRDebug& debug = ctx.debug;
     while (glGetError() != GL_NO_ERROR) {}
     debug.Clear();
 
@@ -243,7 +267,7 @@ void TestSceneResourceLifetime(gllab::KHRDebug& debug) {
 }
 
 // (c) MSAA FBO 폴백 — 성공 경로와 강제 실패 경로.
-void TestMsaaFallback() {
+void TestMsaaFallback(Context&) {
     while (glGetError() != GL_NO_ERROR) {}
 
     {
@@ -284,7 +308,8 @@ void TestMsaaFallback() {
 }
 
 // (d) LightingBindings::Apply 의 실제 카운터가 GL 없는 모델과 일치하는가.
-void TestBindingCountersMatchModel(gllab::ShaderRegistry& shaders) {
+void TestBindingCountersMatchModel(Context& ctx) {
+    gllab::ShaderRegistry& shaders = ctx.shaders;
     while (glGetError() != GL_NO_ERROR) {}
 
     gllab::LightingBindings lighting;
@@ -322,8 +347,61 @@ void TestBindingCountersMatchModel(gllab::ShaderRegistry& shaders) {
     lighting.Shutdown();
 }
 
+// (f) step04 의 셰이더 perm — uber 는 한 프로그램, static 은 모델마다 다른
+// 프로그램. 분기의 소재지(uShadingModel uniform)와 프로그램 전환 감지까지 본다.
+void TestShaderPermutationPrograms(Context& ctx) {
+    gllab::ShaderRegistry& shaders = ctx.shaders;
+    while (glGetError() != GL_NO_ERROR) {}
+
+    // uber 는 모델을 바꿔도 같은 프로그램이다 — 전환 비용이 0 이라는 주장의 근거.
+    gllab::ShaderProgram& uberLambert =
+        shaders.Pick(gllab::ShaderStyle::Uber, gllab::ShadingModel::Lambert);
+    gllab::ShaderProgram& uberBlinn =
+        shaders.Pick(gllab::ShaderStyle::Uber, gllab::ShadingModel::BlinnPhong);
+    gllab::ShaderProgram& uberCel =
+        shaders.Pick(gllab::ShaderStyle::Uber, gllab::ShadingModel::Cel);
+    CHECK(uberLambert.Program() != 0u);
+    CHECK(uberLambert.Program() == uberBlinn.Program());
+    CHECK(uberLambert.Program() == uberCel.Program());
+
+    // static permutation 은 세 프로그램이 전부 다르다.
+    gllab::ShaderProgram& permLambert =
+        shaders.Pick(gllab::ShaderStyle::StaticPermutation, gllab::ShadingModel::Lambert);
+    gllab::ShaderProgram& permBlinn =
+        shaders.Pick(gllab::ShaderStyle::StaticPermutation, gllab::ShadingModel::BlinnPhong);
+    gllab::ShaderProgram& permCel =
+        shaders.Pick(gllab::ShaderStyle::StaticPermutation, gllab::ShadingModel::Cel);
+    CHECK(permLambert.Program() != 0u);
+    CHECK(permLambert.Program() != permBlinn.Program());
+    CHECK(permBlinn.Program()   != permCel.Program());
+    CHECK(permLambert.Program() != permCel.Program());
+    CHECK(permLambert.Program() != uberLambert.Program());
+
+    // 분기가 어디 있는지 — uShadingModel 은 uber 에만 있다. SetInt 는 실제로
+    // glUniform 을 불렀을 때만 true 이므로, 이 두 줄이 '런타임 분기 vs 컴파일
+    // 시점 분리' 를 그대로 가른다.
+    uberLambert.Use();
+    CHECK(uberLambert.SetInt("uShadingModel", 1));
+    permLambert.Use();
+    CHECK(!permLambert.SetInt("uShadingModel", 1));
+
+    // 프로그램 전환 감지 — state changes 카운터가 이 결과로만 늘어난다.
+    shaders.ProgramChangedSinceLast(uberLambert);          // 최초 1 회로 기준을 잡는다.
+    CHECK(!shaders.ProgramChangedSinceLast(uberLambert));
+    CHECK(!shaders.ProgramChangedSinceLast(uberCel));      // uber 는 모델을 바꿔도 전환 없음.
+    CHECK(shaders.ProgramChangedSinceLast(permLambert));   // 스타일을 바꾸면 전환.
+    CHECK(shaders.ProgramChangedSinceLast(permBlinn));     // static 은 모델마다 전환.
+    CHECK(!shaders.ProgramChangedSinceLast(permBlinn));
+
+    std::printf("[shader] uber=%u perm={%u,%u,%u}\n",
+                uberLambert.Program(), permLambert.Program(),
+                permBlinn.Program(), permCel.Program());
+    CHECK(glGetError() == GL_NO_ERROR);
+}
+
 // (e) 드라이버가 보고한 mip chain 크기와 예측 모델의 관계.
-void TestTextureVram(gllab::KHRDebug& debug) {
+void TestTextureVram(Context& ctx) {
+    gllab::KHRDebug& debug = ctx.debug;
     while (glGetError() != GL_NO_ERROR) {}
     debug.Clear();
 
@@ -375,9 +453,48 @@ int Skip(const char* why) {
     return 77;
 }
 
+// 어느 검증이 어느 step 소속인지는 *그 step 이 무엇을 추가했는지* 로 정한다.
+//   step03 — 세 드로우 모드의 픽셀 동일성 + 제출 카운터.
+//   step04 — uber / static permutation 프로그램 구성.
+//   step05 — LightingBindings::Apply 의 실제 카운터.
+//   step06 — 텍스처 mip chain 의 드라이버 실측치.
+//   step07 — Scene::Rebuild 자원 수명 + MSAA 폴백.
+struct TestCase {
+    const char* step;
+    const char* name;
+    void (*fn)(Context&);
+};
+
+const TestCase kTests[] = {
+    {"step03", "draw_mode_capture",     TestDrawModeCaptureRegression},
+    {"step04", "shader_permutations",   TestShaderPermutationPrograms},
+    {"step05", "binding_counters",      TestBindingCountersMatchModel},
+    {"step06", "texture_vram",          TestTextureVram},
+    {"step07", "scene_rebuild_handles", TestSceneResourceLifetime},
+    {"step07", "msaa_fallback",         TestMsaaFallback},
+};
+
+bool Selected(const TestCase& t, const char* filter) {
+    if (!filter || !*filter) return true;
+    return std::strcmp(t.step, filter) == 0 || std::strcmp(t.name, filter) == 0 ||
+           std::strstr(t.name, filter) != nullptr;
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    const char* filter = (argc > 1) ? argv[1] : nullptr;
+    if (filter && !*filter) filter = nullptr;
+
+    // 필터가 아무것도 고르지 않으면 컨텍스트를 만들기 전에 실패시킨다 — 오타를
+    // '헤드리스 skip' 으로 오해하지 않도록.
+    bool anySelected = false;
+    for (const TestCase& t : kTests) anySelected = anySelected || Selected(t, filter);
+    if (!anySelected) {
+        std::cerr << "no test matched filter: " << filter << "\n";
+        return 2;
+    }
+
     glfwSetErrorCallback([](int code, const char* desc) {
         std::fprintf(stderr, "[glfw %d] %s\n", code, desc);
     });
@@ -411,15 +528,23 @@ int main() {
     gllab::KHRDebug debug;
     debug.Install();
 
+    int selected = 0;
+    int passed   = 0;
     try {
         gllab::ShaderRegistry shaders;
         shaders.Init();
+        Context ctx{shaders, debug};
 
-        TestDrawModeCaptureRegression(shaders);
-        TestSceneResourceLifetime(debug);
-        TestMsaaFallback();
-        TestBindingCountersMatchModel(shaders);
-        TestTextureVram(debug);
+        for (const TestCase& t : kTests) {
+            if (!Selected(t, filter)) continue;
+            ++selected;
+            const int before = failures;
+            t.fn(ctx);
+            const bool ok = (failures == before);
+            if (ok) ++passed;
+            std::cout << '[' << t.step << "] " << t.name
+                      << (ok ? " ... ok\n" : " ... FAILED\n");
+        }
     } catch (const std::exception& e) {
         std::cerr << "exception: " << e.what() << "\n";
         ++failures;
@@ -432,6 +557,7 @@ int main() {
         std::cerr << failures << " check(s) failed\n";
         return 1;
     }
-    std::cout << "OpenGL render tests passed\n";
+    std::cout << "graphics_gl_render_tests: " << passed << '/' << selected
+              << " passed (filter=" << (filter ? filter : "all") << ")\n";
     return 0;
 }

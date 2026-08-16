@@ -28,14 +28,36 @@ Octile·Euclidean·Chebyshev처럼 이 8방향 비용 모델에서 admissible한
 
 `Pathfinder::Reset`은 알고리즘과 휴리스틱을 고르고 시작점을 open에 넣는다. `Step`은 한 번에 노드 하나, JPS에서는 jump point 하나를 확장한다.
 
+Scene 은 `Reset` 을 한 곳에서만 부른다. 알고리즘·휴리스틱·격자 크기·벽이 바뀌면 `needRestart_` 만 세우고, 실제 초기화는 Update 안에서 한 번 일어난다.
+
+<!-- snippet: src/scenes/pathfind_scene.cpp#PathfindScene::Restart -->
 ```cpp
-pf.Reset(grid, Algo::AStar, Heur::Octile);
-while (pf.Step(grid)) {
-    DrawOpenClosed(pf);
+void PathfindScene::Restart() {
+    pf_.Reset(grid_, (Algo)algoIdx_, (Heur)heurIdx_);
+    stepAcc_     = 0.0f;
+    needRestart_ = false;
+    pendingStep_ = false;
+    pendingRun_  = false;
 }
 ```
 
-실제 앱에서는 루프를 한 프레임에 전부 돌리지 않는다. `step/s`에 맞춰 일부만 실행해 탐색 과정이 보이게 한다. Run은 자동 진행이고 Step은 정확히 한 번만 확장한다.
+탐색 진행도 한 곳에 모은다. 패널 버튼은 요청 플래그만 세우고 Update 가 그것을 소비하므로, Draw 를 몇 번 호출해도 탐색이 앞으로 가지 않는다. 루프를 한 프레임에 전부 돌리지도 않는다 — `step/s`에 맞춰 일부만 실행해 탐색 과정이 보이게 한다. Run은 자동 진행이고 Step은 정확히 한 번만 확장한다.
+
+<!-- snippet: src/scenes/pathfind_scene.cpp#PathfindScene::Update -->
+```cpp
+if (needRestart_) Restart();
+
+// 패널 버튼 요청 소비 — 탐색 진행은 이 지점에서만 일어난다.
+if (pendingRun_)  { pf_.RunToCompletion(grid_); pendingRun_ = false; }
+if (pendingStep_) { pf_.Step(grid_); pendingStep_ = false; }
+
+if (autoRun_ && !pf_.Stats().done) {
+    stepAcc_ += stepRate_ * dt;
+    int steps = (int)stepAcc_;
+    stepAcc_ -= (float)steps;
+    for (int i = 0; i < steps && pf_.Step(grid_); ++i) {}
+}
+```
 
 ## 3. 우선순위와 휴리스틱
 
@@ -47,6 +69,23 @@ while (pf.Step(grid)) {
 | Greedy | $h(n)$ |
 | A* | $g(n)+h(n)$ |
 | JPS | A*와 같지만 대칭 경로를 건너뜀 |
+
+표의 네 줄은 `Priority` 한 함수에 그대로 들어 있다. 알고리즘을 바꾸는 것은 자료구조가 아니라 이 우선순위 식 하나를 바꾸는 일이다.
+
+<!-- snippet: src/pathfind/pathfinder.h#Priority -->
+```cpp
+float Priority(int idx, Cell c, const Grid& g) const {
+    float gv = gScore_[(size_t)idx];
+    float hv = Heuristic(c, g.Goal());
+    switch (algo_) {
+        case Algo::Dijkstra: return gv;
+        case Algo::Greedy:   return hv;
+        case Algo::AStar:
+        case Algo::JPS:
+        default:             return gv + hv;
+    }
+}
+```
 
 8방향 비용에서 Octile 휴리스틱은 이동 모델과 잘 맞는다. Manhattan은 대각 이동을 허용하는 그래프에서 비용을 과대평가할 수 있어 A*의 최적성 조건을 깨뜨린다. UI에서 휴리스틱을 바꿀 수 있게 한 이유는 이 차이를 직접 확인하기 위해서다.
 
@@ -72,15 +111,28 @@ JPS가 맞게 동작하면:
 
 ```bash
 cmake --build build --config Release
-ctest --test-dir build -C Release -R ai_pathfinder_tests --output-on-failure
-./build/Release/ai_pathfinder_tests    # 직접 실행하면 "pathfinder tests passed"
+ctest --test-dir build -C Release -R ai_step02_pathfinding --output-on-failure
+./build/Release/ai_pathfinder_tests step02   # 같은 열 케이스를 직접 실행
 ```
 
-ctest 출력의 핵심 두 줄은 다음과 같다.
+ctest 는 통과 여부만, 실행 파일은 어떤 케이스가 돌았는지까지 알려 준다.
 
 ```text
-1/1 Test #1: ai_pathfinder_tests ..............   Passed
+1/1 Test #2: ai_step02_pathfinding ............   Passed
 100% tests passed out of 1
+
+ai_pathfinder_tests [step02] 10 case(s)
+  ok  open-grid/heuristic-equivalence
+  ok  forced-neighbors/cardinal
+  ok  forced-neighbors/diagonal
+  ok  jps-equals-dijkstra/200-maps
+  ok  cost-model/absolute
+  ok  search-effort/inequalities
+  ok  suboptimality/greedy-manhattan
+  ok  gui-defaults/enum-order
+  ok  unreachable/no-path
+  ok  degenerate/start-equals-goal
+pathfinder tests passed
 ```
 
 이 테스트가 고정하는 것은 다섯 가지다.
@@ -90,6 +142,33 @@ ctest 출력의 핵심 두 줄은 다음과 같다.
 - **JPS ≡ Dijkstra.** 30x22 격자에 밀도 0.28 로 시드 1..200 의 벽을 깔고, 두 알고리즘의 `found` 와 `pathCost` 가 모두 일치하는지 본다. 대각 forced neighbor 규칙을 지우면 시드 1 에서 27.48528 대 28.31371 로 즉시 갈라진다. 대각 통로 옆에 벽 한 칸을 붙인 16x10 고정 맵도 같은 규칙을 겨냥한다.
 - **탐색 비용의 부등식.** 빈 48x48 에서 `jps.expanded < astar.expanded <= dijkstra.expanded` 이고 세 알고리즘의 `maxOpen` 이 모두 양수다. 32x20 수직벽 맵에서도 같다.
 - **비허용 휴리스틱의 비최적성.** 48x48 시드 1385 맵에서 Greedy 49.62742 > Dijkstra 46.31371, 30x22 시드 7 맵에서 A*/Manhattan 29.97056 > Dijkstra 29.14213 이다. 빈 격자에서는 Greedy 도 최적이므로 그때는 `>=` 만 요구한다.
+
+두 번째 항목 — 경로 자체의 계약 — 이 실제로 어떻게 적히는지는 볼 만하다. 위 열 케이스가
+전부 이 검사를 거친다.
+
+<!-- snippet: tests/pathfinder_tests.cpp@path-contract -->
+```cpp
+CHECK_CTX((int)path.size() == stats.pathLen, context);
+CHECK_CTX(path.front() == grid.Start(), context);
+CHECK_CTX(path.back() == grid.Goal(), context);
+
+float traced = 0.0f;
+for (size_t i = 0; i < path.size(); ++i) {
+    CHECK_CTX(grid.Walkable(path[i].x, path[i].y), context);
+    if (i == 0) continue;
+    const int dx = std::abs(path[i].x - path[i - 1].x);
+    const int dy = std::abs(path[i].y - path[i - 1].y);
+    CHECK_CTX(dx <= 1 && dy <= 1, context);   // 연속 셀은 8-인접
+    CHECK_CTX(dx + dy > 0, context);          // 제자리 반복 금지
+    traced += (dx != 0 && dy != 0) ? kDiagonalCost : 1.0f;
+}
+CHECK_CTX(Near(traced, stats.pathCost, 1e-3f), context);
+```
+
+마지막 줄이 이 블록의 값이다. `pathCost` 를 보고서 그대로 믿는 대신 셀을 하나씩 밟아
+다시 더한 값과 맞춘다. 탐색기가 비용을 잘못 세거나 JPS 의 jump point 사이 보간이 깨지면
+두 숫자가 갈라지고, `context` 에 맵 이름과 알고리즘 이름이 붙어 있어 200 개 맵 중
+어느 것이 깨졌는지 바로 나온다.
 
 GUI 는 48x48 격자에 Heuristic 을 Octile 로 두고 읽는다. 벽이 없는 초기 상태에서 Algorithm 만 바꾸면 `expanded` 가 Dijkstra 1946, A* 44, Greedy 44, JPS 2 로 갈라지고 `path cost` 는 넷 다 43.00 으로 같다. `Random walls` 는 격자 크기로 정해지는 고정 시드를 쓰므로 48x48 에서는 몇 번을 눌러도 같은 맵이 나오고, 그 맵에서는 `expanded` 가 Dijkstra 1535, A* 186, JPS 109, Greedy 44 이며 `path cost` 는 Dijkstra·A*·JPS 가 46.31 로 같은 반면 Greedy 만 49.63 으로 크다. 확장 수가 가장 적은 설정이 가장 짧은 경로를 주지 않는다는 사실이 한 화면에서 읽힌다.
 

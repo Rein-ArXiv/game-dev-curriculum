@@ -1,7 +1,7 @@
 // file.h 의 플랫폼별 구현. positioned IO 만 사용한다.
 //
-// Linux 1차 타깃에서는 이 동기 pread/pwrite 가 IoSystem 의 스레드 풀 백엔드에
-// 실린다. io_uring 백엔드(SQ/CQ 링으로 시스템 콜을 모으는 진짜 비동기)는 같은
+// 이 동기 positioned IO 가 IoSystem(io/async_io.h)의 스레드 풀 백엔드에 실린다.
+// io_uring 백엔드(SQ/CQ 링으로 시스템 콜을 모으는 진짜 비동기)는 같은
 // File 인터페이스 뒤에서 교체되는 지점으로 남긴다(system 시리즈 io_uring 챕터).
 
 #include "io/file.h"

@@ -32,7 +32,8 @@ public:
     void  Deallocate(void* ptr, std::size_t size) override;
     void  Reset() override;
 
-    // 각 클래스의 사용 현황. HUD가 점유 맵을 그릴 때 활용.
+    // 각 클래스의 사용 현황. HUD는 IAllocator 공통 통계만 표시하므로 호출하지 않고,
+    // 코어 테스트가 크기 클래스 라우팅을 검증할 때 쓴다.
     std::size_t ClassBlockSize(std::size_t classIdx) const;
     std::size_t ClassInUse(std::size_t classIdx) const;
     std::size_t ClassCapacity(std::size_t classIdx) const;

@@ -2,7 +2,7 @@
 
 "컴파일러는 코드가 UB를 포함하지 않는다고 가정한다." 이 문장은 단순한 안내가 아니다. Undefined Behavior(UB)는 "정의되지 않은 동작"이 아니라, 컴파일러에게 "이 코드 경로는 절대 실행되지 않는다"고 선언하는 것과 같다. 컴파일러는 이 정보를 이용해 직관을 뛰어넘는 최적화를 수행한다.
 
-UB가 과거로 거슬러 올라가 null check를 제거하고, 무한 루프를 단 몇 줄로 압축하며, 멀쩡히 보이는 코드를 완전히 삭제하는 메커니즘을 살펴본다. 동시에 C++ 빌드 시스템의 기초와 컴파일러 옵션을 정리해, UB를 일으키지 않게 코드를 빌드하고 검증하는 흐름까지 연결한다.
+UB가 과거로 거슬러 올라가 null check를 제거하고, 무한 루프를 단 몇 줄로 압축하며, 멀쩡히 보이는 코드를 완전히 삭제하는 메커니즘을 살펴본다. 그다음 시야를 파일 하나에서 번역 단위 여러 개로 넓힌다. 한 파일 안에서는 성립하던 계약이 번역 단위 경계에서 어떻게 깨지는지, 그리고 그 위반을 검출하는 빌드를 어떻게 구성하는지까지 연결한다.
 
 
 ---
@@ -14,9 +14,9 @@ UB가 과거로 거슬러 올라가 null check를 제거하고, 무한 루프를
 4. [흔한 UB 목록과 최적화 결과](#4-흔한-ub-목록과-최적화-결과)
 5. [Strict Aliasing](#5-strict-aliasing)
 6. [Signed Overflow](#6-signed-overflow)
-7. [UB 탐지 도구: Sanitizer](#7-ub-탐지-도구-sanitizer)
+7. [UB를 런타임에 잡기: UBSan](#7-ub를-런타임에-잡기-ubsan)
 8. [방어적 프로그래밍](#8-방어적-프로그래밍)
-9. [C++ 빌드 시스템과 컴파일러 옵션](#9-c-빌드-시스템과-컴파일러-옵션)
+9. [번역 단위와 UB 검출 빌드](#9-번역-단위와-ub-검출-빌드)
 
 
 ---
@@ -487,129 +487,74 @@ gcc -O2 -fwrapv code.c
 
 Signed overflow를 2의 보수 wrap으로 정의한다. 일부 최적화 기회를 잃는다.
 
-## 7. UB 탐지 도구: Sanitizer
+## 7. UB를 런타임에 잡기: UBSan
 
-### AddressSanitizer (ASan)
-
-Google이 개발한 메모리 오류 탐지기. LLVM과 GCC에 통합되어 있다.
-
-```bash
-clang -fsanitize=address -g code.c -o code
-./code
-```
-
-#### 작동 원리: Shadow Memory
-
-메모리의 8바이트마다 1바이트의 shadow 메모리로 상태를 추적한다.
-
-```text
-실제 메모리:    [8 bytes of data]
-Shadow memory:  [1 byte: 0 = OK, 양수 = 부분적 접근 가능, 음수 = 불가]
-```
-
-모든 메모리 접근 전에 shadow memory를 검사하는 코드를 삽입한다.
-
-```c
-// 원본
-int x = array[i];
-
-// ASan instrumentation (개념적)
-if (shadow_check(&array[i], sizeof(int)) != 0) {
-    report_error(__FILE__, __LINE__, &array[i]);
-}
-int x = array[i];
-```
-
-#### Heap Poisoning
-
-할당된 메모리 주변에 red zone을 생성한다.
-
-```text
-malloc(16):
-[red zone][16 bytes of user data][red zone]
- ↑ poison                          ↑ poison
-```
-
-Red zone 접근 시 즉시 보고.
-
-#### 성능 오버헤드
-
-ASan의 shadow 자체는 대표 구현에서 애플리케이션 주소 공간의 1/8 규모 매핑을 사용하지만, 실제 resident memory에는 red zone, quarantine, allocator metadata와 호출 스택 기록이 더해진다. 실행 시간과 peak RSS는 allocation 패턴, 계측된 load/store 수와 옵션에 따라 달라진다. 공식 안내나 논문 수치는 용량 계획의 출발점으로만 쓰고 대상 테스트 suite에서 직접 측정한다.
-
-### UndefinedBehaviorSanitizer (UBSan)
-
-UB 탐지에 특화되어 있다.
+지금까지 본 UB는 컴파일 시점에 진단되지 않는다. 진단할 수 있었다면 표준이 UB로 남겨 둘 이유가 없었다. 남은 방법은 **실행 중에 그 연산이 정말로 계약을 어기는지 확인하는 코드를 심는 것**이다. UndefinedBehaviorSanitizer가 그 일을 한다.
 
 ```bash
 clang -fsanitize=undefined -g code.c -o code
 ```
 
-탐지 항목:
-- Signed integer overflow
-- Division by zero
-- Null pointer dereference
-- Out-of-bounds array access (일부)
-- Shift by invalid amount
-- Unaligned pointer access
-- Type mismatch (vptr corruption)
-
-예제:
+컴파일러는 UB가 될 수 있는 연산마다 조건 검사와 보고 호출을 IR 생성 단계에서 끼워 넣는다.
 
 ```c
 int overflow(int x) {
     return x + 1;  // x == INT_MAX이면 UB
 }
-
-int main() {
-    overflow(INT_MAX);
-}
 ```
-
-UBSan 출력:
 
 ```text
 code.c:2:12: runtime error: signed integer overflow:
 2147483647 + 1 cannot be represented in type 'int'
 ```
 
-### MemorySanitizer (MSan)
+### 이 글에서 다룬 UB와의 대응
 
-초기화되지 않은 메모리 읽기를 탐지한다.
+UBSan은 하나의 검사기가 아니라 여러 검사의 묶음이다. 이 글이 앞에서 다룬 항목이 각각 어느 검사에 대응하는지 확인해 두면, 검출되지 않은 UB를 검출된 것으로 착각하지 않는다.
 
-```bash
-clang -fsanitize=memory -g code.c -o code
-```
+| 이 글에서 다룬 UB | 대응하는 검사 | 검출 여부 |
+|---|---|---|
+| Signed overflow | `signed-integer-overflow` | 연산이 실행되면 검출 |
+| 0으로 나누기 | `integer-divide-by-zero` | 검출 |
+| Null 역참조 | `null` | 역참조 시점에 검출 |
+| 잘못된 시프트 양 | `shift` | 검출 |
+| 정렬 위반 포인터 접근 | `alignment` | 검출 |
+| 다형 객체의 타입 불일치 | `vptr` | 검출 |
+| 배열 범위 초과 | `bounds` | 크기를 컴파일 시점에 아는 경우만 |
+| **Strict aliasing 위반** | 없음 | **검출하지 못한다** |
 
-Shadow memory로 각 바이트가 초기화되었는지 추적한다.
+마지막 줄이 중요하다. 타입 기반 앨리어싱 규칙 위반은 런타임에 관찰 가능한 사건이 아니다. `float*`로 `int` 객체를 읽는 순간에 잘못된 값이 나오는 것이 아니라, 컴파일러가 두 접근이 겹치지 않는다고 가정해 순서를 바꾸거나 로드를 없앤 **결과**로 값이 어긋난다. 그 가정은 UBSan이 검사할 대상이 아니라 최적화기의 전제다. 이 종류의 UB는 `-fno-strict-aliasing`으로 전제 자체를 끄거나, `memcpy`·`union`으로 규칙을 지키는 코드로 바꾸는 것 외에 방법이 없다.
 
-```c
-int x;
-if (x > 0) {  // MSan: uninitialized value 경고
-    // ...
-}
-```
+### 최적화 수준에 따라 결과가 달라진다
 
-### ThreadSanitizer (TSan)
+UBSan 검사는 최적화 전에 삽입되므로 `-O2`에서도 남아 있다. 다만 두 방향의 상호작용이 생긴다.
 
-Data race를 탐지한다.
+- 최적화기가 "이 검사는 절대 발동하지 않는다"를 증명하면 검사를 지운다. 실제로 그 경로가 실행되지 않는다면 올바른 제거다.
+- 반대로 검사가 삽입된 탓에 그 지점 이후의 코드가 도달 불가능으로 판정되지 않아, 최적화 빌드에서 사라졌을 코드가 남기도 한다.
 
-```bash
-clang -fsanitize=thread -g code.c -o code
-```
-
-모든 메모리 접근과 동기화 이벤트를 기록하여 happens-before 관계 위반을 찾는다.
-
-### Sanitizer 조합
+그래서 `-O0`과 최적화 빌드의 UBSan 결과가 다를 수 있다. 앞에서 본 시간여행 사례는 최적화 빌드에서만 증상이 나타나므로, **검출은 최적화 빌드에서도 한 번 돌려야 한다.** 기본 동작은 위반을 보고하고 실행을 계속하는 것인데, 첫 위반에서 멈추고 싶으면 복구를 끄고 필요하면 트랩으로 바꾼다.
 
 ```bash
-# ASan + UBSan
-clang -fsanitize=address,undefined code.c
+# 첫 위반에서 종료
+clang -fsanitize=undefined -fno-sanitize-recover=undefined code.c
 
-# ASan + LSan (LeakSanitizer)
-clang -fsanitize=address code.c  # LSan 자동 포함
+# 런타임 라이브러리 없이 즉시 트랩 (임베디드·커널 등)
+clang -fsanitize=undefined -fsanitize-trap=undefined code.c
 ```
 
-주의: MSan과 ASan은 동시 사용 불가(shadow memory 충돌).
+### 다른 종류의 오류는 다른 계측이 잡는다
+
+UBSan이 검사하는 것은 **연산 하나가 표준 계약을 어기는지**다. 메모리 블록의 수명이나 경계, 스레드 사이의 접근 순서, 초기화 여부는 연산 하나만 봐서는 판단할 수 없고 프로그램의 상태를 별도로 추적해야 알 수 있다. 그래서 공간·시간 안전성 위반, 데이터 레이스, 초기화되지 않은 읽기는 각각 다른 계측 기법을 쓰는 별도 도구가 맡는다. 그 도구들이 상태를 어떤 자료구조로 들고 있는지는 UB와 최적화의 계약이라는 이 글의 논지 밖이다.
+
+빌드 관점에서 알아 둘 조합 규칙만 정리한다.
+
+| 조합 | 가능 여부 |
+|---|---|
+| UBSan + 주소 계측 | 가능. 같은 빌드에서 함께 켠다 |
+| 주소 계측 + 초기화 계측 | 불가능. 같은 shadow 영역을 요구한다 |
+| UBSan + 스레드 계측 | 가능하지만 실행 시간이 크게 늘어난다 |
+
+UB 검출만 놓고 보면 UBSan은 다른 계측과 충돌하지 않으므로, 어떤 변형 빌드를 돌리든 함께 켜 두는 것이 이득이다.
 
 ## 8. 방어적 프로그래밍
 
@@ -723,9 +668,9 @@ bool safe_add_builtin(int a, int b, int* result) {
 }
 ```
 
-## 9. C++ 빌드 시스템과 컴파일러 옵션
+## 9. 번역 단위와 UB 검출 빌드
 
-UB 검출은 컴파일러와 빌드 시스템 위에서 돌아간다. 어떤 플래그를 어떤 타깃에 어떻게 전달하는지가 결과를 결정한다. 단일 파일 컴파일을 넘어서면 타깃별 옵션, sanitizer 런타임, 링크 방식, CI 환경이 모두 검출 결과에 영향을 준다.
+지금까지의 UB는 모두 한 번역 단위 안에서 성립하는 이야기였다. 컴파일러는 자기가 보는 범위 안에서 계약을 가정하고 최적화한다. 그런데 프로그램은 번역 단위 여러 개를 링크해 만들어지고, **컴파일러가 보지 못하는 경계에서 생기는 UB가 하나 있다.** 그것이 ODR 위반이다. 이 절은 그 경계를 정리하고, 앞 절의 검사를 실제 빌드에 어떻게 얹는지를 정한다.
 
 ### 컴파일 단위와 ODR
 
@@ -761,144 +706,42 @@ ODR을 안전하게 유지하는 방법:
 - 헤더 안의 비-`inline` 함수 정의는 피한다. `inline` 또는 템플릿이어야 한다.
 - 매크로로 헤더 내용이 TU마다 다르게 펼쳐지지 않도록 주의한다.
 
-### CMake 기초
-
-소스 파일이 늘어나면 직접 컴파일러를 호출하는 일이 한계에 부딪힌다. 플랫폼별 플래그, 의존성 그래프, 멀티 컴파일러 지원이 필요해진다. CMake는 이런 메타 빌드 시스템 중 사실상의 표준이다.
-
-CMake가 해결하는 문제:
-
-- 플랫폼별 컴파일러 검출(GCC/Clang/MSVC).
-- 헤더 의존성 추적(어떤 `.cpp`를 다시 빌드할지).
-- 외부 라이브러리 탐색(`find_package`).
-- 한 소스 트리에서 여러 빌드 디렉토리(Debug/Release/UBSan 등) 운용.
-
-최소 골격:
-
-```cmake
-cmake_minimum_required(VERSION 3.20)
-project(myapp CXX)
-
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-add_executable(myapp
-    src/main.cpp
-    src/util.cpp
-)
-
-target_include_directories(myapp PRIVATE include)
-```
-
-`target_compile_options`로 타깃 단위로 플래그를 묶는다. 이것이 권장되는 방식이다. 전역 `add_compile_options`는 의존성을 흐리게 만든다.
-
-```cmake
-target_compile_options(myapp PRIVATE
-    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
-    $<$<CXX_COMPILER_ID:MSVC>:/W4>
-)
-
-# UB 검출용 빌드 변형
-option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
-if(ENABLE_UBSAN)
-    target_compile_options(myapp PRIVATE
-        -fsanitize=address,undefined -fno-omit-frame-pointer)
-    target_link_options(myapp PRIVATE
-        -fsanitize=address,undefined)
-endif()
-```
-
-`PRIVATE`/`PUBLIC`/`INTERFACE`는 사용 영역을 나눈다. `PUBLIC`은 이 타깃에 의존하는 다른 타깃에도 전파되고, `INTERFACE`는 자신은 안 쓰지만 의존자에만 전파된다.
-
-### C++ Modules
-
-전통적 `#include` 모델은 헤더의 텍스트를 매번 펼친다. 같은 헤더가 수백 TU에서 다시 파싱되어 빌드 시간을 잡아먹고, 매크로 누수를 만든다. C++20의 **Modules**는 이 흐름을 끊는다.
-
-모듈 인터페이스 단위:
+마지막 항목이 가장 자주 사고를 낸다. 같은 헤더라도 TU마다 다른 매크로 정의 아래에서 펼쳐지면 서로 다른 정의가 된다.
 
 ```cpp
-// math.cppm (모듈 인터페이스)
-export module math;
+// a.cpp
+#define ENABLE_STATS 1
+#include "config.hpp"   // struct Config에 통계 필드가 생긴다
 
-export int add(int a, int b) {
-    return a + b;
-}
+// b.cpp
+#include "config.hpp"   // 같은 헤더, 다른 레이아웃
 ```
 
-소비 측:
+`NDEBUG`, 최적화 수준에 따라 달라지는 표준 라이브러리의 디버그 모드 매크로, 구조체 패킹 프래그마가 모두 같은 방식으로 레이아웃을 갈라놓는다. 그래서 **번역 단위마다 다른 플래그로 컴파일한 객체 파일을 링크하는 것 자체가 위험한 행위**다.
 
-```cpp
-// main.cpp
-import math;
+### ODR 위반은 왜 잡히지 않는가
 
-int main() {
-    return add(1, 2);
-}
-```
+ODR 위반은 이 글에서 다룬 다른 UB와 검출 가능성이 다르다.
 
-모듈은 한 번 컴파일되어 BMI(Built Module Interface) 형태로 캐시된다. 이후의 `import`는 BMI를 직접 읽으므로 텍스트 재파싱이 없다.
+| 검출 계층 | ODR 위반을 잡는가 |
+|---|---|
+| 컴파일러 진단 | 못 잡는다. 각 TU 안에서는 정의가 하나뿐이라 모순이 없다 |
+| 링커 | 대개 못 잡는다. 이름만 맞으면 통과한다 |
+| 런타임 검사 | 못 잡는다. 어긋난 레이아웃으로 읽고 쓰는 것 자체가 정상 접근으로 보인다 |
+| LTO | 부분적으로 잡는다. 전체 프로그램의 타입 정보를 한자리에 모으기 때문이다 |
 
-핵심 차이:
-
-| 항목 | 헤더 + #include | 모듈 |
-|------|-----------------|------|
-| 처리 단위 | 텍스트 치환 | 미리 처리된 BMI |
-| 매크로 누수 | 발생 가능 | 차단 |
-| ODR 위험 | 높음 | 낮음 |
-| 빌드 시간 | 헤더 크기에 비례 | 한 번만 처리 |
-| 도구 지원 | 성숙 | 발전 중 |
-
-빌드 시스템 지원이 아직 완전하지 않다. CMake는 3.28부터 모듈을 일급으로 지원하고, GCC/Clang/MSVC 모두 구현 단계가 다르다. 새 프로젝트라면 시도해 볼 만하지만, 대규모 코드 베이스는 단계적 도입이 현실적이다.
-
-### 빌드 시간 최적화
-
-대규모 C++ 빌드는 길다. 클린 빌드 30분은 흔하다. 줄이는 방법은 몇 가지가 있다.
-
-**Precompiled Headers(PCH)**: 자주 쓰이고 거의 변하지 않는 헤더(`<vector>`, `<string>`, 프로젝트 공통 헤더)를 미리 파싱해 둔다.
-
-```cmake
-target_precompile_headers(myapp PRIVATE
-    <vector>
-    <string>
-    <unordered_map>
-    "common/log.hpp"
-)
-```
-
-PCH는 헤더 파싱 시간을 크게 줄이지만, PCH 헤더가 바뀌면 의존하는 모든 TU가 다시 빌드된다. 변동성이 낮은 헤더만 모아 둔다.
-
-**Unity Build**: 여러 `.cpp` 파일을 하나의 큰 TU로 합쳐 컴파일한다.
-
-```cmake
-set_target_properties(myapp PROPERTIES
-    UNITY_BUILD ON
-    UNITY_BUILD_BATCH_SIZE 8)
-```
-
-각 TU의 컴파일 고정 비용(헤더 처리 등)이 한 번으로 줄어든다. Unreal Engine이 이 방식을 적극적으로 쓴다. 단점은 `static` 심볼 충돌, 익명 네임스페이스 가시성, 매크로 간섭 등의 의외의 결합 효과가 생길 수 있다는 점이다.
-
-**ccache**: 같은 입력(소스 + 플래그 + 컴파일러 버전)으로 같은 출력을 내야 한다는 컴파일러 결정성을 이용한 캐시.
+마지막 줄이 유일한 실용적 방어다. 링크 시점 최적화를 켜면 컴파일러가 모든 TU의 타입 정보를 함께 보게 되고, GCC의 `-Wodr` 같은 경고가 어긋난 정의를 보고할 수 있다. 완전하지는 않지만, 그 외에는 관측 수단이 없다는 점에서 켜 둘 가치가 있다.
 
 ```bash
-export CC="ccache gcc"
-export CXX="ccache g++"
+# 모든 TU를 같은 플래그로 컴파일하고, LTO에서 타입 불일치를 본다
+g++ -flto -Wodr -O2 a.cpp b.cpp -o app
 ```
 
-CMake와 같이 쓰려면:
-
-```cmake
-find_program(CCACHE ccache)
-if(CCACHE)
-    set(CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE})
-endif()
-```
-
-CI에서 빌드 캐시를 영속화하면 변경된 파일만 다시 컴파일된다. clean 빌드 시간이 절반 이하로 떨어지는 경우가 흔하다.
-
-세 기법은 직교한다. PCH로 헤더 파싱을, Unity Build로 TU 고정 비용을, ccache로 재빌드 비용을 각각 줄인다.
+플래그가 정의를 바꾼다는 사실은 검출용 빌드의 구성 방식을 그대로 규정한다. 검출 플래그를 일부 파일에만 적용하면 그 자체가 ODR 위반을 만든다. 프로그램 전체를 같은 플래그로 다시 빌드해야 한다.
 
 ### Sanitizer 플래그와 UB 검출
 
-이 글에서 다룬 UB는 표준이 "no requirements"라고 선언한 영역이다. 정적 분석으로 잡히지 않는 UB는 런타임 sanitizer로 잡는 것이 가장 확실하다. 빌드 시스템 관점에서는 sanitizer를 일반 빌드와 별도 빌드 변형으로 운용한다.
+이 글에서 다룬 UB는 표준이 "no requirements"라고 선언한 영역이다. 정적 분석으로 잡히지 않는 UB는 런타임 검사로 잡는 것이 가장 확실하다. 그런데 검사 플래그는 코드 생성과 레이아웃을 바꾸므로, 검출용 빌드는 일반 빌드에 얹는 옵션이 아니라 **처음부터 끝까지 별개인 빌드 변형**이어야 한다. 같은 소스 트리에서 별도 빌드 디렉토리를 만드는 형태가 된다.
 
 ```bash
 # Debug 빌드 + ASan + UBSan
@@ -923,21 +766,21 @@ CI는 보통 다음 변형을 함께 돌린다.
 
 각 변형은 서로 다른 오류 집합과 실행 경로를 검사한다. sanitizer 빌드의 slowdown은 고정 배수가 아니며, 테스트 스위트가 통과해도 실행되지 않은 경로의 UB가 없다는 보장은 없다. 재현된 위반은 가능한 한 최초의 잘못된 접근 가까이에서 보고되지만, 최적화와 비동기 실행 때문에 증상 위치가 원인과 다를 수도 있다.
 
-빌드 시스템과 sanitizer를 결합하면 흐름은 명확해진다.
+하나의 소스 트리에서 갈라져 나오는 빌드 변형의 관계는 다음과 같다.
 
 ```mermaid
 flowchart LR
-    Source[소스 파일] --> CMake[CMake 구성]
-    CMake --> Release[Release 빌드]
-    CMake --> Debug[Debug 빌드]
-    CMake --> San[Sanitizer 빌드]
+    Source[소스 트리] --> Conf[빌드 구성<br/>플래그 집합]
+    Conf --> Release[Release 변형]
+    Conf --> Debug[Debug 변형]
+    Conf --> San[검출 변형]
     Release --> Bench[성능 측정]
     Debug --> DevTest[개발 테스트]
-    San --> UBCheck[UB/메모리 오류 검출]
-    UBCheck --> CI[CI 게이트]
+    San --> UBCheck[UB 검출]
+    UBCheck --> Gate[병합 게이트]
 ```
 
-UB 자체가 무작위적으로 보이는 동작을 만들기 때문에, 한 번의 디버깅보다 매 PR에서 sanitizer 빌드를 통과시키는 쪽이 비용이 훨씬 적다. 빌드 시스템을 잘 갖추는 일과 UB를 막는 일은 같은 작업의 양면이다.
+변형이 갈라지는 지점은 플래그 집합 하나다. 그 아래는 각각 완전히 별개의 객체 파일 집합이며, 섞이는 순간 ODR 위반이 된다. UB는 무작위로 보이는 증상을 만들기 때문에, 증상을 만난 뒤 한 번 디버깅하는 것보다 변경마다 검출 변형을 통과시키는 쪽이 비용이 훨씬 적다.
 
 
 ---
@@ -953,7 +796,7 @@ Undefined Behavior는 C/C++의 가장 날카로운 양날의 검이다. 컴파�
 3. 컴파일러는 "UB는 발생하지 않는다"를 axiom으로 사용한다.
 4. 이식성을 얻기 위해 안전성을 희생한 결과다.
 5. 경계 검사를 먼저, Null check를 먼저, sanitizer를 항상 사용하는 방어적 프로그래밍이 필요하다.
-6. 빌드 시스템은 ODR을 강제하고, sanitizer 변형 빌드를 운용해 UB를 잡는 그물을 만든다.
+6. ODR 위반은 컴파일러도 링커도 런타임 검사도 잡지 못하는 유일한 종류의 UB이며, 모든 번역 단위를 같은 플래그로 빌드하는 것이 실질적인 방어다.
 
 John Regehr의 표현을 빌리면, UB는 시간 기계와 같다. 컴파일러는 나중에 발견할 UB를 근거로 코드의 의미를 거슬러 변경할 수 있다. 컴파일러를 적이 아니라 동맹으로 삼으려면, 이 시간 기계가 어디서 어떻게 발동되는지 알아야 한다.
 
@@ -969,10 +812,7 @@ John Regehr의 표현을 빌리면, UB는 시간 기계와 같다. 컴파일러�
 - Raymond Chen, ["Undefined behavior can result in time travel (among other things, but time travel is the funkiest)"](https://devblogs.microsoft.com/oldnewthing/20140627-00/?p=633), 2014
 - Wang Xi et al., ["Towards Optimization-Safe Systems"](https://css.csail.mit.edu/stack/), SOSP 2013
 - Chandler Carruth, ["Garbage In, Garbage Out: Arguing about Undefined Behavior"](https://www.youtube.com/watch?v=yG1OZ69H_-o), CppCon 2016
-- [CMake Documentation](https://cmake.org/cmake/help/latest/) - 공식 문서
-- Craig Scott, "Professional CMake: A Practical Guide" - 모던 CMake의 표준 참고서
-- [C++ Modules in CMake](https://www.kitware.com/import-cmake-c20-modules/)
-- [ccache](https://ccache.dev/) - 컴파일러 캐시
+- [GCC: Optimize Options](https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html) - `-flto`, `-Wodr`, `-fstrict-aliasing`, `-fwrapv`
 - [Compiler Explorer (Godbolt)](https://godbolt.org/) - 다양한 최적화 레벨에서 어셈블리 비교
 - [Cppcheck](http://cppcheck.sourceforge.net/) - 정적 분석
 - [Valgrind](https://valgrind.org/) - 메모리 오류 검출

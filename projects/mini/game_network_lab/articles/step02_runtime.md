@@ -18,6 +18,7 @@
 4. buffer 소유권
 5. 고정 틱과 네트워크 시계
 6. 종료 불변식
+7. 검증 실행
 
 ---
 
@@ -26,6 +27,7 @@
 게임 core가 알아야 할 것은 IOCP completion key나 epoll file descriptor가 아니다. 안정적인
 `ConnectionId`, 받은 바이트, UDP 송신자 endpoint, 오류 코드다.
 
+<!-- snippet: src/network_types.h#NetworkEvent -->
 ```cpp
 struct NetworkEvent {
     NetworkEventKind kind{};
@@ -48,6 +50,7 @@ connection별 `FrameDecoder`에 넣고, 완성된 control message만 상태 기�
 TCP accept 직후에는 네트워크 연결만 존재한다. Hello가 검증되고 서버가 Welcome을 보낸 뒤에도
 UDP endpoint는 아직 모른다. runtime은 상태를 분리한다.
 
+<!-- snippet: src/server_runtime.h#ClientState -->
 ```cpp
 struct ClientState {
     FrameDecoder decoder;
@@ -55,7 +58,9 @@ struct ClientState {
     Endpoint endpoint{};
     bool helloComplete = false;
     bool udpBound = false;
+    // ...
     std::uint32_t lastInputSequence = 0;
+    // ... 이동 의도와 권위 위치
 };
 ```
 
@@ -80,11 +85,16 @@ TCP close는 control channel의 종료다. backend가 session 객체를 바로 �
 - frame 전체가 완료된 뒤에만 queue에서 제거한다.
 - 상한을 넘는 연결은 새 데이터를 무시하지 않고 종료시킨다.
 
+IOCP backend의 `SendStream`이 그 판정을 한다.
+
+<!-- snippet: src/iocp_server.cpp#SendStream -->
 ```cpp
 if (bytes.size() > config_.maxQueuedSendBytesPerConnection -
                        std::min(session->queuedSendBytes,
                                 config_.maxQueuedSendBytesPerConnection)) {
     overflow = true;
+} else {
+    // ... queue 에 넣고 필요하면 송신을 시작한다
 }
 // sendMutex를 놓은 뒤에 종료시킨다.
 if (overflow) {
@@ -116,12 +126,15 @@ runtime의 `Advance(now)`는 60Hz tick 경계를 따라 정수 위치를 갱신�
 worker 시각에 곧바로 월드를 전진시키지 않는다. 입력은 최신 의도로 저장되고 tick이 이를
 소비한다.
 
+<!-- snippet: src/server_runtime.cpp#GameServerRuntime::Advance -->
 ```cpp
-while (now >= nextTick && catchUpTicks < kMaxCatchUpTicks) {
+std::uint32_t catchUpTicks = 0;
+while (now >= nextTick_ && catchUpTicks < 4) {
     RunTick();
-    nextTick += tickDuration;
+    nextTick_ += kTickInterval;
     ++catchUpTicks;
 }
+if (now >= nextTick_) nextTick_ = now + kTickInterval;
 ```
 
 snapshot은 세 tick마다 20Hz로 보낸다. input, simulation, snapshot은 서로 다른 주기를 가지므로
@@ -139,6 +152,86 @@ snapshot은 세 tick마다 20Hz로 보낸다. input, simulation, snapshot은 서
 
 이 순서를 뒤집으면 completion이 파괴된 session이나 queue를 참조한다. 종료 경로도 정상 I/O와
 같은 소유권 규칙을 따라야 한다.
+
+## 검증 실행
+
+여기서 고정한 계약 중 지금 통과·실패로 갈릴 수 있는 것은 두 개다. 고정 틱의 catch-up 상한은
+socket 없이 시각을 주입해 확인하고, 연결별 송신 queue 상한은 실제 backend를 띄워 확인한다.
+CTest 이름은 `game_network_step02_tick_clock`과 `game_network_step02_send_queue`다.
+
+```powershell
+ctest --test-dir projects/mini/game_network_lab/build -C Release `
+      -R game_network_step02 --output-on-failure
+```
+
+```text
+    Start 7: game_network_step02_tick_clock
+1/2 Test #7: game_network_step02_tick_clock ...   Passed    0.06 sec
+    Start 8: game_network_step02_send_queue
+2/2 Test #8: game_network_step02_send_queue ...   Passed    0.19 sec
+
+100% tests passed out of 2
+
+Total Test time (real) =   0.26 sec
+```
+
+두 실행 파일을 직접 부르면 각 case가 관측한 값이 나온다.
+
+```powershell
+projects/mini/game_network_lab/build/Release/game_network_runtime_tests.exe step02
+projects/mini/game_network_lab/build/Release/game_network_send_queue_tests.exe step02
+```
+
+```text
+[step02] tick_clock_catch_up    ok  1 tick, then a 10 interval jump -> ticks=5 (catch-up capped at 4); replaying the same now adds 0
+game_network_runtime_tests: 1 case(s) passed [step02 1]
+[step02] bounded_send_queue  ok  limit=8KiB, gave up after 2 of at most 8192 4KiB sends -> Disconnected(kSendQueueOverflowError) x1, other closes 0
+game_network_send_queue_tests: 1 case(s) passed [step02 1]
+```
+
+`gave up after` 뒤의 숫자는 판정 대상이 아니다. 커널 송신 buffer 크기와 backend가 포기하는
+지점에 따라 달라진다 — 같은 코드로 Linux epoll backend에서는 수천이 나온다. 고정된 것은
+화살표 뒤의 두 값이다.
+
+시계 쪽 case는 상한을 이렇게 관측한다. 한 번 전진시킨 뒤 10 간격만큼 늦은 시각을 주면
+`ticks`가 11이 아니라 5여야 하고, 같은 시각을 다시 주면 더 늘지 않아야 한다. 뒤쪽 검사가
+없으면 시계를 재설정하지 않고 부채를 남기는 구현도 통과한다.
+
+<!-- snippet: tests/runtime_tests.cpp#TestCatchUpIsBounded -->
+```cpp
+runtime.Advance(kBase);
+Require(runtime.Metrics().ticks == 1, "the first Advance runs exactly one tick");
+
+const auto late = kBase + gnl::kTickInterval * 10;
+runtime.Advance(late);
+Require(runtime.Metrics().ticks == 5,
+        "a ten interval stall is clamped to four catch-up ticks");
+
+runtime.Advance(late);
+Require(runtime.Metrics().ticks == 5,
+        "the clock was resynchronised, so the same now runs no further ticks");
+```
+
+송신 queue case의 판정은 backend가 어떻게 포기했는지를 묻지 않는다. 상한이 없으면 32MiB가
+그대로 쌓이고, session 해제가 멱등이 아니면 종료 사건이 두 번 나온다. 두 실패 모드가 서로
+다른 error 문구를 갖는다.
+
+<!-- snippet: tests/send_queue_tests.cpp@overflow-verdict -->
+```cpp
+if (sent >= 8192 && !sendStreamRefused && overflowDisconnects == 0) {
+    return Fail("32 MiB was queued for a receiver that never reads: no send queue bound");
+}
+if (overflowDisconnects != 1) {
+    std::cerr << "FAIL: expected exactly one Disconnected(kSendQueueOverflowError), got "
+              << overflowDisconnects << " after " << sent << " sends\n";
+    return 1;
+}
+if (otherDisconnects != 0) {
+    std::cerr << "FAIL: connection also closed for an unrelated reason ("
+              << otherDisconnects << " events)\n";
+    return 1;
+}
+```
 
 ---
 

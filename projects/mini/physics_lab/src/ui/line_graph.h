@@ -42,7 +42,8 @@ struct GraphInput {
 };
 
 // rect 안에 라인 그래프를 그린다.
-//   inputs: 시리즈들 — 같은 capacity 라고 가정 (다르면 가장 짧은 것에 맞춤).
+//   inputs: 시리즈들 — 같은 capacity 라고 가정 (다르면 가장 *긴* capacity 가
+//           x 축 기준이라 짧은 시리즈는 왼쪽에 몰려 그려진다).
 //   title: 그래프 위에 작게.
 //   yLo, yHi: y 축 범위. autoY true 면 무시되고 모든 시리즈의 min/max 로 설정.
 void DrawLineGraph(Rectangle rect,

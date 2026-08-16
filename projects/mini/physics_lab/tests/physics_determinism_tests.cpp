@@ -4,6 +4,8 @@
 #include "scenes/measure_scene.h"
 #include "scenes/response_scene.h"
 
+#include "step_cases.h"
+
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -59,6 +61,8 @@ void TestBitExactRepeat() {
     const auto second = Run(scene, 600);
     CHECK(first.size() == 24);
     CHECK(MaxDelta(first, second) == 0.0f);
+    std::cout << "  ordered maxDelta=" << MaxDelta(first, second)
+              << " after 600 steps\n";
 
     // 초기 배치 자체도 seed 로 완전히 결정된다.
     std::vector<physlab::MeasureBody> a, b, other;
@@ -121,16 +125,21 @@ void TestMetrics() {
     scene.ComputeMetrics(sim, pen, ke);
     CHECK(std::fabs(pen - 16.0f) < 1e-4f);   // 24 - 8
     CHECK(ke == 0.0f);
+    const float overlapPen = pen;
 
     sim[0].vel = {100.0f, 0.0f};
     scene.ComputeMetrics(sim, pen, ke);
     CHECK(std::fabs(ke - 0.5f) < 1e-4f);     // 0.5 * (100^2) / 100^2
+    const float movingKe = ke;
 
     std::vector<physlab::MeasureBody> apart;
     apart.push_back({{0.0f, 0.0f}, {0.0f, 0.0f}, 12.0f});
     apart.push_back({{100.0f, 0.0f}, {0.0f, 0.0f}, 12.0f});
     scene.ComputeMetrics(apart, pen, ke);
     CHECK(pen == 0.0f);
+    std::cout << "  metrics: overlapping avgPen=" << overlapPen
+              << " separated avgPen=" << pen << " one body at 100 px/s KE="
+              << movingKe << '\n';
 }
 
 // (5) 절대 기준 — 반복성만 보면 '아무것도 하지 않는 StepSim' 도 통과한다.
@@ -197,24 +206,28 @@ void TestMeasureRunsTheResponseSolver() {
     }
     std::cout << "  measure vs response: maxPosDelta=" << worstPos
               << " maxVelDelta=" << worstVel << '\n';
+    // snippet-begin: same-solver
+    // 두 Scene 이 정말 같은 솔버를 도는가. 갈라지면 측정은 교재의 솔버가 아니라
+    // 사본을 재고 있는 것이고, 그때의 '결정적' 판정은 아무것도 보증하지 않는다.
     CHECK(n == 24);
     CHECK(worstPos == 0.0f);
     CHECK(worstVel == 0.0f);
+    // snippet-end: same-solver
 }
+
+const physlab::testkit::StepCase kCases[] = {
+    {"step08", "bit_exact_repeat",    TestBitExactRepeat},
+    {"step08", "settles_in_canvas",   TestSimSettlesInsideCanvas},
+    {"step08", "shuffle_diverges",    TestShuffleBreaksDeterminism},
+    {"step08", "scene_report",        TestSceneOwnDeterminismReport},
+    {"step08", "metrics",             TestMetrics},
+    {"step08", "same_solver_as_response", TestMeasureRunsTheResponseSolver},
+};
 
 }  // namespace
 
-int main() {
-    TestBitExactRepeat();
-    TestSimSettlesInsideCanvas();
-    TestShuffleBreaksDeterminism();
-    TestSceneOwnDeterminismReport();
-    TestMetrics();
-    TestMeasureRunsTheResponseSolver();
-    if (failures != 0) {
-        std::cerr << failures << " determinism test(s) failed\n";
-        return 1;
-    }
-    std::cout << "physics determinism tests passed\n";
-    return 0;
+int main(int argc, char** argv) {
+    return physlab::testkit::RunStepCases(
+        argc, argv, kCases, (int)(sizeof(kCases) / sizeof(kCases[0])),
+        "physics determinism", &failures);
 }

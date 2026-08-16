@@ -33,6 +33,7 @@ math part18 의 *DX/Vulkan 표준* 깊이 매핑.
 
 두 공식은 Scene 이 아니라 `src/algo/depth.h` 에 둔다. 그래야 GUI 없이 값을 직접 호출해 검사할 수 있다 (§8 참고).
 
+<!-- snippet: src/algo/depth.h@ndc-z -->
 ```cpp
 inline float StdNdcZ(float viewZ, float n, float f) {
     float A = -f / (f - n);
@@ -61,37 +62,47 @@ inline float ReverseNdcZ(float viewZ, float n, float f) {
 
 X 축 = *View Z (-near 부터 -far)*, Y 축 = *NDC z (0 ~ 1)*. 캔버스 안에 *margin 60 px* 떼고 그래프.
 
+<!-- snippet: src/scenes/projection_scene.cpp@depth-graph-axes -->
 ```cpp
-int margin = 60;
-int gx = cx + margin, gy = cy + 60;
-int gw = cw - margin * 2, gh = ch - 100;
+int   margin = 60;
+int   gx     = cx + margin;
+int   gy     = cy + 60;
+int   gw     = cw - margin * 2;
+int   gh     = ch - 100;
+if (gw < 100 || gh < 80) return;
 
 // 축
-DrawLine(gx, gy + gh, gx + gw, gy + gh, gray);   // X
-DrawLine(gx, gy,      gx,      gy + gh, gray);   // Y
+DrawLine(gx, gy + gh, gx + gw, gy + gh, Color{180, 180, 180, 255});
+DrawLine(gx, gy,      gx,      gy + gh, Color{180, 180, 180, 255});
 ```
+
+캔버스가 그래프를 담기에 너무 작으면 (`gw < 100 || gh < 80`) 아예 그리지 않고 돌아간다 — 음수 폭으로 좌표가 뒤집히는 것을 막는다.
 
 라벨 + 0/1 표시.
 
+<!-- snippet: src/scenes/projection_scene.cpp@depth-graph-labels -->
 ```cpp
-DrawText("View Z (near → far)", gx + gw / 2 - 60, gy + gh + 6, 12, white);
-DrawText("NDC z", gx - 50, gy + gh / 2, 12, white);
-DrawText("0", gx - 16, gy + gh - 6, 12, white);
-DrawText("1", gx - 16, gy - 6, 12, white);
+DrawText("View Z (near → far)", gx + gw / 2 - 60,
+          gy + gh + 6, 12, Color{200, 200, 200, 255});
+DrawText("NDC z", gx - 50, gy + gh / 2, 12, Color{200, 200, 200, 255});
+DrawText("0", gx - 16, gy + gh - 6, 12, Color{200, 200, 200, 255});
+DrawText("1", gx - 16, gy - 6, 12, Color{200, 200, 200, 255});
 ```
 
 ## 3. Standard vs Reverse 곡선 그리기
 
 256 샘플의 polyline. lambda 로 *공식 함수 자체* 를 매개변수화.
 
+<!-- snippet: src/scenes/projection_scene.cpp@depth-plot-path -->
 ```cpp
 const int N = 256;
 auto plotPath = [&](auto formula, Color c) {
-    for (int i = 0; i < N - 1; ++i) {
-        float t0 = (float)i / (N - 1);
-        float t1 = (float)(i + 1) / (N - 1);
-        float vz0 = -(near_ + (far_ - near_) * t0);   // linear
-        float vz1 = -(near_ + (far_ - near_) * t1);
+    for (int i = 0; i < N; ++i) {
+        float t0 = (float)i / (float)(N - 1);
+        float t1 = (float)(i + 1) / (float)(N - 1);
+        if (i == N - 1) break;
+        float vz0, vz1;
+        // ... linear / log 분기 — §4 ...
         float y0 = formula(vz0, near_, far_);
         float y1 = formula(vz1, near_, far_);
         int   px0 = gx + (int)(t0 * gw);
@@ -102,8 +113,12 @@ auto plotPath = [&](auto formula, Color c) {
     }
 };
 
-if (showStandard_) plotPath(StdNdcZ,     blue);
-if (showReverse_)  plotPath(ReverseNdcZ, orange);
+if (showStandard_) {
+    plotPath(StdNdcZ, Color{120, 200, 255, 255});
+}
+if (showReverse_) {
+    plotPath(ReverseNdcZ, Color{255, 200, 80, 255});
+}
 ```
 
 직관: *Standard 곡선이 가파르게 0 에서 시작 → near 에 NDC 변화가 집중, far 에 평평*. *Reverse 곡선이 1 에서 시작 → 부드럽게 0 으로 떨어짐*. 이 그래프는 *매핑 형태* 를 보여주며, 실제 depth 정밀도는 여기에 float depth 의 ULP 분포가 결합되어 결정된다.
@@ -112,8 +127,10 @@ if (showReverse_)  plotPath(ReverseNdcZ, orange);
 
 near = 0.1, far = 1000 처럼 *큰 비율* 일 때 linear X 축은 *near 근처가 픽셀 1~2 개* 라 안 보인다. log scale 토글로 *near 근처를 확대*.
 
+<!-- snippet: src/scenes/projection_scene.cpp@depth-log-scale -->
 ```cpp
 if (logScale_) {
+    // log: near 에서 far 로 log 분포
     float ln_n = std::log(near_);
     float ln_f = std::log(far_);
     vz0 = -std::exp(ln_n + (ln_f - ln_n) * t0);
@@ -130,9 +147,11 @@ log 모드에서 *Standard Z 가 near 근처를 거의 다 차지하는* 모습�
 
 보상 규칙은 `src/algo/kahan.h` 의 `KahanAccumulator` 한 곳에만 둔다 — 그래프도 순수 함수도 같은 누적기를 쓴다.
 
+<!-- snippet: src/algo/kahan.h#KahanAccumulator -->
 ```cpp
 class KahanAccumulator {
 public:
+    KahanAccumulator() = default;
     explicit KahanAccumulator(float initial) : sum_(initial) {}
     void Add(float x) {
         float y = x - c_;          // 지난번에 잘린 몫을 되돌린다
@@ -150,18 +169,21 @@ private:
 
 Scene 은 그 누적기로 오차 시계열만 만든다.
 
+<!-- snippet: src/scenes/projection_scene.cpp@kahan-error-series -->
 ```cpp
 float naive = 0.0f;
+// 누적 규칙은 algo/kahan.h 한 곳에만 둔다.
 KahanAccumulator kahan;
+// ... 샘플 간격 interval + 두 점 배열 준비 ...
 for (int i = 0; i < N; ++i) {
     float x = kahanSmall_;
     naive += x;
     kahan.Add(x);
-    if (i % interval == 0) {
+    if (i % interval == 0 || i == N - 1) {
         double partial = (double)kahanSmall_ * (i + 1);
         float  errN    = (float)((double)naive       - partial);
         float  errK    = (float)((double)kahan.Sum() - partial);
-        // 점 추가
+        // ... naivePoints / kahanPoints 에 점 추가 ...
     }
 }
 ```
@@ -176,6 +198,7 @@ double 로 *진실 값* (`partial`) 누적 후 float 합과 차이 = 오차.
 
 같은 헤더의 순수 함수 두 개를 그대로 부른다 — Scene 안에 합산 루프를 다시 쓰지 않는다.
 
+<!-- snippet: src/algo/kahan.h@pure-sums -->
 ```cpp
 inline float NaiveSum(float big, float small, int n) {
     float sum = big;
@@ -190,16 +213,21 @@ inline float KahanSum(float big, float small, int n) {
 }
 ```
 
+<!-- snippet: src/scenes/projection_scene.cpp@absorption-case -->
 ```cpp
 float  naive2 = NaiveSum(kahanBig_, kahanSmall_, N);
 float  kSum2  = KahanSum(kahanBig_, kahanSmall_, N);
 double truth2 = (double)kahanBig_ + (double)kahanSmall_ * N;
+```
 
-char buf[200];
+세 값을 캔버스 아래쪽에 한 줄로 찍는다.
+
+<!-- snippet: src/scenes/projection_scene.cpp@absorption-text -->
+```cpp
 std::snprintf(buf, sizeof(buf),
                "Big + small case (big=%.1f): naive=%.6f, kahan=%.6f, truth=%.6f",
                kahanBig_, naive2, kSum2, truth2);
-DrawText(buf, cx + 10, cy + ch - 30, 12, ...);
+DrawText(buf, cx + 10, cy + ch - 30, 12, Color{220, 220, 220, 255});
 ```
 
 big = 100,000, small = 0.0001, N = 100,000 일 때:
@@ -214,20 +242,38 @@ big = 100,000, small = 0.0001, N = 100,000 일 때:
 
 Mode A 의 패널 — near / far 슬라이더 + 토글.
 
+<!-- snippet: src/scenes/projection_scene.cpp#ProjectionScene::DrawPanel -->
 ```cpp
-GuiSlider(rect, ..., &near_, 0.001f, 10.0f);
-GuiSlider(rect, ..., &far_,  100.0f, 10000.0f);
-GuiCheckBox(rect, " standard z [0,1]", &showStandard_);
-GuiCheckBox(rect, " reverse z [1,0]",  &showReverse_);
-GuiCheckBox(rect, " log X axis",        &logScale_);
+GuiSlider(Rectangle{(float)(px + 8), (float)(y + 18), 220, 16},
+           nullptr, nullptr, &near_, 0.001f, 10.0f);
+// ... far 라벨 ...
+GuiSlider(Rectangle{(float)(px + 8), (float)(y + 18), 220, 16},
+           nullptr, nullptr, &far_, 100.0f, 10000.0f);
+y += 42;
+
+GuiCheckBox(Rectangle{(float)(px + 8), (float)y, 16, 16},
+             " standard z [0,1]", &showStandard_);
+y += 22;
+GuiCheckBox(Rectangle{(float)(px + 8), (float)y, 16, 16},
+             " reverse z [1,0]", &showReverse_);
+y += 22;
+GuiCheckBox(Rectangle{(float)(px + 8), (float)y, 16, 16},
+             " log X axis", &logScale_);
 ```
 
 Mode B 의 패널 — N / small / big 슬라이더.
 
+<!-- snippet: src/scenes/projection_scene.cpp#ProjectionScene::DrawPanel -->
 ```cpp
-GuiSlider(rect, ..., &n,           100.0f, 1000000.0f);  // N
-GuiSlider(rect, ..., &kahanSmall_, 0.00001f, 0.01f);
-GuiSlider(rect, ..., &kahanBig_,   0.0f, 100000.0f);
+GuiSlider(Rectangle{(float)(px + 8), (float)(y + 18), 220, 16},
+           nullptr, nullptr, &n, 100.0f, 1000000.0f);
+kahanN_ = (int)n;
+// ... small dx 라벨 ...
+GuiSlider(Rectangle{(float)(px + 8), (float)(y + 18), 220, 16},
+           nullptr, nullptr, &kahanSmall_, 0.00001f, 0.01f);
+// ... big initial 라벨 ...
+GuiSlider(Rectangle{(float)(px + 8), (float)(y + 18), 220, 16},
+           nullptr, nullptr, &kahanBig_, 0.0f, 100000.0f);
 ```
 
 N 이 1M 까지 — 한 프레임 안에 *naive + kahan 두 합산* 을 끝내야 60fps 안전. 1M float 덧셈 두 번 = 약 2~3ms. 안전 범위.
@@ -253,16 +299,73 @@ cmake --build build --config Release
 
 빌드: MSVC `/W4`, 8 Scene 모두 등록 후도 *경고 0 (third-party 외)* + `math_lab.exe` 정상.
 
+이 Scene 의 계산은 전부 `src/algo/depth.h` 와 `src/algo/kahan.h` 로 나와 있어, 화면을 띄우지 않고도 위 수치가 그대로 검사된다. 이 step 이 `tests/core_tests.cpp` 에 추가한 것은 네 개다 — `depth/std_vs_reverse`, `kahan/compensated_sum`, 그리고 이 Scene 이 쓰지는 않지만 `src/algo/mat.h` 로 들어온 계산부를 검사하는 `vector/cross_project_reflect` 와 `matrix/inverse_orthogonal_trs`.
+
+깊이 쪽은 끝점 네 개 (`StdNdcZ(-n)=0`, `StdNdcZ(-f)=1`, reverse 는 각각 1 과 0) 로 시작하지만, 끝점만 보면 두 함수를 통째로 뒤바꿔도 통과할 수 있다. 그래서 전 구간을 41 지점으로 훑어 *단조성* 과 *`reverse == 1 - std`* 를 함께 건다.
+
+<!-- snippet: tests/core_tests.cpp@step08-depth-reverse -->
+```cpp
+float prev = -1.0f;
+for (int i = 0; i <= 40; ++i) {
+    // ...
+    CHECK(sv >= prev - 1e-6f);
+    CHECK(Near(rv, 1.0f - sv, 1e-5f));
+    prev = sv;
+}
+
+// 표준 depth 는 근거리에 극단적으로 몰린다 — 절반 거리에서 이미 0.999 이상.
+CHECK(mathlab::StdNdcZ(-(n + (f - n) * 0.5f), n, f) > 0.99f);
+// 반대로 reverse-Z 는 같은 지점에서 0.01 미만이다.
+CHECK(mathlab::ReverseNdcZ(-(n + (f - n) * 0.5f), n, f) < 0.01f);
+```
+
+마지막 두 CHECK 가 화면에서 보던 것 — *표준 곡선이 near 쪽에 쏠린다* — 을 수치로 바꾼 것이다. 절반 거리에서 이미 0.99 를 넘는다는 것은 남은 절반 구간이 `[0.99, 1]` 안으로 짜부라졌다는 뜻이다.
+
+Kahan 쪽은 합계 비교 (big=100,000 / small=0.0001 / N=100,000 에서 `|kahan - truth| < 1e-3`, `|naive - truth| > 1`) 위에 누적기 자체의 계약을 하나 더 건다. 보상항이 *잘린 몫을 실제로 담고 있는지* 를 직접 본다.
+
+<!-- snippet: tests/core_tests.cpp@step08-kahan-absorption -->
+```cpp
+mathlab::KahanAccumulator acc(1.0f);
+acc.Add(1e-8f);
+CHECK(Near(acc.Sum(), 1.0f, 1e-9f));      // float 1.0 에 흡수되고
+CHECK(std::fabs(acc.Compensation()) > 1e-9f);  // 보상항에 남는다
+for (int i = 0; i < 1000; ++i) acc.Add(1e-8f);
+CHECK(acc.Sum() > 1.0f);   // 모이면 되살아난다
+```
+
+세 줄이 이 알고리즘의 전부다 — 한 번은 묻히고, 보상항에 남고, 모이면 되살아난다. 보상항 대입을 `c_ = 0.0f` 로 지우면 두 번째와 세 번째가 함께 깨진다.
+
+`mat.h` 쪽은 항등식으로 잡는다. `M·M⁻¹ = I` 를 양쪽 모두, 직교행렬의 `Rᵀ = R⁻¹` 과 `det(R) = 1` 을.
+
+<!-- snippet: tests/core_tests.cpp@step08-matrix-identities -->
+```cpp
+const Matrix inv = mathlab::MatInverse(trs);
+CHECK(NearMat(mathlab::MatMul(trs, inv), mathlab::MatIdentity(), 1e-5f));
+CHECK(NearMat(mathlab::MatMul(inv, trs), mathlab::MatIdentity(), 1e-5f));
+// ...
+CHECK(Near(mathlab::MatDeterminant(R), 1.0f, 1e-4f));
+```
+
+여기에 `QuatToMatrix(q)·v == QuatRotateVec(q, v)` 를 무작위 벡터 100 개로 대조한다 — 행렬 경로와 쿼터니언 경로가 *독립 구현* 이므로 서로의 오라클이 된다. TRS 와 SRT 가 다른 변환이라는 비가환성, 열 우선 규약 (평행이동이 네 번째 열), 특이행렬에서 `MatInvert` 가 거짓을 돌려주는 것까지 함께 본다.
+
 ```text
-$ ctest --test-dir build -C Release --output-on-failure
-    Start 1: math_core_tests
-1/1 Test #1: math_core_tests ..................   Passed    0.04 sec
+$ ctest --test-dir build -C Release -R math_step08_projection --output-on-failure
+    Start 8: math_step08_projection
+1/1 Test #8: math_step08_projection ...........   Passed    0.04 sec
+
 100% tests passed out of 1
 ```
 
-이 Scene 의 계산은 전부 `src/algo/depth.h` 와 `src/algo/kahan.h` 로 나와 있고, `tests/core_tests.cpp` 의 `TestDepth()` / `TestKahan()` 이 위 수치를 그대로 못 박는다 — `StdNdcZ(-n, n, f) == 0`, `StdNdcZ(-f, n, f) == 1`, reverse 는 각각 1 과 0, 전 구간 `reverse == 1 - std`, 그리고 big = 100,000 / small = 0.0001 / N = 100,000 에서 `|kahan - truth| < 1e-3` 과 `|naive - truth| > 1`. 화면을 띄우지 않고도 이 Scene 의 주장이 검사된다.
+```text
+$ ./build/Release/math_core_tests.exe step08
+[step08] depth/std_vs_reverse ............ 88 checks, 0 failed
+[step08] kahan/compensated_sum ........... 8 checks, 0 failed
+[step08] vector/cross_project_reflect .... 1208 checks, 0 failed
+[step08] matrix/inverse_orthogonal_trs ... 322 checks, 0 failed
+step08: 4 case(s), 1626 check(s), 0 failure(s)
+```
 
-검사가 실제로 결함을 잡는지는 변이 주입으로 확인했다. `StdNdcZ` 의 `A` 부호를 뒤집으면 `TestDepth` 가, `KahanAccumulator::Add` 의 보상항 대입을 `c_ = 0.0f` 로 지우면 `TestKahan` 이 즉시 실패한다.
+검사가 실제로 결함을 잡는지는 변이 주입으로 확인했다. `StdNdcZ` 의 `A` 부호를 뒤집으면 `depth/std_vs_reverse` 가, `KahanAccumulator::Add` 의 보상항 대입을 `c_ = 0.0f` 로 지우면 `kahan/compensated_sum` 이 즉시 실패한다.
 
 ---
 
@@ -285,7 +388,7 @@ Step 8 + math_lab 전체에서 만든 것.
 
 이 lab 의 8 Step 빌드가 *math 시리즈의 컴패니언 도구* 로 완결. 시리즈를 읽다가 의문이 생기는 지점 (*짐벌락이 어떻게 보이는가, smin 의 k 값이 어떻게 효과 하는가, BVH 가 광선을 얼마나 가지치기하는가, Reverse-Z 가 정말 정밀도를 개선하는가*) 에서 lab 의 해당 Scene 을 열고 슬라이더를 끌면 즉시 답이 보인다.
 
-이 step 의 한계. 깊이 정밀도는 *NDC 매핑 곡선* 만 그릴 뿐 실제 float 비트 분포에서 몇 개의 서로 다른 깊이 값이 나오는지는 세지 않는다. 벡터 (part02)·행렬 (part03)·좌표계 (part06) 는 `src/algo/mat.h` 로 계산부만 들어와 `tests/core_tests.cpp` 의 `TestVectorAlgebra()` / `TestMatrix()` 가 항등식 (`M·M⁻¹ = I`, 직교행렬의 `Rᵀ = R⁻¹` 과 `det = 1`, `QuatToMatrix(q)·v == QuatRotateVec(q, v)`, TRS 와 SRT 의 비가환성, 전치 왕복) 을 검사할 뿐, 이 축을 마우스로 만지는 Scene 은 없다.
+이 step 의 한계. 깊이 정밀도는 *NDC 매핑 곡선* 만 그릴 뿐 실제 float 비트 분포에서 몇 개의 서로 다른 깊이 값이 나오는지는 세지 않는다 — 검증도 매핑 값까지이고 "그래서 z-fighting 이 줄어드는가" 는 재지 않는다. 벡터 (part02)·행렬 (part03)·좌표계 (part06) 는 `src/algo/mat.h` 로 계산부만 들어와 검사되지만, 이 축을 마우스로 만지는 Scene 은 없다 — 이 lab 에서 유일하게 *화면 없는* 코드다.
 
 ## 더 읽을거리
 

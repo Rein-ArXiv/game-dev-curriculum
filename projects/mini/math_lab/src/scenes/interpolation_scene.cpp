@@ -40,6 +40,7 @@ Vector2 InterpolationScene::SampleCurve(float t) const {
 }
 
 void InterpolationScene::DrawWorld(int cx, int cy, int cw, int ch) {
+    // snippet-begin: handle-init
     if (!initialized_) {
         p0_.SetPosition({(float)(cx + cw * 0.20f), (float)(cy + ch * 0.70f)});
         p1_.SetPosition({(float)(cx + cw * 0.35f), (float)(cy + ch * 0.25f)});
@@ -47,8 +48,10 @@ void InterpolationScene::DrawWorld(int cx, int cy, int cw, int ch) {
         p3_.SetPosition({(float)(cx + cw * 0.80f), (float)(cy + ch * 0.70f)});
         initialized_ = true;
     }
+    // snippet-end: handle-init
 
     // 곡선 자체 — N 샘플 + 라인 스트립.
+    // snippet-begin: curve-linestrip
     const int N  = sampleCount_;
     Vector2 prev = SampleCurve(0.0f);
     for (int i = 1; i <= N; ++i) {
@@ -57,8 +60,10 @@ void InterpolationScene::DrawWorld(int cx, int cy, int cw, int ch) {
         DrawLineEx(prev, p, 2.0f, Color{180, 220, 255, 255});
         prev = p;
     }
+    // snippet-end: curve-linestrip
 
     // Hermite 면 접선 화살표.
+    // snippet-begin: curve-guides
     if (curve_ == Curve::Hermite) {
         Vector2 a  = p0_.Position();
         Vector2 c  = p2_.Position();
@@ -72,6 +77,7 @@ void InterpolationScene::DrawWorld(int cx, int cy, int cw, int ch) {
         DrawLineEx(p1_.Position(), p2_.Position(), 1.0f, Color{120, 120, 120, 180});
         DrawLineEx(p2_.Position(), p3_.Position(), 1.0f, Color{120, 120, 120, 180});
     }
+    // snippet-end: curve-guides
 
     // 이동하는 점 (t 또는 arc-length s).
     Vector2 pos;
@@ -139,6 +145,7 @@ void InterpolationScene::DrawPanel(int px, int py, int pw, int ph) {
     sampleCount_ = (int)samples;
     y += 22;
 
+    // snippet-begin: arc-length-label
     if (useArcLen_) {
         ArcLengthLUT lut;
         lut.Build(sampleCount_, [this](float u) { return SampleCurve(u); });
@@ -146,6 +153,7 @@ void InterpolationScene::DrawPanel(int px, int py, int pw, int ph) {
         GuiLabel(Rectangle{(float)(px + 8), (float)y, 220, 18}, buf);
         y += 18;
     }
+    // snippet-end: arc-length-label
 }
 
 }  // namespace mathlab

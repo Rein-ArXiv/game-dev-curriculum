@@ -272,7 +272,7 @@ void Hud::Draw(Toggles& toggles, const FrameTimer& timer,
 
 ## 5. raygui 콤보박스의 모달 패턴
 
-raygui의 `GuiDropdownBox`는 *드롭다운이 펼쳐진 상태* 와 *접힌 상태* 를 분리한다. 호출자가 *편집 모드 boolean* 을 들고 있어야 한다. 펼쳐진 동안 다른 위젯이 우연히 클릭되는 것을 막고 싶으면 `GuiLock`/`GuiUnlock` 으로 명시적으로 입력을 잠글 수 있다(이 도구는 콤보박스가 한 번에 하나만 펼쳐지므로 잠그지 않는다).
+raygui의 `GuiDropdownBox`는 *드롭다운이 펼쳐진 상태* 와 *접힌 상태* 를 분리한다. 호출자가 *편집 모드 boolean* 을 들고 있어야 한다. 펼쳐진 동안 다른 위젯이 우연히 클릭되는 것을 막으려면 `GuiLock`/`GuiUnlock` 으로 명시적으로 입력을 잠가야 한다. 이 단계에서는 활성 콤보가 entities 하나뿐이라 잠글 것이 없지만, 뒤 단계에서 콤보가 여럿 활성화되면 반드시 필요해진다 — 펼친 목록의 높이가 `(항목 수 + 1) × (행 높이 + 항목 간격)` 이라 아래 두세 행 위젯을 그대로 덮기 때문이다. 최종 코드의 `Hud::DrawTogglePanel` 이 그 잠금과 "열린 콤보를 마지막에 그리기" 를 담당한다.
 
 ```cpp
 bool allocatorEdit_ = false;  // 멤버
@@ -603,6 +603,92 @@ allocator/layout/container/simd/branch는 회색으로 비활성. entities 콤�
 5. 자동 줌이 새 max에 맞춰 스케일을 다시 잡는다. 60fps 기준선이 그래프 하단으로 내려간다.
 
 이 *세로 절벽* 이 측정 도구가 만들어 내는 첫 번째 시각적 사건이다. 토글이 바뀐 정확한 프레임을 그래프에서 손가락으로 짚을 수 있다.
+
+### 자동 검증: `parts_toggles_tests`
+
+토글 시스템에서 사람이 클릭해야만 확인되는 부분과 창 없이 확인되는 부분은 다르다. raygui 위젯이 실제로 눌리는지는 창·입력 컨텍스트가 있어야 알 수 있지만, *어떤 토글이 재시작을 부르는가* 와 *패널의 위젯들이 화면에서 어디에 놓이는가* 는 순수 계산이다. 그 둘이 `toggles` 그룹이고, ctest 이름은 `parts_toggles_tests` 다.
+
+`RequiresRestart` 는 메인 루프가 프레임 끝에서 시뮬을 다시 만들지 말지를 정하는 유일한 근거다. 어느 축이 어느 쪽인지를 못 박아 둔다.
+
+<!-- snippet: tests/core_tests.cpp#TestToggleRestartRules -->
+```cpp
+// tests/core_tests.cpp — toggles 그룹
+
+void TestToggleRestartRules() {
+    const ppl::Toggles base;
+    CHECK(base.entityPresetIdx == 1);
+    CHECK(base.EntityCount() == 10000);
+    // ...
+    // 같은 값끼리는 재구성이 없다. 이게 깨지면 매 프레임 시뮬을 새로 만든다.
+    CHECK(!ppl::RequiresRestart(base, base));
+
+    // 데이터 구조를 다시 만들어야 하는 축.
+    ppl::Toggles entities = base;
+    entities.entityPresetIdx = 2;
+    CHECK(entities.EntityCount() == 100000);
+    CHECK(ppl::RequiresRestart(base, entities));
+    CHECK(ppl::RequiresRestart(entities, base));  // 판정은 방향에 무관하다
+    // ...
+    // 경로 선택만 바꾸는 축은 재구성 없이 적용된다. 여기에 simd/branchless가
+    // 끼면 토글할 때마다 화면이 깜박인다.
+    ppl::Toggles simd = base;
+    simd.simd = ppl::SimdWidth::AVX2;
+    CHECK(!ppl::RequiresRestart(base, simd));
+    // ...
+}
+```
+
+패널 기하 쪽은 콤보를 펼쳤을 때의 겹침을 고정한다. `GuiLock` 과 "열린 콤보를 마지막에 그리기" 가 필요한 이유가 곧 이 겹침이므로, 겹침이 사라지면 그 잠금·지연도 다시 판단해야 한다.
+
+<!-- snippet: tests/core_tests.cpp#TestTogglePanelGeometry -->
+```cpp
+// tests/core_tests.cpp — toggles 그룹
+
+void TestTogglePanelGeometry() {
+    // ...
+    constexpr int x = 320;
+    constexpr int y = 700;
+
+    // 행 간격 24 > 위젯 높이 22. 접힌 위젯끼리는 겹치지 않는다.
+    CHECK(ppl::kPanelRowH == 22);
+    CHECK(PanelRowY(y, 1) - PanelRowY(y, 0) == 24);
+    CHECK(!RectsOverlap(PanelFieldRect(x, y, 0), PanelFieldRect(x, y, 1)));
+    // ...
+    // entities는 "1k;10k;100k" 세 항목 → 4 * (22+2) = 96.
+    const UiRect entitiesOpen = DropdownOpenRect(entities, 3);
+    CHECK(entitiesOpen.h == 96);
+
+    // 펼친 목록이 아래 두 행의 필드 자리를 덮는다.
+    CHECK(RectsOverlap(entitiesOpen, allocator));
+    CHECK(RectsOverlap(entitiesOpen, layout));
+    // ...
+    // 두 패스 그리기: 모든 위젯이 정확히 한 번, 열린 콤보만 마지막 패스에.
+    CHECK(PanelDrawsWidget(/*widgetOpen=*/false, /*openPass=*/false));
+    CHECK(!PanelDrawsWidget(/*widgetOpen=*/false, /*openPass=*/true));
+    CHECK(!PanelDrawsWidget(/*widgetOpen=*/true, /*openPass=*/false));
+    CHECK(PanelDrawsWidget(/*widgetOpen=*/true, /*openPass=*/true));
+}
+```
+
+여기 쓰인 `kPanelRowH`·`PanelRowY`·`PanelFieldRect` 는 문서용 복제본이 아니라 `ui/hud_layout.h` 의 상수와 수식 그 자체다. 위젯을 그리는 코드가 같은 함수를 부른다.
+
+```bash
+cmake -S . -B build
+cmake --build build --config Release
+ctest --test-dir build -C Release -R parts_toggles_tests --output-on-failure
+
+./build/parts_core_tests toggles              # Linux/macOS
+.\build\Release\parts_core_tests.exe toggles  # Windows
+```
+
+```text
+parts_core_tests: group `toggles`
+  toggles/ToggleRestartRules ... 18 check(s) ok
+  toggles/TogglePanelGeometry ... 16 check(s) ok
+toggles: 2 test(s), 34 check(s), 0 failure(s)
+```
+
+두 검사가 각각 18·16개 단언을 돈다. 콤보박스 클릭 자체는 여전히 손으로 확인해야 하지만, 클릭이 *무엇을 부르는지* 와 *어디에 그려지는지* 는 여기서 갈린다.
 
 ### 검증 체크리스트
 

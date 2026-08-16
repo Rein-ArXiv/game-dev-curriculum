@@ -22,6 +22,7 @@
 2. [에너지 정의와 단위 변환](#2-에너지-정의와-단위-변환)
 3. [Scene 구조: 두 핸들 + pulse](#3-scene-구조-두-핸들--pulse)
 4. [세 가지 시나리오](#4-세-가지-시나리오)
+5. [force 식을 창 없이 확인하기](#5-force-식을-창-없이-확인하기)
 
 ---
 
@@ -168,6 +169,82 @@ flowchart TB
     I --> J[Graph push]
 ```
 
+## 5. force 식을 창 없이 확인하기
+
+위 세 시나리오는 전부 *그래프를 눈으로 보는* 확인이다. 그런데 이 Scene 이 주장하는 것들 — 스프링의 부호, 두 drag 의 종단 속도, "보존력만 있으면 총 에너지가 평평하다" — 은 전부 숫자로 갈리는 명제다. 눈으로 보는 확인은 부호가 뒤집힌 것은 잡아도 계수가 2 배 틀린 것은 잘 못 잡는다.
+
+`ComputeForce(pos, vel)` 는 이미 *현재 상태만으로 결정되는* const 함수다. GUI 가 슬라이더로 만들던 상태를 창 없이 만들 수 있으면 그대로 부를 수 있다. 그래서 패널의 체크박스 / 슬라이더에 대응하는 setter 를 헤드리스용으로 열어 둔다 — 값의 의미와 기본값은 패널과 같고, GUI 경로는 이 함수들을 부르지 않는다.
+
+```cpp
+// scenes/forces_scene.h — 헤드리스 검증용
+Vector2 ComputeForce(Vector2 pos, Vector2 vel) const;
+void    SetCanvas(int x, int y, int w, int h);
+void    SetState(Vector2 pos, Vector2 vel);
+void    SetGravity(bool on, float g);
+void    SetSpring(bool on, float k, float rest, Vector2 anchor);
+void    SetDrag(float linear, float quad);
+float   LastTotalEnergy() const;
+```
+
+```cmake
+physlab_add_scene_test(physics_forces_tests src/scenes/forces_scene.cpp)
+add_test(NAME step03.forces COMMAND physics_forces_tests step03)
+```
+
+스프링 부호가 가장 틀리기 쉽다. anchor (400, 300), rest 80, k 8 이면 값이 전부 정수로 떨어지므로 리터럴로 못 박는다.
+
+<!-- snippet: tests/physics_forces_tests.cpp@spring-sign -->
+```cpp
+// 늘어남 (len 100 > rest 80): anchor 쪽 (-x) 으로 8 * 20 = 160.
+const Vector2 stretched = scene.ComputeForce({500.0f, 300.0f}, {0, 0});
+CHECK(std::fabs(stretched.x + 160.0f) < 1e-3f);
+CHECK(std::fabs(stretched.y) < 1e-3f);
+
+// 눌림 (len 50 < rest 80): 바깥 (+x) 으로 8 * 30 = 240.
+const Vector2 compressed = scene.ComputeForce({450.0f, 300.0f}, {0, 0});
+CHECK(std::fabs(compressed.x - 240.0f) < 1e-3f);
+
+// 자연 길이에서는 정확히 0.
+const Vector2 atRest = scene.ComputeForce({480.0f, 300.0f}, {0, 0});
+CHECK(std::fabs(atRest.x) < 1e-3f);
+CHECK(std::fabs(atRest.y) < 1e-3f);
+
+// anchor 와 겹치면 방향이 정의되지 않는다 — 0/0 대신 힘 0.
+const Vector2 degenerate = scene.ComputeForce({400.0f, 300.0f}, {0, 0});
+CHECK(degenerate.x == 0.0f && degenerate.y == 0.0f);
+```
+
+종단 속도는 위 1 절의 두 식을 그대로 쓴다. 캔버스를 아주 크게 잡아 벽 / 바닥에 닿지 않는 낙하를 만들고 3000 스텝을 돌린 뒤 $v_y$ 를 읽으면, linear 는 $mg/c_1 = 600/3 = 200$, quadratic 은 $\sqrt{mg/c_2} = \sqrt{600/0.006} = 316.23$ 이어야 한다. drag 를 둘 다 끄면 종단 속도 자체가 없으므로 1 초 뒤 $v = gt = 600$ 이 나오는지로 대조군을 삼는다.
+
+에너지 주장은 중력을 끄고 스프링만 켠 진동자로 본다 (중력을 켜면 PE_grav 항이 커서 상대 변화가 묻힌다). 10 초 = 1200 스텝 동안 총 에너지 시계열을 모아, drag 가 0 이면 *퍼짐이 초깃값의 5 % 안* 이고 c₁ = 1 이면 *단조 감소해 5 % 아래로* 떨어지는지를 본다.
+
+```powershell
+cmake --build build --config Release -j
+ctest --test-dir build -C Release -R step03 --output-on-failure
+.\build\Release\physics_forces_tests.exe step03   # 같은 것을 직접 — 관측값까지 본다
+```
+
+`ctest` 는 통과 / 실패만 알려 준다. 두 번째 줄을 직접 돌리면 각 식이 실제로 낸 값이 보인다.
+
+```text
+[step03] force_terms
+  gravity=(0,600) linear drag=(-200,0) quad drag=(-15,-20)
+  ok
+[step03] spring_sign
+  stretched=-160 compressed=240 at rest=0 diagonal=(-96,-128)
+  ok
+[step03] terminal_velocity
+  terminal v: linear(c1=3)=200 quadratic(c2=0.006)=316.227 no drag after 1 s=600
+  ok
+[step03] drag_drains_energy
+  conservative E: start=0.3598 end=0.359912 spread=0.00849062
+  with linear drag c1=1: start=0.3598 end=1.40113e-05 (monotone decreasing)
+  ok
+4 case(s) ok: physics forces [step03]
+```
+
+마지막 줄이 이 Scene 의 간판 주장을 숫자로 만든 것이다 — 보존력만 있으면 총 에너지가 0.3598 에서 0.3599 로 (퍼짐 0.0085, 초깃값의 2.4 %) 제자리이고, 선형 drag 를 켜면 같은 시간에 1.4e-05 까지 빠진다. 2.4 % 의 퍼짐은 semi-implicit Euler 가 에너지를 정확히 보존하지 않고 *유계로 진동* 시키기 때문이며, 그 진동 폭이 drag 의 감소와 4 자리 차이로 갈린다는 것이 요점이다.
+
 ---
 
 ## 결론
@@ -178,8 +255,9 @@ Step 3 에서 추가한 것.
 2. **에너지 정의: KE / PE_grav / PE_spring** — 그래프로 *보존 / 비보존* 의 시각적 차이.
 3. **두 핸들 + pulse 입력** — DragHandle 의 한 번에 한 핸들 정책으로 겹쳐도 안 충돌. impulse 는 *Step 안에서 한 번 적용 후 flag clear*.
 4. **단위 변환 (100 px = 1 m)** — 그래프 라벨이 *m / s 기준* — 시리즈 본문과 동일한 단위.
+5. **`physics_forces_tests` 타깃** — `ctest --test-dir build -C Release -R step03` 로 네 force 항의 크기·부호, 두 drag 의 종단 속도, 보존 / 비보존의 에너지 거동을 창 없이 검사.
 
-이 Scene 이 다루는 것은 mass 한 개에 걸리는 force 뿐이다. 물체가 여러 개일 때의 충돌 후보 추출·접촉 판정·응답은 여기에 없고, 자동 테스트도 늘지 않는다.
+이 Scene 이 다루는 것은 mass 한 개에 걸리는 force 뿐이다. 물체가 여러 개일 때의 충돌 후보 추출·접촉 판정·응답은 여기에 없다. 자동 검사도 force 식과 에너지 시계열까지이고, 두 핸들의 드래그·pulse 입력은 앱에서 눈으로 본다.
 
 ## 더 읽을거리
 

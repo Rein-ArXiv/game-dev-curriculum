@@ -1,6 +1,7 @@
 #pragma once
 
-// Scene — 1만 오브젝트 고정 씬 + 드로우콜 모드 토글.
+// Scene — 오브젝트 격자 씬 (개수는 Build / Rebuild 인자, 앱 기본값 1만)
+//         + 드로우콜 모드 토글.
 //
 // Step 1: 개별 glDrawElements N 회만 동작.
 // Step 3 추가: Instancing (`glDrawElementsInstanced` 한 번) + Multi-Draw Indirect

@@ -23,39 +23,41 @@ in-flight 작업을 하나의 논리적 완료 순서로 표현할 수 있다.
 
 이 lab 은 `synchronization2` 를 켜므로 제출도 `VkSubmitInfo2` 이고, semaphore 는 `VkSemaphoreSubmitInfo` 로 stage 까지 함께 지정한다.
 
+<!-- snippet: src/app/app.cpp#App::OnFrame -->
 ```cpp
-vkAcquireNextImageKHR(device, swapchain, timeout,
-                      fr.imageAvailable, VK_NULL_HANDLE, &imageIndex);
-
+VkResult acq = vkAcquireNextImageKHR(dev, swap_.Handle(), UINT64_MAX,
+                                     fr.imageAvailable, VK_NULL_HANDLE, &imageIndex);
+// ... 완료 대기 · 기록 ...
 VkSemaphoreSubmitInfo waitInfo{};
-waitInfo.sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
 waitInfo.semaphore = fr.imageAvailable;
 waitInfo.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
 
 VkSemaphoreSubmitInfo signalInfos[2]{};
-signalInfos[0].sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-signalInfos[0].semaphore = renderFinished[imageIndex];
+signalInfos[0].sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+signalInfos[0].semaphore = renderFinished_[imageIndex];
 signalInfos[0].stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
 uint32_t signalCount = 1;
-if (syncMode == SyncMode::Timeline) {          // timeline signal 이 하나 더 붙는다
-    signalInfos[1].sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-    signalInfos[1].semaphore = timeline.Handle();
-    signalInfos[1].value     = signalValue;
+if (syncMode_ == SyncMode::Timeline) {          // timeline signal 이 하나 더 붙는다
+    signalInfos[1].sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    signalInfos[1].semaphore = timeline_.Handle();
+    signalInfos[1].value = signalValue;
     signalInfos[1].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     signalCount = 2;
 }
 
 VkSubmitInfo2 submit{};
-submit.sType                   = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
-submit.waitSemaphoreInfoCount  = 1;
-submit.pWaitSemaphoreInfos     = &waitInfo;
-submit.commandBufferInfoCount  = 1;
-submit.pCommandBufferInfos     = &cmdInfo;
+submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+submit.waitSemaphoreInfoCount = 1;
+submit.pWaitSemaphoreInfos = &waitInfo;
+submit.commandBufferInfoCount = 1;
+submit.pCommandBufferInfos = &cmdInfo;
 submit.signalSemaphoreInfoCount = signalCount;
-submit.pSignalSemaphoreInfos   = signalInfos;
+submit.pSignalSemaphoreInfos = signalInfos;
 
-vkQueueSubmit2(queue, 1, &submit, submitFence);
-vkQueuePresentKHR(presentQueue, &presentInfo);
+VkFence submitFence = (syncMode_ == SyncMode::Binary) ? fr.inFlight : VK_NULL_HANDLE;
+if (vkQueueSubmit2(ctx_.GraphicsQueue(), 1, &submit, submitFence) != VK_SUCCESS)
+    throw std::runtime_error("vkQueueSubmit2");
 ```
 
 `submitFence` 는 Binary 모드에서만 frame slot 의 fence 이고, Timeline 모드에서는 `VK_NULL_HANDLE` 이다. 완료 추적을 fence 또는 timeline 값 중 하나로만 하기 때문이다.
@@ -69,10 +71,16 @@ vkQueuePresentKHR(presentQueue, &presentInfo);
 
 Timeline semaphore 는 값 기반이다.
 
+<!-- snippet: src/sync/timeline_sync.cpp#TimelineSemaphore::Init -->
 ```cpp
 VkSemaphoreTypeCreateInfo type{};
+type.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
 type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
 type.initialValue = 0;
+
+VkSemaphoreCreateInfo ci{};
+ci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+ci.pNext = &type;
 ```
 
 signal 은 “값을 N 으로 만든다”, wait 은 “값이 N 이상이 될 때까지 기다린다”가 된다. 여러 frame-in-flight 와 queue 간 의존성을 하나의 semaphore 값으로 표현할 수 있다.
@@ -98,13 +106,15 @@ Acquire와 present 연결은 두 모드 모두 binary semaphore를 사용한다.
 / `vkWaitSemaphores`)는 그 판정 결과를 받아 앱이 수행한다. 이 분리 덕분에 아래
 세 계약이 디바이스 없이 검사된다.
 
+<!-- snippet: src/sync/frame_completion.h#FrameCompletionTracker -->
 ```cpp
-void     OnSubmit(int slot, uint32_t image, uint64_t value);
-bool     NeedsTimelineWait(uint32_t image, uint64_t& outValue) const;
-bool     NeedsSlotWait(int slot, uint64_t& outValue) const;
-int      LastSlotForImage(uint32_t image) const;
-bool     OnSyncModeChanged(SyncMode mode);
-void     OnSwapchainRecreated(size_t imageCount);
+void OnSwapchainRecreated(size_t imageCount);
+bool OnSyncModeChanged(SyncMode mode);
+// ...
+void OnSubmit(int slot, uint32_t image, uint64_t value);
+bool NeedsTimelineWait(uint32_t image, uint64_t& outValue) const;
+bool NeedsSlotWait(int slot, uint64_t& outValue) const;
+int  LastSlotForImage(uint32_t image) const;
 ```
 
 ## 4. Frame-in-flight 모델
@@ -125,17 +135,48 @@ vkWaitSemaphores(device, &waitInfoFor(frameValue), timeout);
 
 ```powershell
 cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
+ctest --test-dir build -C Release -R vk_step05_semaphore --output-on-failure
+.\build\Release\graphics_vk_contract_tests.exe step05
 build\Release\graphics_vk_lab.exe
 ```
 
+```text
+    Start 6: vk_step05_semaphore
+1/1 Test #6: vk_step05_semaphore ..............   Passed    0.04 sec
+
+100% tests passed out of 1
+
+[step05] sync_mode_names ... ok (2 checks)
+[step05] timeline_counter ... ok (4 checks)
+[step05] frame_completion_tracking ... ok (137 checks)
+step05: 3 test(s), 143 checks, 0 failed
+```
+
+`timeline_counter` 의 4개는 `Current() == 0`, `Next() == 1`, `Next() == 2`, 즉 값이 1씩 단조 증가한다는 것이다. 나머지 137개가 완료 추적이고, 그중 대부분은 12프레임 루프에서 slot·image별로 기억된 값이 그 제출의 signal 값과 같고 재사용마다 커지는지를 프레임마다 확인하는 데 쓰인다.
+
+가장 깨지기 쉬운 지점은 모드 전환이다. 두 체계가 섞이면 없는 값이나 다른 체계의 fence 를 기다리게 되는데, 이것은 화면에서 간헐적 멈춤으로만 나타나 눈으로 잡기 어렵다.
+
+<!-- snippet: tests/graphics_vk_contract_tests.cpp@sync-mode-isolation -->
+```cpp
+CHECK(t.OnSyncModeChanged(SyncMode::Binary));
+for (uint32_t i = 0; i < kImages; ++i) {
+    uint64_t w = 0;
+    CHECK(!t.NeedsTimelineWait(i, w));             // Binary 에서는 값 대기 없음.
+    CHECK(t.ImageValue(i) == 0);
+    CHECK(t.LastSlotForImage(i) == FrameCompletionTracker::kNoSlot);
+}
+for (int s = 0; s < kSlots; ++s) {
+    uint64_t w = 0;
+    CHECK(!t.NeedsSlotWait(s, w));
+    CHECK(t.SlotValue(s) == 0);
+}
+```
+
+같은 실행이 swapchain 재생성도 확인한다 — image별 추적값은 0 으로 초기화되고 slot 쪽 기록은 유지된다(command buffer 와 fence 는 재생성되지 않기 때문).
+
 관측 항목.
 
-- `ctest` 는 `100% tests passed out of 1` 을 출력한다. timeline 카운터 쪽에서 고정되는 것은 `Current() == 0`, `Next() == 1`, `Next() == 2` 즉 값이 1씩 단조 증가한다는 것이다. 여기에 더해 완료 추적의 계약이 함께 검사된다.
-  - Timeline 모드에서 12프레임을 돌리며, slot·image별로 기억된 값이 그 제출의 signal 값과 정확히 같고 재사용 시점마다 단조 증가한다.
-  - 모드를 Binary ↔ Timeline 으로 전환하면 slot 값·image 값·image→slot 기록이 모두 비워져 이전 체계의 값을 기다리는 일이 없다.
-  - swapchain 재생성 후 image별 추적값이 0 으로 초기화되고, slot 쪽 기록은 유지된다(command buffer 와 fence 는 재생성되지 않기 때문).
-- 패널의 `Frame sync` 콤보를 `Timeline` 으로 바꾸면 그 아래에 `timeline (value = N)` 이 뜨고 N 이 제출마다 1씩 증가한다. `Binary fence` 로 돌리면 값 표시가 사라진다.
+- 패널의 `Frame sync` 콤보를 `Timeline` 으로 바꾸면 그 아래에 `Timeline completion tracking   (value = N)` 이 뜨고 N 이 제출마다 1씩 증가한다. `Binary fence` 로 돌리면 `Fence completion tracking` 만 남고 값 표시가 사라진다.
 - 두 모드 사이를 오가도 화면이 멈추거나 validation 메시지가 뜨지 않아야 한다. 모드 전환 지점에서 fence 추적과 timeline 값 추적이 섞이면 여기서 드러난다.
 - 두 모드 모두 acquire/present 는 binary semaphore 를 쓰므로, 전환해도 present 경로의 semaphore 개수는 변하지 않는다.
 

@@ -36,6 +36,7 @@ full.wal 사본, 오프셋 sample_1 의 바이트 ^= 0xFF
 
 주입 도구는 원본 로그 생성과 앞부분 복사 두 가지다. 로그를 만들면서 각 COMMIT 프레임이 끝나는 파일 오프셋을 함께 기록해 둔다 — 절단 길이에서 복구가 되살려야 할 트랜잭션 수를 계산하기 위해서다.
 
+<!-- snippet: tests/db_crash_test.cpp -->
 ```cpp
 static constexpr int kAccounts = 16;
 static constexpr long long kInitBalance = 1000;
@@ -77,6 +78,8 @@ static void BuildLog(const std::string& path, uint32_t seed,
     db.Close();
 }
 
+// ... ExpectedCommits — 2절
+
 static long long FileSize(const std::string& path) {
     FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) return -1;
@@ -98,6 +101,7 @@ static void TruncateTo(const std::string& src, const std::string& dst, long long
 
 축 B의 도구는 세 개다. 손상 바이트가 어느 프레임에 속하는지 알아야 복구가 멈춰야 할 지점을 계산할 수 있으므로, 온전한 로그를 한 번 훑어 프레임 시작 오프셋을 모아 둔다. 그리고 사본을 매번 다시 만들지 않도록 한 바이트만 뒤집었다 되돌린다.
 
+<!-- snippet: tests/db_crash_test.cpp -->
 ```cpp
 // 온전한 로그의 프레임 시작 오프셋 목록.
 static std::vector<long long> FrameStarts(const std::string& path) {
@@ -164,8 +168,9 @@ static void RestoreByte(const std::string& path, long long offset, int original)
 
 세 번째 불변식은 `BuildLog`가 남긴 COMMIT 오프셋 배열로 계산한다. 유효 경계 이하에서 끝나는 COMMIT 프레임 수가 곧 복구가 되살려야 할 트랜잭션 수이고, 합 보존만으로는 잡히지 않는 '한 트랜잭션 더 살거나 덜 사는' 오류를 직접 잡는다. 유효 경계는 축 A에서는 절단 길이이고, 축 B에서는 손상된 바이트를 담은 프레임의 시작 오프셋이다 — 복구는 그 프레임에 닿는 순간 멈춰야 하므로 그 앞까지의 COMMIT만 살아야 한다.
 
+<!-- snippet: tests/db_crash_test.cpp#ExpectedCommits -->
 ```cpp
-// 절단 길이 cutAt 에서 복구가 되살려야 하는 트랜잭션 수 — 완전히 포함된 COMMIT 프레임 수.
+// 유효 경계 cutAt 이하에서 끝나는 COMMIT 프레임 수 — 복구가 되살려야 하는 트랜잭션 수.
 static uint64_t ExpectedCommits(const std::vector<long long>& commit_ends, long long cutAt) {
     uint64_t n = 0;
     for (long long end : commit_ends) {
@@ -174,7 +179,12 @@ static uint64_t ExpectedCommits(const std::vector<long long>& commit_ends, long 
     }
     return n;
 }
+```
 
+불변식 셋을 실제로 단정하는 것은 이 함수다. 스윕의 모든 시행이 여기를 지나가고, 어긋난 값은 `why`에 담겨 실패 줄에 그대로 찍힌다.
+
+<!-- snippet: tests/db_crash_test.cpp#CheckInvariants -->
+```cpp
 // 복구본의 불변식 검사. 실패 시 false.
 static bool CheckInvariants(const std::unordered_map<std::string, std::string>& idx,
                             uint64_t committed, uint64_t expected, std::string& why) {
@@ -204,6 +214,7 @@ static bool CheckInvariants(const std::unordered_map<std::string, std::string>& 
 
 몇 개 임의 위치만 자르면 Commit 경계 바로 앞뒤 같은 중요한 경우를 놓칠 수 있다. 이 구현은 파일 전체 범위를 일정 보폭으로 샘플링하고 완전한 파일 끝도 별도로 검사한다. 축 B는 같은 방식으로 손상 오프셋을 샘플링한다. 더 강한 검사가 필요하면 프레임 시작·끝과 Commit 전후를 명시적으로 추가하거나 보폭을 1로 줄인다. 여러 난수 시드로 이체 순서를 바꾸면 데이터 패턴 의존 버그도 줄인다.
 
+<!-- snippet: tests/db_crash_test.cpp#main -->
 ```cpp
 int main() {
     const std::string full = "crash_full.wal", cut = "crash_cut.wal";
@@ -288,26 +299,33 @@ flip sweep : 291 trials, 225 failures
 
 ## 4. 단위 테스트 묶음
 
-`db_tests`는 더 작은 실패를 빠르게 진단한다. 검사 항목과 각 항목이 겨냥하는 구현 결함은 다음과 같이 짝을 이룬다.
+`db_tests`는 더 작은 실패를 빠르게 진단한다. 검사 항목과 각 항목이 겨냥하는 구현 결함, 그리고 그 검사를 추가한 step은 다음과 같이 짝을 이룬다.
 
-| 검사 | 겨냥하는 결함 |
-|---|---|
-| put/get/del 가시성 | 커밋 전 변경이 인덱스에 새는 것 |
-| 재시작 복구 | 커밋분 유실, 롤백분 부활 |
-| 미완 꼬리 폐기 | COMMIT 없는 op를 적용하는 것 |
-| CRC 손상 검출 | 마지막 프레임의 찢긴 쓰기를 넘기는 것 |
-| 로그 중간 손상 이후 꼬리 폐기 | 손상 지점에서 멈추지 않고 재동기화하는 것 |
-| Del 프레임 디스크 왕복 | Del 디코드 실패, 삭제된 키의 부활 |
-| fsync ON 커밋의 내구성 | fsync 실패를 성공으로 보고하는 것 |
-| 쓰레기 길이 필드 거부 | 길이 필드를 믿고 그만큼 버퍼를 잡는 것 |
-| 상한 초과 프레임 거부 | 프레임 길이 상한 가드의 소실 |
+| 검사 | 겨냥하는 결함 | 추가한 step |
+|---|---|---|
+| `frame_codec_bytes` | 엔디언·payload 배치·CRC 다항식이 바뀌는 것 | step01 |
+| `crc_mismatch_stops_replay` | 마지막 프레임의 찢긴 쓰기를 넘기는 것 | step01 |
+| `garbage_length_rejected` | 길이 필드를 믿고 그만큼 버퍼를 잡는 것 | step01 |
+| `oversized_frame_rejected` | 프레임 길이 상한 가드의 소실 | step01 |
+| `commit_visibility` | 커밋 전 변경이 인덱스에 새는 것 | step02 |
+| `reopen_keeps_committed` | 커밋분 유실, 롤백분 부활 | step02 |
+| `uncommitted_tail_discarded` | COMMIT 없는 op를 적용하는 것 | step02 |
+| `midlog_corruption_drops_tail` | 손상 지점에서 멈추지 않고 재동기화하는 것 | step02 |
+| `del_survives_restart` | Del 디코드 실패, 삭제된 키의 부활 | step02 |
+| `fsync_on_commit_durable` | fsync 실패를 성공으로 보고하는 것 | step02 |
+
+소속은 파일 맨 아래 `kCases` 표가 정하고, 그 표를 `--step=NN` 필터가 읽는다. 덕분에 step01·step02 독자는 자기 step이 추가한 것만 이름과 함께 돌려 볼 수 있고, 이 step의 독자는 `ctest`로 전부 돌린다.
 
 `db_crash_test`가 표본 장애에서 통합 불변식을 검사하고, 단위 테스트가 실패 원인을 좁힌다.
 
 손상 주입 테스트는 '어느 프레임의 어느 바이트'인지를 정확히 겨냥해야 하므로, 오프셋을 하드코딩하지 않고 파일 앞에서부터 프레임을 파싱해 계산한다.
 
+<!-- snippet: tests/db_tests.cpp -->
 ```cpp
 // db_tests — WalKv 단위 테스트 (ctest 대상)
+//
+// 인자 없이 돌리면 전부 실행한다. `--step=NN` 을 주면 그 step 이 추가한 검사만
+// 골라 이름과 함께 찍는다 — 파일 맨 아래 kCases 표가 소속을 정한다.
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -390,6 +408,8 @@ static std::vector<uint8_t> FrameBytes(const walkv::Frame& fr) {
     out.insert(out.end(), payload.begin(), payload.end());
     return out;
 }
+
+// ... step01 의 frame_codec_bytes — step01 문서에서 인용한다
 
 // 기본: put/get/del, 커밋 전 비가시
 static void TestBasic() {
@@ -497,6 +517,7 @@ static void TestCorruptionDetected() {
 
 위 `TestCorruptionDetected`는 파일 *마지막* 프레임의 CRC 필드만 뒤집는다. 손상 뒤에 유효한 COMMIT이 하나도 없으므로 '재동기화 금지' 규칙 자체는 건드리지 못한다. 그 규칙을 겨냥하는 것이 아래 첫 번째 테스트다. 나머지 넷은 Del 프레임의 디스크 왕복, fsync ON 커밋, 그리고 길이 필드 가드를 각각 맡는다.
 
+<!-- snippet: tests/db_tests.cpp -->
 ```cpp
 // 로그 '중간'의 손상: 손상 프레임 뒤에 유효한 COMMIT 이 더 있어도 꼬리 전체를 버린다.
 static void TestCorruptionMidLogDiscardsTail() {
@@ -652,20 +673,60 @@ static void TestOversizedFrameRejected() {
     Reset();
 }
 
-int main() {
-    TestBasic();
-    TestReopen();
-    TestUncommittedTailDiscarded();
-    TestCorruptionDetected();
-    TestCorruptionMidLogDiscardsTail();
-    TestDelSurvivesRestart();
-    TestFsyncOnCommitDurable();
-    TestGarbageLengthRejected();
-    TestOversizedFrameRejected();
+// ...
+
+struct Case {
+    const char* step;
+    const char* name;
+    void (*fn)();
+};
+
+static const Case kCases[] = {
+    {"01", "frame_codec_bytes",           TestFrameCodecBytes},
+    {"01", "crc_mismatch_stops_replay",   TestCorruptionDetected},
+    {"01", "garbage_length_rejected",     TestGarbageLengthRejected},
+    {"01", "oversized_frame_rejected",    TestOversizedFrameRejected},
+    {"02", "commit_visibility",           TestBasic},
+    {"02", "reopen_keeps_committed",      TestReopen},
+    {"02", "uncommitted_tail_discarded",  TestUncommittedTailDiscarded},
+    {"02", "midlog_corruption_drops_tail",TestCorruptionMidLogDiscardsTail},
+    {"02", "del_survives_restart",        TestDelSurvivesRestart},
+    {"02", "fsync_on_commit_durable",     TestFsyncOnCommitDurable},
+};
+
+int main(int argc, char** argv) {
+    std::string step;
+    if (argc > 1) {
+        const std::string arg = argv[1];
+        if (arg.rfind("--step=", 0) != 0) {
+            std::printf("usage: db_tests [--step=NN]\n");
+            return 2;
+        }
+        step = arg.substr(7);
+    }
+
+    int selected = 0;
+    for (const Case& c : kCases) {
+        if (!step.empty() && step != c.step) continue;
+        ++selected;
+        const int before = g_failed;
+        c.fn();
+        if (!step.empty())
+            std::printf("  %-4s %s\n", (g_failed == before) ? "ok" : "FAIL", c.name);
+    }
     std::remove(kPath.c_str());
-    if (g_failed == 0) { std::printf("db_tests: all passed\n"); return 0; }
-    std::printf("db_tests: %d check(s) failed\n", g_failed);
-    return 1;
+
+    if (!step.empty() && selected == 0) {
+        std::printf("db_tests: no case belongs to step%s\n", step.c_str());
+        return 2;
+    }
+    if (g_failed != 0) {
+        std::printf("db_tests: %d check(s) failed\n", g_failed);
+        return 1;
+    }
+    if (step.empty()) std::printf("db_tests: all passed\n");
+    else std::printf("db_tests[step%s]: %d/%d passed\n", step.c_str(), selected, selected);
+    return 0;
 }
 ```
 
@@ -675,24 +736,47 @@ int main() {
 
 ## 5. 완료 기준
 
+이 step이 추가한 것은 크래시 주입 스윕이므로, 이 step의 실행 단위는 `db_crash_test`다. 직접 돌리면 두 축의 시행 횟수가 그대로 나온다.
+
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
-./build/Release/db_bench
 ./build/Release/db_crash_test
 ```
 
-ctest에 등록된 대상은 `db_tests`, `db_crash_test`, `db_bench_smoke` 셋이다. 마지막은 `db_bench --smoke`를 돌리는 축소 실행이다. 표본을 줄였으니 측정값으로는 못 쓰지만, fsync ON 커밋 경로와 벤치의 실패 검사가 매 ctest 실행에서 지나가게 하는 값이 있다 — 커밋이나 재생이 실패를 보고하면 벤치는 지연 표를 찍지 않고 즉시 비정상 종료한다. 수치를 볼 때는 인자 없이 직접 돌린다.
-
-관측되는 출력:
+관측 결과 — 시행 수(633·291)는 로그 길이와 보폭에서 정해지므로 결정적이다. 실패한 지점이 있으면 `FAIL`/`FAIL(flip)` 줄이 시드·오프셋·기대값과 함께 먼저 찍히고 종료 코드가 1이 된다.
 
 ```text
-db_tests: all passed
 crash sweep: 633 trials, 0 failures
 flip sweep : 291 trials, 0 failures
 OK — 샘플링한 절단·손상 지점에서 '완전한 접두사'로만 복구된다 (원자성+보존 불변식 유지)
 ```
+
+lab 전체의 완료 기준은 ctest 다섯 대상이다.
+
+```bash
+ctest --test-dir build -C Release --output-on-failure
+```
+
+```text
+1/5 Test #1: db_tests .........................   Passed    0.18 sec
+2/5 Test #2: db_crash_test ....................   Passed   18.33 sec
+3/5 Test #3: db_bench_smoke ...................   Passed    0.21 sec
+4/5 Test #4: db_tests_step01 ..................   Passed    0.10 sec
+5/5 Test #5: db_tests_step02 ..................   Passed    0.08 sec
+
+100% tests passed out of 5
+```
+
+| ctest 이름 | 무엇을 돌리나 | 어느 step의 실행 단위인가 |
+|---|---|---|
+| `db_tests` | 단위 테스트 열 건 전부 | — (전체 실행) |
+| `db_tests_step01` | `db_tests --step=01` — 프레임 형식·CRC·파싱 경계 | step01 |
+| `db_tests_step02` | `db_tests --step=02` — 트랜잭션 커밋·복구 | step02 |
+| `db_bench_smoke` | `db_bench --smoke` — 벤치의 `Die` 검사 | step03 |
+| `db_crash_test` | 절단·손상 스윕과 경제 불변식 | step04 |
+
+`db_bench_smoke`는 표본을 줄인 축소 실행이라 측정값으로는 못 쓰지만, fsync ON 커밋 경로와 벤치의 실패 검사가 매 ctest 실행에서 지나가게 하는 값이 있다 — 커밋이나 재생이 실패를 보고하면 벤치는 지연 표를 찍지 않고 즉시 비정상 종료한다. 수치를 볼 때는 `./build/Release/db_bench`를 인자 없이 직접 돌린다.
 
 완료 기준은 `0 failures` 한 줄만이 아니다. 어떤 불변식을 어떤 장애 모델에서 검사했는지 설명할 수 있어야 한다. 이 lab이 검증하는 범위는 단일 프로세스·단일 WAL의 잘린 꼬리 복구이며, 실제 전원 손실의 저장 장치 동작·동시성 제어·복제 합의까지 검증하지는 않는다.
 

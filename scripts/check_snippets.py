@@ -330,7 +330,12 @@ def _definition_patterns(symbol: str) -> list[tuple[str, re.Pattern[str]]]:
     bare_escaped = re.escape(bare)
     return [
         ("python", re.compile(r"^\s*(?:async\s+)?def\s+" + bare_escaped + r"\s*\(")),
-        ("python", re.compile(r"^\s*class\s+" + bare_escaped + r"\s*[(:]")),
+        # 파이썬 클래스는 정의 줄이 `:` 로 끝난다. `[(:]` 로만 보면
+        # C++ 의 `class X : public Y {` 가 여기 먼저 걸려 들여쓰기 기반
+        # _python_extent 가 정의 줄 한 줄만 범위로 잡는다(실측: 기반 클래스를 가진
+        # 모든 C++ 클래스가 `#심볼` 앵커로 잡히지 않았다).
+        ("python", re.compile(
+            r"^\s*class\s+" + bare_escaped + r"\s*(?:\(.*\))?\s*:\s*$")),
         ("cmake", re.compile(r"^\s*(?:function|macro)\s*\(\s*" + bare_escaped + r"\b", re.I)),
         ("type", re.compile(
             r"\b(?:class|struct|union|enum\s+class|enum|namespace|interface|record)\s+"

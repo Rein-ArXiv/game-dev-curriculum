@@ -87,6 +87,7 @@ void TextureRegistry::Init(int size, KHRDebug* debug) {
 
     // VRAM 측정 — generic compression 의 실제 결과 크기. mip chain 전체 합산.
     auto MeasureSize = [](GLuint t) -> int {
+        // snippet-begin: vram-measure
         glBindTexture(GL_TEXTURE_2D, t);
         int total = 0;
         for (int level = 0;; ++level) {
@@ -108,6 +109,7 @@ void TextureRegistry::Init(int size, KHRDebug* debug) {
             total += sz;
         }
         return total;
+        // snippet-end: vram-measure
     };
 
     bytesUncompressed_ = MeasureSize(texUncompressed_);

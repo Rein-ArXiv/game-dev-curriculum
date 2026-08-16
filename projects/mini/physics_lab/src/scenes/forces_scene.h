@@ -31,8 +31,25 @@ public:
     void DrawPanel(int panelX, int panelY, int panelW, int panelH) override;
     std::string_view Name() const override { return "Forces"; }
 
-private:
+    // --- 헤드리스 검증용 ---
+    // GUI 패널의 체크박스 / 슬라이더가 만들던 상태를 창 없이 만든다. 값의 의미와
+    // 기본값은 패널과 동일하고, GUI 경로는 이 함수들을 부르지 않는다. force 식
+    // 자체는 이미 (pos, vel) 만으로 결정되는 const 함수라 그대로 노출한다.
     Vector2 ComputeForce(Vector2 pos, Vector2 vel) const;
+
+    void SetCanvas(int x, int y, int w, int h);
+    void SetState(Vector2 pos, Vector2 vel);
+    void SetGravity(bool on, float g);
+    void SetSpring(bool on, float k, float rest, Vector2 anchor);
+    void SetDrag(float linear, float quad);
+
+    Vector2 Position() const { return pos_; }
+    Vector2 Velocity() const { return vel_; }
+    float   Mass()     const { return mass_; }
+    // 마지막 Step 이 그래프에 넣은 총 에너지 (KE + PE, m·s 단위).
+    float   LastTotalEnergy() const { return totalHist_.Latest(); }
+
+private:
     void    ApplyImpulse(Vector2 dv);
 
     Vector2 pos_      = {0, 0};

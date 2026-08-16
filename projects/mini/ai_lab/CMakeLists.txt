@@ -54,17 +54,42 @@ add_executable(${PROJECT_NAME}
 )
 
 enable_testing()
+
+# 창 없이 도는 테스트 실행 파일 셋. 각 실행 파일은 인자 없이 부르면 자기 케이스를
+# 전부 돌고, `step0N` 을 주면 그 step 이 추가한 케이스만 돈다.
+add_executable(ai_chrome_tests
+    tests/chrome_tests.cpp
+    src/grid/grid.cpp
+    src/ui/scene_chrome.cpp
+)
+target_include_directories(ai_chrome_tests PRIVATE src)
+target_link_libraries(ai_chrome_tests PRIVATE raylib)
+
 add_executable(ai_pathfinder_tests
     tests/pathfinder_tests.cpp
     src/grid/grid.cpp
 )
 target_include_directories(ai_pathfinder_tests PRIVATE src)
 target_link_libraries(ai_pathfinder_tests PRIVATE raylib)
-add_test(NAME ai_pathfinder_tests COMMAND ai_pathfinder_tests)
 
 add_executable(ai_model_tests tests/ai_model_tests.cpp)
 target_include_directories(ai_model_tests PRIVATE src)
-add_test(NAME ai_model_tests COMMAND ai_model_tests)
+
+# step 단위 등록. step 문서의 독자가 그 시점에 자기가 방금 추가한 것만 돌릴 수
+# 있어야 하고, 통과 출력도 step 마다 달라야 한다. 등록 순서를 step 순서로 두어
+# ctest 번호(`Test #3`)가 step 번호와 일치한다.
+add_test(NAME ai_step01_skeleton    COMMAND ai_chrome_tests     step01)
+add_test(NAME ai_step02_pathfinding COMMAND ai_pathfinder_tests step02)
+add_test(NAME ai_step03_flowfield   COMMAND ai_model_tests      step03)
+add_test(NAME ai_step04_steering    COMMAND ai_model_tests      step04)
+add_test(NAME ai_step05_boids       COMMAND ai_model_tests      step05)
+add_test(NAME ai_step06_influence   COMMAND ai_model_tests      step06)
+
+# 실행 파일 단위 전체 등록. step 등록이 어느 케이스도 빠뜨리지 않았는지는 이쪽
+# 개수와 step 쪽 개수 합을 비교하면 드러난다.
+add_test(NAME ai_chrome_tests     COMMAND ai_chrome_tests)
+add_test(NAME ai_pathfinder_tests COMMAND ai_pathfinder_tests)
+add_test(NAME ai_model_tests      COMMAND ai_model_tests)
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     src
@@ -84,10 +109,12 @@ endif()
 # 컴파일러 경고.
 if(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE /W4 /permissive- /utf-8)
+    target_compile_options(ai_chrome_tests PRIVATE /W4 /permissive- /utf-8)
     target_compile_options(ai_pathfinder_tests PRIVATE /W4 /permissive- /utf-8)
     target_compile_options(ai_model_tests PRIVATE /W4 /permissive- /utf-8)
 else()
     target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(ai_chrome_tests PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(ai_pathfinder_tests PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(ai_model_tests PRIVATE -Wall -Wextra -Wpedantic)
 endif()

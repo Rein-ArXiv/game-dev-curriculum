@@ -1,5 +1,7 @@
 #include "ui/hud.h"
 
+#include "ui/hud_layout.h"
+
 #include "raylib.h"
 #include "raygui.h"
 
@@ -94,92 +96,126 @@ void Hud::DrawStats(const FrameTimer& timer, std::size_t entityCount,
 }
 
 void Hud::DrawTogglePanel(Toggles& toggles, int x, int y) {
+    // 콤보가 열려 있는 동안 다른 위젯의 입력을 잠가야 하므로 GuiLock/GuiUnlock으로 둘러싼다.
+    // 열린 콤보 자신은 raygui 4.0 GuiDropdownBox의 `editMode || !guiLocked` 조건 덕에
+    // 잠금 중에도 자기 입력을 계속 처리한다.
+    //
+    // 잠금만으로는 부족하다. 펼친 목록의 높이는
+    //   (itemCount + 1) * (kRowH + DROPDOWN_ITEMS_SPACING) = 4 * 24 = 96
+    // 이라 같은 컬럼의 아래 두세 행을 덮는데(x와 폭이 같다), 아래 행 위젯을 *나중에*
+    // 그리면 목록 위에 덮어 그려진다. 그래서 열린 콤보만 두 번째 패스로 미뤄
+    // 마지막에 그린다.
+    const bool comboOpen = entityEdit_ || allocatorEdit_ || layoutEdit_ ||
+                           containerEdit_ || simdEdit_;
+
+    if (comboOpen) GuiLock();
+    DrawTogglePanelPass(toggles, x, y, /*openPass=*/false);
+    GuiUnlock();
+    if (comboOpen) DrawTogglePanelPass(toggles, x, y, /*openPass=*/true);
+}
+
+void Hud::DrawTogglePanelPass(Toggles& toggles, int x, int y, bool openPass) {
     // 현재 활성 토글: entities, layout, simd, branchless, allocator, container.
     // 측정 가능한 비교 축: entities, layout, simd, branchless, allocator, container 여섯 가지.
     // (allocator는 EventBenchmark 워크로드 ms에만 영향.
     //  container는 ContainerBenchmark 워크로드 ms에만 영향.)
     //
     // raygui의 ComboBox는 active 인덱스를 in-out 인자로 받는다.
-    // 콤보가 열려 있는 동안 다른 위젯의 입력을 잠가야 하므로 GuiLock/GuiUnlock으로 둘러싼다.
+    //
+    // openPass=false 는 닫힌 위젯만, true 는 열린 콤보 하나만 그린다(PanelDrawsWidget).
+    // 접힌 위젯끼리는 겹치지 않으므로(행 간격 24 > 높이 22) 한 클릭이 콤보를 둘
+    // 동시에 열 수 없다. 즉 두 번째 패스에서 그려지는 위젯은 최대 하나다.
 
-    constexpr int kRowH    = 22;
-    constexpr int kLabelW  = 96;
-    constexpr int kFieldW  = 130;
-    constexpr int kGap     = 8;
+    constexpr int kRowH    = kPanelRowH;
+    constexpr int kLabelW  = kPanelLabelW;
+    constexpr int kFieldW  = kPanelFieldW;
     int row = 0;
 
-    auto rowY = [&](int r) { return y + r * (kRowH + 2); };
+    auto rowY = [&](int r) { return PanelRowY(y, r); };
 
     // 1행: 엔티티 수
-    DrawText("entities :", x, rowY(row), 14, LIGHTGRAY);
-    int entityIdx = toggles.entityPresetIdx;
-    if (GuiDropdownBox(Rect(x + kLabelW, rowY(row), kFieldW, kRowH),
-                       kEntityOptions, &entityIdx, entityEdit_)) {
-        entityEdit_ = !entityEdit_;
-    }
-    if (!entityEdit_) {
-        toggles.entityPresetIdx =
-            std::clamp(entityIdx, 0, kEntityCountPresetCount - 1);
+    if (PanelDrawsWidget(entityEdit_, openPass)) {
+        DrawText("entities :", x, rowY(row), 14, LIGHTGRAY);
+        int entityIdx = toggles.entityPresetIdx;
+        if (GuiDropdownBox(Rect(x + kLabelW, rowY(row), kFieldW, kRowH),
+                           kEntityOptions, &entityIdx, entityEdit_)) {
+            entityEdit_ = !entityEdit_;
+        }
+        if (!entityEdit_) {
+            toggles.entityPresetIdx =
+                std::clamp(entityIdx, 0, kEntityCountPresetCount - 1);
+        }
     }
     row++;
 
     // 2행: 할당자 — 활성. EventBenchmark 워크로드에 적용된다.
-    DrawText("allocator:", x, rowY(row), 14, LIGHTGRAY);
-    int allocIdx = (int)toggles.allocator;
-    if (GuiDropdownBox(Rect(x + kLabelW, rowY(row), kFieldW, kRowH),
-                       kAllocatorOptions, &allocIdx, allocatorEdit_)) {
-        allocatorEdit_ = !allocatorEdit_;
-    }
-    if (!allocatorEdit_) {
-        toggles.allocator = (Allocator)std::clamp(allocIdx, 0, kAllocatorCount - 1);
+    if (PanelDrawsWidget(allocatorEdit_, openPass)) {
+        DrawText("allocator:", x, rowY(row), 14, LIGHTGRAY);
+        int allocIdx = (int)toggles.allocator;
+        if (GuiDropdownBox(Rect(x + kLabelW, rowY(row), kFieldW, kRowH),
+                           kAllocatorOptions, &allocIdx, allocatorEdit_)) {
+            allocatorEdit_ = !allocatorEdit_;
+        }
+        if (!allocatorEdit_) {
+            toggles.allocator = (Allocator)std::clamp(allocIdx, 0, kAllocatorCount - 1);
+        }
     }
     row++;
 
     // 3행: 레이아웃 — 활성
-    DrawText("layout   :", x, rowY(row), 14, LIGHTGRAY);
-    int layoutIdx = (int)toggles.layout;
-    if (GuiDropdownBox(Rect(x + kLabelW, rowY(row), kFieldW, kRowH),
-                       kLayoutOptions, &layoutIdx, layoutEdit_)) {
-        layoutEdit_ = !layoutEdit_;
-    }
-    if (!layoutEdit_) {
-        toggles.layout = (Layout)std::clamp(layoutIdx, 0, kLayoutCount - 1);
+    if (PanelDrawsWidget(layoutEdit_, openPass)) {
+        DrawText("layout   :", x, rowY(row), 14, LIGHTGRAY);
+        int layoutIdx = (int)toggles.layout;
+        if (GuiDropdownBox(Rect(x + kLabelW, rowY(row), kFieldW, kRowH),
+                           kLayoutOptions, &layoutIdx, layoutEdit_)) {
+            layoutEdit_ = !layoutEdit_;
+        }
+        if (!layoutEdit_) {
+            toggles.layout = (Layout)std::clamp(layoutIdx, 0, kLayoutCount - 1);
+        }
     }
     row++;
 
     // 우측 컬럼: 컨테이너 / SIMD / branchless
-    const int x2 = x + kLabelW + kFieldW + kGap * 4;
+    const int x2 = PanelColumn2X(x);
     int row2 = 0;
-    auto rowY2 = [&](int r) { return y + r * (kRowH + 2); };
+    auto rowY2 = [&](int r) { return PanelRowY(y, r); };
 
     // container 토글 — 활성. ContainerBenchmark 워크로드에 적용된다.
-    DrawText("container:", x2, rowY2(row2), 14, LIGHTGRAY);
-    int containerIdx = (int)toggles.container;
-    if (GuiDropdownBox(Rect(x2 + kLabelW, rowY2(row2), kFieldW, kRowH),
-                       kContainerOptions, &containerIdx, containerEdit_)) {
-        containerEdit_ = !containerEdit_;
-    }
-    if (!containerEdit_) {
-        toggles.container = (Container)std::clamp(containerIdx, 0, kContainerCount - 1);
+    if (PanelDrawsWidget(containerEdit_, openPass)) {
+        DrawText("container:", x2, rowY2(row2), 14, LIGHTGRAY);
+        int containerIdx = (int)toggles.container;
+        if (GuiDropdownBox(Rect(x2 + kLabelW, rowY2(row2), kFieldW, kRowH),
+                           kContainerOptions, &containerIdx, containerEdit_)) {
+            containerEdit_ = !containerEdit_;
+        }
+        if (!containerEdit_) {
+            toggles.container = (Container)std::clamp(containerIdx, 0, kContainerCount - 1);
+        }
     }
     row2++;
 
-    DrawText("simd     :", x2, rowY2(row2), 14, LIGHTGRAY);
-    int simdIdx = (int)toggles.simd;
-    if (GuiDropdownBox(Rect(x2 + kLabelW, rowY2(row2), kFieldW, kRowH),
-                       kSimdOptions, &simdIdx, simdEdit_)) {
-        simdEdit_ = !simdEdit_;
-    }
-    if (!simdEdit_) {
-        toggles.simd = (SimdWidth)std::clamp(simdIdx, 0, kSimdCount - 1);
+    if (PanelDrawsWidget(simdEdit_, openPass)) {
+        DrawText("simd     :", x2, rowY2(row2), 14, LIGHTGRAY);
+        int simdIdx = (int)toggles.simd;
+        if (GuiDropdownBox(Rect(x2 + kLabelW, rowY2(row2), kFieldW, kRowH),
+                           kSimdOptions, &simdIdx, simdEdit_)) {
+            simdEdit_ = !simdEdit_;
+        }
+        if (!simdEdit_) {
+            toggles.simd = (SimdWidth)std::clamp(simdIdx, 0, kSimdCount - 1);
+        }
     }
     row2++;
 
     // branchless 체크박스 — 활성. Scalar 경로에 한해 효과를 본다 (predication 토글).
-    bool branchless = toggles.branchless;
-    GuiCheckBox(Rect(x2 + kLabelW, rowY2(row2), kRowH, kRowH),
-                "branchless", &branchless);
-    toggles.branchless = branchless;
+    // 콤보가 아니므로 열린 패스에는 그리지 않는다.
+    if (!openPass) {
+        bool branchless = toggles.branchless;
+        GuiCheckBox(Rect(x2 + kLabelW, rowY2(row2), kRowH, kRowH),
+                    "branchless", &branchless);
+        toggles.branchless = branchless;
+    }
     row2++;
 }
 

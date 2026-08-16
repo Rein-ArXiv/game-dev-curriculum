@@ -8,6 +8,10 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\LiveService.Core\LiveService.Core.csproj" />
+    <!-- step05 검사는 이 실행 파일을 loopback 에 띄운다. 어셈블리를 링크하지는
+         않고 같은 구성으로 빌드되기만 하면 되므로 참조 출력은 끈다. -->
+    <ProjectReference Include="..\..\src\LiveService.Api\LiveService.Api.csproj"
+                      ReferenceOutputAssembly="false" />
   </ItemGroup>
 </Project>
 

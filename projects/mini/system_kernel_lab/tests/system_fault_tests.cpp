@@ -8,6 +8,9 @@
 // 공통 사후조건: 모든 오류 경로 뒤에 /proc/self/fd 개수가 그대로여야 한다
 // (fd 누수 없음), 그리고 주입을 푼 다음 사이클이 정상값을 내야 한다
 // (오류 처리가 backend 를 망가뜨린 채로 두지 않음).
+//
+// 검사들은 파일 끝의 표에서 *그것을 추가한 step* 에 묶인다. 인자 없이 부르면
+// 전부 돌고, `--step=N` 은 그 step 이 추가한 검사만 돈다(tests/step_filter.h).
 
 #include "fault/fault_inject.h"
 #include "io/io_backend.h"
@@ -33,9 +36,21 @@
 
 #include <unistd.h>
 
+#include "step_filter.h"
+
 namespace {
 
 std::atomic<int> failures{0};
+
+int Failures() { return failures.load(); }
+
+// 이 lab 은 backend 를 한 step 에 하나씩 얹는다. 오류 경로 검사도 같은 단위로
+// 갈라야 "이 step 이 추가한 것" 을 독자가 따로 돌릴 수 있다.
+constexpr skl::BackendType kReadBackend[]  = {skl::BackendType::Read};
+constexpr skl::BackendType kSyncBackends[] = {skl::BackendType::Pread,
+                                              skl::BackendType::Mmap};
+constexpr skl::BackendType kAsyncBackends[] = {skl::BackendType::Aio,
+                                               skl::BackendType::Uring};
 
 #define CHECK(expr)                                                           \
     do {                                                                      \
@@ -218,19 +233,24 @@ void TestFaultSpecSemantics() {
     CHECK(!skl::SetFaultSpec("read:0:EIO:1:2"));
     CHECK(!skl::FaultsArmed());
     skl::ClearFaults();
+    std::cout << "  spec 'read:2:EIO:1' -> pass,pass,EIO,pass (calls=4 "
+                 "injections=1); 4 malformed specs rejected and disarmed\n";
 }
 
 // ---------------------------------------------------------------------------
 // 1. open 실패 — 모든 backend 가 이미 연 fd 를 되돌려 놓아야 한다.
 // ---------------------------------------------------------------------------
 
-void TestOpenFailureReleasesFds() {
+// snippet-begin: open-failure-fd
+void CheckOpenFailureReleasesFds(const skl::BackendType* types,
+                                 std::size_t count) {
     TempFixture fixture(4, 64 * 1024);
 
-    for (int raw = 0; raw < skl::kBackendTypeCount; ++raw) {
-        const auto type = static_cast<skl::BackendType>(raw);
+    for (std::size_t idx = 0; idx < count; ++idx) {
+        const auto type = types[idx];
         if (!skl::BackendCompiledIn(type)) continue;
         auto backend = MakeExact(type);
+        const char* label = skl::kBackendTypeLabels[static_cast<int>(type)];
 
         const std::size_t fdBefore = OpenFdCount();
         {
@@ -243,9 +263,24 @@ void TestOpenFailureReleasesFds() {
             CHECK(skl::FaultInjectionCount("open") == 1);
         }
         CHECK(OpenFdCount() == fdBefore);
-        CheckHealthyAfterFault(*backend, fixture, skl::kBackendTypeLabels[raw]);
+        CheckHealthyAfterFault(*backend, fixture, label);
         CHECK(OpenFdCount() == fdBefore);
+        std::cout << "  " << label << ": open failed at file 3, fds back to "
+                  << fdBefore << ", next cycle healthy\n";
     }
+}
+// snippet-end: open-failure-fd
+
+void TestReadOpenFailure() {
+    CheckOpenFailureReleasesFds(kReadBackend, 1);
+}
+
+void TestSyncBackendsOpenFailure() {
+    CheckOpenFailureReleasesFds(kSyncBackends, 2);
+}
+
+void TestAsyncBackendsOpenFailure() {
+    CheckOpenFailureReleasesFds(kAsyncBackends, 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -253,32 +288,31 @@ void TestOpenFailureReleasesFds() {
 //    시그널 대신 seam 으로 강제하고, 결과가 무주입 실행과 완전히 같아야 한다.
 // ---------------------------------------------------------------------------
 
-void TestEintrRetryIsTransparent() {
+void CheckEintrRetryIsTransparent(skl::BackendType type, const char* op) {
     TempFixture fixture(4, 64 * 1024);
+    const std::string spec = std::string(op) + ":0:EINTR:3";
 
-    struct Case {
-        skl::BackendType type;
-        const char*      spec;
-        const char*      op;
-    };
-    const Case cases[] = {
-        {skl::BackendType::Read,  "read:0:EINTR:3",  "read"},
-        {skl::BackendType::Pread, "pread:0:EINTR:3", "pread"},
-    };
-
-    for (const Case& c : cases) {
-        auto backend = MakeExact(c.type);
-        const std::size_t fdBefore = OpenFdCount();
-        {
-            ScopedFault fault(c.spec);
-            const CycleOutcome out = RunOne(*backend, fixture);
-            CHECK(!out.threw);
-            CHECK(out.bytes == fixture.ExpectedBytes());
-            CHECK(out.sum == fixture.ExpectedSum());
-            CHECK(skl::FaultInjectionCount(c.op) == 3);
-        }
-        CHECK(OpenFdCount() == fdBefore);
+    auto backend = MakeExact(type);
+    const std::size_t fdBefore = OpenFdCount();
+    {
+        ScopedFault fault(spec);
+        const CycleOutcome out = RunOne(*backend, fixture);
+        CHECK(!out.threw);
+        CHECK(out.bytes == fixture.ExpectedBytes());
+        CHECK(out.sum == fixture.ExpectedSum());
+        CHECK(skl::FaultInjectionCount(op) == 3);
     }
+    CHECK(OpenFdCount() == fdBefore);
+    std::cout << "  " << op << ": 3 injected EINTR retried, bytes="
+              << fixture.ExpectedBytes() << " unchanged\n";
+}
+
+void TestReadEintrRetry() {
+    CheckEintrRetryIsTransparent(skl::BackendType::Read, "read");
+}
+
+void TestPreadEintrRetry() {
+    CheckEintrRetryIsTransparent(skl::BackendType::Pread, "pread");
 }
 
 // ---------------------------------------------------------------------------
@@ -293,7 +327,7 @@ void TestMmapErrorPaths() {
     {
         // fstat 실패는 여전히 오류다. (파일이 fileBytes 보다 *짧은* 것은
         // 더 이상 오류가 아니다 — io_backend.h 의 short read 계약. 그쪽은
-        // system_io_path_tests 의 TestShortReadContract 가 본다.)
+        // system_io_path_tests 의 CheckShortReadContract 가 본다.)
         ScopedFault fault("fstat:0:EIO:1");
         const CycleOutcome bad = RunOne(*backend, fixture);
         CHECK(bad.threw);
@@ -321,6 +355,9 @@ void TestMmapErrorPaths() {
 
     CheckHealthyAfterFault(*backend, fixture, "mmap");
     CHECK(OpenFdCount() == fdBefore);
+    std::cout << "  mmap: fstat/mmap/munmap each failed once -> throw with a "
+                 "named cause, fds stay at " << fdBefore
+              << ", next cycle healthy\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -372,6 +409,9 @@ void TestAioErrorPaths() {
     CHECK(OpenFdCount() == fdBefore);
     CheckHealthyAfterFault(*backend, fixture, "aio");
     CHECK(OpenFdCount() == fdBefore);
+    std::cout << "  aio: suspend EINTR retried x2, submit failure harvested "
+                 "before throw, suspend EBADF drained by polling; fds stay at "
+              << fdBefore << '\n';
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +481,9 @@ void TestUringErrorPaths() {
     CHECK(OpenFdCount() == fdBefore);
     CheckHealthyAfterFault(*backend, fixture, "uring/user_data");
     CHECK(OpenFdCount() == fdBefore);
+    std::cout << "  io_uring: wait EINTR retried x2; get_sqe/submit/short-submit"
+                 "/user_data each rebuilt the ring and the next cycle was "
+                 "healthy; fds stay at " << fdBefore << '\n';
 }
 
 // ---------------------------------------------------------------------------
@@ -479,6 +522,8 @@ void TestFactoryUringRuntimeFallback() {
         CHECK(backend != nullptr);
     }
     CHECK(OpenFdCount() == fdBefore);
+    std::cout << "  factory: queue_init ENOSYS -> actual=read (usable), "
+                 "no injection -> actual=io_uring\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -626,10 +671,16 @@ void CheckWorkloadRecovers(skl::CtxType ctx, const char* label) {
     workload.Shutdown();
     std::error_code ignored;
     std::filesystem::remove_all(dir, ignored);
+    std::cout << "  " << label
+              << ": worker error propagated, pool reusable, bytes="
+              << expectedBytes << " checksum=" << expectedChecksum << '\n';
 }
 
-void TestWorkloadErrorPropagation() {
+void TestWorkerPoolErrorPropagation() {
     CheckWorkloadRecovers(skl::CtxType::Pthread, "pthread pool");
+}
+
+void TestCoroutinePoolErrorPropagation() {
     CheckWorkloadRecovers(skl::CtxType::Coroutine, "coroutine pool");
 }
 
@@ -637,11 +688,12 @@ void TestWorkloadErrorPropagation() {
 // 9. 성공 경로 fd 누수 — 오류가 없어도 사이클을 반복하면 드러난다.
 // ---------------------------------------------------------------------------
 
-void TestRepeatedCyclesLeakNoFds() {
+void CheckRepeatedCyclesLeakNoFds(const skl::BackendType* types,
+                                  std::size_t count) {
     TempFixture fixture(4, 4096);
 
-    for (int raw = 0; raw < skl::kBackendTypeCount; ++raw) {
-        const auto type = static_cast<skl::BackendType>(raw);
+    for (std::size_t idx = 0; idx < count; ++idx) {
+        const auto type = types[idx];
         if (!skl::BackendCompiledIn(type)) continue;
         auto backend = MakeExact(type);
 
@@ -654,45 +706,56 @@ void TestRepeatedCyclesLeakNoFds() {
             CHECK(out.bytes == fixture.ExpectedBytes());
         }
         CHECK(OpenFdCount() == fdBefore);
+        std::cout << "  " << skl::kBackendTypeLabels[static_cast<int>(type)]
+                  << ": 20 clean cycles, open fds " << fdBefore << " -> "
+                  << OpenFdCount() << '\n';
     }
 }
 
-struct NamedTest {
-    const char* name;
-    void (*fn)();
+void TestReadRepeatedCycles() {
+    CheckRepeatedCyclesLeakNoFds(kReadBackend, 1);
+}
+
+void TestSyncBackendsRepeatedCycles() {
+    CheckRepeatedCyclesLeakNoFds(kSyncBackends, 2);
+}
+
+void TestAsyncBackendsRepeatedCycles() {
+    CheckRepeatedCyclesLeakNoFds(kAsyncBackends, 2);
+}
+
+// 검사 ↔ step 대응표. 소속은 *그 step 이 무엇을 추가했는가* 로 정한다 —
+// backend 오류 경로는 그 backend 를 얹은 step, 실행 모델의 오류 전파는 그
+// 실행 모델을 얹은 step, seam 자체의 계약은 seam 을 세운 step 이다.
+const skl_test::StepCase kCases[] = {
+    {2, "read: open failure releases fds",   &TestReadOpenFailure},
+    {2, "read: EINTR retry transparency",    &TestReadEintrRetry},
+    {2, "read: repeated cycles leak no fds", &TestReadRepeatedCycles},
+    {3, "pread/mmap: open failure releases fds",
+     &TestSyncBackendsOpenFailure},
+    {3, "pread: EINTR retry transparency",   &TestPreadEintrRetry},
+    {3, "mmap error paths",                  &TestMmapErrorPaths},
+    {3, "pread/mmap: repeated cycles leak no fds",
+     &TestSyncBackendsRepeatedCycles},
+    {4, "aio/io_uring: open failure releases fds",
+     &TestAsyncBackendsOpenFailure},
+    {4, "aio error paths",                   &TestAioErrorPaths},
+    {4, "io_uring error paths",              &TestUringErrorPaths},
+    {4, "factory uring runtime fallback",    &TestFactoryUringRuntimeFallback},
+    {4, "aio/io_uring: repeated cycles leak no fds",
+     &TestAsyncBackendsRepeatedCycles},
+    {5, "worker pool error propagation",     &TestWorkerPoolErrorPropagation},
+    {6, "sched thread policy fallback",      &TestSchedThreadPolicyFallback},
+    {6, "sched cgroup fallback",             &TestSchedCgroupFallback},
+    {7, "coroutine pool error propagation",
+     &TestCoroutinePoolErrorPropagation},
+    {8, "fault spec semantics",              &TestFaultSpecSemantics},
 };
 
 }  // namespace
 
-int main() {
-    const NamedTest tests[] = {
-        {"fault spec semantics",       &TestFaultSpecSemantics},
-        {"open failure fd cleanup",    &TestOpenFailureReleasesFds},
-        {"EINTR retry transparency",   &TestEintrRetryIsTransparent},
-        {"mmap error paths",           &TestMmapErrorPaths},
-        {"aio error paths",            &TestAioErrorPaths},
-        {"io_uring error paths",       &TestUringErrorPaths},
-        {"factory uring fallback",     &TestFactoryUringRuntimeFallback},
-        {"sched thread fallback",      &TestSchedThreadPolicyFallback},
-        {"sched cgroup fallback",      &TestSchedCgroupFallback},
-        {"workload error propagation", &TestWorkloadErrorPropagation},
-        {"repeated cycles fd leak",    &TestRepeatedCyclesLeakNoFds},
-    };
-
-    for (const NamedTest& test : tests) {
-        const int before = failures.load();
-        std::cout << "[ run  ] " << test.name << '\n';
-        test.fn();
-        skl::ClearFaults();  // 어떤 경우에도 다음 테스트로 새지 않게.
-        std::cout << (failures.load() == before ? "[  ok  ] " : "[ FAIL ] ")
-                  << test.name << '\n';
-    }
-
-    if (failures.load() != 0) {
-        std::cerr << failures.load() << " system fault test(s) failed\n";
-        return 1;
-    }
-    std::cout << "system fault tests passed ("
-              << (sizeof(tests) / sizeof(tests[0])) << " groups)\n";
-    return 0;
+int main(int argc, char** argv) {
+    return skl_test::RunStepCases(argc, argv, "system_fault_tests", kCases,
+                                  sizeof(kCases) / sizeof(kCases[0]),
+                                  &Failures, &skl::ClearFaults);
 }

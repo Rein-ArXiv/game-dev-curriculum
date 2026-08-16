@@ -86,6 +86,12 @@ public:
             return false;
         }
         config_ = config;
+        // Stop() latches stopping_ so late completions stay quiet; a new Start()
+        // owns the lifetime again and has to clear it, or every PostAccept(),
+        // PostReceive() and PostDatagramReceive() below bails out on the spot.
+        // Cleared here rather than next to started_ because the failure paths in
+        // this function call Stop(), whose own guard is that same flag.
+        stopping_.store(false);
 
         WSADATA data{};
         int wsa = WSAStartup(MAKEWORD(2, 2), &data);
@@ -238,6 +244,7 @@ public:
         for (const auto& session : sessions) CloseSession(session, 0);
 
         if (started_) {
+            // snippet-begin: shutdown-drain
             std::unique_lock lock(outstandingMutex_);
             outstandingCv_.wait(lock, [this] { return outstanding_.load() == 0; });
             lock.unlock();
@@ -245,6 +252,7 @@ public:
             for (std::uint32_t i = 0; i < workerCount_; ++i) {
                 PostQueuedCompletionStatus(port_, 0, kShutdownKey, nullptr);
             }
+            // snippet-end: shutdown-drain
             for (auto& worker : workers_) {
                 if (worker.joinable()) worker.join();
             }

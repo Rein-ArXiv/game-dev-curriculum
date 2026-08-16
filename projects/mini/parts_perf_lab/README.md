@@ -109,6 +109,36 @@ cmake --build build --config Release --target parts_core_tests
 ctest --test-dir build -C Release --output-on-failure
 ```
 
+실행 파일은 하나지만 실행 단위는 주제별로 나뉘어 있다. `parts_core_tests` 는 `argv[1]` 을 그룹 이름으로 받아 그 그룹의 검사만 돌리고, CMake가 그룹마다 ctest 이름을 하나씩 등록한다. 전체를 도는 `parts_core_tests` 는 그대로 남는다.
+
+| ctest 이름 | 그룹 인자 | 검사 대상 |
+|---|---|---|
+| `parts_skeleton_tests` | `skeleton` | `FrameTimer` 의 update/draw 분리와 링 버퍼 포화 |
+| `parts_toggles_tests` | `toggles` | `RequiresRestart` 판정, 토글 패널 기하와 두 패스 그리기 |
+| `parts_layout_tests` | `layout` | 세 레이아웃의 결과 동등성, 경계 반사 불변식 |
+| `parts_simd_tests` | `simd` | SIMD 폭 사이 등식, AoS의 SIMD 무효성 |
+| `parts_branch_tests` | `branch` | branchless 토글이 결과를 바꾸지 않는다는 등식 |
+| `parts_allocator_tests` | `allocator` | 정렬 규약, 네 할당자의 프레임 계약, 풀 고갈 |
+| `parts_container_tests` | `container` | 세 컨테이너의 합산 동등성과 노드 회수 |
+| `parts_graph_tests` | `graph` | 네 측정 채널이 같은 head로 함께 밀리는가 |
+
+```bash
+ctest --test-dir build -C Release -R parts_allocator_tests --output-on-failure
+./build/Release/parts_core_tests allocator   # ctest가 부르는 것과 같은 실행
+```
+
+```text
+parts_core_tests: group `allocator`
+  allocator/AlignmentHelpers ... 5 check(s) ok
+  allocator/MallocAndArena ... 11 check(s) ok
+  allocator/PoolAndSlab ... 15 check(s) ok
+  allocator/PoolExhaustion ... 31 check(s) ok
+  allocator/EventBenchmarkContract ... 86 check(s) ok
+allocator: 5 test(s), 148 check(s), 0 failure(s)
+```
+
+그룹마다 단언 수가 다르므로, 출력 마지막 줄만 봐도 무엇을 돌렸는지와 검사가 줄지 않았는지를 함께 확인할 수 있다.
+
 AVX2 구성에서도 같은 타깃을 돌린다. `PERF_LAB_AVX2` 정의와 `/arch:AVX2`(GCC/Clang은 `-mavx2 -mfma`)는 앱 타깃과 테스트 타깃에 동일하게 부여되므로, 이 구성에서만 `UpdateAVX2` 경로가 컴파일되고 검사된다.
 
 ```bash

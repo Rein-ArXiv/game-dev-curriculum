@@ -81,8 +81,8 @@ public:
                                Vector2 ro, Vector2 rd,
                                float tMax = 1e30f) const;
 
-    // 빌드 단계 진척률에 따라 *그 단계까지 만들어진* 노드 수만 반환.
-    // 시각화에서 빌드 애니메이션을 위해 사용.
+    // 빌드된 전체 노드 수. 시각화의 visited 플래그 배열 크기 / 상태 표시용.
+    // (단계별 애니메이션은 이 값이 아니라 노드의 depth 로 거른다.)
     int NumNodes() const { return (int)nodes_.size(); }
 
 private:

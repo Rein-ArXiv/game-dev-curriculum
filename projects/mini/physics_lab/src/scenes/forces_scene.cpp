@@ -53,6 +53,41 @@ Vector2 ForcesScene::ComputeForce(Vector2 pos, Vector2 vel) const {
     return f;
 }
 
+void ForcesScene::SetCanvas(int x, int y, int w, int h) {
+    lastCanvasX_ = x;
+    lastCanvasY_ = y;
+    lastCanvasW_ = w;
+    lastCanvasH_ = h;
+    // 캔버스를 직접 준 뒤에는 DrawWorld 가 위치를 다시 잡지 않는다.
+    initialized_ = true;
+}
+
+void ForcesScene::SetState(Vector2 pos, Vector2 vel) {
+    pos_ = pos;
+    vel_ = vel;
+    massHandle_.SetPosition(pos);
+    keHist_.Clear();
+    peHist_.Clear();
+    totalHist_.Clear();
+}
+
+void ForcesScene::SetGravity(bool on, float g) {
+    gravityOn_ = on;
+    gravityG_  = g;
+}
+
+void ForcesScene::SetSpring(bool on, float k, float rest, Vector2 anchor) {
+    springOn_   = on;
+    springK_    = k;
+    springRest_ = rest;
+    anchorHandle_.SetPosition(anchor);
+}
+
+void ForcesScene::SetDrag(float linear, float quad) {
+    dragLinear_ = linear;
+    dragQuad_   = quad;
+}
+
 void ForcesScene::ApplyImpulse(Vector2 dv) {
     pulsePending_ = true;
     pulseDv_      = dv;

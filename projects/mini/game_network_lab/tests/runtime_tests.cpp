@@ -8,6 +8,7 @@
 
 #include "protocol.h"
 #include "server_runtime.h"
+#include "step_cases.h"
 
 #include <algorithm>
 #include <array>
@@ -204,6 +205,10 @@ void TestHelloProducesWelcome() {
     Deliver(runtime, gnl::NetworkEventKind::StreamBytes, 1, gnl::Endpoint{}, hello);
     Require(runtime.Metrics().rejectedPackets == 1, "a repeated Hello is rejected");
     Require(fake.disconnects.size() == 1, "a repeated Hello closes the connection");
+    gnl_test::Observe("Welcome payload = 8B id + 16B token, token non-zero; "
+                      "a second Hello -> rejectedPackets=" +
+                      std::to_string(runtime.Metrics().rejectedPackets) +
+                      " disconnects=" + std::to_string(fake.disconnects.size()));
 }
 
 // (2) A forged token must not bind a UDP endpoint.
@@ -231,6 +236,10 @@ void TestForgedTokenIsRejected() {
     AdvanceTicks(runtime, 3);
     Require(runtime.Metrics().ticks == 3, "three ticks ran");
     Require(CollectSnapshots(fake).empty(), "an unbound client receives no snapshot");
+    gnl_test::Observe("one flipped token byte -> rejectedPackets=" +
+                      std::to_string(runtime.Metrics().rejectedPackets) +
+                      " ConnectAccepted=0 snapshots=0 after " +
+                      std::to_string(runtime.Metrics().ticks) + " ticks");
 }
 
 // (3) Input is only accepted from the endpoint that completed Connect.
@@ -260,6 +269,11 @@ void TestForeignEndpointIsRejected() {
             "spoofed input must not move the authoritative position");
     Require(snapshots.back().ack == 0,
             "spoofed input must not become the acknowledged sequence");
+    gnl_test::Observe("Input from an unbound endpoint -> rejectedPackets=" +
+                      std::to_string(runtime.Metrics().rejectedPackets) +
+                      " position=(" + std::to_string(snapshots.back().positionX) +
+                      ", " + std::to_string(snapshots.back().positionY) +
+                      ") ack=" + std::to_string(snapshots.back().ack));
 }
 
 // (4) Duplicate and older sequences are dropped, and (6) the snapshot ack is
@@ -292,6 +306,9 @@ void TestStaleInputIsDroppedAndAcked() {
     Require(wrapped.size() == 3, "nine ticks produce three snapshots");
     Require(wrapped[2].ack == 2u, "a wrapped-newer sequence replaces the old one");
     Require(wrapped[2].positionX == 21, "moveX became +1 for ticks 7..9");
+    gnl_test::Observe("duplicate and older sequences dropped, ack 0xfffffff0 -> " +
+                      std::to_string(wrapped[2].ack) + " across the wrap, positionX=" +
+                      std::to_string(wrapped[2].positionX));
 }
 
 // (5) Fixed-step authority and the 1-in-3 snapshot cadence.
@@ -322,6 +339,11 @@ void TestAuthoritativeTickAndSnapshotCadence() {
     }
     Require(snapshots.back().positionX == 36, "final authoritative positionX is 36");
     Require(snapshots.back().positionY == -24, "final authoritative positionY is -24");
+    gnl_test::Observe("ticks=" + std::to_string(runtime.Metrics().ticks) +
+                      " snapshots=" + std::to_string(snapshots.size()) +
+                      " ack=" + std::to_string(snapshots.back().ack) +
+                      " position=(" + std::to_string(snapshots.back().positionX) +
+                      ", " + std::to_string(snapshots.back().positionY) + ")");
 }
 
 // (7) A long stall is clamped, and the clock is resynchronised afterwards.
@@ -341,18 +363,27 @@ void TestCatchUpIsBounded() {
     runtime.Advance(late);
     Require(runtime.Metrics().ticks == 5,
             "the clock was resynchronised, so the same now runs no further ticks");
+    gnl_test::Observe("1 tick, then a 10 interval jump -> ticks=" +
+                      std::to_string(runtime.Metrics().ticks) +
+                      " (catch-up capped at 4); replaying the same now adds 0");
 }
 
 } // namespace
 
-int main() {
-    TestHelloProducesWelcome();
-    TestForgedTokenIsRejected();
-    TestForeignEndpointIsRejected();
-    TestStaleInputIsDroppedAndAcked();
-    TestAuthoritativeTickAndSnapshotCadence();
-    TestCatchUpIsBounded();
-
-    std::cout << "game_network_runtime_tests: all checks passed\n";
-    return 0;
+// The fixed tick clock and its bounded catch-up are the runtime half of the
+// backend contract step. Everything else here is the authoritative session:
+// handshake, endpoint capability, input ordering, snapshot cadence.
+int main(int argc, char** argv) {
+    return gnl_test::Run(
+        "game_network_runtime_tests",
+        {
+            {"step02", "tick_clock_catch_up", [] { TestCatchUpIsBounded(); return 0; }},
+            {"step05", "hello_welcome", [] { TestHelloProducesWelcome(); return 0; }},
+            {"step05", "forged_token", [] { TestForgedTokenIsRejected(); return 0; }},
+            {"step05", "foreign_endpoint", [] { TestForeignEndpointIsRejected(); return 0; }},
+            {"step05", "stale_input_ack", [] { TestStaleInputIsDroppedAndAcked(); return 0; }},
+            {"step05", "tick_snapshot_cadence",
+             [] { TestAuthoritativeTickAndSnapshotCadence(); return 0; }},
+        },
+        argc, argv);
 }

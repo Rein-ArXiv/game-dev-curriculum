@@ -2,7 +2,7 @@
 
 UTF-8, UTF-16, 코드 페이지의 기본 개념만으로는 Windows의 텍스트 경계를 안전하게 다루기 어렵다. 왜 `CreateFileA`와 `CreateFileW`가 따로 존재하는지, 한국어 Windows에서 콘솔 출력이 왜 깨지는지, `LoadStringA`가 MBCS 문자열을 어떻게 잘라 먹는지, `strcpy_s`와 `StringCchCopy`의 계약이 무엇이 다른지는 Windows 플랫폼 ABI와 NLS 정책의 문제다.
 
-이 글은 Windows 플랫폼 경계에서 필요한 MBCS 처리, 콘솔 인코딩, 안전한 문자열 함수, locale과 NLS, TCHAR 마이그레이션, `WideCharToMultiByte`/`MultiByteToWideChar`의 계약을 다룬다. 공통 Unicode 모델을 반복하는 대신 Windows API가 요구하는 표현과 실패 조건에 집중한다.
+이 글은 Windows 플랫폼 경계에서 필요한 MBCS 처리, 콘솔 인코딩, 안전한 문자열 함수, locale과 NLS, TCHAR 마이그레이션, COM 경계의 문자열 할당자와 소유권, `WideCharToMultiByte`/`MultiByteToWideChar`의 계약을 다룬다. 공통 Unicode 모델을 반복하는 대신 Windows API가 요구하는 표현과 실패 조건에 집중한다.
 
 전제는 다음과 같다. 내부 인코딩은 UTF-8로 통일하고, Windows API 경계에서만 UTF-16으로 변환한다. 그 변환을 안전하고 손실 없이 수행하기 위해 어떤 함수와 패턴을 알아야 하는가가 이 글의 주제다.
 
@@ -17,10 +17,11 @@ UTF-8, UTF-16, 코드 페이지의 기본 개념만으로는 Windows의 텍스�
 5. [안전한 문자열 함수](#5-안전한-문자열-함수)
 6. [TCHAR 마이그레이션](#6-tchar-마이그레이션)
 7. [Windows 문자열 타입 총정리](#7-windows-문자열-타입-총정리)
-8. [WideCharToMultiByte와 MultiByteToWideChar 심화](#8-widechartomultibyte와-multibytetowidechar-심화)
-9. [파일 시스템과 인코딩](#9-파일-시스템과-인코딩)
-10. [실전 패턴 모음](#10-실전-패턴-모음)
-11. [문제 해결 체크리스트](#11-문제-해결-체크리스트)
+8. [COM 문자열: 할당자와 소유권](#8-com-문자열-할당자와-소유권)
+9. [WideCharToMultiByte와 MultiByteToWideChar 심화](#9-widechartomultibyte와-multibytetowidechar-심화)
+10. [파일 시스템과 인코딩](#10-파일-시스템과-인코딩)
+11. [실전 패턴 모음](#11-실전-패턴-모음)
+12. [문제 해결 체크리스트](#12-문제-해결-체크리스트)
 
 
 ---
@@ -963,25 +964,229 @@ CStringW cstr2(wstr2.c_str());
 std::string utf8 = WideToUtf8(cstr.GetString());
 ```
 
-### `_bstr_t` (COM용)
+CString은 MFC/ATL 안에서만 쓰이는 타입이다. COM 인터페이스 경계를 넘는 문자열은 이 표의 어느 타입도 아닌 BSTR을 쓰고, 그 이유와 계약은 별개의 문제다.
 
-BSTR 래퍼 클래스다.
+## 8. COM 문자열: 할당자와 소유권
+
+### 왜 경계 전용 할당자가 필요한가
+
+COM 객체는 모듈 경계를 넘어 통신한다. DLL A가 만든 문자열을 EXE가 해제하는 상황이 인터페이스 설계상 정상 흐름이다. 문제는 각 모듈이 자기 CRT와 함께 링크되면 *서로 다른 힙* 을 쓴다는 데 있다.
+
+| 상황 | 결과 | 필요한 것 |
+|------|------|-----------|
+| DLL A: `malloc` → EXE: `free` | 다른 CRT 힙이면 힙 손상 | 양쪽이 합의한 할당자 |
+| DLL A: `new` → COM 객체: `delete` | 같은 문제 | 양쪽이 합의한 할당자 |
+| DLL A: `SysAllocString` → EXE: `SysFreeString` | 안전 | 프로세스 공통 할당자 |
+
+정적 CRT 링크, 서로 다른 Visual Studio 버전으로 빌드된 모듈, 서로 다른 언어 런타임이 섞이면 첫 두 줄이 곧바로 사고가 된다. COM이 자체 할당자를 정의한 이유가 이것이다.
+
+### 경계에서 쓰는 할당자
+
+| 함수 쌍 | 할당자 | 용도 |
+|------|--------|------|
+| `malloc` / `free` | CRT 힙 | 모듈 내부 전용 |
+| `new` / `delete` | CRT 힙 | 모듈 내부 전용 |
+| `HeapAlloc` / `HeapFree` | 지정한 프로세스 힙 | 저수준 Windows API |
+| `CoTaskMemAlloc` / `CoTaskMemFree` | COM task allocator | COM 인터페이스 경계의 일반 버퍼 |
+| `SysAllocString` / `SysFreeString` | OLE Automation의 BSTR 전용 할당자 | BSTR만 |
+
+인터페이스 시그니처를 보면 어느 할당자를 써야 하는지가 결정되어 있다. out 파라미터의 타입이 계약을 지정한다.
+
+```cpp
+// 문자열 반환: 호출자가 SysFreeString으로 해제한다
+HRESULT GetName(BSTR* pbstrName) {
+    *pbstrName = SysAllocString(L"MyObject");
+    return S_OK;
+}
+
+// 일반 버퍼 반환: 호출자가 CoTaskMemFree로 해제한다
+HRESULT GetData(BYTE** ppData, ULONG* pcb) {
+    *pcb = 100;
+    *ppData = (BYTE*)CoTaskMemAlloc(*pcb);
+    return S_OK;
+}
+```
+
+### BSTR의 메모리 계약
+
+BSTR은 문자열 시작을 가리키는 포인터지만, 그 *앞* 에 길이 필드가 붙어 있다.
+
+| 오프셋 | 크기 | 내용 |
+|:------:|:----:|------|
+| -4 | 4바이트 | 바이트 길이 (종료 null 제외) |
+| 0 | 가변 | UTF-16LE 데이터 |
+| 끝 | 2바이트 | 종료 null |
+
+이 배치에서 두 가지가 따라온다. 길이 조회가 탐색 없이 끝나고, 데이터 중간에 `U+0000`이 들어 있어도 길이가 보존된다. Windows API가 반환하는 다른 문자열 타입은 둘 다 보장하지 않는다.
+
+```cpp
+BSTR bstr = SysAllocString(L"Hello");
+
+UINT chars = SysStringLen(bstr);       // 5 (문자 수)
+UINT bytes = SysStringByteLen(bstr);   // 10 (바이트 수)
+
+SysFreeString(bstr);
+```
+
+`BSTR`과 `LPWSTR`은 둘 다 `wchar_t*`로 정의되지만 계약이 다르다. 타입 시스템이 구분해 주지 않으므로 규약으로 지켜야 한다.
+
+| 특성 | BSTR | LPWSTR |
+|------|------|--------|
+| 길이 정보 | 포인터 앞 4바이트 | 없음 (종료 null로 판단) |
+| 할당 | `SysAllocString` 계열 | `malloc`, `new`, 스택 등 |
+| 해제 | `SysFreeString` | 할당 방식에 따름 |
+| 중간 null | 허용 | 문자열 끝을 의미 |
+| COM 마샬링 | 자동 지원 | 수동 처리 |
+
+```cpp
+// 잘못된 코드: 리터럴에는 길이 필드가 없다.
+// 현대 C++에서는 const wchar_t[]를 BSTR로 암시 변환할 수 없어 진단되고,
+// 강제 캐스팅해도 BSTR 계약은 생기지 않는다.
+BSTR bad = const_cast<BSTR>(L"Hello");
+SysFreeString(bad);   // Automation 할당자가 만든 포인터가 아니다
+
+// 올바른 코드
+BSTR ok = SysAllocString(L"Hello");
+SysFreeString(ok);
+```
+
+`NULL` BSTR은 오류가 아니라 *빈 문자열* 이다. `SysStringLen(NULL)`은 0을 반환한다. COM 인터페이스에서 문자열을 받을 때 `NULL`을 실패로 처리하면 정상 입력을 거부하게 된다.
+
+```cpp
+void ProcessString(BSTR bstr) {
+    UINT len = bstr ? SysStringLen(bstr) : 0;   // NULL도 유효한 빈 문자열
+    if (len > 0) {
+        // 비어 있지 않은 문자열
+    }
+}
+```
+
+### SysAllocString 계열
+
+| 함수 | 용도 | 반환값 |
+|------|------|--------|
+| `SysAllocString(LPCOLESTR)` | null 종료 문자열로부터 생성 | BSTR |
+| `SysAllocStringLen(LPCOLESTR, UINT)` | 길이 지정, 중간 null 허용 | BSTR |
+| `SysAllocStringByteLen(LPCSTR, UINT)` | 바이트 배열로부터 생성 | BSTR |
+| `SysReAllocString(BSTR*, LPCOLESTR)` | 재할당 | BOOL |
+| `SysFreeString(BSTR)` | 해제 | void |
+| `SysStringLen(BSTR)` | 문자 수 반환 | UINT |
+| `SysStringByteLen(BSTR)` | 바이트 수 반환 | UINT |
+
+`SysAllocStringLen`이 별도로 존재하는 이유가 BSTR의 존재 이유와 같다. 길이를 명시적으로 받아야 중간에 `U+0000`이 있는 데이터를 손실 없이 담을 수 있다. `SysAllocString`은 인자를 null 종료 문자열로 읽으므로 그 지점에서 잘린다.
+
+내부 할당자는 공개 계약이 아니다. 직접 구현해 대체할 수 없고, 다음은 오직 레이아웃을 설명하기 위한 의사 코드다.
+
+```cpp
+BSTR conceptual_SysAllocStringLen(const OLECHAR* psz, UINT len) {
+    UINT bytes = len * sizeof(OLECHAR);
+    // 길이 필드(4) + 데이터 + 종료 null(2)
+    BYTE* raw = (BYTE*)automation_alloc(4 + bytes + sizeof(OLECHAR));
+    if (!raw) return NULL;
+
+    *((UINT*)raw) = bytes;              // 길이는 바이트 단위로 저장한다
+    BSTR bstr = (BSTR)(raw + 4);
+    if (psz) memcpy(bstr, psz, bytes);
+    else     memset(bstr, 0, bytes);
+    bstr[len] = L'\0';
+    return bstr;
+}
+```
+
+해제 시 4바이트 앞으로 되돌아가야 하므로, BSTR 포인터를 다른 할당자에 넘기면 진단되지 않는 힙 손상이 된다.
+
+### 흔한 실수와 디버깅
+
+| 실수 | 원인 | 대응 |
+|------|------|------|
+| BSTR 누수 | `SysFreeString` 누락 | RAII 래퍼 사용 |
+| 이중 해제 | out 파라미터 소유권 혼란 | 인터페이스 문서의 소유권 규약 확인 |
+| 잘못된 할당자 | `malloc` + `SysFreeString` 혼용 | 타입으로 계약 구분 |
+| 리터럴 해제 | `BSTR b = L"Hello"; SysFreeString(b);` | 항상 `SysAllocString` 경유 |
+| 길이 필드 훼손 | BSTR 버퍼에 직접 더 긴 문자열 기록 | `SysReAllocStringLen` 사용 |
+
+디버거에서는 포인터 앞 4바이트를 직접 읽어 길이 필드를 확인할 수 있다.
+
+```cpp
+BSTR bstr = SysAllocString(L"Test");
+UINT* pLen = (UINT*)bstr - 1;   // Watch에 *pLen: 8 (바이트)
+```
+
+### RAII 래퍼
+
+`SysFreeString` 누락은 흔한 실수이고, 예외가 던져지는 경로까지 손으로 막기는 어렵다. COM 경계에는 표준 래퍼가 준비되어 있다.
 
 ```cpp
 #include <comutil.h>
 
-_bstr_t bstr = L"COM 문자열";
-BSTR raw = bstr.GetBSTR();
+_bstr_t bstr1(L"Hello");
+_bstr_t bstr2 = L"World";
+_bstr_t bstr3 = bstr1 + L" " + bstr2;
 
-// 자동 변환
-_bstr_t fromAnsi = "ANSI";     // ANSI → Wide 변환
-_bstr_t fromWide = L"Wide";
+BSTR raw = bstr3;                 // 소유권 유지 (또는 bstr3.GetBSTR())
+BSTR detached = bstr3.Detach();   // 소유권 이전, 호출자가 해제
+SysFreeString(detached);
 
-// std::string 변환
-std::string utf8((const char*)bstr);  // 주의: ANSI 변환
+_bstr_t fromAnsi = "ANSI";        // char*를 받으면 현재 ANSI 코드 페이지로 변환한다
 ```
 
-## 8. WideCharToMultiByte와 MultiByteToWideChar 심화
+마지막 줄이 함정이다. `_bstr_t`가 `char*`를 받거나 `const char*`로 변환될 때 개입하는 것은 UTF-8이 아니라 *현재 ANSI 코드 페이지* 다. UTF-8 중심으로 설계한 코드에서 이 변환을 무심코 타면 비ASCII 문자가 손실된다. UTF-8 문자열은 명시적으로 UTF-16으로 변환한 뒤 넘긴다.
+
+| 메서드 | 동작 |
+|--------|------|
+| `GetBSTR` | 내부 BSTR 반환 (소유권 유지) |
+| `GetAddress` | `BSTR*` 반환 (out 파라미터용) |
+| `Detach` | 소유권 이전 |
+| `Attach(BSTR)` | 기존 BSTR 소유권 획득 |
+| `copy` | 복사본 생성 (호출자 해제 책임) |
+
+ATL 기반 코드에서는 `CComBSTR`을 쓴다.
+
+```cpp
+#include <atlbase.h>
+
+CComBSTR bstr1(L"Hello");
+bstr1.Append(L" World");
+
+if (bstr1.CompareNoCase(L"HELLO WORLD") == 0) {
+    // 같음
+}
+
+// out 파라미터에는 비어 있는 객체를 사용한다
+CComBSTR name;
+HRESULT hr = pObj->GetName(&name);
+if (SUCCEEDED(hr)) {
+    bstr1 = name;
+}
+```
+
+`CComBSTR::operator&`는 기존 문자열을 자동 해제하지 않는다. 값이 들어 있는 객체에 `&`를 사용하면 원래 포인터를 잃어 누수가 되고, 디버그 빌드는 이를 assertion으로 잡는다. 값이 있는 변수와 분리된 빈 객체로 out 값을 받은 뒤 성공했을 때 대입한다.
+
+COM 객체 포인터 자체에도 같은 문제가 있다. `AddRef`/`Release` 짝을 손으로 맞추는 대신 스마트 포인터를 쓴다.
+
+```cpp
+#include <wrl/client.h>
+using Microsoft::WRL::ComPtr;
+
+ComPtr<IUnknown> pUnk;
+HRESULT hr = CoCreateInstance(CLSID_Something, nullptr,
+    CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pUnk));
+
+ComPtr<IDispatch> pDisp;
+hr = pUnk.As(&pDisp);            // QueryInterface + 소유권 획득
+// 범위를 벗어나면 Release가 호출된다
+```
+
+| 래퍼 | 헤더 | 대상 |
+|------|------|------|
+| `_bstr_t` | comutil.h | BSTR (가벼움) |
+| `CComBSTR` | atlbase.h | BSTR (ATL) |
+| `CComPtr<T>` | atlbase.h | COM 포인터 (ATL) |
+| `ComPtr<T>` | wrl/client.h | COM 포인터 (현대) |
+
+새로 작성하는 코드라면 ATL 의존성이 없는 `_bstr_t`와 `ComPtr<T>` 조합이 가장 가볍다. 기존 ATL 프로젝트는 `CComBSTR`/`CComPtr`을 그대로 쓴다. 어느 쪽이든 원칙은 하나다. **COM 경계를 넘는 자원은 그 자원을 만든 할당자와 짝이 맞는 래퍼에 즉시 담는다.**
+
+## 9. WideCharToMultiByte와 MultiByteToWideChar 심화
 
 ### 함수 시그니처
 
@@ -1150,7 +1355,7 @@ std::wstring StrictUtf8ToWide(const std::string& utf8) {
 }
 ```
 
-## 9. 파일 시스템과 인코딩
+## 10. 파일 시스템과 인코딩
 
 ### NTFS와 Unicode
 
@@ -1264,7 +1469,7 @@ GetFullPathNameW(L"relative\\path.txt", MAX_PATH,
                  fullPath, NULL);
 ```
 
-## 10. 실전 패턴 모음
+## 11. 실전 패턴 모음
 
 ### 패턴 1: UTF-8 중심 아키텍처
 
@@ -1410,7 +1615,7 @@ int main(int argc, char* argv[]) {
 }
 ```
 
-## 11. 문제 해결 체크리스트
+## 12. 문제 해결 체크리스트
 
 ### 한글 깨짐 진단
 
@@ -1515,6 +1720,7 @@ Windows 문자열 처리는 단순해 보이지만 함정이 많다. 핵심 원�
 | 안전한 함수 사용 | strsafe.h 또는 _s 함수 |
 | MBCS 경계 주의 | CharNext/CharPrev 사용 |
 | 명시적 코드 페이지 | CP_UTF8 직접 지정 |
+| 모듈 경계는 전용 할당자 | COM 경계는 `SysAllocString`·`CoTaskMemAlloc`과 짝이 맞는 래퍼 |
 
 레거시 코드를 유지보수할 때는 기존 인코딩 전략을 파악하는 것이 우선이다. 새 코드에서는 처음부터 UTF-8 중심 아키텍처를 설계하는 것이 장기적으로 유리하다. Win9x 시대의 산물인 TCHAR 매크로 시스템은 새 코드에서는 사용하지 않는다. 직접 `wchar_t`와 W 계열 API를 사용하고, 내부 데이터는 UTF-8 `std::string`으로 유지한다.
 
@@ -1522,6 +1728,10 @@ Windows 문자열 처리는 단순해 보이지만 함정이 많다. 핵심 원�
 ## 더 읽을거리
 
 - [Windows Data Types](https://learn.microsoft.com/en-us/windows/win32/winprog/windows-data-types)
+- [Microsoft Learn: BSTR](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/automat/bstr)
+- [Wine의 oleaut32 구현](https://source.winehq.org/git/wine.git/tree/HEAD:/dlls/oleaut32) - BSTR/VARIANT 오픈소스 구현
+- Box, D. (1998). *Essential COM*
+- Rector, B. & Sells, C. (1999). *ATL Internals*
 - [Unicode in the Windows API](https://learn.microsoft.com/en-us/windows/win32/intl/unicode-in-the-windows-api)
 - [Strsafe Functions](https://learn.microsoft.com/en-us/windows/win32/menurc/strsafe-ovw)
 - [National Language Support](https://learn.microsoft.com/en-us/windows/win32/intl/national-language-support)

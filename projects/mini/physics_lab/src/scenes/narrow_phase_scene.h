@@ -11,8 +11,8 @@
 //   - EPA: GJK 가 "충돌" 이라고 답하면 그 simplex 를 확장해 원점까지의 최단 거리
 //     = penetration depth + normal 을 구함.
 //
-// 두 알고리즘 모두 매 frame 동시에 돌고, 결과 (collision yes/no, depth, normal)
-// 를 비교 — 일치하지 않으면 패널에 "DISAGREE" 표시 (한쪽 버그 검출).
+// 두 알고리즘 모두 매 frame 동시에 돌고, 결과 (collision yes/no + depth) 를
+// 비교 — 갈라지면 패널과 캔버스에 "boundary / numerical mismatch" 표시.
 
 #pragma once
 
@@ -76,7 +76,8 @@ private:
     float   lastDepth_     = 0.0f;
     double  lastUs_        = 0.0;
 
-    // SAT 와 GJK+EPA 의 결과 비교. agreesCollision/depth/normal.
+    // SAT 와 GJK+EPA 의 결과 비교 — collision 일치 + depth 차 < 1.5 px.
+    // normal 은 이 비교에 들어가지 않는다.
     bool    bothAgree_   = true;
     bool    satCollision_  = false;
     bool    gjkCollision_  = false;

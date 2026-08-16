@@ -79,27 +79,38 @@
 
 ### FBO 생성
 
+핸들 세 개는 한 번만 만든다.
+
+<!-- snippet: src/render/msaa_target.cpp#MsaaTarget::Init -->
 ```cpp
-glGenFramebuffers(1, &fbo);
-glGenRenderbuffers(1, &colorRb);
-glGenRenderbuffers(1, &depthRb);
-
-int samples = 4;     // MSAA 4×
-glBindRenderbuffer(GL_RENDERBUFFER, colorRb);
-glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_RGBA8, w, h);
-
-glBindRenderbuffer(GL_RENDERBUFFER, depthRb);
-glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples,
-                                  GL_DEPTH24_STENCIL8, w, h);
-
-glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                           GL_RENDERBUFFER, colorRb);
-glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
-                           GL_RENDERBUFFER, depthRb);
+void MsaaTarget::Init() {
+    glGenFramebuffers(1, &fbo_);
+    glGenRenderbuffers(1, &colorRb_);
+    glGenRenderbuffers(1, &depthRb_);
+}
 ```
 
-`glRenderbufferStorageMultisample` 의 *samples* 인자가 MSAA 레벨.
+스토리지 할당과 attach 는 *크기 / 샘플 수가 바뀔 때마다* 다시 한다.
+
+<!-- snippet: src/render/msaa_target.cpp#MsaaTarget::Recreate -->
+```cpp
+int n = MsaaCount(current_);
+
+glBindRenderbuffer(GL_RENDERBUFFER, colorRb_);
+glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, GL_RGBA8, w_, h_);
+
+glBindRenderbuffer(GL_RENDERBUFFER, depthRb_);
+glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, GL_DEPTH24_STENCIL8,
+                                  w_, h_);
+
+glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_RENDERBUFFER, colorRb_);
+glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                           GL_RENDERBUFFER, depthRb_);
+```
+
+`glRenderbufferStorageMultisample` 의 두 번째 인자 `n` (= `MsaaCount(current_)`, 열거값이 그대로 샘플 수) 이 MSAA 레벨이다.
 
 ### 렌더링
 
@@ -113,11 +124,12 @@ glClear(...);
 
 ### Resolve
 
+<!-- snippet: src/render/msaa_target.cpp#MsaaTarget::Resolve -->
 ```cpp
-glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_);
 glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);     // default
-glBlitFramebuffer(0, 0, w, h,
-                   0, 0, w, h,
+glBlitFramebuffer(0, 0, w_, h_,
+                   0, 0, dstW, dstH,
                    GL_COLOR_BUFFER_BIT, GL_NEAREST);
 ```
 
@@ -127,8 +139,11 @@ glBlitFramebuffer(0, 0, w, h,
 
 윈도우 크기 / MSAA 옵션 변경 시 *renderbuffer 재할당*.
 
+<!-- snippet: src/render/msaa_target.cpp#MsaaTarget::EnsureSize -->
 ```cpp
 void MsaaTarget::EnsureSize(int width, int height, MsaaSamples samples) {
+    width  = std::max(width, 1);
+    height = std::max(height, 1);
     if (width == w_ && height == h_ && samples == requested_) return;
     w_ = width; h_ = height; requested_ = samples; current_ = samples;
     if (samples != MsaaSamples::Off) Recreate();
@@ -137,6 +152,7 @@ void MsaaTarget::EnsureSize(int width, int height, MsaaSamples samples) {
 
 게이트를 *요청값* (`requested_`) 으로 비교하는 것이 중요하다. FBO 가 불완전하면 `Recreate` 가 실제 사용값 `current_` 를 Off 로 되돌리는데, 게이트가 `current_` 를 본다면 요청값과 영원히 어긋나 *매 프레임 재시도* 하게 된다.
 
+<!-- snippet: src/render/msaa_target.cpp#MsaaTarget::Recreate -->
 ```cpp
 if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
     current_        = MsaaSamples::Off;
@@ -147,12 +163,14 @@ if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
 
 폴백 사실은 `TakeFallbackNotice()` 로 한 번 보고되고, App 이 자기 토글 값도 Off 로 되돌린 뒤 디버그 로그에 남긴다. 그래야 패널이 "4x" 라고 알리면서 실제로는 기본 프레임버퍼에 그리는 상태가 생기지 않는다.
 
+<!-- snippet: src/app/app.cpp#App::ProcessFrame -->
 ```cpp
 msaa_->EnsureSize(windowW_, windowH_, msaa_samples_);
 if (msaa_->TakeFallbackNotice()) {
     msaa_samples_ = MsaaSamples::Off;
-    khrDebug_->PushAppMessage("MSAA framebuffer incomplete — fell back to Off",
-                              DebugMessage::Severity::Medium);
+    khrDebug_->PushAppMessage(
+        "MSAA framebuffer incomplete — fell back to Off",
+        DebugMessage::Severity::Medium);
 }
 ```
 
@@ -214,11 +232,69 @@ build\Release\graphics_gl_lab.exe      # Linux/macOS: ./build/graphics_gl_lab
 - `MSAA` 를 올리면 `GPU pass` 가 올라가고, ImPlot 의 CPU 곡선이 GPU 곡선에 달라붙는다 (위의 wall-clock 주의 참고).
 - 드라이버가 요청한 샘플 수의 FBO 를 만들지 못하면 콤보가 스스로 `Off` 로 돌아가고 *GL debug log* 창에 `MSAA framebuffer incomplete — fell back to Off` 한 줄이 남는다.
 
-```bash
-ctest --test-dir build -C Release --output-on-failure
+### 이 step 의 검증
+
+이 step 이 추가한 두 경로 — 스케일 재빌드와 MSAA 폴백 — 를 실제 컨텍스트에서 밟는 항목이 있다.
+
+```powershell
+ctest --test-dir build -C Release -R gl_step07 --output-on-failure
 ```
 
-`graphics_gl_render_tests` 가 이 두 경로를 실제 컨텍스트에서 밟는다. 스케일 재빌드 쪽은 `Scene::Rebuild` 를 1000 회 반복한 뒤 여섯 개 핸들이 모두 유효하고 드라이버가 발급하는 이름 값이 누적되지 않는지 본다 — 해제가 한 줄만 빠져도 이름이 1000 단위로 올라가 테스트가 죽는다. MSAA 쪽은 4x 정상 생성과, `GL_MAX_RENDERBUFFER_SIZE` 를 넘는 크기를 요청해 renderbuffer storage 를 실패시킨 불완전 FBO 두 경우를 모두 실행해 폴백 후 `Current()` 와 `Requested()` 가 Off 로 맞춰지고 폴백 통지가 정확히 한 번만 소비되는지 확인한다. 폴백을 조용히 삼키도록 바꾸면 이 네 개의 단언이 함께 실패한다.
+```text
+    Start 12: gl_step07_scale_msaa
+1/1 Test #12: gl_step07_scale_msaa .............   Passed    0.41 sec
+
+100% tests passed out of 1
+```
+
+```powershell
+build\Release\graphics_gl_render_tests.exe step07   # Linux/macOS: ./build/graphics_gl_render_tests step07
+```
+
+```text
+[gl] vendor=Intel renderer=Intel(R) Iris(R) Xe Graphics version=4.5.0 - Build 32.0.101.7088
+[lifetime] probeBefore=1 probeAfter=6 maxHandle=6 after 1000 rebuilds
+[step07] scene_rebuild_handles ... ok
+[step07] msaa_fallback ... ok
+graphics_gl_render_tests: 2/2 passed (filter=step07)
+```
+
+스케일 재빌드 쪽은 `Scene::Rebuild` 를 1000 회 반복한 뒤 여섯 개 핸들이 모두 유효하고 드라이버가 발급하는 이름 값이 누적되지 않는지 본다.
+
+<!-- snippet: tests/graphics_gl_render_tests.cpp#TestSceneResourceLifetime -->
+```cpp
+constexpr int kRebuilds = 1000;
+for (int i = 0; i < kRebuilds; ++i) {
+    scene.Rebuild(kObjectCount);
+}
+// ...
+const GLuint maxHandle = std::max({after.vboVerts, after.vboIndices,
+                                   after.vboInstanceModel,
+                                   after.vboInstanceColor,
+                                   after.indirectBuffer, probeAfter});
+// ...
+CHECK(maxHandle < 128u);
+CHECK(probeAfter <= probeBefore + 16u);
+```
+
+위 출력의 `maxHandle=6` 이 그 결과다 — 1000 회를 돌고도 이름이 한 자리에 머문다. 해제가 한 줄만 빠지면 이 값이 수천 단위로 올라가 두 단언이 함께 죽는다.
+
+MSAA 쪽은 4x 정상 생성과, `GL_MAX_RENDERBUFFER_SIZE` 를 넘는 크기를 요청해 renderbuffer storage 를 실패시킨 불완전 FBO 두 경우를 모두 실행한다.
+
+<!-- snippet: tests/graphics_gl_render_tests.cpp#TestMsaaFallback -->
+```cpp
+gllab::MsaaTarget msaa;
+msaa.Init();
+msaa.EnsureSize(maxRb + 1, maxRb + 1, gllab::MsaaSamples::X8);
+CHECK(msaa.Current() == gllab::MsaaSamples::Off);
+CHECK(msaa.Requested() == gllab::MsaaSamples::Off);
+CHECK(!msaa.Enabled());
+// 통지는 정확히 한 번만 소비된다.
+CHECK(msaa.TakeFallbackNotice());
+CHECK(!msaa.TakeFallbackNotice());
+```
+
+폴백 후 `Current()` 와 `Requested()` 가 함께 Off 로 맞춰져야 매 프레임 재시도가 생기지 않고, 통지가 정확히 한 번만 소비되어야 로그가 같은 줄로 넘치지 않는다. 폴백을 조용히 삼키도록 바꾸면 이 다섯 단언이 함께 실패한다.
 
 여전히 자동 검증 밖인 것도 분명하다. 오브젝트 수와 MSAA 샘플 수에 따른 *시간* 변화는 GPU·드라이버마다 달라 고정 기대값을 둘 수 없으므로 패널 그래프로만 읽는다.
 

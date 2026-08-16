@@ -26,7 +26,7 @@ flowchart TB
 3. **데코레이터** — 조건·반복·쿨다운의 분리와 카탈로그.
 4. **Parallel** — 동시 실행, 성공/실패 정책, 자원 충돌.
 5. **tick 모델** — Running 노드 기억과 재평가 비용.
-6. **Blackboard** — 노드 간 데이터 공유와 스코프.
+6. **Blackboard** — 노드 간 데이터 공유의 접근 계약, 미스 처리, 스코프.
 7. **Event-Driven BT** — abort 정책으로 매 틱 전체 평가 제거.
 8. **BT 패턴 카탈로그** — 실전에서 반복되는 관용구.
 9. **BT의 한계** — 효용·계획과의 혼합.
@@ -213,7 +213,7 @@ flowchart TB
 
 ```cpp
 Status Cooldown::Tick(Blackboard& bb) {
-    float now = bb.Get<float>("time");
+    const float now = bb.Require(BB::Time);                   // 틱 드라이버가 매 틱 채우는 키다
     if (now - lastFire_ < interval_) return Status::Failure;  // 아직 쿨다운
     Status s = child_->Tick(bb);
     if (s == Status::Success) lastFire_ = now;                // 성공 시점 기록
@@ -225,8 +225,9 @@ TimeLimit은 Running을 강제 종료하는 예다 — 자식이 너무 오래 R
 
 ```cpp
 Status TimeLimit::Tick(Blackboard& bb) {
-    if (startTime_ < 0) startTime_ = bb.Get<float>("time");
-    if (bb.Get<float>("time") - startTime_ > limit_) {
+    const float now = bb.Require(BB::Time);
+    if (startTime_ < 0) startTime_ = now;
+    if (now - startTime_ > limit_) {
         child_->Reset(); startTime_ = -1;
         return Status::Failure;                               // 타임아웃
     }
@@ -313,21 +314,82 @@ memory Composite는 *그 자식 위치를 기억* 해야 한다 — 2절의 `cur
 
 ## 6. Blackboard 통신 구조
 
-BT 노드는 서로 직접 인자를 주고받지 않는다. 대신 공유 키-값 저장소인 *Blackboard* 를 통해 데이터를 읽고 쓴다. IsEnemyVisible이 `lastSeenPos`를 쓰고, MoveTo가 그것을 읽는 식이다.
+BT 노드는 서로 직접 인자를 주고받지 않는다. 대신 공유 키-값 저장소인 *Blackboard* 를 통해 데이터를 읽고 쓴다. IsEnemyVisible이 타깃 위치 키를 쓰고, MoveTo가 그것을 읽는 식이다. 트리가 의존하는 것은 저장 구조(해시 맵, 슬롯 배열, 컴포넌트)가 아니라 *접근 계약* 이다. 저장 구조를 바꿔도 트리는 그대로지만, 계약이 느슨하면 트리의 제어 흐름 자체가 틀린 값 위에서 돈다.
+
+### 키는 이름과 값 타입의 쌍이다
+
+키를 문자열로만 두면 오타가 조용히 새 키를 만들고, 같은 키를 시스템마다 다른 타입으로 읽어도 컴파일이 통과한다. 키를 값 타입까지 가진 핸들로 선언하면 타입 쪽 실수는 컴파일 단계에서 걸린다.
+
+```cpp
+template <class T> struct BBKey { const char* name; };   // 키 = 이름 + 값 타입
+
+namespace BB {
+inline constexpr BBKey<float>    Time     {"time"};
+inline constexpr BBKey<EntityId> Target   {"target"};
+inline constexpr BBKey<Vector3>  TargetPos{"target_pos"};
+}
+```
+
+이름 충돌 검증, 쓰기 소유자 지정, 값의 수명 관리는 저장소 쪽 설계 문제다. 트리 입장에서 필요한 보장은 하나다 — 이 키를 읽으면 이 타입이 온다.
+
+### 미스는 값이 아니다
+
+BT의 제어 흐름은 Success와 Failure 두 값으로만 짜인다. 그래서 blackboard 읽기의 실패도 이 어휘로 번역돼야 한다. 키는 이 관점에서 두 부류로 갈린다.
+
+- *틱 드라이버가 보장하는 키*: 프레임 시간처럼 루트 tick 전에 항상 채워진다. 미스는 정상 입력이 아니라 배선 버그이므로 계약 위반으로 다룬다.
+- *존재 자체가 조건인 키*: 타깃, 마지막 목격 위치처럼 없을 수 있다. 미스는 정상 상태이고 조건 노드의 Failure로 번역된다.
+
+두 부류를 서로 다른 접근자로 나눈다.
 
 ```cpp
 class Blackboard {
 public:
-    template <class T> void Set(std::string_view key, T v) { data_[std::string(key)] = v; }
-    template <class T> T    Get(std::string_view key) const {
-        auto it = data_.find(std::string(key));
-        return it != data_.end() ? std::any_cast<T>(it->second) : T{};
-    }
-    bool Has(std::string_view key) const { return data_.count(std::string(key)) > 0; }
-private:
-    std::unordered_map<std::string, std::any> data_;
+    template <class T> void Set(BBKey<T> key, const T& v);
+
+    // 존재가 조건인 키 — 미스는 "없음"이지 값이 아니다
+    template <class T> std::optional<T> Get(BBKey<T> key) const;
+
+    // 드라이버가 매 틱 채우는 키 — 미스는 계약 위반이다
+    template <class T> T Require(BBKey<T> key) const;
+
+    template <class T> void Clear(BBKey<T> key);   // 수명이 끝난 값을 남기지 않는다
 };
 ```
+
+조건 잎과 행동 잎은 이 계약 위에서 각각 몇 줄로 닫힌다.
+
+```cpp
+Status HasTarget::Tick(Blackboard& bb) {
+    return bb.Get(BB::Target) ? Status::Success : Status::Failure;
+}
+
+Status MoveToTarget::Tick(Blackboard& bb) {
+    auto dst = bb.Get(BB::TargetPos);
+    if (!dst) return Status::Failure;              // 입력이 없으면 실행하지 않는다
+    return agent_.MoveTo(*dst) ? Status::Success : Status::Running;
+}
+```
+
+### 기본값을 돌려주는 읽기가 트리를 망가뜨린다
+
+미스에서 `T{}` 를 돌려주는 접근자는 호출부를 짧게 만들지만, 트리에 *없는 입력을 있는 입력으로* 넘긴다.
+
+```cpp
+// 반례: 미스를 값으로 위장하는 접근자
+template <class T> T Get(std::string_view key) const {
+    auto it = data_.find(std::string(key));
+    return it != data_.end() ? std::any_cast<T>(it->second)
+                             : T{};                // 미스가 0, false, 원점이 된다
+}
+```
+
+`: T{}` 한 줄이 세 가지를 동시에 무너뜨린다.
+
+- *잘못된 행동이 성공으로 보고된다*. 타깃 위치 키의 미스는 원점 $(0,0,0)$ 이 된다. MoveTo는 실패하지 않고 맵 원점까지 이동한 뒤 Success를 반환하며, 상위 Sequence는 아무 이상 없이 다음 자식으로 진행한다.
+- *두 종류의 Failure가 뭉개진다*. `bool` 키의 미스는 false다. 조건 노드는 Failure를 반환하고, 트리는 "타깃이 없다"와 "타깃 키를 아무도 쓴 적이 없다"를 구분할 수 없다. 앞의 것은 설계대로 동작한 것이고 뒤의 것은 배선 버그인데, 로그에는 같은 줄이 남는다.
+- *반복이 증상을 지운다*. polling BT는 매 틱 같은 조건을 다시 평가한다. 미스가 기본값으로 통과하면 같은 잘못된 판단이 초당 수십 번 되풀이되지만, 어느 틱에서도 오류로 승격되지 않는다. 예외 한 번이면 즉시 드러났을 문제가 재현 조건이 좁은 행동 이상으로만 남는다.
+
+실패 처리의 방향도 뒤집혀 있다. 위 접근자에서 타입 불일치는 `std::any_cast`의 예외로 즉시 터지고, 키 미스는 조용히 통과한다. 트리가 원하는 것은 그 반대다 — 타입 실수는 컴파일 시점에 막고, 미스는 호출부가 반드시 보고 Failure로 번역하게 만든다.
 
 ### 인스턴스 분리와 스코프
 
@@ -371,8 +433,8 @@ Unreal Engine의 Behavior Tree가 이 모델의 대표다. 데코레이터(조�
 
 ```cpp
 // 조건 데코레이터: blackboard 키를 구독, 변화 시 abort 신호
-void ConditionDecorator::OnBlackboardChanged(const std::string& key) {
-    if (key != observedKey_) return;
+void ConditionDecorator::OnBlackboardChanged(std::string_view key) {
+    if (key != observedKey_) return;                 // observedKey_ 는 구독한 BBKey 의 이름이다
     bool now = Evaluate(bb_);
     if (now != lastValue_) {
         lastValue_ = now;
@@ -509,7 +571,9 @@ struct NodeDebugInfo {
 
 ### Blackboard watch
 
-6절의 Blackboard 키-값을 실시간으로 들여다보는 창. "MoveTo가 엉뚱한 곳으로 간다"면 `targetPos` 값을 watch해 "타깃 위치가 잘못 설정됐다"를 확인한다. BT 노드 간 데이터가 전부 Blackboard를 거치므로, 그 키들이 *결정의 입력 전체* 다.
+6절의 Blackboard 키-값을 실시간으로 들여다보는 창. "MoveTo가 엉뚱한 곳으로 간다"면 타깃 위치 키를 watch해 "타깃 위치가 잘못 설정됐다"를 확인한다. BT 노드 간 데이터가 전부 Blackboard를 거치므로, 그 키들이 *결정의 입력 전체* 다.
+
+이 뷰는 값과 함께 *채워진 적이 있는가* 를 별도 표시로 보여야 한다. 6절의 읽기 계약에서 미스와 0은 다른 사건이고, 뷰가 둘을 같은 `0`으로 그리면 "아무도 쓰지 않은 키"라는 가장 흔한 배선 버그가 화면에서 사라진다. 마지막 작성자와 갱신 틱을 함께 남기면 "누가 언제 이 값을 넣었나"까지 한 화면에서 닫힌다.
 
 ### tick 트레이스 로그
 
@@ -522,7 +586,7 @@ BT의 전이 로그는 "프레임 N: Root→전투Seq→교전Sel→근접Seq→
 
 행동 트리는 행동을 트리로 *합성* 하고, 매 틱 루트에서 잎으로 평가를 흘려 실행할 행동을 고른다. Composite(Sequence/Selector/Parallel), Decorator, Leaf 세 종류와 Running/Success/Failure 세 반환값이 전부지만, 이 최소 구성으로 우선순위 폴백, 시간에 걸친 행동, 동시 실행, 조건 분리를 모두 표현한다. memory/reactive 변형이 "진행 유지"와 "조건 반응"을 가르고, 데코레이터가 빈도·반복·타임아웃을 행동에서 분리한다.
 
-BT의 진짜 가치는 모듈성이다. 서브트리를 재사용하고, Blackboard로 데이터를 인스턴스별로 분리하고, 디자이너가 트리를 조립하고 프로그래머가 잎을 구현하는 분업이 가능하다. polling BT의 반응성 비용은 event-driven의 abort 정책(Self/Lower Priority/Both)으로 키 변화 빈도에 비례하게 줄인다. 실전 트리는 우선순위 Selector·Guarded Sequence·Monitor+Action Parallel 같은 관용구의 다층 조합이다.
+BT의 진짜 가치는 모듈성이다. 서브트리를 재사용하고, Blackboard로 데이터를 인스턴스별로 분리하고, 디자이너가 트리를 조립하고 프로그래머가 잎을 구현하는 분업이 가능하다. 이 분업이 성립하려면 Blackboard 읽기가 미스를 값으로 위장하지 않아야 한다 — 트리의 어휘는 Success와 Failure뿐이므로, 입력의 부재는 기본값이 아니라 Failure로 번역돼야 잘못된 행동이 성공으로 보고되지 않는다. polling BT의 반응성 비용은 event-driven의 abort 정책(Self/Lower Priority/Both)으로 키 변화 빈도에 비례하게 줄인다. 실전 트리는 우선순위 Selector·Guarded Sequence·Monitor+Action Parallel 같은 관용구의 다층 조합이다.
 
 한계는 연속적 우선순위, 정확한 상태 복원, 런타임 계획 생성이다. 이 셋은 각각 효용 AI, 상태 스택, 계획 기반 AI의 영역이며, 실전 BT는 이들을 잎으로 품어 함께 쓴다. tick 경로 하이라이트와 blackboard watch 같은 시각적 디버깅 도구가 BT의 합성성을 실제로 다룰 수 있게 만든다. BT는 단독 해법이라기보다, 게임 AI 의사결정의 *조립 골격* 으로 자리 잡았다.
 

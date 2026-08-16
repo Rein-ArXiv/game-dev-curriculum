@@ -18,6 +18,7 @@ void CollisionScene::Update(float dt) {
     rotA_.Update();
     rotB_.Update();
 
+    // snippet-begin: gjk-auto-step
     if (mode_ == Mode::GJK && gjkAuto_) {
         gjkAccum_ += dt;
         if (gjkAccum_ > 0.4f) {
@@ -25,6 +26,7 @@ void CollisionScene::Update(float dt) {
             ++gjkStep_;
         }
     }
+    // snippet-end: gjk-auto-step
 }
 
 OBB2D CollisionScene::BuildOBB(DragHandle const& center, DragHandle const& rot,
@@ -237,12 +239,14 @@ void CollisionScene::DrawPanel(int px, int py, int pw, int ph) {
         GuiCheckBox(Rectangle{(float)(px + 8), (float)y, 16, 16},
                      " auto step", &gjkAuto_);
         y += 22;
+        // snippet-begin: gjk-step-buttons
         if (GuiButton(Rectangle{(float)(px + 8), (float)y, 90, 22}, "Step +")) {
             gjkStep_++;
         }
         if (GuiButton(Rectangle{(float)(px + 100), (float)y, 90, 22}, "Reset")) {
             gjkStep_ = 0;
         }
+        // snippet-end: gjk-step-buttons
         y += 28;
     }
 

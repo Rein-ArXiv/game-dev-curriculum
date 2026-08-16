@@ -452,6 +452,100 @@ cmake --build build --config Release
 
 `live bytes` 는 모든 프레임 끝에서 0이어야 정상이다. malloc은 Deallocate가 실제 free라 0, Arena는 Reset이 일괄 회수라 0, Pool/Slab은 Reset이 free list 재구성이라 0.
 
+### 자동 검증: `parts_allocator_tests`
+
+바로 위 문단이 HUD를 눈으로 읽으라는 요구다. 같은 요구를 창 없이 기계가 하도록 옮겨 놓은 것이 `allocator` 그룹이다. 네 할당자 전부에 대해 프레임 계약을 3프레임 연속으로 확인한다.
+
+<!-- snippet: tests/core_tests.cpp#TestEventBenchmarkContract -->
+```cpp
+// tests/core_tests.cpp — allocator 그룹
+
+void TestEventBenchmarkContract() {
+    constexpr std::size_t kTarget   = 200;
+    // ...
+    ppl::IAllocator* allocators[] = {&mallocAlloc, &arena, &pool, &slab};
+    static_assert(sizeof(allocators) / sizeof(allocators[0]) == ppl::kAllocatorCount,
+                  "EventBenchmark contract must cover every allocator toggle");
+
+    for (int a = 0; a < ppl::kAllocatorCount; ++a) {
+        const char* label = ppl::AllocatorName(static_cast<ppl::Allocator>(a));
+        ppl::IAllocator* alloc = allocators[a];
+
+        ppl::EventBenchmark bench;
+        bench.Init(kTarget);
+        CHECK_AT(bench.Target() == kTarget, label);
+
+        for (int frame = 0; frame < 3; ++frame) {
+            bench.RunFrame(alloc);
+            CHECK_AT(bench.LastFrameAllocCount() == kTarget, label);
+            CHECK_AT(bench.LastFrameAllocBytes() == kTarget * kNodeSize, label);
+            CHECK_AT(alloc->FrameAllocCount() == kTarget, label);
+            CHECK_AT(alloc->FrameAllocBytes() == kTarget * kNodeSize, label);
+            // HUD의 live bytes가 0이라는 것이 바로 이 줄이다.
+            CHECK_AT(alloc->LiveBytes() == 0, label);
+        }
+        // 누적 카운터는 3프레임 분이 그대로 쌓인다.
+        CHECK_AT(alloc->AllocCount() == 3 * kTarget, label);
+        CHECK_AT(alloc->FreeCount() == 3 * kTarget, label);
+        CHECK_AT(alloc->PeakBytes() == kTarget * kNodeSize, label);
+    }
+
+    // 일괄 회수가 실제로 일어났는지는 할당자 고유 상태로 확인한다.
+    CHECK(arena.Used() == 0);
+    CHECK(pool.InUse() == 0);
+    CHECK(pool.Free() == kTarget);
+    CHECK(slab.ClassInUse(1) == 0);  // 24바이트 요청 -> 32바이트 클래스
+    // ...
+}
+```
+
+`static_assert` 한 줄이 이 검사를 콤보박스에 묶어 둔다. 할당자 항목을 하나 더 늘리면 배열 길이와 `kAllocatorCount` 가 어긋나 *컴파일이* 멈춘다. 토글에는 보이는데 검증에는 없는 할당자가 생길 수 없다.
+
+풀 고갈은 별도 검사다. HUD에서 `alloc count` 가 `kEventCount` 보다 작아지는 상황의 계약을 그대로 고정한다.
+
+<!-- snippet: tests/core_tests.cpp#TestPoolExhaustion -->
+```cpp
+// tests/core_tests.cpp — allocator 그룹
+
+void TestPoolExhaustion() {
+    constexpr std::size_t kBlocks = 8;
+    ppl::PoolAllocator pool(32, 8, kBlocks);
+    // ...
+    // 블록을 다 쓴 뒤의 요청은 반드시 nullptr.
+    CHECK(pool.Allocate(32, 8) == nullptr);
+    CHECK(pool.InUse() == kBlocks);
+
+    // 하나 반납하면 그 슬롯이 그대로 재사용된다(free list LIFO).
+    pool.Deallocate(slots[3], 32);
+    CHECK(pool.InUse() == kBlocks - 1);
+    CHECK(pool.Free() == 1);
+    void* again = pool.Allocate(32, 8);
+    CHECK(again == slots[3]);
+    // ...
+}
+```
+
+```bash
+cmake -S . -B build
+cmake --build build --config Release
+ctest --test-dir build -C Release -R parts_allocator_tests --output-on-failure
+
+./build/parts_core_tests allocator              # Linux/macOS
+.\build\Release\parts_core_tests.exe allocator  # Windows
+```
+
+```text
+parts_core_tests: group `allocator`
+  allocator/AlignmentHelpers ... 5 check(s) ok
+  allocator/MallocAndArena ... 11 check(s) ok
+  allocator/PoolAndSlab ... 15 check(s) ok
+  allocator/PoolExhaustion ... 31 check(s) ok
+  allocator/EventBenchmarkContract ... 86 check(s) ok
+allocator: 5 test(s), 148 check(s), 0 failure(s)
+```
+
+`EventBenchmarkContract` 의 86개는 네 할당자 × (Target 1 + 3프레임 × 5 + 누적 3) = 76에, 일괄 회수 확인 4 + 풀 고갈 4 + allocator 없는 프레임 2를 더한 수다. 실패하면 어느 할당자에서 깨졌는지가 `[Arena]` 처럼 라벨로 함께 찍힌다.
+
 ### 검증 체크리스트
 
 - alloc ms가 0 → `alloc.get()` 이 nullptr이거나 `kEventCount = 0`. main 초기화 확인.

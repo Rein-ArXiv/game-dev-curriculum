@@ -35,6 +35,7 @@
 5. [큐브 메시와 셰이더](#5-큐브-메시와-셰이더)
 6. [Win32 + ImGui DX12 백엔드](#6-win32--imgui-dx12-백엔드)
 7. [빌드와 실행 결과](#7-빌드와-실행-결과)
+8. [골격의 자동 검증](#8-골격의-자동-검증)
 
 ---
 
@@ -998,11 +999,13 @@ void FrameTimer::EndFrame() {
 
 히스토리는 링 버퍼다. 240 칸을 `historyHead_` 가 순회하므로 그리기 직전에 한 번 선형화해야 시간 순서로 보인다.
 
-종료 순서에도 계약이 있다. ImGui 백엔드를 먼저 내리고, `D3D12Context::Shutdown()` 이 `Flush()` 로 GPU 완료를 보장한 뒤에야 `ComPtr` 들이 풀린다.
+종료 순서에도 계약이 있다. 마지막 프레임의 `EndFrame()` 은 `ExecuteCommandLists` + `Present` + `Signal` 만 하고 기다리지 않으므로, 종료 시점에 GPU 는 아직 그 프레임을 그리고 있을 수 있다. 그래서 **무엇을 놓기도 전에** `Flush()` 로 GPU 완료를 먼저 보장한다. 그 뒤에 ImGui 백엔드(폰트 텍스처·프레임별 정점/인덱스 버퍼·PSO·루트시그니처)를 내리고, 디버그 콜백을 떼고, timestamp query heap·readback 버퍼를 놓고, 마지막에 `D3D12Context::Shutdown()` 이 남은 `ComPtr` 들을 푼다. 순서가 뒤집히면 GPU 가 참조 중인 자원을 Release 하는 것이라 D3D12 에서 정의되지 않은 동작이다.
 
 <!-- snippet: src/app/app.cpp#App::Shutdown -->
 ```cpp
 void App::Shutdown() {
+    ctx_.Flush();
+
     ImGui_ImplDX12_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImPlot::DestroyContext();
@@ -1028,6 +1031,72 @@ build\Release\graphics_dx_lab.exe
 관측 항목 — 창 제목이 `graphics_dx_lab` 이고, 패널의 `objects` 가 10000 이며, 큐브 격자가 각자 다른 축으로 회전한다. 검은 화면이 나오면 `shaders/` 복사가 안 됐거나(`D3DCompileFromFile` 실패는 예외 메시지로 뜬다) 어댑터 선택이 실패한 것이다.
 
 Visual Studio 의 *Graphics Debugger* 또는 *PIX on Windows* 로 *드로우 콜 / state 단계별 디버깅* 가능. *RenderDoc* 도 DX12 지원.
+
+## 8. 골격의 자동 검증
+
+위의 관측 항목은 전부 사람 눈이 하는 일이다. 골격에서도 눈을 거치지 않고 판정할 수 있는 것이 둘 있다.
+
+하나는 *프레임 상수 합성* 이다. `MakeFrameCB` 는 D3D12 에도 Win32 에도 의존하지 않는 순수 함수라 결과 행렬을 그대로 계산해 볼 수 있다. 다른 하나는 *종료 순서* 다. `App::Shutdown()` 은 창·디바이스·ImGui 에 묶여 헤드리스로 링크할 수 없지만, 단계의 *순서* 만은 소스 텍스트에서 확인할 수 있다.
+
+계약 테스트 실행 파일 `graphics_dx_contract_tests` 는 앱 타깃과 같은 `CMakeLists.txt` 에 정의돼 있고, 인자로 받은 이름에 해당하는 검사 그룹만 돈다. 골격 몫을 부르는 등록은 이 한 줄이다.
+
+<!-- snippet: CMakeLists.txt@step01-target -->
+```cmake
+add_test(NAME graphics_dx_step01_skeleton     COMMAND graphics_dx_contract_tests step01)
+```
+
+```powershell
+cmake --build build --config Release
+ctest --test-dir build -C Release -R graphics_dx_step01 --output-on-failure
+build\Release\graphics_dx_contract_tests.exe step01
+```
+
+```text
+1/1 Test #2: graphics_dx_step01_skeleton ......   Passed    0.09 sec
+
+100% tests passed out of 1
+
+  [step01] frame_camera_matrix                         19 checks
+  [step01] shutdown_waits_for_gpu                      22 checks
+step01: 2 groups, 41 checks, 0 failures
+DirectX contract tests passed
+```
+
+두 줄의 그룹 이름과 판정 수가 곧 이 골격이 지키기로 한 계약의 전부다. 종료 순서 쪽은 `App::Shutdown()` 의 본문만 잘라 내 위치를 비교한다.
+
+<!-- snippet: tests/graphics_dx_contract_tests.cpp#TestShutdownWaitsForGpuBeforeRelease -->
+```cpp
+void TestShutdownWaitsForGpuBeforeRelease() {
+    const std::string source = StripLineComments(ReadLabSource("src/app/app.cpp"));
+    // ...
+    const size_t wait = body.find("ctx_.Flush()");
+    CHECK(wait != std::string::npos);
+    // ...
+    const char* const releases[] = {
+        "ImGui_ImplDX12_Shutdown()",
+        "ImGui_ImplWin32_Shutdown()",
+        "ImPlot::DestroyContext()",
+        "ImGui::DestroyContext()",
+        "debug_.Uninstall()",
+        "gpuTimer_.Shutdown()",
+        "ctx_.Shutdown()",
+    };
+    for (const char* step : releases) {
+        const size_t at = body.find(step);
+        CHECK(at != std::string::npos);
+        // ...
+        CHECK(at > wait);
+    }
+    // ...
+    CHECK(flushBody.find("Signal(") != std::string::npos);
+    CHECK(flushBody.find("WaitForSingleObject") != std::string::npos);
+    CHECK(flushBody.find("Signal(") < flushBody.find("WaitForSingleObject"));
+}
+```
+
+`ctx_.Flush()` 를 지우거나 해제 중 하나라도 그 앞으로 올리면 어느 해제가 앞섰는지 이름까지 찍고 깨진다. 마지막 세 줄은 `Flush()` 자신이 `Signal` 만 하고 끝나지 않는다는 것 — 대기 없는 Signal 은 보장이 아니다 — 을 못박는다.
+
+`MakeFrameCB` 쪽은 원점이 화면 중앙에 오는지, near / far 평면 위의 점이 깊이 0 과 1 로 사상되는지, 월드 +X 가 화면 오른쪽·+Y 가 위쪽인지, aspect 가 가로에만 걸리는지를 본다. 행렬 규약 하나만 뒤집혀도 — 예컨대 `XMMatrixTranspose` 를 빼면 — 화면을 띄우기 전에 여기서 먼저 깨진다.
 
 ---
 

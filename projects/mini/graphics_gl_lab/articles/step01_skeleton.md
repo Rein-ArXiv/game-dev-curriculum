@@ -42,6 +42,7 @@
 
 *Vsync OFF* 가 핵심 — Vsync ON 이면 *모든 모드가 16.67ms 에 도달* 해 *차이가 안 보임*. Vsync OFF 로 *진짜 GPU 비용* 측정.
 
+<!-- snippet: src/app/app.cpp#App::InitWindow -->
 ```cpp
 glfwSwapInterval(vsyncOn_ ? 1 : 0);   // 기본값은 false, 측정 시 OFF
 ```
@@ -99,6 +100,7 @@ graphics_gl_lab/
 
 `shaders/` 디렉토리가 *빌드 출력 옆에 자동 복사* 된다 (런타임 로드용).
 
+<!-- snippet: CMakeLists.txt -->
 ```cmake
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
@@ -110,6 +112,7 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
 
 `App::InitWindow` 가 *4.5 Core* 컨텍스트를 명시.
 
+<!-- snippet: src/app/app.cpp#App::InitWindow -->
 ```cpp
 glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
 glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
@@ -124,6 +127,7 @@ glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GL_TRUE);
 
 `App::InitGL` 이 glad 로더 + 기본 상태.
 
+<!-- snippet: src/app/app.cpp#App::InitGL -->
 ```cpp
 if (!gladLoadGL((GLADloadfunc)glfwGetProcAddress)) {
     throw std::runtime_error("gladLoadGL failed");
@@ -137,6 +141,7 @@ glDepthFunc(GL_LESS);
 
 `Scene::Build(10000)` 가 *cube 메시 한 개* 를 GPU 에 업로드 + *1만 ObjectTransform* 을 격자로 생성.
 
+<!-- snippet: src/scene/scene.cpp#Scene::Build -->
 ```cpp
 int side = (int)std::ceil(std::cbrt((double)objectCount));   // 22
 float spacing = 2.5f;
@@ -172,15 +177,18 @@ Uniform 캐시가 핵심 — 매 드로우마다 `glGetUniformLocation("uModel")
 
 기본 셰이더 (Lambertian).
 
+<!-- snippet: shaders/basic.frag#main -->
 ```glsl
 // fragment
 vec3 N = normalize(vNormalWS);
 vec3 L = normalize(uLightDir);
 float diff = max(dot(N, L), 0.0);
-vec3 ambient = 0.15 * uColor;
-vec3 diffuse = diff * uColor;
+vec3 ambient = 0.15 * vColor;
+vec3 diffuse = diff * vColor;
 FragColor = vec4(ambient + diffuse, 1.0);
 ```
+
+색이 `vColor` 인 점에 주의한다. `uColor` uniform 은 *정점 셰이더* 쪽에 있고, 프래그먼트 셰이더는 그것을 정점에서 받은 varying 으로만 본다.
 
 이 단계의 셰이더는 이 한 벌뿐이다 — 셰이딩 모델 선택도, 프로그램 전환도 없다.
 
@@ -188,16 +196,28 @@ FragColor = vec4(ambient + diffuse, 1.0);
 
 `FrameTimer` — `std::chrono::steady_clock` 기반 CPU ms 측정 + EMA + 240 프레임 히스토리.
 
+<!-- snippet: src/measure/frame_timer.cpp#FrameTimer::EndFrame -->
 ```cpp
 void FrameTimer::EndFrame() {
     auto now = Clock::now();
     std::chrono::duration<float, std::milli> ms = now - frameBegin_;
     lastFrameMs_ = ms.count();
-    emaFrameMs_ = emaFrameMs_ * 0.9f + lastFrameMs_ * 0.1f;
+
+    if (emaFrameMs_ <= 0.0f) {
+        emaFrameMs_ = lastFrameMs_;
+    } else {
+        emaFrameMs_ = emaFrameMs_ * (1.0f - kEmaAlpha) + lastFrameMs_ * kEmaAlpha;
+    }
+
     history_[(size_t)historyHead_] = lastFrameMs_;
     historyHead_ = (historyHead_ + 1) % kHistorySize;
+
+    prevBegin_    = frameBegin_;
+    hasPrevFrame_ = true;
 }
 ```
+
+EMA 는 첫 프레임에서 *씨앗* 을 넣는다 (`emaFrameMs_ <= 0` 이면 측정값을 그대로 대입). 0 에서 시작해 `α = 0.1` 로 수렴시키면 수십 프레임 동안 실제보다 낮은 ms 가 표시되기 때문이다. 마지막 두 줄은 `BeginFrame` 이 *이전 BeginFrame 과의 간격* 으로 dt 를 계산하기 위한 기록이며, 이 dt 가 `Scene::Update(dt)` 로 들어간다.
 
 ImPlot 그래프가 240 프레임 (약 4초 @ 60fps) 의 *ms 변화* 를 *시계열 plot*.
 
@@ -232,6 +252,59 @@ build\Release\graphics_gl_lab.exe
 - ImPlot 시계열 — frame ms 변동.
 
 저사양 GPU (Intel UHD 등) 에서 *1만 드로우콜 × 60fps = 60만 콜 / 초* 가 *드로우콜 오버헤드만으로 ms 가 16+* 가 나오기 쉽다. 이 골격의 관측 가능한 결과가 바로 그 *개별 드로우콜 비용* 이다.
+
+### 이 골격이 맞게 깔렸는지 확인
+
+창을 띄우는 것 말고도 확인할 수단이 있다. 격자 씬의 카메라 행렬과 FrameTimer 는 GL 호출이 없는 계산이라 컨텍스트 없이 그대로 검사된다.
+
+```powershell
+ctest --test-dir build -C Release -R gl_step01 --output-on-failure
+```
+
+```text
+    Start 3: gl_step01_skeleton
+1/1 Test #3: gl_step01_skeleton ...............   Passed    0.03 sec
+
+100% tests passed out of 1
+```
+
+이 항목이 무엇을 돌렸는지는 테스트 실행 파일을 직접 부르면 이름으로 나온다. 첫 인자가 필터다.
+
+```powershell
+build\Release\graphics_gl_contract_tests.exe step01   # Linux/macOS: ./build/graphics_gl_contract_tests step01
+```
+
+```text
+[step01] camera_matrices ... ok
+[step01] frame_timer_history ... ok
+graphics_gl_contract_tests: 2/2 passed (filter=step01)
+```
+
+`camera_matrices` 는 `ComputeCamera(objectCount, aspect)` 가 만든 view / proj 로 격자 최외곽 큐브 여덟 개를 변환해 *전부 클립 볼륨 안에 들어오는지* 를 본다. 카메라가 격자 크기에 비례해 물러나지 않으면 (`camDist` 계산을 상수로 바꾸면) 큐브가 화면 밖으로 나가 이 단언이 깨진다.
+
+`frame_timer_history` 는 위 `EndFrame` 의 두 규칙을 고정한다 — *EMA 씨앗* 과 *240 슬롯 링*.
+
+<!-- snippet: tests/graphics_gl_contract_tests.cpp#TestFrameTimerHistory -->
+```cpp
+// 첫 프레임 — dt 는 0 이고 EMA 는 측정값을 그대로 씨앗으로 받는다.
+timer.BeginFrame();
+SpinFor(std::chrono::microseconds(300));
+timer.EndFrame();
+CHECK(timer.LastDeltaSeconds() == 0.0f);
+// ...
+CHECK(Near(timer.EmaFrameMs(), timer.LastFrameMs(), 1e-6f));
+CHECK(timer.HistoryHead() == 1);
+// ...
+const float ema1 = timer.EmaFrameMs();
+timer.BeginFrame();
+SpinFor(std::chrono::microseconds(2000));
+timer.EndFrame();
+const float last2 = timer.LastFrameMs();
+// ...
+CHECK(Near(timer.EmaFrameMs(), ema1 * 0.9f + last2 * 0.1f, 1e-3f));
+```
+
+시간 값 자체는 기계마다 다르므로 고정한 것은 *계산 규칙* 이다. 마지막 줄은 두 값을 읽어 `α = 0.1` 의 혼합을 직접 다시 계산하므로, 실제 소요 시간과 무관하게 성립한다. 씨앗 대입을 지우면 첫 줄들이, `α` 를 바꾸면 마지막 줄이 갈린다.
 
 ---
 

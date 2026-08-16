@@ -124,6 +124,7 @@ std::unique_ptr<IIoBackend> FileIoWorkload::CreateEffectiveBackend() {
     return backend;
 }
 
+// snippet-begin: worker-error
 void FileIoWorkload::ClearWorkerError() {
     std::lock_guard<std::mutex> lock(workerErrorMutex_);
     workerError_ = nullptr;
@@ -142,6 +143,7 @@ void FileIoWorkload::RethrowWorkerError() {
     }
     if (error) std::rethrow_exception(error);
 }
+// snippet-end: worker-error
 
 void FileIoWorkload::GenerateFixture(std::size_t fileCount,
                                      std::size_t fileBytes) {
@@ -358,6 +360,7 @@ void FileIoWorkload::Shutdown() {
 // 코루틴 모드 — ucontext 기반 stackful coroutine, round-robin driver.
 // ============================================================================
 
+// snippet-begin: coro-trampoline
 namespace {
 
 // makecontext의 trampoline 진입에서 *현재 어느 인스턴스의 어느 idx인가* 를
@@ -375,6 +378,26 @@ static void SklCoroTrampoline(int idx) {
 }
 
 }  // extern "C"
+// snippet-end: coro-trampoline
+
+bool FileIoWorkload::SetupCoroContext(Coroutine& c, int idx) {
+    if (::getcontext(&c.ctx) != 0) {
+        std::fprintf(stderr, "skl: getcontext failed\n");
+        RecordWorkerError(std::make_exception_ptr(
+            std::runtime_error("getcontext failed")));
+        c.done = true;
+        return false;
+    }
+    c.ctx.uc_stack.ss_sp   = c.stack.data();
+    c.ctx.uc_stack.ss_size = c.stack.size();
+    c.ctx.uc_link          = &driverCtx_;
+    c.done                 = false;
+    ::makecontext(&c.ctx,
+                  reinterpret_cast<void (*)()>(SklCoroTrampoline),
+                  1,
+                  idx);
+    return true;
+}
 
 void FileIoWorkload::StartCoroutinePool() {
     queueSync_ = CreateSync(syncType_);
@@ -421,25 +444,21 @@ void FileIoWorkload::StartCoroutinePool() {
 
             // ucontext는 normal return 후 재진입할 수 없으므로 사이클마다
             // 같은 stack 위에 context entry를 새로 만든다.
+            //
+            // 셋업 한 건을 별도 함수(SetupCoroContext)로 뺀 이유가 있다.
+            // getcontext 는 setjmp 처럼 "두 번 반환할 수 있는" 함수라, 같은
+            // 프레임에서 그 호출을 넘어 살아 있는 지역 변수는 컴파일러가
+            // clobber 후보로 본다(-Wclobbered). 실제로는 getcontext 가 저장한
+            // 복귀 지점을 바로 다음 makecontext 가 트램폴린 진입점으로 덮어써
+            // 이 지점으로 되돌아오지 않지만, 컴파일러는 그것을 증명할 수 없다.
+            // 함수를 분리하면 루프 변수와 setupOk 가 그 프레임에 없어 경고가
+            // 사라지고, 누군가 나중에 setcontext(&c.ctx) 경로를 추가해도
+            // 이 루프 상태가 깨지지 않는다.
             bool setupOk = true;
             for (std::size_t i = 0; i < coros_.size(); ++i) {
-                auto& c = coros_[i];
-                if (::getcontext(&c.ctx) != 0) {
-                    std::fprintf(stderr, "skl: getcontext failed\n");
-                    RecordWorkerError(std::make_exception_ptr(
-                        std::runtime_error("getcontext failed")));
-                    c.done = true;
+                if (!SetupCoroContext(coros_[i], static_cast<int>(i))) {
                     setupOk = false;
-                    continue;
                 }
-                c.ctx.uc_stack.ss_sp   = c.stack.data();
-                c.ctx.uc_stack.ss_size = c.stack.size();
-                c.ctx.uc_link          = &driverCtx_;
-                c.done                 = false;
-                ::makecontext(&c.ctx,
-                              reinterpret_cast<void (*)()>(SklCoroTrampoline),
-                              1,
-                              static_cast<int>(i));
             }
             if (!setupOk) {
                 workerCycleAck_.fetch_add(1, std::memory_order_release);

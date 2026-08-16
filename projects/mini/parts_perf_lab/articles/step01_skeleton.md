@@ -483,6 +483,58 @@ actual fps:   747
 
 수치는 머신마다 다르다. update가 draw보다 한 자릿수 빠른 건 *순수 산술 루프* 가 *raylib `DrawPixel` 1만 호출* 보다 빠르기 때문이다. 이 비대칭 때문에 그리기 비용을 update 비용과 섞어 재면 시뮬 최적화의 효과가 묻힌다.
 
+### 자동 검증: `parts_skeleton_tests`
+
+화면을 눈으로 보는 것과 별개로, 창을 열지 않고 도는 검증 타깃이 함께 빌드된다. `parts_core_tests` 는 raylib을 링크하지 않는 계산 코어 전용 실행 파일이고, 인자로 그룹 이름 하나를 받아 그 부분만 돈다. 여기서 만든 `FrameTimer` 의 그룹 이름은 `skeleton` 이고, CMake가 그것을 `parts_skeleton_tests` 라는 ctest 이름으로 등록한다.
+
+무엇을 확인하는가는 검사 코드가 직접 말한다. `FrameTimer` 가 하는 일은 *update와 draw를 나눠 재는 것* 과 *그 값을 600칸 링 버퍼에 쌓는 것* 둘뿐이라, 검사도 그 둘이다.
+
+<!-- snippet: tests/core_tests.cpp#TestFrameTimerWindow -->
+```cpp
+// tests/core_tests.cpp — skeleton 그룹
+
+void TestFrameTimerWindow() {
+    ppl::FrameTimer timer;
+    CHECK(timer.Head() == 0);
+    CHECK(timer.Filled() == 0);
+    CHECK(timer.LastTotalMs() == 0.0f);
+    // ...
+    // total은 두 구간의 합이다. 한쪽만 재거나 겹쳐 재면 이 등식이 깨진다.
+    CHECK(timer.LastTotalMs() == timer.LastUpdateMs() + timer.LastDrawMs());
+    // ...
+    // 용량을 다 채우면 head가 0으로 감기고 filled는 kCapacity에서 멈춘다.
+    constexpr std::size_t kCap = ppl::FrameTimer::kCapacity;
+    for (std::size_t i = 1; i < kCap; ++i) timer.CommitFrame();
+    CHECK(timer.Head() == 0);
+    CHECK(timer.Filled() == kCap);
+    timer.CommitFrame();
+    CHECK(timer.Head() == 1);
+    CHECK(timer.Filled() == kCap);
+}
+```
+
+`LastTotalMs()` 등식은 측정 구간이 어긋났는지를 잡는다. 링 버퍼 포화 검사는 `filled_` 가 `kCapacity` 를 넘어 자라지 않는다는 것 — 그래프가 읽을 구간이 배열 밖으로 나가지 않는 근거다.
+
+빌드하고 그 그룹만 돌린다.
+
+```bash
+cmake -S . -B build
+cmake --build build --config Release
+ctest --test-dir build -C Release -R parts_skeleton_tests --output-on-failure
+
+# ctest가 부르는 것과 같은 실행. 그룹 이름을 인자로 준다.
+./build/parts_core_tests skeleton              # Linux/macOS
+.\build\Release\parts_core_tests.exe skeleton  # Windows
+```
+
+```text
+parts_core_tests: group `skeleton`
+  skeleton/FrameTimerWindow ... 14 check(s) ok
+skeleton: 1 test(s), 14 check(s), 0 failure(s)
+```
+
+`14 check(s)` 가 이 그룹의 지문이다. 검사를 지우거나 조건을 느슨하게 만들면 이 수부터 줄어들고, 실패하면 `ok` 자리가 `FAILED` 로 바뀌면서 어긋난 단언의 파일·줄 번호가 stderr에 찍힌다.
+
 ### 검증 체크리스트
 
 코드를 따라 쳤는데 동작이 이상하면 다음을 확인한다.

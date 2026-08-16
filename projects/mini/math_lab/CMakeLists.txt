@@ -56,9 +56,32 @@ add_executable(${PROJECT_NAME}
 )
 
 enable_testing()
-add_executable(math_core_tests tests/core_tests.cpp)
+# GUI 없이 도는 코어 검증. algo/ 는 헤더온리라 소스가 필요 없고, 화면 분할 계산인
+# ComputeLayout 만 scene_chrome.cpp 에 있어 함께 컴파일한다(그리기 함수는 부르지 않는다).
+add_executable(math_core_tests
+    tests/core_tests.cpp
+    src/ui/scene_chrome.cpp)
 target_include_directories(math_core_tests PRIVATE src)
 target_link_libraries(math_core_tests PRIVATE raylib)
+
+# 실행 단위를 step 입도로 나눈다. 인자는 core_tests.cpp 의 kCases 표에 있는 step 키고,
+# ctest 이름은 그 step 의 문서 이름과 같다 — 어느 step 이 깨졌는지 이름만 보고 안다.
+set(MATH_LAB_STEPS
+    step01_skeleton
+    step02_rotation
+    step03_interpolation
+    step04_noise
+    step05_collision
+    step06_spatial
+    step07_sdf
+    step08_projection)
+
+foreach(step IN LISTS MATH_LAB_STEPS)
+    string(SUBSTRING "${step}" 0 6 step_key)
+    add_test(NAME math_${step} COMMAND math_core_tests "${step_key}")
+endforeach()
+
+# step 필터 없이 표 전체를 도는 타깃. 위 step 타깃의 합집합이다.
 add_test(NAME math_core_tests COMMAND math_core_tests)
 
 target_include_directories(${PROJECT_NAME} PRIVATE

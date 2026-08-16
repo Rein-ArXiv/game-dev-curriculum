@@ -3,6 +3,10 @@
 //
 // 링크되는 제품 TU: src/scene/scene_record.cpp, src/barrier/barrier_helpers.cpp,
 // src/descriptor/heap_manager.cpp, src/measure/timestamp_query.cpp.
+//
+// 실행 단위는 step 입도다. 인자 없이 부르면 전부 돌고, `step03` 같은 step 이름이나
+// 그룹 이름 하나를 argv[1] 로 넘기면 그 몫만 돈다. 어느 그룹이 어느 step 소속인지는
+// 파일 끝의 kCases 표가 정한다 — 기준은 *그 step 이 무엇을 추가했는가* 다.
 
 #include "app/frame_cb.h"
 #include "barrier/barrier_helpers.h"
@@ -14,7 +18,10 @@
 
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <iostream>
+#include <iterator>
+#include <string>
 #include <vector>
 
 using namespace DirectX;
@@ -22,10 +29,14 @@ using namespace DirectX;
 namespace {
 
 int failures = 0;
+// 실행된 판정 수. step 별 타깃이 "이 step 의 검사가 실제로 돌았다" 를 서로 다른
+// 수로 보고하게 만드는 값이다 — 통과 문구만으로는 어느 step 을 돌렸는지 모른다.
+int checks = 0;
 constexpr UINT ninetySix = 96;
 
 #define CHECK(expr)                                                          \
     do {                                                                     \
+        ++checks;                                                            \
         if (!(expr)) {                                                       \
             std::cerr << "CHECK failed: " #expr << " (" << __FILE__ << ':' \
                       << __LINE__ << ")\n";                                  \
@@ -151,7 +162,10 @@ void TestDrawSubmissions() {
 }
 
 // ---------------------------------------------------------------------------
-// Step 3/4 — Scene::RecordDraw 가 실제로 기록하는 명령 검증.
+// Step 3 — Scene::RecordDraw 가 실제로 기록하는 명령 검증.
+//
+// 루트 시그니처 정책 몫은 이 절에 두지 않는다. RootSigPolicy 와 루트 상수 슬롯
+// 상수는 step04 가 추가한 것이므로 아래 Step 4 절이 따로 본다.
 // ---------------------------------------------------------------------------
 
 struct RecordResult {
@@ -185,9 +199,7 @@ void TestSceneRecordsPerDraw() {
     CHECK(r.cmd.vertexBufferSets == 1);
     CHECK(r.cmd.indexBufferSets == 1);
 
-    // (b) RootSigPolicy::PerDraw -> Scene 내부 SetGraphicsRootSignature 100회.
-    CHECK(r.cmd.rootSigSets.size() == 100);
-    for (auto* rs : r.cmd.rootSigSets) CHECK(rs == FakeRootSig());
+    // (b) RootSigPolicy 몫은 step04 의 TestRootSigPolicyCallCounts 로 옮겼다.
 
     // (c) PsoSwitchPolicy::PerDraw -> SetPipelineState 100회.
     CHECK(r.cmd.psoSets.size() == 100);
@@ -208,16 +220,14 @@ void TestSceneRecordsPerDraw() {
     if (!r.cmd.rootConsts.empty()) CHECK(r.cmd.rootConsts[0].data[0] == 0u);
 }
 
-void TestSceneRecordsGlobalPolicies() {
-    // (b) RootSigPolicy::Global -> Scene 은 RootSig 를 건드리지 않는다.
+void TestSceneRecordsGlobalPsoPolicy() {
     // (c) PsoSwitchPolicy::PerPass -> Scene 은 PSO 를 건드리지 않는다.
+    // 같은 실행의 RootSig 쪽 몫은 step04 가 본다.
     RecordResult r;
     RunRecord(r, 100, dxlab::DrawMode::PerDraw, dxlab::RootSigPolicy::Global,
               dxlab::PsoSwitchPolicy::PerPass);
-    CHECK(r.cmd.rootSigSets.empty());
     CHECK(r.cmd.psoSets.empty());
     CHECK(r.cmd.draws.size() == 100);
-    CHECK(r.counters.rootSigSets == 0);
     CHECK(r.counters.pipelineSets == 0);
 }
 
@@ -282,6 +292,29 @@ void TestRecordedSubmissionsMatchHelper() {
         CHECK(r.cmd.draws.size() == 1);
         if (!r.cmd.draws.empty()) CHECK(r.cmd.draws[0].instanceCount == 0);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Step 4 — RootSigPolicy 와 루트 상수 슬롯 규약.
+// ---------------------------------------------------------------------------
+
+// (b) 정책이 기록부의 SetGraphicsRootSignature 호출 수를 바꾼다.
+void TestRootSigPolicyCallCounts() {
+    // Per-Draw -> 드로우마다 한 번, 전부 같은 루트 시그니처 포인터.
+    RecordResult perDraw;
+    RunRecord(perDraw, 100, dxlab::DrawMode::PerDraw,
+              dxlab::RootSigPolicy::PerDraw, dxlab::PsoSwitchPolicy::PerDraw);
+    CHECK(perDraw.cmd.rootSigSets.size() == 100);
+    for (auto* rs : perDraw.cmd.rootSigSets) CHECK(rs == FakeRootSig());
+    CHECK(perDraw.counters.rootSigSets == 100);
+
+    // Global -> 기록부는 루트 시그니처를 한 번도 건드리지 않는다. 프레임 루프가
+    // 패스 시작에 부르는 1 회는 기록부 몫이 아니다.
+    RecordResult global;
+    RunRecord(global, 100, dxlab::DrawMode::PerDraw,
+              dxlab::RootSigPolicy::Global, dxlab::PsoSwitchPolicy::PerPass);
+    CHECK(global.cmd.rootSigSets.empty());
+    CHECK(global.counters.rootSigSets == 0);
 }
 
 // (e) 루트 상수 슬롯 규약이 루트 시그니처 예산과 정확히 맞물리는지.
@@ -662,6 +695,116 @@ void TestTimestampBeginWaitsBeforeOverwrite() {
 }
 
 // ---------------------------------------------------------------------------
+// Step 1 — 종료 순서. GPU 완료 대기가 자원 해제보다 *먼저* 와야 한다.
+//
+// src/app/app.cpp 는 Win32 창 + 실제 D3D12 디바이스 + ImGui 백엔드에 묶여 있어
+// 헤드리스로 링크할 수 없다. 그래서 이 계약만은 소스 텍스트에서 확인한다.
+// 실재했던 결함: 대기(Flush)가 *마지막* ctx_.Shutdown() 안에서야 일어나서, 그
+// 전에 ImGui 폰트 텍스처·프레임별 정점/인덱스 버퍼·PSO·루트시그니처와 timestamp
+// query heap·readback 버퍼를 GPU 가 아직 참조 중인 상태로 Release 했다.
+// ---------------------------------------------------------------------------
+
+#ifndef DXLAB_SOURCE_DIR
+#error "DXLAB_SOURCE_DIR 이 정의되지 않았습니다 (CMakeLists.txt 참조)."
+#endif
+
+std::string ReadLabSource(const char* relative) {
+    const std::string path = std::string(DXLAB_SOURCE_DIR) + "/" + relative;
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return {};
+    return std::string(std::istreambuf_iterator<char>(in),
+                       std::istreambuf_iterator<char>());
+}
+
+// `//` 줄 주석 제거. UTF-8 후속 바이트는 항상 0x80 이상이라 '/' 와 겹치지 않으므로
+// 바이트 단위 주사로 충분하다. (이 파일들에 블록 주석·문자열 리터럴은 없다.)
+std::string StripLineComments(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    bool inComment = false;
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '\n') {
+            inComment = false;
+            out.push_back('\n');
+            continue;
+        }
+        if (!inComment && text[i] == '/' && i + 1 < text.size() &&
+            text[i + 1] == '/') {
+            inComment = true;
+        }
+        if (!inComment) out.push_back(text[i]);
+    }
+    return out;
+}
+
+// 시그니처 뒤 중괄호 짝을 세어 함수 본문만 잘라낸다.
+std::string ExtractFunctionBody(const std::string& source,
+                                const std::string& signature) {
+    const size_t sig = source.find(signature);
+    if (sig == std::string::npos) return {};
+    const size_t open = source.find('{', sig);
+    if (open == std::string::npos) return {};
+    int depth = 0;
+    for (size_t i = open; i < source.size(); ++i) {
+        if (source[i] == '{') {
+            ++depth;
+        } else if (source[i] == '}') {
+            if (--depth == 0) return source.substr(open + 1, i - open - 1);
+        }
+    }
+    return {};
+}
+
+void TestShutdownWaitsForGpuBeforeRelease() {
+    const std::string source = StripLineComments(ReadLabSource("src/app/app.cpp"));
+    CHECK(!source.empty());
+    if (source.empty()) return;
+
+    const std::string body = ExtractFunctionBody(source, "void App::Shutdown()");
+    CHECK(!body.empty());
+    if (body.empty()) return;
+
+    // 대기는 direct queue 에 새 fence 값을 Signal 하고 그 값까지 블록하는
+    // D3D12Context::Flush 여야 한다. 이름이 바뀌면 여기서 시끄럽게 터진다.
+    const size_t wait = body.find("ctx_.Flush()");
+    CHECK(wait != std::string::npos);
+    if (wait == std::string::npos) return;
+
+    // GPU 가 참조 중일 수 있는 자원을 놓는 단계들 — 전부 대기 뒤에 와야 한다.
+    const char* const releases[] = {
+        "ImGui_ImplDX12_Shutdown()",
+        "ImGui_ImplWin32_Shutdown()",
+        "ImPlot::DestroyContext()",
+        "ImGui::DestroyContext()",
+        "debug_.Uninstall()",
+        "gpuTimer_.Shutdown()",
+        "ctx_.Shutdown()",
+    };
+    for (const char* step : releases) {
+        const size_t at = body.find(step);
+        CHECK(at != std::string::npos);
+        if (at == std::string::npos) continue;
+        if (at <= wait) {
+            std::cerr << "  자원 해제 `" << step << "` 가 GPU 대기보다 앞섭니다.\n";
+        }
+        CHECK(at > wait);
+    }
+
+    // ctx_.Shutdown() 도 자체 Flush 를 갖지만, 그것은 *마지막* 단계라 위의
+    // 해제들을 덮지 못한다 — 그게 원래 결함이었다.
+    const std::string ctxSource =
+        StripLineComments(ReadLabSource("src/device/d3d12_context.cpp"));
+    CHECK(!ctxSource.empty());
+    const std::string flushBody =
+        ExtractFunctionBody(ctxSource, "void D3D12Context::Flush()");
+    CHECK(!flushBody.empty());
+    // Flush 는 Signal 한 뒤 반드시 기다린다(대기 없는 Signal 은 보장이 아니다).
+    CHECK(flushBody.find("Signal(") != std::string::npos);
+    CHECK(flushBody.find("WaitForSingleObject") != std::string::npos);
+    CHECK(flushBody.find("Signal(") < flushBody.find("WaitForSingleObject"));
+}
+
+// ---------------------------------------------------------------------------
 // 항목 13 (3) — 변환 결과.
 // ---------------------------------------------------------------------------
 
@@ -831,28 +974,207 @@ void TestInstanceUploadMatchesRootConstants() {
     CHECK(rotated);
 }
 
+// ---------------------------------------------------------------------------
+// Step 7 — 스케일 전환. `Scene::Rebuild` 는 `BuildObjects` 로 격자를 다시 만들고
+// `EnsureInstanceBuffer` 로 인스턴스 업로드 버퍼를 다시 확보한다. 앞의 것은
+// 디바이스가 필요 없으므로 여기서 제품 코드를 그대로 돌리고, 뒤의 것은
+// "저장소 용량 밖을 쓰지 않는다" 는 계약만 헤드리스로 확인한다.
+// ---------------------------------------------------------------------------
+
+void TestSceneRebuildScales() {
+    dxlab::Scene scene;
+    // 패널 콤보가 오가는 세 규모. 마지막에 작은 쪽으로 되돌아온다 —
+    // 재빌드가 이전 격자를 지우지 않으면 여기서 수가 누적돼 드러난다.
+    const int scales[] = {1000, 10000, 100000, 1000};
+    for (int count : scales) {
+        scene.BuildObjects(count);
+        CHECK(scene.ObjectCount() == count);
+        // 규모별 제출 수 예측이 규모를 따라간다.
+        CHECK(dxlab::ExpectedDrawSubmissions(dxlab::DrawMode::PerDraw, count) ==
+              count);
+        CHECK(dxlab::ExpectedDrawSubmissions(dxlab::DrawMode::Instanced, count) == 1);
+
+        // Instanced 경로는 규모와 무관하게 드로우 1 회이고, 그 한 번의 instance
+        // count 가 곧 오브젝트 수다. 이것이 100k 에서 CPU 가 무너지지 않는 이유다.
+        FakeCmdList cmd;
+        dxlab::GlCounters counters{};
+        scene.RecordDraw(&cmd, dxlab::DrawMode::Instanced,
+                         dxlab::RootSigPolicy::Global,
+                         dxlab::PsoSwitchPolicy::PerPass, FakeRootSig(),
+                         FakePsoA(), nullptr, counters);
+        CHECK(cmd.draws.size() == 1);
+        if (!cmd.draws.empty()) CHECK(cmd.draws[0].instanceCount == (UINT)count);
+        CHECK(counters.instancedDraws == 1);
+        CHECK(counters.drawCalls == 0);
+    }
+
+    // Per-Draw 는 규모가 그대로 드로우 수가 된다 — 표의 100k · Per-Draw 행이
+    // 실용 불가인 이유가 이 비례다. 기록 자체는 1,000 으로 확인한다.
+    scene.BuildObjects(1000);
+    FakeCmdList perDraw;
+    dxlab::GlCounters perDrawCounters{};
+    scene.RecordDraw(&perDraw, dxlab::DrawMode::PerDraw,
+                     dxlab::RootSigPolicy::Global,
+                     dxlab::PsoSwitchPolicy::PerPass, FakeRootSig(),
+                     FakePsoA(), nullptr, perDrawCounters);
+    CHECK(perDraw.draws.size() == 1000);
+    CHECK(perDrawCounters.drawCalls == 1000);
+}
+
+void TestSceneRebuildIsRepeatable() {
+    // 고정 시드라 같은 규모로 되돌아오면 같은 격자가 나온다. 규모를 왕복해도
+    // 측정이 재현된다는 전제이자, 재빌드가 앞 규모의 상태를 남기지 않는다는 확인.
+    const int kObjects = 1000;
+    const size_t kProbe = 16;           // 앞 몇 칸만 대조해도 시드 동일성은 드러난다.
+    std::vector<dxlab::Instance> first((size_t)kObjects), second((size_t)kObjects);
+
+    dxlab::Scene scene;
+    dxlab::GlCounters counters{};
+
+    scene.BindInstanceStorage(first.data(), first.size());
+    scene.BuildObjects(kObjects);
+    FakeCmdList c1;
+    scene.RecordDraw(&c1, dxlab::DrawMode::Instanced, dxlab::RootSigPolicy::Global,
+                     dxlab::PsoSwitchPolicy::PerPass, FakeRootSig(), FakePsoA(),
+                     nullptr, counters);
+
+    scene.BuildObjects(10000);          // 다른 규모를 거쳤다가,
+    scene.BindInstanceStorage(second.data(), second.size());
+    scene.BuildObjects(kObjects);       // 같은 규모로 되돌아온다.
+    FakeCmdList c2;
+    scene.RecordDraw(&c2, dxlab::DrawMode::Instanced, dxlab::RootSigPolicy::Global,
+                     dxlab::PsoSwitchPolicy::PerPass, FakeRootSig(), FakePsoA(),
+                     nullptr, counters);
+
+    for (size_t i = 0; i < kProbe; ++i) {
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c)
+                CHECK(NearF(first[i].model.m[r][c], second[i].model.m[r][c]));
+        CHECK(NearF(first[i].color.x, second[i].color.x));
+        CHECK(NearF(first[i].color.y, second[i].color.y));
+        CHECK(NearF(first[i].color.z, second[i].color.z));
+    }
+}
+
+void TestInstanceStorageCapacityClamp() {
+    // 규모를 키우는 순간 격자는 이미 커졌는데 인스턴스 버퍼는 아직 이전 용량일
+    // 수 있다. 그때 기록부가 용량 밖을 쓰면 남의 메모리를 밟는다.
+    const size_t capacity = 16;
+    const int objectCount = 64;
+    const float sentinel = -12345.0f;
+    // 저장소는 오브젝트 수만큼 잡되 *용량은 그보다 작게* 알린다. 클램프가
+    // 사라지면 뒤 칸이 덮여 CHECK 가 깨진다 — 실제 버퍼 밖을 밟아 죽는 대신
+    // 어디까지 썼는지가 그대로 드러난다.
+    std::vector<dxlab::Instance> storage((size_t)objectCount);
+    for (auto& inst : storage) inst.model.m[3][3] = sentinel;
+
+    dxlab::Scene scene;
+    scene.BindInstanceStorage(storage.data(), capacity);
+    scene.BuildObjects(objectCount);    // 알린 용량보다 큰 격자.
+
+    FakeCmdList cmd;
+    dxlab::GlCounters counters{};
+    scene.RecordDraw(&cmd, dxlab::DrawMode::Instanced, dxlab::RootSigPolicy::Global,
+                     dxlab::PsoSwitchPolicy::PerPass, FakeRootSig(), FakePsoA(),
+                     nullptr, counters);
+
+    // 앞 capacity 칸은 채워졌고(alpha 1), 뒤 여유 칸은 손대지 않았다.
+    for (size_t i = 0; i < capacity; ++i) {
+        CHECK(NearF(storage[i].color.w, 1.0f));
+        CHECK(NearF(storage[i].model.m[3][3], 1.0f));
+    }
+    for (size_t i = capacity; i < storage.size(); ++i)
+        CHECK(NearF(storage[i].model.m[3][3], sentinel));
+
+    // 제출은 저장소 용량이 아니라 오브젝트 수를 따른다.
+    CHECK(cmd.draws.size() == 1);
+    if (!cmd.draws.empty())
+        CHECK(cmd.draws[0].instanceCount == (UINT)objectCount);
+}
+
+// ---------------------------------------------------------------------------
+// step 별 실행 단위. 어느 그룹이 어느 step 소속인지는 *그 step 이 무엇을
+// 추가했는지* 로 정한다 — 각 step 문서의 "이 step 이 추가·변경하는 파일" 표가
+// 그 근거다.
+// ---------------------------------------------------------------------------
+
+struct TestCase {
+    int step;
+    const char* name;
+    void (*fn)();
+};
+
+const TestCase kCases[] = {
+    // step01 — 골격. 프레임 상수 합성과 종료 순서.
+    {1, "frame_camera_matrix",                   &TestFrameCamera},
+    {1, "shutdown_waits_for_gpu",                &TestShutdownWaitsForGpuBeforeRelease},
+    // step02 — 타임스탬프 ring buffer 와 fence 완료 판정.
+    {2, "slot_ready_predicate",                  &TestSlotReadyPredicate},
+    {2, "timestamp_poll_waits_for_fence",        &TestTimestampPollWaitsForFence},
+    {2, "timestamp_begin_waits_before_overwrite",&TestTimestampBeginWaitsBeforeOverwrite},
+    // step03 — 드로우 모드와 PSO 변경 빈도.
+    {3, "draw_submissions_helper",               &TestDrawSubmissions},
+    {3, "records_per_draw",                      &TestSceneRecordsPerDraw},
+    {3, "records_global_pso_policy",             &TestSceneRecordsGlobalPsoPolicy},
+    {3, "records_instanced",                     &TestSceneRecordsInstanced},
+    {3, "records_per_material",                  &TestSceneRecordsPerMaterial},
+    {3, "recorded_matches_helper",               &TestRecordedSubmissionsMatchHelper},
+    {3, "instance_model_matrix",                 &TestInstanceModelMatrix},
+    {3, "instance_upload_matches_root_constants",&TestInstanceUploadMatchesRootConstants},
+    // step04 — 루트 시그니처 정책과 루트 상수 슬롯.
+    {4, "rootsig_policy_call_counts",            &TestRootSigPolicyCallCounts},
+    {4, "root_constant_budget",                  &TestRootConstantBudget},
+    // step05 — descriptor 수명 계획.
+    {5, "descriptor_lifetime_plan",              &TestDescriptorLifetimePlan},
+    {5, "descriptor_ranges_disjoint",            &TestDescriptorRangesDisjoint},
+    {5, "heap_manager_follows_plan",             &TestHeapManagerFollowsPlan},
+    // step06 — 배리어 발급 형태.
+    {6, "barrier_description",                   &TestBarrierDescription},
+    {6, "barrier_flush_counts",                  &TestBarrierFlushCounts},
+    {6, "back_buffer_barrier_sequence",          &TestBackBufferBarrierSequence},
+    // step07 — 규모 전환.
+    {7, "scene_rebuild_scales",                  &TestSceneRebuildScales},
+    {7, "scene_rebuild_is_repeatable",           &TestSceneRebuildIsRepeatable},
+    {7, "instance_storage_capacity_clamp",       &TestInstanceStorageCapacityClamp},
+};
+
+std::string StepTag(int step) {
+    std::string tag = "step";
+    if (step < 10) tag += '0';
+    return tag + std::to_string(step);
+}
+
+bool Selected(const TestCase& test, const std::string& filter) {
+    return filter.empty() || filter == test.name || filter == StepTag(test.step);
+}
+
 }  // namespace
 
-int main() {
-    TestDrawSubmissions();
-    TestSceneRecordsPerDraw();
-    TestSceneRecordsGlobalPolicies();
-    TestSceneRecordsInstanced();
-    TestSceneRecordsPerMaterial();
-    TestRecordedSubmissionsMatchHelper();
-    TestRootConstantBudget();
-    TestDescriptorLifetimePlan();
-    TestDescriptorRangesDisjoint();
-    TestHeapManagerFollowsPlan();
-    TestBarrierDescription();
-    TestBarrierFlushCounts();
-    TestBackBufferBarrierSequence();
-    TestSlotReadyPredicate();
-    TestTimestampPollWaitsForFence();
-    TestTimestampBeginWaitsBeforeOverwrite();
-    TestFrameCamera();
-    TestInstanceModelMatrix();
-    TestInstanceUploadMatchesRootConstants();
+int main(int argc, char** argv) {
+    const std::string filter = (argc > 1) ? argv[1] : "";
+
+    int groups = 0;
+    for (const auto& test : kCases) {
+        if (!Selected(test, filter)) continue;
+        const int before = checks;
+        test.fn();
+        ++groups;
+        std::cout << "  [" << StepTag(test.step) << "] " << test.name;
+        for (size_t pad = std::strlen(test.name); pad < 44; ++pad)
+            std::cout << ' ';
+        std::cout << (checks - before) << " checks\n";
+    }
+
+    // 아무것도 고르지 못한 필터는 조용히 통과하면 안 된다 — 오타 난 타깃이
+    // 0 개를 돌고 green 을 내는 것이 이 배선에서 가장 위험한 실패다.
+    if (groups == 0) {
+        std::cerr << "no test group matches `" << filter << "`\n";
+        return 2;
+    }
+
+    std::cout << (filter.empty() ? std::string("all") : filter) << ": " << groups
+              << " groups, " << checks << " checks, " << failures
+              << " failures\n";
     if (failures != 0) return 1;
     std::cout << "DirectX contract tests passed\n";
     return 0;

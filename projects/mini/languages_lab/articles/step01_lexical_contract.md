@@ -24,26 +24,49 @@
 
 렉서는 문법의 가장 낮은 층이다. 이 구현은 다음 토큰을 인정한다.
 
+<!-- snippet: src/language.hpp#TokenKind mode=exact -->
 ```cpp
 enum class TokenKind {
-    Number, Identifier,
-    Let, If, Else, While, True, False,
-    LeftParen, RightParen, LeftBrace, RightBrace, Semicolon,
-    Plus, Minus, Star, Slash,
-    Equal, EqualEqual, BangEqual,
-    Less, LessEqual, Greater, GreaterEqual,
+    Number,
+    Identifier,
+    Let,
+    If,
+    Else,
+    While,
+    True,
+    False,
+    LeftParen,
+    RightParen,
+    LeftBrace,
+    RightBrace,
+    Semicolon,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Equal,
+    EqualEqual,
+    BangEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
     End,
 };
 ```
 
+숫자와 식별자, 여섯 개의 키워드, 구두점, 산술·비교 연산자, 그리고 입력 끝을 나타내는
+`End`가 전부다.
+
 토큰은 종류만 저장하지 않는다. 파서와 VM의 오류를 원래 소스로 되돌리려면 위치가 끝까지
 보존되어야 한다.
 
+<!-- snippet: src/language.hpp#Token mode=exact -->
 ```cpp
 struct Token {
-    TokenKind kind;
+    TokenKind kind = TokenKind::End;
     std::string text;
-    double number;
+    double number = 0.0;
     SourceLocation location;
 };
 ```
@@ -56,13 +79,19 @@ struct Token {
 `=`를 먼저 확정하고 뒤의 `=`를 별도 토큰으로 만들면 `==`가 할당 두 번으로 깨진다. 렉서는
 같은 접두사를 가진 후보 중 가장 긴 것을 우선해야 한다.
 
+<!-- snippet: src/language.hpp#ScanPunctuation -->
 ```cpp
-if (Peek() == '=') {
-    Advance();
-    tokens.push_back({TokenKind::EqualEqual, "==", 0.0, start});
-} else {
-    tokens.push_back({TokenKind::Equal, "=", 0.0, start});
-}
+// language.hpp: Lexer::ScanPunctuation 의 두 글자 후보 처리 발췌
+auto oneOrTwo = [&](char expected, TokenKind oneKind, TokenKind twoKind) {
+    if (Peek() == expected) {
+        Advance();
+        tokens.push_back({twoKind, std::string() + c + expected, 0.0, start});
+    } else {
+        one(oneKind);
+    }
+};
+// ...
+case '=': oneOrTwo('=', TokenKind::Equal, TokenKind::EqualEqual); break;
 ```
 
 위치는 토큰 소비가 아니라 문자 소비와 함께 갱신한다. 줄바꿈은 줄을 하나 올리고 열을 1로
@@ -74,6 +103,7 @@ if (Peek() == '=') {
 언어 계약이며 여기서는 거부한다. 변환은 `std::from_chars`의 종료 포인터와 오류 코드를
 둘 다 검사한다.
 
+<!-- snippet: src/language.hpp#ScanNumber -->
 ```cpp
 const auto result = std::from_chars(begin, end, value);
 if (result.ec != std::errc{} || result.ptr != end || !std::isfinite(value))
@@ -89,6 +119,7 @@ if (result.ec != std::errc{} || result.ptr != end || !std::isfinite(value))
 알 수 없는 문자를 식별자로 취급하거나 건너뛰면 잘못된 프로그램이 다른 의미로 실행된다.
 `@` 같은 문자는 위치가 붙은 진단이 된다.
 
+<!-- snippet: src/language.hpp#ScanPunctuation -->
 ```cpp
 diagnostics.push_back({start, std::string("알 수 없는 문자: ") + c});
 ```
@@ -99,26 +130,38 @@ diagnostics.push_back({start, std::string("알 수 없는 문자: ") + c});
 
 ## 5. 검증
 
-최종 코드를 빌드한 뒤 테스트를 실행한다.
+빌드한 뒤 어휘 계약만 골라 실행한다. 테스트 실행 파일은 등록표에서 `step01` 라벨이
+붙은 사례만 걸러 돌리고, 같은 라벨의 ctest 타깃이 그 인자로 실행 파일을 부른다.
 
 ```powershell
 cmake -S . -B build
 cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
+ctest --test-dir build -C Release -R languages_step01 --output-on-failure
+.\build\Release\languages_tests.exe step01
 ```
 
 ```text
-1/1 Test #1: languages_tests ..................   Passed
+1/1 Test #2: languages_step01_lexical_contract ...   Passed
 100% tests passed out of 1
+[step01] lexer_token_locations ok
+[step01] lexer_rejects_unknown_character ok
+languages_tests [step01]: all checks passed (2 case(s), 24 check(s))
 ```
+
+출력의 두 사례 이름이 이 절이 주장하는 것과 그대로 대응한다 — 토큰 위치 보존과 알 수 없는
+문자 거부다. 24라는 단언 수는 두 사례가 실제로 무엇을 몇 개 못 박았는지를 보여 준다.
+전체를 한 번에 돌리려면 인자 없이 `ctest --test-dir build -C Release --output-on-failure`를
+실행한다. 이 어휘 계약은 그중 두 사례다.
 
 위치 보존은 진단의 줄만 보면 검증되지 않는다. `SourceLocation`의 기본값이 `{1, 1}`이라
 한 줄짜리 소스에서 줄 번호를 확인하는 단언은 위치 추적을 지워도 통과한다. 그래서 테스트는
 세 줄짜리 소스에서 줄과 열을 함께 못 박는다.
 
+<!-- snippet: src/tests.cpp#TestLexerRejectsUnknownCharacter -->
 ```cpp
 const auto multiline =
-    Compiler{}.Compile("let a = 1;\nlet b = 2;\n   let c = @;\n");
+    lab::lang::Compiler{}.Compile("let a = 1;\nlet b = 2;\n   let c = @;\n");
+// ...
 const auto& d = multiline.diagnostics.front();
 CHECK(d.message == "알 수 없는 문자: @");
 CHECK(d.location.line == 3);
@@ -128,12 +171,17 @@ CHECK(d.location.column == 12);
 최대 길이 일치는 `Lexer::Scan`을 직접 호출해 토큰열 자체를 본다. `a == b`는 네 토큰이어야
 하고, `==`의 열은 두 번째 `=`의 열이 아니라 토큰이 시작한 열이어야 한다.
 
+<!-- snippet: src/tests.cpp#TestLexerTokenLocations -->
 ```cpp
-std::vector<Diagnostic> diagnostics;
-const auto tokens = Lexer("a == b").Scan(diagnostics);
+std::vector<lab::lang::Diagnostic> diagnostics;
+const auto tokens = lab::lang::Lexer("a == b").Scan(diagnostics);
+CHECK(diagnostics.empty());
 CHECK(tokens.size() == 4);  // Identifier, EqualEqual, Identifier, End
-CHECK(tokens[1].kind == TokenKind::EqualEqual);
-CHECK(tokens[1].location.column == 3);
+// ...
+CHECK(tokens[1].kind == lab::lang::TokenKind::EqualEqual);
+CHECK(tokens[1].text == "==");
+CHECK(tokens[1].location.line == 1);
+CHECK(tokens[1].location.column == 3);  // `=`의 열이 아니라 토큰 시작 열
 ```
 
 `start`를 `{1, 1}` 상수로 고정하거나 두 글자 분기를 지우면 위 단언들이 실패한다. 추가 수동

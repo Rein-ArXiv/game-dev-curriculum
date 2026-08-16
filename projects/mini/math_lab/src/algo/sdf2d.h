@@ -11,6 +11,7 @@
 namespace mathlab {
 namespace sdf {
 
+// snippet-begin: sdf-shapes
 inline float Length2(Vector2 a) { return std::sqrt(a.x * a.x + a.y * a.y); }
 
 // SDF: outside > 0, inside < 0, surface = 0.
@@ -46,6 +47,7 @@ inline float Capsule(Vector2 p, Vector2 a, Vector2 b, float r) {
 inline float OpUnion(float a, float b)     { return std::min(a, b); }
 inline float OpIntersect(float a, float b) { return std::max(a, b); }
 inline float OpSubtract(float a, float b)  { return std::max(a, -b); }
+// snippet-end: sdf-shapes
 
 // Smooth Min (polynomial). math part14 의 정정된 형태:
 //   h = max(k - |a-b|, 0) / k

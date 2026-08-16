@@ -131,29 +131,34 @@ class GpuTimer {
 
 호출 카운트는 *드라이버에 후킹할 수도 있고 (gladHook), Scene 이 자기가 호출한 횟수를 직접 증가시킬 수도 있음*. 학습 단계엔 *직접 증가* 가 단순.
 
+<!-- snippet: src/measure/gl_counters.h#GlCounters -->
 ```cpp
 struct GlCounters {
-    int drawCalls;
-    int instancedDraws;
-    int indirectDraws;
-    int stateChanges;
-    int uniformUpdates;
-    int bufferUpdates;
-    int barrierCalls;
+    int drawCalls         = 0;
+    int instancedDraws    = 0;
+    int indirectDraws     = 0;
+    int stateChanges      = 0;     // glBind* / glUseProgram 등
+    int uniformUpdates    = 0;
+    int bufferUpdates     = 0;     // glBufferSubData (UBO / SSBO 갱신)
+    int barrierCalls      = 0;
+    // ... Reset() 이 일곱 개를 모두 0 으로 되돌린다.
 };
 ```
 
 Scene 코드가 명시적으로.
 
+<!-- snippet: src/scene/scene.cpp#Scene::Draw -->
 ```cpp
 glBindVertexArray(vao_);
 counters.stateChanges++;
-
+// ...
 for (const auto& o : objects_) {
+    glm::mat4 model = glm::translate(glm::mat4(1.0f), o.position)
+                    * glm::rotate(glm::mat4(1.0f), o.angle, o.axis);
     if (shader.SetMat4("uModel", model))   counters.uniformUpdates++;
     if (shader.SetVec3("uColor", o.color)) counters.uniformUpdates++;
-
     glDrawElements(GL_TRIANGLES, indexCount_, GL_UNSIGNED_INT, nullptr);
+    ++lastDrawCalls_;
     counters.drawCalls++;
 }
 ```
@@ -177,14 +182,22 @@ void App::Render() {
 
 GL 드라이버가 *에러 / 경고 / 성능 힌트 / undefined behavior* 메시지를 줄 수 있다. 디버그 컨텍스트 (`GLFW_OPENGL_DEBUG_CONTEXT`) + `glDebugMessageCallback` 등록 시.
 
-```cpp
-void GLAPIENTRY MyCallback(GLenum source, GLenum type, GLuint id,
-                            GLenum severity, GLsizei length,
-                            const GLchar* message, const void* userParam);
+콜백은 `KHRDebug` 의 정적 멤버로 두고 `userParam` 에 인스턴스를 실어 보낸다.
 
+<!-- snippet: src/measure/khr_debug.h -->
+```cpp
+static void GLAPIENTRY Callback(GLenum source, GLenum type, GLuint id,
+                                 GLenum severity, GLsizei length,
+                                 const GLchar* message, const void* userParam);
+```
+
+등록은 `Install()` 한 곳에서.
+
+<!-- snippet: src/measure/khr_debug.cpp#KHRDebug::Install -->
+```cpp
 glEnable(GL_DEBUG_OUTPUT);
 glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);  // 콜백이 *호출 스레드에서* 실행
-glDebugMessageCallback(&MyCallback, this);
+glDebugMessageCallback(&KHRDebug::Callback, this);
 glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE,
                       0, nullptr, GL_TRUE);     // 모든 메시지 활성
 ```
@@ -203,9 +216,10 @@ glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE,
 
 콜백이 *수백 메시지 / 초* 를 던질 수 있어 *vector push_back 무한 누적* 은 메모리 위험. *원형 버퍼 (256 슬롯)* 에 가장 최근 256 개만 보관.
 
+<!-- snippet: src/measure/khr_debug.cpp#KHRDebug::Push -->
 ```cpp
 void KHRDebug::Push(const DebugMessage& m) {
-    ring_[head_] = m;
+    ring_[(size_t)head_] = m;
     head_ = (head_ + 1) % kRingSize;
     if (count_ < kRingSize) ++count_;
 }
@@ -217,9 +231,10 @@ ImGui 로그 창에서 *심각도별 색상* + *자동 스크롤* 로 표시.
 
 ImPlot 가 *CPU ms + GPU ms 를 같은 plot* 에 두 line 으로.
 
+<!-- snippet: src/ui/panel.cpp@ms-plot -->
 ```cpp
-ImPlot::PlotLine("CPU", cpuHist.data(), kHistorySize);
-ImPlot::PlotLine("GPU", gpuHist.data(), kHistorySize);
+ImPlot::PlotLine("CPU", cpuHist.data(), FrameTimer::kHistorySize);
+ImPlot::PlotLine("GPU", gpuHist.data(), GpuTimer::kHistorySize);
 ```
 
 두 선이 *분리되어 그려지면* — 어디가 더 비싼지 *한눈에*. 예 — *CPU 5ms / GPU 12ms* 면 *GPU 바운드*, *CPU 18ms / GPU 3ms* 면 *CPU (드로우콜) 바운드*.
@@ -272,6 +287,53 @@ build\Release\graphics_gl_lab.exe
 - *Frame* 섹션에 `CPU frame` 과 `GPU pass` 두 줄이 함께 뜨고, ImPlot 그래프에 CPU / GPU 두 곡선이 그려진다.
 - *GL counters (this frame)* 섹션의 다섯 줄이 위의 `draw calls: 10000 … uniform updates: 20006` 과 일치한다.
 - 디버그 컨텍스트로 빌드된 경우 *GL debug log* 창에 드라이버 메시지가 심각도 색상으로 쌓인다. 메시지가 하나도 없으면 `(no messages)` 가 표시된다.
+
+### 측정 인프라 자체의 검증
+
+세 관측 수단 중 *GPU 시간* 은 값이 기계마다 달라 고정 기대값을 둘 수 없다. 나머지 둘 — *카운터의 프레임 경계* 와 *디버그 메시지 링* — 은 GL 호출이 없는 계산이라 컨텍스트 없이 그대로 검사된다.
+
+```powershell
+ctest --test-dir build -C Release -R gl_step02 --output-on-failure
+```
+
+```text
+    Start 4: gl_step02_measure
+1/1 Test #4: gl_step02_measure ................   Passed    0.03 sec
+
+100% tests passed out of 1
+```
+
+```powershell
+build\Release\graphics_gl_contract_tests.exe step02   # Linux/macOS: ./build/graphics_gl_contract_tests step02
+```
+
+```text
+[step02] counter_reset ... ok
+[step02] debug_message_ring ... ok
+graphics_gl_contract_tests: 2/2 passed (filter=step02)
+```
+
+`counter_reset` 은 일곱 칸을 전부 0 이 아닌 값으로 채운 뒤 `Reset()` 이 전부 되돌리는지 본다. 한 칸이라도 살아남으면 패널의 수치가 프레임 사이에 누적되어 거짓말을 한다.
+
+`debug_message_ring` 은 원형 버퍼가 *메모리를 늘리지 않고 최근 256 개만* 보관한다는 주장을 그대로 친다.
+
+<!-- snippet: tests/graphics_gl_contract_tests.cpp#TestDebugMessageRing -->
+```cpp
+constexpr int kOverflow = gllab::KHRDebug::kRingSize + 10;
+for (int i = 0; i < kOverflow; ++i)
+    debug.PushAppMessage("msg" + std::to_string(i));
+
+// 슬롯 수는 링 크기에서 멈춘다 — push_back 누적이면 여기서 갈린다.
+CHECK(debug.Count() == gllab::KHRDebug::kRingSize);
+CHECK(debug.RingHead() == (2 + kOverflow) % gllab::KHRDebug::kRingSize);
+
+// 가장 최근 메시지는 머리 바로 앞 칸이고, 가장 오래된 것은 덮여 사라졌다.
+const int newest =
+    (debug.RingHead() + gllab::KHRDebug::kRingSize - 1) % gllab::KHRDebug::kRingSize;
+CHECK(debug.Get(newest).text == "msg" + std::to_string(kOverflow - 1));
+```
+
+`Push` 를 `std::vector::push_back` 으로 바꾸면 `Count()` 가 266 이 되어 첫 단언이, 덮어쓰기를 없애면 마지막 단언이 갈린다. `PushAppMessage` 로 넣은 항목의 `source` 가 `GL_DEBUG_SOURCE_APPLICATION` 인지도 같은 함수가 함께 확인한다 — 앱 메시지와 드라이버 메시지가 같은 창에 섞여도 출처가 구분되어야 하기 때문이다.
 
 ---
 

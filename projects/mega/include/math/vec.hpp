@@ -2,7 +2,8 @@
 //
 // 단일 벡터 타입은 디버깅·게임 로직용이다. 대량 갱신(파티클, ECS 컴포넌트)은
 // SoA(x[N],y[N],z[N]) 로 따로 두어 SIMD 를 태운다(math 시리즈 SIMD 챕터). 이
-// 헤더는 AoS 단일체를 다루고, SoA 변형은 vec_soa.hpp 로 분리한다.
+// 헤더는 AoS 단일체를 다루고, 이 저장소의 SoA 배치는 컬럼 컨테이너
+// containers/soa_vector.h 가 갖는다.
 
 #pragma once
 

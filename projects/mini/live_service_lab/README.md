@@ -39,7 +39,12 @@ ID, server ID, 짧은 수명의 game token 계약으로 연결된다.
 | server는 자기 match 결과만 제출한다 | `X-Server-Id`와 allocation owner 검증 | `IdempotentResult` |
 | 중복 result도 owner만 receipt를 받는다 | recorded server ID를 retry 경로에서 재검증 | `IdempotentResult` |
 | 완료된 match는 capacity와 ticket을 해제한다 | result 기록이 active count를 줄이고 ticket을 `Completed`로 전이 | `MatchAllocation`, `TicketLifecycle` |
-| 식별자·capacity·rating 범위를 강제한다 | ASCII 식별자 검사와 범위 가드 | `IdentifierContract` |
+| 식별자는 ASCII 영숫자와 `.`·`-`·`_`만 허용한다 | 길이 상한이 붙은 `Identifiers.IsValid` | `IdentifierContract` |
+| capacity·rating·party size 범위를 강제한다 | register와 enqueue의 범위 가드 | `RangeGuards` |
+| 동시 요청도 capacity를 넘기지 못한다 | 후보 필터의 술어와 증가가 같은 lock 안 | `AtomicTransitions` |
+| core는 wall clock을 읽지 않는다 | 모든 상태 전이 함수가 `now`를 인자로 받음 | `InjectedClock` |
+| 인증 실패는 domain에 닿기 전에 막힌다 | server key와 bearer token 검사 | `HttpAuthBoundary` |
+| domain 예외가 서로 다른 status code로 갈린다 | 400·401·404·409 매핑과 중복 receipt 200 | `HttpErrorMapping` |
 
 ## 추적 단위
 
@@ -51,7 +56,7 @@ ID, server ID, 짧은 수명의 game token 계약으로 연결된다.
 | 관측값 | ticket 상태, 배정까지 걸린 가상 초, `ControlPlaneMetrics`의 다섯 계수, 검증 결과와 예외 종류 |
 | 기대 결과 | rating 차가 `100 + min(400, 대기초 × 10)` 이하일 때만 배정, `ActiveMatches < Capacity` 유지, 같은 result ID 재시도가 `RecordedResults`를 늘리지 않음 |
 | 실패 주입 | 허용되지 않는 식별자, capacity 0·음수 등록, 마지막 문자를 바꾼 token, 만료된 token, 다른 server ID로 검증한 game token, 공백 claim이 든 game token, 남의 ticket 조회, 다른 server의 result 제출, 이미 완료된 match에 두 번째 result, allocation과 다른 player 집합, 같은 result ID에 다른 score·다른 match ID, drain 뒤 queue, heartbeat 공백 뒤 배정 요청, region이 어긋난 ticket·server, capacity를 넘는 큐 |
-| 자동 테스트 | contract test가 계약별 13개 함수로 나뉘어 각 계약의 정상 경로와 실패 주입을 함께 검사한다. 위 계약 표의 '자동 테스트' 열이 계약과 함수의 대응이다. 실패 메시지는 함수 이름으로 시작한다 |
+| 자동 테스트 | contract test가 계약별 18개 검사로 나뉘어 각 계약의 정상 경로와 실패 주입을 함께 검사한다. 위 계약 표의 '자동 테스트' 열이 계약과 검사의 대응이다. 실패 메시지는 검사 이름으로 시작한다 |
 
 ## 구조
 
@@ -77,24 +82,46 @@ Core는 HTTP와 wall-clock 전역 상태에 의존하지 않는다. 모든 상�
 .NET 10 SDK가 필요하다.
 
 ```powershell
-dotnet build `
-  projects/mini/live_service_lab/src/LiveService.Api/LiveService.Api.csproj `
-  -c Release
-
 dotnet run `
   --project projects/mini/live_service_lab/tests/LiveService.Tests/LiveService.Tests.csproj `
   -c Release
 ```
 
-테스트 target은 `LiveService.Tests` 하나이고 `LiveService.Core`를 project reference로 링크한다.
-전부 통과하면 `live_service_tests: all checks passed`를 출력하고 exit code 0으로 끝난다. 실패하면
-`함수이름: 깨진 계약` 형태의 메시지를 가진 예외로 즉시 종료한다.
+테스트 target은 `LiveService.Tests` 하나다. `LiveService.Core`를 project reference로 링크하고,
+`LiveService.Api`는 어셈블리를 링크하지 않고 빌드 순서만 잇는다(`ReferenceOutputAssembly=false`).
+HTTP 계약 검사가 그 실행 파일을 loopback에 띄우기 때문이다. 그래서 위 한 줄이 Core·Api·Tests를
+모두 빌드한다.
 
-검출력은 `LiveService.Core`에 결함을 하나 주입하고 위 명령을 다시 돌려 확인한다. capacity 비교,
-heartbeat 신선도 필터, `MarkUnhealthyServers`, rating window 확대와 상한, 음수 경과 시간 clamp,
-ticket 중복 억제, fingerprint 비교와 정렬, ticket 소유자 검사, player 집합 검사, 이중 완료 검사,
-신규 result owner 검사, region 일치 두 곳, active match 감소, admission token ID 생성, endpoint
-전달, game token audience·만료·공백 claim 가드를 각각 무력화하면 대응하는 함수가 실패한다.
+전부 통과하면 마지막 줄에 `live_service_tests: all checks passed`를 출력하고 exit code 0으로
+끝난다. 실패하면 `검사이름: 깨진 계약` 형태의 메시지를 가진 예외로 즉시 종료한다.
+
+실행 단위는 step 문서 단위로 나뉜다. 인자에 이름을 주면 그 이름의 검사만 돈다. 검사 하나의
+이름을 그대로 넣어도 된다.
+
+```powershell
+dotnet run `
+  --project projects/mini/live_service_lab/tests/LiveService.Tests/LiveService.Tests.csproj `
+  -c Release -- step03
+```
+
+```text
+live_service_tests: filter=step03 -> 6 check(s)
+  step03 RangeGuards         ok
+  step03 MatchAllocation     ok
+  step03 ServerHealth        ok
+  step03 ProgressiveWidening ok
+  step03 RegionAffinity      ok
+  step03 ServerDrain         ok
+live_service_tests: step03 6/6 checks passed
+```
+
+검출력은 `LiveService.Core` 또는 `LiveService.Api`에 결함을 하나 주입하고 위 명령을 다시 돌려
+확인한다. capacity 비교, heartbeat 신선도 필터, `MarkUnhealthyServers`, rating window 확대와
+상한, 음수 경과 시간 clamp, ticket 중복 억제, fingerprint 비교와 정렬, ticket 소유자 검사,
+player 집합 검사, 이중 완료 검사, 신규 result owner 검사, region 일치 두 곳, active match 감소,
+admission token ID 생성, endpoint 전달, game token audience·만료·공백 claim 가드, 식별자 길이
+상한, rating 상한, `X-Server-Id` 공백 가드, `/results`의 status code 매핑을 각각 무력화하면
+대응하는 검사가 실패한다.
 
 ## 실행
 

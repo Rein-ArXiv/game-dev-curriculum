@@ -18,6 +18,7 @@ OS 동작은 다르지만 backend 밖에는 같은 이벤트와 송신 계약을
 4. eventfd command queue
 5. descriptor 수명
 6. IOCP와의 의미 정렬
+7. 검증 실행
 
 ---
 
@@ -34,18 +35,19 @@ level-triggered 모드에서는 읽을 데이터가 남아 있는 동안 `EPOLLI
 
 listener 사건은 `accept4`를 반복한다.
 
+<!-- snippet: src/epoll_server.cpp#AcceptReady -->
 ```cpp
 for (;;) {
-    int fd = accept4(listener, reinterpret_cast<sockaddr*>(&address), &length,
+    sockaddr_storage address{};
+    socklen_t length = sizeof(address);
+    int fd = accept4(listener_, reinterpret_cast<sockaddr*>(&address), &length,
                      SOCK_NONBLOCK | SOCK_CLOEXEC);
-    if (fd >= 0) {
-        RegisterSession(fd);
-        continue;
+    if (fd < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+        if (errno == EINTR) continue;
+        return;
     }
-    if (errno == EINTR) continue;
-    if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-    HandleListenerError(errno);
-    break;
+    // ... session 을 등록하고 Connected 이벤트를 만든다
 }
 ```
 
@@ -61,9 +63,10 @@ UDP 데이터그램 하나는 하나의 receive 결과다. buffer보다 큰 데�
 nonblocking `send`는 일부만 쓸 수 있다. queue front에는 payload와 offset을 보존한다. 즉시 보낼
 수 있는 동안 반복하고 `EAGAIN`이면 해당 session의 관심 집합에 `EPOLLOUT`을 추가한다.
 
+<!-- snippet: src/epoll_server.cpp#FlushSession -->
 ```cpp
-if (errno == EAGAIN || errno == EWOULDBLOCK) {
-    ModifyEpoll(session.fd, EPOLLIN | EPOLLOUT | EPOLLRDHUP);
+if (bytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+    ModifyEpoll(session->fd, EPOLLIN | EPOLLOUT | EPOLLRDHUP);
     return;
 }
 ```
@@ -108,6 +111,83 @@ IOCP operation은 제출 시점에 buffer를 소유하고 completion이 수명�
 
 플랫폼 추상화는 두 API를 같은 모양으로 흉내 내는 것이 아니라, 서로 다른 메커니즘이 같은 상위
 불변식을 만족하는지 확인하는 일이다.
+
+## 검증 실행
+
+이 backend는 Linux에서만 컴파일된다. Windows 빌드에서 통과한 CTest는 이 파일의 어떤 줄도
+실행하지 않았으므로, 판정은 Linux에서 따로 받아야 한다. 아래는 WSL2 Ubuntu 26.04, g++ 15.2,
+CMake 4.2에서 실행한 결과다. Windows 캐시를 건드리지 않도록 build 디렉터리를 분리한다.
+
+```bash
+cmake -S projects/mini/game_network_lab \
+      -B projects/mini/game_network_lab/build-linux \
+      -DCMAKE_BUILD_TYPE=Release
+cmake --build projects/mini/game_network_lab/build-linux --parallel
+ctest --test-dir projects/mini/game_network_lab/build-linux \
+      -R game_network_step04 --output-on-failure
+```
+
+```text
+    Start 11: game_network_step04_backend_restart
+1/2 Test #11: game_network_step04_backend_restart .....   Passed    0.01 sec
+    Start 12: game_network_step04_datagram_recovery
+2/2 Test #12: game_network_step04_datagram_recovery ...   Passed    4.02 sec
+
+100% tests passed, 0 tests failed out of 2
+
+Total Test time (real) =   4.14 sec
+```
+
+두 case의 이름은 플랫폼과 무관하지만 태그는 지금 빌드된 backend를 따라간다. Windows에서
+같은 case를 부르면 IOCP가 판정 대상이 되고, 여기서는 `epoll_server.cpp`가 판정 대상이다.
+같은 계약을 두 구현에서 각각 확인한다는 뜻이며, 한쪽 통과를 다른 쪽 통과로 세지 않는다.
+
+```bash
+./projects/mini/game_network_lab/build-linux/game_network_lifecycle_tests step04
+```
+
+```text
+[step04] backend_restart  ok  3 Start/Stop rounds: each refused a second Start(), then accepted a loopback connection and reported its close
+game_network_lifecycle_tests: 1 case(s) passed [step04 1]
+```
+
+데이터그램 case는 `fork` + `execv`로 띄운 두 프로세스가 같은 stdout을 물려받으므로 case 줄
+중간에 서버와 클라이언트의 출력이 끼어든다. 아래는 그 실행에서 판정에 필요한 줄만 남긴
+것이다.
+
+```bash
+./projects/mini/game_network_lab/build-linux/game_network_process_tests step04
+```
+
+```text
+[step04] oversized_datagram_recovery  connected: id=1
+...
+complete: input_ticks=60 snapshots=22 predicted=(0,8)
+game_server: TCP 52485, UDP 48640
+clients=1 ticks=60 control=1 datagrams=102 snapshots=14 rejected=64
+clients=0 ticks=120 control=1 datagrams=125 snapshots=22 rejected=64
+ok  64 x 4KiB datagrams first, then handshake, endpoint binding and snapshots over loopback: client=0 server=0 within the time limit
+game_network_process_tests: 1 case(s) passed [step04 1]
+```
+
+`rejected=64`가 이 case의 관측값이다. 정상 client보다 먼저 protocol 최대 크기를 넘는
+데이터그램 64개가 도착했고, 서버는 그것을 전부 버렸으며, 그 뒤에도 handshake와 22개의
+snapshot이 정상으로 흘렀다. 잘린 데이터그램을 부분 메시지로 취급하거나 오류 뒤 receive를
+멈추는 구현이면 `rejected`가 아니라 `snapshots`가 0이 되고 client가 0이 아닌 code로 끝난다.
+
+<!-- snippet: tests/process_tests.cpp#SendOversizedDatagrams -->
+```cpp
+std::vector<char> payload(4096, 'x');
+for (int i = 0; i < 64; ++i) {
+    const int sent = sendto(socket, payload.data(),
+        static_cast<int>(payload.size()), 0,
+        reinterpret_cast<sockaddr*>(&server), sizeof(server));
+    if (sent != static_cast<int>(payload.size())) {
+        CloseSocket(socket);
+        return false;
+    }
+}
+```
 
 ---
 

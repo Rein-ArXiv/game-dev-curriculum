@@ -27,6 +27,7 @@
 5. 워커 풀 통합과 권한 폴백
 6. HUD 콤보와 사용 시나리오
 7. 빌드와 측정 결과
+8. 검증 — 권한이 없을 때의 동작이 계약이다
 
 ---
 
@@ -87,6 +88,7 @@ cgroup v2 환경에서만 동작. systemd 기반 데스크톱 Linux는 거의 v2
 
 이 차이를 인터페이스로 분리한다.
 
+<!-- snippet: src/sched/sched_policy.h -->
 ```cpp
 // src/sched/sched_policy.h
 
@@ -214,6 +216,7 @@ cgroup의 cpu.weight 쓰기는 *현재 프로세스의 cgroup 경로를 알아�
 
 ### 현재 cgroup 경로 검출
 
+<!-- snippet: src/sched/sched_policy.cpp#CurrentCgroupV2Path -->
 ```cpp
 // /proc/self/cgroup 첫 줄의 v2 cgroup 경로를 얻는다.
 //   "0::/user.slice/.../skl.scope" 형태. /sys/fs/cgroup 와 합쳐 절대 경로.
@@ -254,6 +257,7 @@ std::string CurrentCgroupV2Path() {
 
 ### cpu.weight 쓰기
 
+<!-- snippet: src/sched/sched_policy.cpp#ApplyCgroupCpuWeight -->
 ```cpp
 bool ApplyCgroupCpuWeight(int weight) {
     const std::string dir = CurrentCgroupV2Path();
@@ -430,6 +434,7 @@ void FileIoWorkload::Reconfigure(BackendType backendType,
 
 ## 6. HUD 콤보와 사용 시나리오
 
+<!-- snippet: src/ui/hud.cpp#Hud::Draw -->
 ```cpp
 // src/ui/hud.cpp 일부
 
@@ -542,6 +547,83 @@ sudo setcap cap_sys_nice+ep ./build/system_kernel_lab
 - **cgroup이 자주 효과 없음** — 단일 cgroup 환경이거나 권한 부족. 측정 *환경 셋업이 결과의 절반*.
 
 도구의 정직성은 *환경 의존 결과를 환경 의존이라고 분명히 말하는* 데 있다. sched 토글이 *효과 없는 시나리오* 도 측정 정보다.
+
+## 8. 검증 — 권한이 없을 때의 동작이 계약이다
+
+스케줄링 정책의 *성공* 경로는 자동으로 확인할 수 없다. `SCHED_FIFO` 는 `CAP_SYS_NICE` 가 있어야 붙고, cgroup 쓰기는 위임된 cgroup이 있어야 한다. 두 조건 다 검사 프로세스가 스스로 만들 수 없고, 만들려 들면 실제 시스템을 건드리게 된다.
+
+그런데 이 모듈이 실제로 약속한 것은 성공이 아니다. *권한이 없으면 `false` 를 돌려주고, 스레드는 기본 정책으로 계속 돈다* 가 약속이다. 도구가 죽거나 조용히 성공한 척하면 측정 메타데이터가 거짓이 된다. 그쪽은 seam 주입으로 결정적으로 밟을 수 있다.
+
+<!-- snippet: tests/system_fault_tests.cpp#TestSchedThreadPolicyFallback -->
+```cpp
+// tests/system_fault_tests.cpp
+
+void TestSchedThreadPolicyFallback() {
+    // 이 스레드의 nice 를 바꾸므로 메인 스레드가 아니라 전용 스레드에서.
+    std::thread worker([] {
+        CHECK(skl::ApplySchedToCurrentThread(skl::SchedType::Default));
+
+        {
+            ScopedFault fault("setpriority:0:EACCES");
+            CHECK(!skl::ApplySchedToCurrentThread(skl::SchedType::Nice));
+            CHECK(skl::FaultInjectionCount("setpriority") == 1);
+        }
+        // 무주입: nice 를 *올리는* 것은 권한이 필요 없다 → 성공 경로 대조군.
+        CHECK(skl::ApplySchedToCurrentThread(skl::SchedType::Nice));
+
+        {
+            ScopedFault fault("pthread_setschedparam:0:EPERM");
+            CHECK(!skl::ApplySchedToCurrentThread(skl::SchedType::Fifo));
+            CHECK(skl::FaultInjectionCount("pthread_setschedparam") == 1);
+        }
+        // ...
+        // 실패했든 성공했든 스레드는 살아 있고 기본으로 돌아갈 수 있어야 한다.
+        CHECK(skl::ApplySchedToCurrentThread(skl::SchedType::Default));
+    });
+    worker.join();
+}
+```
+
+`무주입: nice 를 올리는 것은 권한이 필요 없다` 줄이 대조군이다. 실패만 확인하면 *항상 `false` 를 돌려주는* 구현도 통과한다. `nice` 를 올리는 쪽은 일반 사용자도 되므로, 같은 함수가 조건에 따라 두 답을 낸다는 것을 여기서 보인다.
+
+cgroup 쪽은 검사가 실제 cgroup을 바꿀 위험이 있어 순서를 뒤집는다. 먼저 승인 환경변수 없이 부르면 거부하는지, 승인 경로가 현재 cgroup과 다르면 거부하는지를 확인하고, `cpu.weight` 에 쓰기 권한이 *없음을 확인한 뒤에만* 읽기·쓰기 실패 경로로 들어간다. 쓰기가 가능한 환경에서는 그 검사를 건너뛴다고 stdout에 남긴다 — 조용히 건너뛰면 "검사했다"가 거짓이 된다.
+
+```bash
+cmake --build build -j
+ctest --test-dir build -R skl_step06 --output-on-failure
+```
+
+```text
+    Start 21: skl_step06_fault
+1/1 Test #21: skl_step06_fault .................   Passed    0.00 sec
+
+100% tests passed, 0 tests failed out of 1
+```
+
+```bash
+./build/system_fault_tests --step=06
+```
+
+```text
+[ run  ] step06  sched thread policy fallback
+skl: setpriority(nice=10) failed: Permission denied — keeping default
+skl: pthread_setschedparam(SCHED_FIFO, prio=50) failed: Operation not permitted — keeping default. Check ulimit -r and CAP_SYS_NICE.
+skl: pthread_setschedparam(SCHED_FIFO, prio=50) failed: Operation not permitted — keeping default. Check ulimit -r and CAP_SYS_NICE.
+  SCHED_FIFO applied without injection: no (expected without CAP_SYS_NICE)
+[  ok  ] step06  sched thread policy fallback
+[ run  ] step06  sched cgroup fallback
+skl: refusing to modify the current cgroup. Set SKL_CGROUP_DIR exactly to '/sys/fs/cgroup/init.scope' only for a delegated, disposable benchmark cgroup.
+skl: cgroup v2 not detected — keeping default
+skl: refusing to modify the current cgroup. Set SKL_CGROUP_DIR exactly to '/sys/fs/cgroup/init.scope' only for a delegated, disposable benchmark cgroup.
+skl: cgroup v2 not detected — keeping default
+skl: reading /sys/fs/cgroup/init.scope/cpu.weight failed — keeping default
+skl: reading /sys/fs/cgroup/init.scope/cpu.weight failed — keeping default
+  cgroup write seam reached: no (cpu.weight unreadable here)
+[  ok  ] step06  sched cgroup fallback
+system_fault_tests --step=6: 2/17 check(s) run, 0 failed
+```
+
+stderr에 실패 안내가 잔뜩 나오는데도 케이스가 통과한다는 것이 이 절의 요점이다. 안내는 *기대된 출력* 이고, 그 뒤에도 스레드가 살아 있고 기본 정책으로 돌아갈 수 있다는 것이 검사 대상이다. `SCHED_FIFO applied without injection: no` 와 `cgroup write seam reached: no` 두 줄은 이 머신의 권한 상태를 그대로 적은 것 — 권한이 있는 머신에서는 `yes` 로 바뀌고 그때는 쓰기 seam까지 검사된다.
 
 ---
 

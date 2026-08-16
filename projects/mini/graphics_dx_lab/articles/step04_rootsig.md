@@ -187,14 +187,56 @@ void TestRootConstantBudget() {
 
 `color` 만 `==` 인 것이 의도다. color 는 레이아웃의 마지막 슬롯이므로 *예산의 끝과 정확히 맞아야* 하고, 그렇지 않다면 24 라는 숫자와 실제 사용량이 갈라진 것이다.
 
-정책별 호출 수도 같은 실행 파일이 판정한다.
+정책별 호출 수도 같은 실행 파일이 판정한다. 루트 시그니처 몫만 도는 등록은 이 한 줄이다.
+
+<!-- snippet: CMakeLists.txt@step04-target -->
+```cmake
+add_test(NAME graphics_dx_step04_rootsig      COMMAND graphics_dx_contract_tests step04)
+```
 
 ```powershell
-ctest --test-dir build -C Release --output-on-failure
+cmake --build build --config Release
+ctest --test-dir build -C Release -R graphics_dx_step04 --output-on-failure
+build\Release\graphics_dx_contract_tests.exe step04
 ```
+
+```text
+1/1 Test #5: graphics_dx_step04_rootsig .......   Passed    0.04 sec
+
+100% tests passed out of 1
+
+  [step04] rootsig_policy_call_counts                  104 checks
+  [step04] root_constant_budget                        5 checks
+step04: 2 groups, 109 checks, 0 failures
+DirectX contract tests passed
+```
+
+두 그룹이 각각 위 표와 앞 절의 단언을 맡는다. `rootsig_policy_call_counts` 의 104 판정이 확인하는 것은 둘이다.
 
 - 오브젝트 100 개 · `RootSigPolicy::PerDraw` 에서 기록부의 `SetGraphicsRootSignature` 가 정확히 100 회이고, 모두 같은 포인터다.
 - `RootSigPolicy::Global` 에서는 기록부가 루트 시그니처를 *한 번도* 건드리지 않는다(0 회). 표의 `Global = 1` 은 프레임 루프가 부르는 그 한 번이다.
+
+<!-- snippet: tests/graphics_dx_contract_tests.cpp#TestRootSigPolicyCallCounts -->
+```cpp
+void TestRootSigPolicyCallCounts() {
+    // Per-Draw -> 드로우마다 한 번, 전부 같은 루트 시그니처 포인터.
+    RecordResult perDraw;
+    RunRecord(perDraw, 100, dxlab::DrawMode::PerDraw,
+              dxlab::RootSigPolicy::PerDraw, dxlab::PsoSwitchPolicy::PerDraw);
+    CHECK(perDraw.cmd.rootSigSets.size() == 100);
+    for (auto* rs : perDraw.cmd.rootSigSets) CHECK(rs == FakeRootSig());
+    CHECK(perDraw.counters.rootSigSets == 100);
+
+    // Global -> 기록부는 루트 시그니처를 한 번도 건드리지 않는다.
+    RecordResult global;
+    RunRecord(global, 100, dxlab::DrawMode::PerDraw,
+              dxlab::RootSigPolicy::Global, dxlab::PsoSwitchPolicy::PerPass);
+    CHECK(global.cmd.rootSigSets.empty());
+    CHECK(global.counters.rootSigSets == 0);
+}
+```
+
+`RecordResult` 는 명령 기록을 남기는 command list 대역과 카운터를 함께 든 묶음이고, `RunRecord` 는 오브젝트 수와 네 정책을 받아 `Scene::RecordDraw` 를 한 번 돌린다. 두 번 돌리는 이유는 *정책 하나만 다르고 나머지가 같은* 두 실행을 나란히 놓아야 이 축의 효과가 분리되기 때문이다. 100 회 쪽의 포인터 비교가 있어야 “호출은 하는데 엉뚱한 시그니처를 물린다”가 통과하지 못한다.
 
 ---
 

@@ -1,5 +1,5 @@
 // Step 1 의 placeholder Scene. 단일 원형 강체 + 중력 + 바닥 충돌.
-// 캔버스를 클릭해 강체를 그 위치로 옮긴다 (속도 0 으로 reset).
+// 강체 위의 핸들을 잡아 끌면 그 위치로 옮긴다 (속도 0 으로 reset).
 // Scene framework / handle / panel / chrome / fixed dt accumulator 가 동작하는지
 // 확인 + *위치 / 속도 / dt 적분 / 충돌 응답* 구조를 가장 단순한 형태로 시연.
 

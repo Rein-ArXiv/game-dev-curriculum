@@ -72,13 +72,33 @@ add_executable(parts_core_tests
     src/sim/factory.cpp
     src/measure/container_benchmark.cpp
     src/measure/event_benchmark.cpp
+    src/measure/frame_timer.cpp
     src/alloc/malloc_allocator.cpp
     src/alloc/arena_allocator.cpp
     src/alloc/pool_allocator.cpp
     src/alloc/slab_allocator.cpp
 )
 target_include_directories(parts_core_tests PRIVATE src)
+# 전체 실행. 한 번에 다 돌리고 싶을 때의 진입점이다.
 add_test(NAME parts_core_tests COMMAND parts_core_tests)
+
+# 그룹별 실행 단위. 같은 실행 파일에 그룹 이름을 넘기면 그 그룹만 돈다.
+# 이름은 그 검사를 *추가한* step 의 주제를 딴다 — ctest 이름 하나가 문서 한 편에
+# 대응하므로, 어느 step 을 따라가다 깨졌는지가 ctest 출력에서 바로 보인다.
+# snippet-begin: group-tests
+function(parts_add_group_test name group)
+    add_test(NAME ${name} COMMAND parts_core_tests ${group})
+endfunction()
+
+parts_add_group_test(parts_skeleton_tests  skeleton)
+parts_add_group_test(parts_toggles_tests   toggles)
+parts_add_group_test(parts_layout_tests    layout)
+parts_add_group_test(parts_simd_tests      simd)
+parts_add_group_test(parts_branch_tests    branch)
+parts_add_group_test(parts_allocator_tests allocator)
+parts_add_group_test(parts_container_tests container)
+parts_add_group_test(parts_graph_tests     graph)
+# snippet-end: group-tests
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     src

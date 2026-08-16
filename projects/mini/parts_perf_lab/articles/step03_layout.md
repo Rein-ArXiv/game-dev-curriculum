@@ -121,6 +121,7 @@ add_executable(parts_core_tests
     src/sim/factory.cpp
     src/measure/container_benchmark.cpp
     src/measure/event_benchmark.cpp
+    src/measure/frame_timer.cpp
     src/alloc/malloc_allocator.cpp
     src/alloc/arena_allocator.cpp
     src/alloc/pool_allocator.cpp
@@ -129,6 +130,26 @@ add_executable(parts_core_tests
 target_include_directories(parts_core_tests PRIVATE src)
 add_test(NAME parts_core_tests COMMAND parts_core_tests)
 ```
+
+한 실행 파일이지만 실행 단위는 하나가 아니다. `main` 이 `argv[1]` 을 그룹 이름으로 받아 그 그룹의 검사만 돌리고, CMake가 그룹마다 `add_test` 를 하나씩 더 등록한다. 전체를 한 번에 도는 `parts_core_tests` 는 그대로 남고, 그 옆에 주제별 이름이 나란히 선다.
+
+<!-- snippet: CMakeLists.txt@group-tests -->
+```cmake
+function(parts_add_group_test name group)
+    add_test(NAME ${name} COMMAND parts_core_tests ${group})
+endfunction()
+
+parts_add_group_test(parts_skeleton_tests  skeleton)
+parts_add_group_test(parts_toggles_tests   toggles)
+parts_add_group_test(parts_layout_tests    layout)
+parts_add_group_test(parts_simd_tests      simd)
+parts_add_group_test(parts_branch_tests    branch)
+parts_add_group_test(parts_allocator_tests allocator)
+parts_add_group_test(parts_container_tests container)
+parts_add_group_test(parts_graph_tests     graph)
+```
+
+`ctest -R parts_layout_tests` 처럼 이름 하나를 골라 돌리면 그 주제의 검사만 돈다. 무엇을 만들다 깨졌는지가 ctest 출력의 이름에서 바로 보이고, 실패한 그룹만 반복해서 돌릴 수 있다.
 
 빌드 후 `ctest --test-dir build -C Release --output-on-failure` 로 실행한다. 이 타깃은 raylib을 링크하지 않는다. 레이아웃 구현의 `Draw()` 는 `src/sim/*_draw.cpp` 라는 별도 번역 단위에 있고, 그 파일들은 앱 타깃에만 들어간다. `Draw()` 가 가상 함수라 vtable에 주소가 필요하므로 테스트 타깃은 대신 빈 정의만 담은 `tests/headless_draw.cpp` 를 링크한다. 그 결과 GLFW·OpenGL 없이 계산 코어만 빌드해 검증할 수 있고, 테스트는 창을 열지 않고 `Update` 와 `CopyState` 만 호출한다.
 
@@ -603,6 +624,102 @@ cmake --build build --config Release
 콤보박스 클릭 직후 그래프에 *세로 절벽* 이 그려진다. 직전 layout의 ms와 직후 layout의 ms가 한 줄로 이어지면서 차이가 시각적 사건이 된다.
 
 100k 엔티티로 늘리면 절대 ms가 커지면서 *비율 차이* 가 더 잘 보인다. 1k에서는 차이가 측정 노이즈 안에 묻힐 수도 있다.
+
+### 자동 검증: `parts_layout_tests`
+
+ms를 비교하려면 세 레이아웃이 *같은 계산* 을 해야 한다. 그 전제를 `layout` 그룹이 두 방향에서 확인한다. 하나는 구현끼리의 동등성, 다른 하나는 구현과 무관한 절대 기준이다.
+
+동등성 쪽은 SoA/Scalar/branched를 baseline으로 두고 나머지 조합을 같은 프레임 수만큼 돌려 비교한다. 초기 상태는 시드가 같으므로 *비트 단위* 로 같아야 하고, 180프레임 뒤의 상태는 경로별 허용 오차 안에 들어야 한다.
+
+<!-- snippet: tests/core_tests.cpp#TestLayoutEquivalence -->
+```cpp
+// tests/core_tests.cpp — layout 그룹
+
+void TestLayoutEquivalence() {
+    constexpr int   kFrames = 180;
+    constexpr float kDt     = 1.0f / 120.0f;
+
+    // baseline: SoA / Scalar / branched.
+    std::vector<float> baselineInit, baseline;
+    {
+        auto sim = MakeAndInit(ppl::Layout::SoA);
+        sim->CopyState(baselineInit);
+        for (int i = 0; i < kFrames; ++i) {
+            sim->Update(kDt, ppl::SimdWidth::Scalar, false);
+        }
+        sim->CopyState(baseline);
+    }
+    CHECK(baseline.size() == kEntities * 4);
+
+    for (const Combo& c : AllCombos()) {
+        const std::string label = ComboName(c);
+        auto sim = MakeAndInit(c.layout);
+        CHECK_AT(sim->Count() == kEntities, label);
+
+        // 같은 시드니 초기 상태는 세 레이아웃이 비트 단위로 같다.
+        std::vector<float> state;
+        sim->CopyState(state);
+        CHECK_AT(NearStates(state, baselineInit, 0.0f), label);
+
+        for (int i = 0; i < kFrames; ++i) {
+            sim->Update(kDt, c.simd, c.branchless);
+        }
+        sim->CopyState(state);
+        CHECK_AT(NearStates(state, baseline, ToleranceFor(c.simd, kFrames)), label);
+    }
+}
+```
+
+절대 기준 쪽이 앞에서 말한 *동등성만으로 부족한 지점* 을 메운다. 실패는 조합 라벨(`AoS/SSE/branchless` 같은)과 함께 찍히므로 어느 경로가 깨졌는지 바로 나온다.
+
+<!-- snippet: tests/core_tests.cpp#TestBoundaryInvariants -->
+```cpp
+// tests/core_tests.cpp — layout 그룹
+
+void TestBoundaryInvariants() {
+    // ...
+    // (a) 갱신 후 모든 엔티티가 뷰포트 안에 있다.
+    if (!(px >= 0.0f && px <= maxX && py >= 0.0f && py <= maxY)) {
+        ++boundsViolations;
+    }
+    // (b) 반사는 부호만 뒤집으므로 |v|는 성분별로 보존된다.
+    if (std::fabs(std::fabs(vx) - absV0[i * 2 + 0]) > 1e-4f ||
+        std::fabs(std::fabs(vy) - absV0[i * 2 + 1]) > 1e-4f) {
+        ++speedViolations;
+    }
+    // (c) 이번 프레임에 속도 부호가 뒤집혔는가.
+    if (prev[i * 4 + 2] * vx < 0.0f) flippedX[i] = 1;
+    if (prev[i * 4 + 3] * vy < 0.0f) flippedY[i] = 1;
+    // ...
+    CHECK_AT(boundsViolations == 0, label);
+    CHECK_AT(speedViolations == 0, label);
+    // ...
+    // 좁은 뷰포트 + 큰 dt에서는 대다수가 실제로 반사해야 한다.
+    CHECK_AT(nx >= kEntities / 2, label);
+    CHECK_AT(ny >= kEntities / 2, label);
+    // 잔여(count % 4) 처리 구간의 반사가 사라지면 여기서 걸린다.
+    CHECK_AT(flippedX[kEntities - 1] == 1, label);
+    CHECK_AT(flippedY[kEntities - 1] == 1, label);
+}
+```
+
+```bash
+cmake -S . -B build
+cmake --build build --config Release
+ctest --test-dir build -C Release -R parts_layout_tests --output-on-failure
+
+./build/parts_core_tests layout              # Linux/macOS
+.\build\Release\parts_core_tests.exe layout  # Windows
+```
+
+```text
+parts_core_tests: group `layout`
+  layout/LayoutEquivalence ... 37 check(s) ok
+  layout/BoundaryInvariants ... 120 check(s) ok
+layout: 2 test(s), 157 check(s), 0 failure(s)
+```
+
+단언 수가 조합 수에 비례한다. 기본 빌드는 `{SoA, AoS, Archetype} x {Scalar, SSE} x {branched, branchless}` 12조합이라 위 수가 나오고, `-DPERF_LAB_ENABLE_AVX2=ON` 으로 구성하면 폭이 하나 늘어 18조합이 되면서 `55` / `180` / 합계 `235` 로 바뀐다. 수가 그보다 작으면 조합 하나가 빠졌다는 뜻이다.
 
 ### 검증 체크리스트
 

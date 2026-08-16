@@ -1,7 +1,7 @@
 // Step 7: SDF + Ray Marching Scene (2D).
-//   두 도형 (Circle / Box) 의 위치 / 크기를 핸들로.
+//   두 도형 (Circle / Box) 의 위치는 핸들로, 크기는 패널 슬라이더로.
 //   합성 모드 토글: Union (min) / SmoothMin / Subtract.
-//   화면 전체에 SDF 등고선 (texture 로 grayscale).
+//   캔버스 전체에 SDF 등고선 (texture — 밝기 = 거리, 안/밖은 색조로 구분).
 //   광선 ro → rd 가 sphere tracing 단계별로 표면까지 이동.
 
 #pragma once

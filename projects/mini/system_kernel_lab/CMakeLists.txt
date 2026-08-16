@@ -96,8 +96,12 @@ set(SKL_CORE_TEST_SOURCES
     src/workload/file_io_workload.cpp
 )
 
+# FrameTimer 는 GUI 의존이 없는 순수 링 버퍼 회계라 창 없이 검사할 수 있다.
+# 코어 목록에 넣지 않고 이 타깃에만 얹는 이유는 오류 경로·I/O 경로 타깃이
+# 타이머를 쓰지 않기 때문이다.
 add_executable(system_core_tests
-    tests/system_core_tests.cpp ${SKL_CORE_TEST_SOURCES})
+    tests/system_core_tests.cpp ${SKL_CORE_TEST_SOURCES}
+    src/measure/frame_timer.cpp)
 
 # 오류 경로 전용. src/fault 의 주입 seam 으로 EINTR 재시도, aio 수확,
 # io_uring 링 재초기화, factory 폴백, 스케줄링 권한 실패를 결정적으로 밟는다.
@@ -201,6 +205,47 @@ set_tests_properties(system_kernel_bench_rejects_bad_toggle PROPERTIES
     WILL_FAIL TRUE
     TIMEOUT 60)
 
+# ── step 단위 실행 케이스 ────────────────────────────────────────────────────
+# 위의 전체 실행 케이스는 그대로 둔다. 여기서 *더하는* 것은 "이 step 이 추가한
+# 것만 도는" 케이스다. 세 바이너리 안에서 어느 검사가 어느 step 소속인지는
+# tests/*.cpp 끝의 대응표가 정하고, `--step=N` 이 그 표를 필터로 쓴다.
+#
+# 표에 없는 step 을 여기서 걸면 바이너리가 종료 코드 2 로 실패한다 — 케이스가
+# 아무것도 돌지 않은 채 초록이 되지 않는다. 그래서 이 목록과 소스의 표가
+# 어긋나면 ctest 가 잡는다.
+# snippet-begin: step-tests
+function(skl_add_step_test tag suite target)
+    add_test(NAME skl_step${tag}_${suite} COMMAND ${target} --step=${tag})
+    set_tests_properties(skl_step${tag}_${suite} PROPERTIES TIMEOUT 60)
+endfunction()
+
+# 워크로드 골격 · 프레임 타이머 윈도우
+skl_add_step_test(01 core     system_core_tests)
+# IIoBackend + ReadBackend + factory
+skl_add_step_test(02 core     system_core_tests)
+skl_add_step_test(02 fault    system_fault_tests)
+skl_add_step_test(02 io_path  system_io_path_tests)
+# pread · mmap
+skl_add_step_test(03 core     system_core_tests)
+skl_add_step_test(03 fault    system_fault_tests)
+skl_add_step_test(03 io_path  system_io_path_tests)
+# POSIX AIO · io_uring
+skl_add_step_test(04 core     system_core_tests)
+skl_add_step_test(04 fault    system_fault_tests)
+skl_add_step_test(04 io_path  system_io_path_tests)
+# sync 4종 · 워커 풀 · 작업 큐 인계
+skl_add_step_test(05 core     system_core_tests)
+skl_add_step_test(05 fault    system_fault_tests)
+# 스케줄링 정책 적용과 권한 폴백
+skl_add_step_test(06 fault    system_fault_tests)
+# 코루틴 실행 단위
+skl_add_step_test(07 core     system_core_tests)
+skl_add_step_test(07 fault    system_fault_tests)
+# 카운터 채널 · 주입 seam 의 계약
+skl_add_step_test(08 core     system_core_tests)
+skl_add_step_test(08 fault    system_fault_tests)
+# snippet-end: step-tests
+
 target_include_directories(${PROJECT_NAME} PRIVATE
     src
     ${imgui_SOURCE_DIR}
@@ -215,7 +260,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ${CMAKE_DL_LIBS}
 )
 
-# POSIX AIO 가드. librt가 발견되면 SKL_HAS_POSIX_AIO 정의 + 링크.
+# POSIX AIO 가드. 위 헤더+심볼 컴파일 검사가 통과하면 SKL_HAS_POSIX_AIO 정의,
+# librt가 따로 있는 환경에서는 그 라이브러리도 링크.
 if(SKL_POSIX_AIO_AVAILABLE)
     target_compile_definitions(${PROJECT_NAME} PRIVATE SKL_HAS_POSIX_AIO=1)
     if(SKL_RT_LIB)

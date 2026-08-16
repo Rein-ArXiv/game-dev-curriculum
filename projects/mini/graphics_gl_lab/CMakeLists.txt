@@ -170,7 +170,8 @@ set(GLLAB_CORE_SOURCES
     src/render/lighting_bindings.cpp
     src/render/texture_modes.cpp
     src/render/msaa_target.cpp
-    src/measure/khr_debug.cpp)
+    src/measure/khr_debug.cpp
+    src/measure/frame_timer.cpp)
 
 add_executable(graphics_gl_contract_tests
     tests/graphics_gl_contract_tests.cpp
@@ -198,6 +199,34 @@ add_test(NAME graphics_gl_render_tests
 set_tests_properties(graphics_gl_render_tests PROPERTIES
     SKIP_RETURN_CODE 77
     TIMEOUT 300)
+
+# ── step 입도의 실행 단위 ────────────────────────────────────────────────────
+# 위 두 항목(전체 실행)은 그대로 두고 step 별 항목을 *더한다*. 새 실행 파일은
+# 없다 — 두 테스트 main 이 첫 인자를 step 필터로 받는다. step 문서의 검증 절은
+# 자기 step 의 항목만 부르므로(`ctest -R gl_step05`), 각 step 의 기대 출력이
+# 서로 다르다.
+add_test(NAME gl_step01_skeleton          COMMAND graphics_gl_contract_tests step01)
+add_test(NAME gl_step02_measure           COMMAND graphics_gl_contract_tests step02)
+add_test(NAME gl_step03_drawcall_contract COMMAND graphics_gl_contract_tests step03)
+add_test(NAME gl_step05_binding_contract  COMMAND graphics_gl_contract_tests step05)
+add_test(NAME gl_step06_texture_contract  COMMAND graphics_gl_contract_tests step06)
+
+# 컨텍스트가 필요한 step 은 렌더 타깃 쪽. 헤드리스 환경의 skip 규약(77)을
+# 전체 항목과 똑같이 유지한다.
+function(gllab_add_render_step_test name step)
+    add_test(NAME ${name}
+             COMMAND graphics_gl_render_tests ${step}
+             WORKING_DIRECTORY $<TARGET_FILE_DIR:graphics_gl_render_tests>)
+    set_tests_properties(${name} PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 300)
+endfunction()
+
+gllab_add_render_step_test(gl_step03_drawcall_render step03)
+gllab_add_render_step_test(gl_step04_shader_perm     step04)
+gllab_add_render_step_test(gl_step05_binding_render  step05)
+gllab_add_render_step_test(gl_step06_texture_render  step06)
+gllab_add_render_step_test(gl_step07_scale_msaa      step07)
 
 # 플랫폼 분기.
 if(UNIX AND NOT APPLE)

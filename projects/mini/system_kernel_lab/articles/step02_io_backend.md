@@ -24,6 +24,7 @@
 4. BackendType enum과 팩토리
 5. FileIoWorkload의 backend 주입
 6. main 통합과 빌드 결과
+7. 검증 — 계약을 코드로 못 박는다
 
 ---
 
@@ -114,6 +115,7 @@ async backend는 *제출 순서* 와 *결과 도착 순서* 가 다를 수 있�
 
 `src/io/io_backend.h`:
 
+<!-- snippet: src/io/io_backend.h -->
 ```cpp
 #pragma once
 
@@ -180,6 +182,7 @@ flowchart LR
 
 `src/io/read_backend.h`:
 
+<!-- snippet: src/io/read_backend.h -->
 ```cpp
 #pragma once
 
@@ -285,7 +288,7 @@ std::uint64_t ReadBackend::RunCycle(const std::vector<std::string>& paths,
 2. **backend는 fixture가 얼마나 커야 하는지 모른다.** "내가 요청한 것보다 파일이 작다"와 "파일이 여기서 끝난다"를 구분할 수 있는 것은 크기를 정한 호출자뿐이다.
 3. **다섯 구현이 이 판정에서 일치할 수가 없다.** mmap은 매핑한 뒤에는 EOF를 관측조차 못 하고(그래서 매핑 길이를 파일 크기로 잘라야 한다), aio·io_uring은 완료 단위로만 안다. 바이트 수를 돌려주는 쪽이 예외보다 정보량이 많고, 다섯 구현이 같은 값으로 수렴한다.
 
-`tests/system_io_path_tests.cpp` 의 `TestShortReadContract` 가 이 계약을 못 박는다. 딱 맞는 파일·요청의 절반·4097바이트·1바이트·빈 파일·요청보다 큰 파일을 한 사이클에 섞어 두고, 컴파일된 모든 backend가 *같은 `(크기, 체크섬)` 목록* 과 *같은 총 바이트* 를 내는지 본다(비동기 backend는 완료 순서가 다르므로 정렬해 비교한다).
+`tests/system_io_path_tests.cpp` 의 `CheckShortReadContract` 가 이 계약을 못 박는다. 딱 맞는 파일·요청의 절반·4097바이트·1바이트·빈 파일·요청보다 큰 파일을 한 사이클에 섞어 두고, 대상 backend가 *같은 `(크기, 체크섬)` 목록* 과 *같은 총 바이트* 를 내는지 본다(비동기 backend는 완료 순서가 다르므로 정렬해 비교한다).
 
 ### EINTR 재시도가 중요한 이유
 
@@ -545,6 +548,74 @@ cmake --build build -j
 토글 UI + pread + mmap 이 들어올 때 *지금* 인터페이스가 없으면 그 단계가 *세 가지 작업을 동시에* 한다 — 인터페이스 설계, UI, 두 backend 추가. 변경 범위가 커지면 *어디서 뭐가 깨졌는지* 추적이 어렵다.
 
 이 단계의 가치는 측정 결과를 바꾸지 않은 채 변경 지점을 좁힌 데 있다. 백엔드 선택, 수명, 워크로드 호출 경계가 분리되었으므로 새 구현을 넣더라도 baseline 경로와 비교 기준을 유지할 수 있다.
+
+## 7. 검증 — 계약을 코드로 못 박는다
+
+인터페이스를 세운 단계의 산출물은 *문서에 적힌 약속* 이다. 약속은 지켜지는지 확인할 방법이 없으면 주석과 다를 바 없다. `IIoBackend` 가 건 약속은 셋이었다 — path 당 onRead 한 번, 넘기는 크기는 *실제로 읽은* 바이트, 반환값은 그 합.
+
+`ReadBackend` 는 그 셋을 지키는 첫 구현이다. 검사 쪽은 파일 크기를 제각각으로 만든 fixture를 한 사이클에 통과시키고, `(크기, 체크섬)` 기록을 path 수만큼 모아 기대값과 통째로 비교한다. 합계만 보면 "두 파일을 한 번에 읽고 한 번만 콜백" 같은 위반이 그대로 통과한다.
+
+<!-- snippet: tests/system_io_path_tests.cpp@short-read-contract -->
+```cpp
+// tests/system_io_path_tests.cpp
+
+void CheckContractOnFixture(const SizedFixture& fixture, std::size_t requestBytes,
+                            const char* label, const skl::BackendType* types,
+                            std::size_t count) {
+    for (std::size_t idx = 0; idx < count; ++idx) {
+        const auto type = types[idx];
+        // ...
+        // path 당 정확히 한 번.
+        CHECK(out.reads.size() == fixture.Paths().size());
+        CheckReadsEqual(out.reads, fixture.ExpectedReads(requestBytes), name);
+        CHECK(out.bytes == fixture.ExpectedBytes(requestBytes));
+        CHECK(OpenFdCount() == fdBefore);
+    }
+}
+```
+
+대상 backend를 인자로 받는 이유는 이 계약을 지켜야 하는 구현이 앞으로 늘기 때문이다. 지금 이 단계가 부르는 목록은 `read` 하나다.
+
+EINTR 재시도 루프도 여기서 처음 생겼다(`if (errno == EINTR) continue;`). 정규 파일로는 절대 밟히지 않는 분기라, 검사는 `/tmp` 에 FIFO를 만들고 `SA_RESTART` 없는 `SIGUSR1` 을 읽기 스레드에만 1 ms 간격으로 보낸다. 판정은 *시그널이 와도 바이트 수와 체크섬이 무시그널 실행과 완전히 같다* 이고, 그 위에 "재시도가 실제로 일어났다"를 seam 호출 횟수로 확인한다.
+
+```bash
+cmake --build build -j
+ctest --test-dir build -R skl_step02 --output-on-failure
+```
+
+```text
+    Start 10: skl_step02_core
+1/3 Test #10: skl_step02_core ..................   Passed    0.00 sec
+    Start 11: skl_step02_fault
+2/3 Test #11: skl_step02_fault .................   Passed    0.00 sec
+    Start 12: skl_step02_io_path
+3/3 Test #12: skl_step02_io_path ...............   Passed    0.31 sec
+
+100% tests passed, 0 tests failed out of 3
+```
+
+세 케이스가 각각 성공 경로 · 오류 경로 · I/O 경로다. 무엇을 봤는지는 실행 파일을 직접 부르면 나온다.
+
+```bash
+./build/system_io_path_tests --step=02
+```
+
+```text
+[ run  ] step02  short read contract (read)
+  read: mixed fixture {16384, 8192, 4097, 1, 0, 32775} request=16384 -> total=45058 bytes, one onRead per path
+[  ok  ] step02  short read contract (read)
+[ run  ] step02  fifo partial read loop + EINTR
+  fifo chunked read: chunks=24 calls(base)=24 calls(signalled)=89
+[  ok  ] step02  fifo partial read loop + EINTR
+[ run  ] step02  fifo blocking read EINTR
+  read wait via read: calls(base)=1 calls(signalled)=73
+[  ok  ] step02  fifo blocking read EINTR
+system_io_path_tests --step=2: 3/9 check(s) run, 0 failed
+```
+
+읽어야 할 줄은 `calls(base)=24 calls(signalled)=89` 다. `PIPE_BUF` 이하의 write는 원자적이므로 시그널이 없으면 read 호출은 청크 수(24)를 넘을 수 없다. 89는 `-1`/EINTR를 받고 되돌아간 호출이 65번 있었다는 뜻이고, 그런데도 총 바이트와 체크섬은 무시그널 실행과 한 글자도 다르지 않다. 그것이 "재시도가 투명하다"의 관측 가능한 형태다. 뒤 두 숫자는 시그널 타이밍에 따라 실행마다 달라지지만 `signalled > base` 라는 부등호는 달라지지 않는다.
+
+`45058` 은 `16384 + 8192 + 4097 + 1 + 0 + 16384` 다 — 마지막 파일은 요청보다 크지만 요청분만 읽었고, 빈 파일도 콜백을 한 번 받았다.
 
 ---
 

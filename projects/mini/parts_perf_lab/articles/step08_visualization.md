@@ -160,6 +160,68 @@ timer.CommitFrame(bench.LastFrameMs(), cbench.LastFrameMs());
 > `BeginUpdate → sim->Update → EndUpdate → bench.RunFrame → cbench.RunFrame → BeginDraw → sim->Draw → EndDraw → CommitFrame → hud.Draw`
 > 순으로 돈다. `bench.RunFrame`과 `cbench.RunFrame`은 update/draw 타이머 밖에서 측정된다. `CommitFrame`은 시뮬 draw가 끝난 뒤, HUD를 그리기 전에 호출된다. 그래서 `lastUpdateMs_`, `lastDrawMs_`, `bench.LastFrameMs()`, `cbench.LastFrameMs()`가 모두 *같은 프레임의 값* 으로 묶이고, 그래프에는 현재 샘플이 바로 반영된다. HUD 자체를 그리는 비용은 draw ms에서 제외된다.
 
+### 자동 검증: `parts_graph_tests`
+
+세 라인을 한 시간축에 겹쳐 그리는 그림이 의미를 가지려면, 같은 인덱스의 네 값이 *같은 프레임* 의 것이어야 한다. 채널이 하나라도 어긋나게 밀리면 "동시에 변한다"는 관측 자체가 거짓이 된다. 그 정렬은 창 없이 확인되는 순수 계산이라 `graph` 그룹이 붙들고 있다.
+
+<!-- snippet: tests/core_tests.cpp#TestFrameTimerChannels -->
+```cpp
+// tests/core_tests.cpp — graph 그룹
+
+void TestFrameTimerChannels() {
+    ppl::FrameTimer timer;
+    timer.CommitFrame(0.25f, 1.5f);
+    CHECK(timer.LastAllocMs() == 0.25f);
+    CHECK(timer.LastContainerMs() == 1.5f);
+    CHECK(timer.AllocMs()[0] == 0.25f);
+    CHECK(timer.ContainerMs()[0] == 1.5f);
+
+    // 인자를 생략한 호출은 두 채널을 0으로 되돌린다. 워크로드가 없는 프레임이
+    // 직전 값을 물려받아 그래프에 유령 라인을 남기면 안 된다.
+    timer.CommitFrame();
+    CHECK(timer.LastAllocMs() == 0.0f);
+    CHECK(timer.LastContainerMs() == 0.0f);
+    // ...
+    // 링을 한 바퀴 넘겨도 네 채널이 같은 head로 함께 밀린다.
+    constexpr std::size_t kCap = ppl::FrameTimer::kCapacity;
+    ppl::FrameTimer rolled;
+    for (std::size_t i = 0; i < kCap + 7; ++i) {
+        rolled.CommitFrame(static_cast<float>(i), static_cast<float>(i) * 2.0f);
+    }
+    CHECK(rolled.Filled() == kCap);
+    CHECK(rolled.Head() == 7);
+
+    int misaligned = 0;
+    for (std::size_t i = 0; i < kCap; ++i) {
+        if (rolled.ContainerMs()[i] != rolled.AllocMs()[i] * 2.0f) ++misaligned;
+    }
+    CHECK(misaligned == 0);
+
+    // head는 *다음에 쓸* 자리다. 가장 최근 샘플은 head-1, 가장 오래된 샘플은 head.
+    CHECK(rolled.AllocMs()[6] == static_cast<float>(kCap + 6));
+    CHECK(rolled.AllocMs()[7] == 7.0f);
+}
+```
+
+alloc 채널에 `i`, container 채널에 `i * 2` 를 넣고 링을 한 바퀴 넘겨 돌린 뒤, 600칸 전부에서 두 배 관계가 유지되는지 센다. 어긋난 칸이 하나라도 있으면 두 채널이 서로 다른 프레임을 가리키고 있다는 뜻이다. 마지막 두 단언은 `head` 가 *다음에 쓸* 자리라는 규칙을 고정한다 — 그래프가 왼쪽 끝을 `head` 에서 시작해 오른쪽으로 그리는 순서가 여기서 나온다.
+
+```bash
+cmake -S . -B build
+cmake --build build --config Release
+ctest --test-dir build -C Release -R parts_graph_tests --output-on-failure
+
+./build/parts_core_tests graph              # Linux/macOS
+.\build\Release\parts_core_tests.exe graph  # Windows
+```
+
+```text
+parts_core_tests: group `graph`
+  graph/FrameTimerChannels ... 14 check(s) ok
+graph: 1 test(s), 14 check(s), 0 failure(s)
+```
+
+폴리라인을 그리는 부분 자체는 raylib 호출이라 창 없이 재현되지 않는다. 여기서 고정하는 것은 그 아래 깔린 데이터 정렬이고, 화면에서 세 라인이 실제로 어떻게 보이는지는 아래 사용 시나리오를 직접 따라가 확인한다.
+
 ## 3. `Hud::DrawFrameGraph` 확장 — 세 라인을 그리는 폴리라인 폼
 
 기존 `DrawFrameGraph`는 frame total(update + draw) 한 라인만 그리는 구조였다. 폴리라인 그리기 로직을 *함수 객체* 로 빼서 같은 코드를 채널마다 반복한다.

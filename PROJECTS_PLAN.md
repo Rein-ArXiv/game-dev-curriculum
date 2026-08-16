@@ -34,7 +34,9 @@
 - `languages_lab`: 토큰 위치·우선순위, 바이트코드 제어 흐름·스택 검증, 실행 예산, 호스트 바인딩
 - `system_kernel_lab`: I/O 결과 동등성, 부분 읽기·EINTR·취소, 동기화 불변식
 - `math_lab`: 행렬·쿼터니언 항등식, 교차 판정, 퇴화 기하, 수치 오차
-- `physics_lab`: 적분기 오차 차수, 운동량·에너지 범위, 접촉·마찰·제약 불변식
+- `physics_lab`: 적분기 오차 차수, 운동량·에너지 범위, 접촉·제약 불변식 (마찰은 이 lab의 범위가
+  아니다 — 강체에 회전 자유도가 없어 접선 impulse가 토크를 만들지 못하고, 그러면 physics 시리즈
+  part09의 정지 마찰과 동마찰이 속도 감쇠 하나로 뭉개져 검증할 대상 자체가 사라진다)
 - `ai_lab`: 경로 비용, 도달 불가 상태, flow field, steering·boids 경계 조건
 - graphics labs: 자원 수명과 동기화 상태, 변환 결과, 가능한 경우 렌더 캡처 회귀
 - `game_network_lab`: 실제 TCP framing, IOCP/epoll 수명, UDP endpoint binding, 권위 tick과 snapshot
@@ -49,7 +51,13 @@
    지난 step을 되짚는 참조는 허용된다.
 3. 현재 step에서 추가·변경한 코드가 식별된다.
 4. 문서의 코드만 따라도 해당 상태를 빌드할 수 있다.
-5. step 종료 시 실행 명령과 관측 가능한 결과가 있다.
+5. step 종료 시 실행 명령과 관측 가능한 결과가 있다. — `scripts/check_project_docs.py`가
+   검사한다. 자동 검증을 *실행하는* 명령(`ctest`, 경로로 부르는 테스트 실행 파일,
+   테스트 프로젝트를 도는 `dotnet`)과 그 명령이 내는 관측 출력이 둘 다 있어야 한다.
+   빌드만 하는 명령, GUI 앱 실행, 벤치마크, 육안 체크리스트는 자동 검증이 아니다.
+   자동 검증이 성립하지 않는 step은 `projects/mini/VERIFY_EXEMPT.md`에 이유와 함께
+   등재한다. 등재 없는 미달만 error이고, 등재된 문서가 나중에 기준을 만족하게 되면
+   낡은 등재로 error가 된다. 인정 형식과 등재 규칙은 그 문서에 있다.
 6. 다음 step의 확장은 기존 공개 계약을 이유 없이 깨지 않는다.
 7. 최종 코드와 문서 코드가 드리프트하지 않도록 스니펫 검증을 둔다. 단계별 소스 스냅숏은
    만들지 않는다. — `scripts/check_snippets.py`가 검사한다. 현재 소스와 일치한다고 주장하는
@@ -57,7 +65,7 @@
    `scripts/SNIPPETS.md`에 있다.
 
 ```powershell
-python scripts/check_project_docs.py   # 2번 + 7번을 한 번에 검사한다
+python scripts/check_project_docs.py   # 2번 + 5번 + 7번을 한 번에 검사한다
 ```
 
 ## Mega의 최종 게임

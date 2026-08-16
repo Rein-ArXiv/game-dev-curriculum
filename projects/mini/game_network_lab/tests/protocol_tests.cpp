@@ -1,4 +1,5 @@
 #include "protocol.h"
+#include "step_cases.h"
 
 #include <array>
 #include <cstddef>
@@ -6,6 +7,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace {
@@ -39,6 +41,9 @@ void TestGoldenControlFrame() {
     for (std::size_t i = 0; i < expected.size(); ++i) {
         Require(frame[i] == expected[i], "control frame golden bytes");
     }
+    gnl_test::Observe("EncodeControl(Hello, 5B) = " + std::to_string(frame.size()) +
+                      "B, header " + std::to_string(kFrameHeaderBytes) +
+                      "B matched byte for byte");
 }
 
 void TestGoldenDatagram() {
@@ -65,6 +70,10 @@ void TestGoldenDatagram() {
     }
     Require(datagram.size() == kDatagramHeaderBytes + payload.size(),
             "datagram header is 24 bytes");
+    gnl_test::Observe("EncodeDatagram(Input, 42, 99, 5B) = " +
+                      std::to_string(datagram.size()) + "B, header " +
+                      std::to_string(kDatagramHeaderBytes) +
+                      "B matched byte for byte");
 }
 
 void TestFraming() {
@@ -94,6 +103,9 @@ void TestFraming() {
     Require(mergedDecoder.Push(merged), "push merged frames");
     Require(mergedDecoder.Pop()->type == ControlType::Hello, "first merged frame");
     Require(mergedDecoder.Pop()->type == ControlType::Ping, "second merged frame");
+    gnl_test::Observe("3+7+" + std::to_string(frame.size() - 10) +
+                      " byte pushes -> 1 frame, one " +
+                      std::to_string(merged.size()) + "B push -> 2 frames");
 }
 
 void TestDatagramRoundTrip() {
@@ -109,6 +121,9 @@ void TestDatagramRoundTrip() {
     Require(decoded->sequence == 99, "datagram sequence");
     Require(decoded->payload == std::vector<std::byte>(payload.begin(), payload.end()),
             "datagram payload");
+    gnl_test::Observe("connection=" + std::to_string(decoded->connection) +
+                      " sequence=" + std::to_string(decoded->sequence) +
+                      " payload=" + std::to_string(decoded->payload.size()) + "B");
 }
 
 // A datagram is a single OS-delivered unit, so every header field the sender did
@@ -160,6 +175,8 @@ void TestDatagramRejection() {
     // Round trip still works for the unmodified bytes: the checks above reject
     // corruption, not everything.
     Require(DecodeDatagram(original).has_value(), "the untouched datagram still decodes");
+    gnl_test::Observe("rejected: truncated, length +1 and -1, 2 reserved bytes, "
+                      "magic, version, short header; the original still decodes");
 }
 
 // A stream decoder cannot resynchronise, so an illegal header must move it to a
@@ -203,6 +220,9 @@ void TestFrameHeaderRejection() {
         Require(decoder.Failed(), "an over-long declared length fails the decoder");
         Require(decoder.BufferedBytes() == hugeLength.size(),
                 "the decoder never allocated for the declared length");
+        gnl_test::Observe("magic, version and a 65537 byte declared length each "
+                          "latch Failed(); BufferedBytes stayed " +
+                          std::to_string(decoder.BufferedBytes()));
     }
 }
 
@@ -228,6 +248,8 @@ void TestFrameBufferCap() {
                 "a single oversized push is refused");
         Require(decoder.Failed(), "a single oversized push fails the decoder");
     }
+    gnl_test::Observe("accumulation cap " + std::to_string(kCap) +
+                      "B accepted, cap+1 refused in one push and in two");
 }
 
 void TestSequenceWrap() {
@@ -238,20 +260,26 @@ void TestSequenceWrap() {
     Require(!IsNewerSequence(17, 17), "equal sequence is not newer");
     Require(IsNewerSequence(18, 17), "the next sequence is newer");
     Require(!IsNewerSequence(17, 18), "the previous sequence is not newer");
+    gnl_test::Observe("0 is newer than 0xffffffff, 0xffffffff is not newer than 0, "
+                      "17 is not newer than 17");
 }
 
 } // namespace
 
-int main() {
-    TestGoldenControlFrame();
-    TestGoldenDatagram();
-    TestFraming();
-    TestDatagramRoundTrip();
-    TestDatagramRejection();
-    TestFrameHeaderRejection();
-    TestFrameBufferCap();
-    TestSequenceWrap();
-
-    std::cout << "game_network_tests: all checks passed\n";
-    return 0;
+// Everything in this binary is the wire format the protocol step defined, so
+// every case carries the same tag.
+int main(int argc, char** argv) {
+    return gnl_test::Run(
+        "game_network_tests",
+        {
+            {"step01", "golden_control_frame", [] { TestGoldenControlFrame(); return 0; }},
+            {"step01", "golden_datagram", [] { TestGoldenDatagram(); return 0; }},
+            {"step01", "framing", [] { TestFraming(); return 0; }},
+            {"step01", "datagram_round_trip", [] { TestDatagramRoundTrip(); return 0; }},
+            {"step01", "datagram_rejection", [] { TestDatagramRejection(); return 0; }},
+            {"step01", "frame_header_rejection", [] { TestFrameHeaderRejection(); return 0; }},
+            {"step01", "frame_buffer_cap", [] { TestFrameBufferCap(); return 0; }},
+            {"step01", "sequence_wrap", [] { TestSequenceWrap(); return 0; }},
+        },
+        argc, argv);
 }

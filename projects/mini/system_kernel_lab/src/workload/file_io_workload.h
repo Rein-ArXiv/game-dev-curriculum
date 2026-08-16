@@ -116,7 +116,8 @@ private:
     std::vector<std::thread>                  workerThreads_;
     std::unique_ptr<ISync>                    queueSync_;
 
-    // 작업 큐. push는 메인 (DispatchAll), pop은 워커.
+    // 작업 큐. push는 메인 (RunCycleMulti / RunCycleCoroutine),
+    // pop은 워커 스레드 또는 코루틴.
     std::queue<std::size_t>      queue_;
 
     // 메인이 워커들에게 *지금 사이클 시작* 을 알리는 카운터.
@@ -142,6 +143,11 @@ private:
         std::vector<unsigned char>  stack;
         bool                        done = false;
     };
+
+    // getcontext(= setjmp 계열) 를 호출자 프레임에서 떼어내기 위한 분리다.
+    // 자세한 이유는 RunCycleCoroutine 의 호출부 주석 참고.
+    // 실패하면 c.done 을 세우고 false 를 돌려준다.
+    bool SetupCoroContext(Coroutine& c, int idx);
 
     std::vector<Coroutine>       coros_;
     std::vector<std::unique_ptr<IIoBackend>> coroBackends_;

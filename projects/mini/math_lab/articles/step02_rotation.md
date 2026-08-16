@@ -40,48 +40,50 @@ flowchart LR
 
 토글은 raygui 의 `GuiToggleGroup` 으로. 한 라인의 두 칸짜리 토글.
 
+<!-- snippet: src/scenes/rotation_scene.cpp@mode-toggle -->
 ```cpp
-int modeIdx = (mode_ == Mode::Euler) ? 0 : 1;
-GuiToggleGroup(panelRect, "Euler;Slerp/Nlerp", &modeIdx);
+int   modeIdx  = (mode_ == Mode::Euler) ? 0 : 1;
+int   newMode  = GuiToggleGroup(Rectangle{(float)(px + 8), (float)y, 130, 22},
+                                 "Euler;Slerp/Nlerp", &modeIdx);
+(void)newMode;
 mode_ = (modeIdx == 0) ? Mode::Euler : Mode::SlerpVsNlerp;
 ```
+
+`GuiToggleGroup` 은 반환값도 인덱스로 돌려주지만 이 Scene 은 `&modeIdx` 로 받은 값만 쓴다 — `/W4` 에서 미사용 경고가 나지 않게 `(void)newMode;` 로 명시적으로 버린다.
 
 ## 2. 쿼터니언 유틸 헤더
 
 `raylib` 의 `Quaternion` 은 사실상 `Vector4` 별칭. `raymath.h` 에 `QuaternionMultiply` / `QuaternionToMatrix` 같은 함수가 있지만, *쿼터니언 대수 자체가 이 Scene 의 학습 대상* 이라 곱·샌드위치 회전·행렬 변환은 `algo/quaternion.h` 에 직접 쓴다. raymath 는 *정답지* 로만 쓴다.
 
+<!-- snippet: src/algo/quaternion.h -->
 ```cpp
 namespace mathlab {
 
 inline Quaternion QuatIdentity() { return {0, 0, 0, 1}; }
 
 inline Quaternion QuatFromAxisAngle(Vector3 axis, float angleRad) {
-    float lenSq = axis.x*axis.x + axis.y*axis.y + axis.z*axis.z;
+    float lenSq = axis.x * axis.x + axis.y * axis.y + axis.z * axis.z;
     if (lenSq < 1e-12f) return QuatIdentity();
     float inv = 1.0f / std::sqrt(lenSq);
-    Vector3 a = {axis.x*inv, axis.y*inv, axis.z*inv};
+    Vector3 a = {axis.x * inv, axis.y * inv, axis.z * inv};
     float half = angleRad * 0.5f;
     float s    = std::sin(half);
-    return {a.x*s, a.y*s, a.z*s, std::cos(half)};
+    return {a.x * s, a.y * s, a.z * s, std::cos(half)};
 }
 
 // Hamilton 곱: w = aw·bw - a⃗·b⃗,  v⃗ = aw·b⃗ + bw·a⃗ + a⃗ × b⃗
 inline Quaternion QuatMul(Quaternion a, Quaternion b) {
     return {
-        a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
-        a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
-        a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w,
-        a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z,
+        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
     };
 }
 
-inline Quaternion QuatConjugate(Quaternion q) { return {-q.x, -q.y, -q.z, q.w}; }
-
-// v' = q ⊗ (v, 0) ⊗ q⁻¹
-inline Vector3 QuatRotateVec(Quaternion q, Vector3 v) {
-    Quaternion p{v.x, v.y, v.z, 0.0f};
-    Quaternion r = QuatMul(QuatMul(q, p), QuatConjugate(q));
-    return {r.x, r.y, r.z};
+// 켤레. 단위 쿼터니언에서는 q⁻¹ 과 같다.
+inline Quaternion QuatConjugate(Quaternion q) {
+    return {-q.x, -q.y, -q.z, q.w};
 }
 
 inline Quaternion QuatFromEulerXYZ(float pitch, float yaw, float roll) {
@@ -90,6 +92,17 @@ inline Quaternion QuatFromEulerXYZ(float pitch, float yaw, float roll) {
     Quaternion qz = QuatFromAxisAngle({0, 0, 1}, roll);
     return QuatMul(QuatMul(qz, qy), qx);
 }
+
+// ... QuatNorm / QuatNormalize ...
+
+// v' = q ⊗ (v, 0) ⊗ q⁻¹
+inline Vector3 QuatRotateVec(Quaternion q, Vector3 v) {
+    Quaternion p{v.x, v.y, v.z, 0.0f};
+    Quaternion r = QuatMul(QuatMul(q, p), QuatConjugate(q));
+    return {r.x, r.y, r.z};
+}
+
+// ... QuatToMatrix / QuatNlerp / QuatSlerp — §5 ...
 
 }  // namespace mathlab
 ```
@@ -115,6 +128,7 @@ flowchart LR
 
 큐브 그리기는 raylib 의 `DrawCubeV` + 로컬 행렬 변환.
 
+<!-- snippet: src/scenes/rotation_scene.cpp@cube-matrix -->
 ```cpp
 rlPushMatrix();
 rlTranslatef(offset.x, offset.y, offset.z);
@@ -126,8 +140,9 @@ float t[16] = {
     m.m12, m.m13, m.m14, m.m15,
 };
 rlMultMatrixf(t);
+Vector3 size = {scale * 0.9f, scale * 0.55f, scale * 0.35f};
 DrawCubeV({0, 0, 0}, size, tint);
-DrawCubeWiresV({0, 0, 0}, size, lineColor);
+DrawCubeWiresV({0, 0, 0}, size, Color{220, 220, 220, 200});
 rlPopMatrix();
 ```
 
@@ -139,6 +154,7 @@ Tait-Bryan 시퀀스에서 짐벌락은 *가운데 축* 각도가 ±90° 일 때
 
 검출은 단순 — 가운데 축 각도가 ±90° 근처인지만 본다.
 
+<!-- snippet: src/algo/quaternion.h#EulerNearGimbalLock -->
 ```cpp
 inline bool EulerNearGimbalLock(float middleAxisRad) {
     constexpr float kEps = 0.05f;          // 약 3°
@@ -150,6 +166,7 @@ inline bool EulerNearGimbalLock(float middleAxisRad) {
 
 DrawWorld 에서 표시.
 
+<!-- snippet: src/scenes/rotation_scene.cpp@gimbal-warning -->
 ```cpp
 if (mode_ == Mode::Euler && EulerNearGimbalLock(yaw_)) {
     DrawText("GIMBAL LOCK — pitch and roll collapsed onto same axis",
@@ -172,22 +189,33 @@ math part05 의 핵심 차이.
 
 코드.
 
+<!-- snippet: src/algo/quaternion.h#QuatSlerp -->
 ```cpp
 inline Quaternion QuatSlerp(Quaternion a, Quaternion b, float t) {
-    a = QuatNormalize(a);                                      // 비단위 입력 방어
+    a = QuatNormalize(a);          // 비단위 입력 방어
     b = QuatNormalize(b);
-    float d = a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
-    if (d < 0.0f) { b = {-b.x, -b.y, -b.z, -b.w}; d = -d; }   // 짧은 호 보장
-    if (d > 0.9995f) return QuatNlerp(a, b, t);                // 거의 같음 → nlerp 안전
-    if (d > 1.0f)  d = 1.0f;                                   // 정규화 오차 방어
+    float d = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    if (d < 0.0f) {                // 짧은 호 보장
+        b = {-b.x, -b.y, -b.z, -b.w};
+        d = -d;
+    }
+    if (d > 0.9995f) {
+        return QuatNlerp(a, b, t);   // 거의 같음 — nlerp 가 더 안정
+    }
+    // 입력이 미세하게 정규화 깨지면 d > 1 → acos NaN. 방어용 clamp.
+    if (d > 1.0f)  d = 1.0f;
     if (d < -1.0f) d = -1.0f;
-    float theta = std::acos(d);
-    float sinT  = std::sin(theta);
+    float theta  = std::acos(d);
+    float sinT   = std::sin(theta);
     if (sinT < 1e-6f) return QuatNlerp(a, b, t);
-    float wa    = std::sin((1 - t) * theta) / sinT;
-    float wb    = std::sin(t * theta)       / sinT;
-    return { a.x*wa + b.x*wb, a.y*wa + b.y*wb,
-             a.z*wa + b.z*wb, a.w*wa + b.w*wb };
+    float wa     = std::sin((1 - t) * theta) / sinT;
+    float wb     = std::sin(t * theta)       / sinT;
+    return {
+        a.x * wa + b.x * wb,
+        a.y * wa + b.y * wb,
+        a.z * wa + b.z * wb,
+        a.w * wa + b.w * wb,
+    };
 }
 ```
 
@@ -205,14 +233,17 @@ Mode B 가 매 프레임 두 보간을 *나란히 큐브로 그린다*. autoPlay
 
 축은 *quaternion 으로 회전된 단위 벡터* 3 개를 화살표 (실린더) 로.
 
+<!-- snippet: src/scenes/rotation_scene.cpp@axis-triad -->
 ```cpp
 Vector3 ex = QuatRotateVec(q, {scale, 0, 0});   // 회전된 X 축
 Vector3 ey = QuatRotateVec(q, {0, scale, 0});
 Vector3 ez = QuatRotateVec(q, {0, 0, scale});
-DrawCylinderEx(offset, offset + ex, 0.04f, 0.04f, 8, RED);
-DrawCylinderEx(offset, offset + ey, 0.04f, 0.04f, 8, GREEN);
-DrawCylinderEx(offset, offset + ez, 0.04f, 0.04f, 8, BLUE);
+DrawArrow3D(offset, Vector3Add(offset, ex), Color{255, 90, 90, 255},  0.04f);
+DrawArrow3D(offset, Vector3Add(offset, ey), Color{120, 255, 120, 255}, 0.04f);
+DrawArrow3D(offset, Vector3Add(offset, ez), Color{120, 160, 255, 255}, 0.04f);
 ```
+
+`DrawArrow3D` 는 이 cpp 의 익명 네임스페이스에 있는 한 줄짜리 래퍼로, 안에서 `DrawCylinderEx` 를 부른다. `Vector3` 에는 `operator+` 가 없으므로 끝점은 raymath 의 `Vector3Add` 로 만든다.
 
 색상 컨벤션: *X = 빨강, Y = 초록, Z = 파랑* (math part06 의 표준). 이 컨벤션이 *Maya·Blender·Unity·Unreal 모두 공통* 이라 사용자가 색만 보고 축을 인식 가능.
 
@@ -222,20 +253,22 @@ DrawCylinderEx(offset, offset + ez, 0.04f, 0.04f, 8, BLUE);
 
 Mode A 의 패널 — 3 슬라이더 + 라이브 쿼터니언 / norm 표시.
 
+<!-- snippet: src/scenes/rotation_scene.cpp#RotationScene::DrawPanel -->
 ```cpp
-char buf[128];
 std::snprintf(buf, sizeof(buf), "pitch %5.1f deg", pitch_ * 57.2958f);
-GuiLabel(labelRect, buf);
-GuiSlider(sliderRect, nullptr, nullptr, &pitch_, -kPi, kPi);
-
-// 같은 패턴으로 yaw, roll ...
-
+GuiLabel(Rectangle{(float)(px + 8), (float)y, 220, 18}, buf);
+GuiSlider(Rectangle{(float)(px + 8), (float)(y + 18), 220, 16},
+           nullptr, nullptr, &pitch_, -kPi, kPi);
+y += 42;
+// ... 같은 패턴으로 yaw, roll ...
 Quaternion q = QuatFromEulerXYZ(pitch_, yaw_, roll_);
-std::snprintf(buf, sizeof(buf), "q = (%.2f, %.2f, %.2f, %.2f)",
+std::snprintf(buf, sizeof(buf),
+               "q = (%.2f, %.2f, %.2f, %.2f)",
                q.x, q.y, q.z, q.w);
-GuiLabel(qLabelRect, buf);
+GuiLabel(Rectangle{(float)(px + 8), (float)y, 260, 18}, buf);
+y += 18;
 std::snprintf(buf, sizeof(buf), "|q| = %.4f (should be 1)", QuatNorm(q));
-GuiLabel(normLabelRect, buf);
+GuiLabel(Rectangle{(float)(px + 8), (float)y, 260, 18}, buf);
 ```
 
 `|q|` 표시가 *정규화 검증* — 슬라이더 입력이 *항상 단위 쿼터니언* 임을 사용자가 직접 본다. math part20 의 *비단위 누적* 함정이 *이런 직접 변환에서는 안 일어난다* 는 증거.
@@ -259,13 +292,52 @@ cmake --build build --config Release -j
 
 빌드 검증: MSVC `/W4`, `cmake --build build --config Release` → 새 Scene 추가 후도 *경고 0* (third-party raygui 만 일부) + `math_lab.exe` 정상.
 
-이 step 이 `tests/core_tests.cpp` 에 추가한 것은 `TestQuaternion()` — 0-vector 축이 항등 쿼터니언이 되는지, 비단위 축 `(0,0,4)` 로 만든 90° 회전이 `(1,0,0)` 을 `(0,1,0)` 으로 보내는지, *3 배 스케일한 비단위 입력* 에도 `QuatSlerp` 결과의 norm 이 1 인지, `EulerNearGimbalLock` 이 ±90° 근처에서만 참인지.
+이 step 이 `tests/core_tests.cpp` 에 추가한 것은 쿼터니언 검증 세 개다.
+
+`quaternion/identities` — 0-vector 축이 항등 쿼터니언이 되는지, 비단위 축 `(0,0,4)` 로 만든 90° 회전이 `(1,0,0)` 을 `(0,1,0)` 으로 보내는지, *3 배 스케일한 비단위 입력* 에도 `QuatSlerp` 결과의 norm 이 1 인지, `QuatMul(z90, x90)` 이 *오른쪽을 먼저 적용* 하는 Hamilton 규약을 지키는지, `EulerNearGimbalLock` 이 ±90° 근처에서만 참인지.
+
+`quaternion/slerp_uniform_speed` — 화면에서 "Slerp 는 호 위, Nlerp 는 현 근처" 로만 보이던 차이를 수치로 못 박는다. 2.6 rad 짜리 큰 호를 100 등분해 *인접 샘플 사이 각도* 의 max/min 비를 잰다. 등각속도면 1 에 붙고, 아니면 튄다.
+
+<!-- snippet: tests/core_tests.cpp@step02-slerp-uniform-speed -->
+```cpp
+const float slerpRatio = stepRatio(&mathlab::QuatSlerp);
+const float nlerpRatio = stepRatio(&mathlab::QuatNlerp);
+// ...
+CHECK(slerpRatio < 1.05f);
+// 대조군 — nlerp 는 같은 호에서 균일하지 않아야 한다.
+// (이 CHECK 가 없으면 위 상한이 자명해질 수 있다)
+CHECK(nlerpRatio > 1.3f);
+```
+
+Nlerp 쪽 하한이 핵심이다. 상한만 있으면 `QuatSlerp` 본문을 `QuatNlerp` 로 바꿔치기해도 *두 값이 같이 움직여* 통과할 수 있다. 두 방향을 함께 잡아야 판별이 된다.
+
+`quaternion/gimbal_lock` — 짐벌락을 *경고 문구* 가 아니라 불변식으로 쓴다. 가운데 축 (yaw) 이 ±90° 면 바깥 두 축이 한 자유도로 축약되므로, pitch 와 roll 을 *같은 양만큼 밀어도* 회전이 변하지 않아야 한다. 175 개 (pitch, roll, 미는 양) 조합에서 최악의 `1-|dot|` 을 잰다.
+
+<!-- snippet: tests/core_tests.cpp@step02-gimbal-lock -->
+```cpp
+const float locked = worstMismatch(halfPi);
+const float free   = worstMismatch(0.0f);
+// ...
+CHECK(locked < 1e-5f);
+CHECK(free > 1e-3f);
+```
+
+`free` 쪽이 대조군이다 — yaw=0 에서는 같은 조작이 회전을 *실제로 바꿔야* 한다. 이게 없으면 `QuatFromEulerXYZ` 가 무엇을 돌려주든 (예컨대 곱 순서를 뒤집어도) `locked` 만으로는 통과할 수 있다.
 
 ```text
-$ ctest --test-dir build -C Release --output-on-failure
-    Start 1: math_core_tests
-1/1 Test #1: math_core_tests ..................   Passed    0.04 sec
+$ ctest --test-dir build -C Release -R math_step02_rotation --output-on-failure
+    Start 2: math_step02_rotation
+1/1 Test #2: math_step02_rotation .............   Passed    0.04 sec
+
 100% tests passed out of 1
+```
+
+```text
+$ ./build/Release/math_core_tests.exe step02
+[step02] quaternion/identities ........... 9 checks, 0 failed
+[step02] quaternion/slerp_uniform_speed .. 6 checks, 0 failed
+[step02] quaternion/gimbal_lock .......... 2 checks, 0 failed
+step02: 3 case(s), 17 check(s), 0 failure(s)
 ```
 
 ---
@@ -280,7 +352,7 @@ Step 2 에서 만든 것.
 
 math 시리즈 part04 (회전 표현 비교) 와 part05 (쿼터니언) 의 *수식과 다이어그램* 이 *마우스에 반응하는 3D 큐브와 빨간 짐벌락 경고* 로 살아 있다.
 
-이 step 의 한계. 입력이 *슬라이더뿐* 이라 회전축을 마우스로 직접 끄는 조작이 없고, 축-각 표현을 따로 보여주는 모드도 없다 (`Mode` 는 `Euler` 와 `SlerpVsNlerp` 둘뿐). 짐벌락은 *경고 문구* 로만 검증되고, `EulerNearGimbalLock` 이 참인 구간에서 pitch·roll 이 실제로 같은 회전으로 축약된다는 불변식은 테스트에 없다. Slerp 와 Nlerp 의 *등각속도 차이* 역시 눈으로만 보이고 수치로 고정되어 있지 않다.
+이 step 의 한계. 입력이 *슬라이더뿐* 이라 회전축을 마우스로 직접 끄는 조작이 없고, 축-각 표현을 따로 보여주는 모드도 없다 (`Mode` 는 `Euler` 와 `SlerpVsNlerp` 둘뿐). 자동 검증이 고정한 것은 *대수적 성질* 이고, Scene 이 실제로 그리는 것 — 큐브의 자세, 축 triad 의 방향, 빨간 경고가 켜지는 순간 — 은 여전히 눈으로만 확인된다. Slerp/Nlerp 판별도 `QuatAngleBetween` 이라는 *같은 파일 안의 보조 함수* 를 기준으로 재므로, 각도 계산 자체가 틀렸다면 두 곡선을 함께 오독한다.
 
 ## 더 읽을거리
 

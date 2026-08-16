@@ -221,6 +221,7 @@ enum class OpCode : uint8_t {
     Halt,
 };
 
+// snippet-begin: bytecode-structs
 struct Instruction {
     OpCode op = OpCode::Halt;
     int32_t operand = 0;
@@ -232,6 +233,7 @@ struct Program {
     std::vector<double> constants;
     std::vector<std::string> names;
 };
+// snippet-end: bytecode-structs
 
 struct CompileResult {
     std::optional<Program> program;
@@ -409,6 +411,7 @@ private:
 
     void Expression() { ParsePrecedence(Precedence::Equality); }
 
+    // snippet-begin: parse-precedence
     void ParsePrecedence(Precedence minimum) {
         if (!EnterNesting(Peek().location)) {
             LeaveNesting();
@@ -426,6 +429,7 @@ private:
         }
         LeaveNesting();
     }
+    // snippet-end: parse-precedence
 
     void Prefix() {
         const Token token = tokens_[current_++];

@@ -22,7 +22,7 @@ public:
     explicit ArenaAllocator(std::size_t capacity);
     ~ArenaAllocator() override;
 
-    // 복사 금지, 이동만 허용.
+    // 복사 금지. 소멸자를 직접 선언하므로 이동 생성/대입도 암시적으로 생기지 않는다.
     ArenaAllocator(const ArenaAllocator&) = delete;
     ArenaAllocator& operator=(const ArenaAllocator&) = delete;
 

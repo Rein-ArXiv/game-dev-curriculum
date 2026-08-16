@@ -1,5 +1,5 @@
 // Step 2: Rotation Scene.
-//   Mode A: Euler XYZ 슬라이더 + 짐벌락 시각화 (pitch ≈ ±90° 일 때).
+//   Mode A: Euler XYZ 슬라이더 + 짐벌락 시각화 (가운데 축 yaw ≈ ±90° 일 때).
 //   Mode B: 두 keyframe 사이 Slerp vs Nlerp 비교 (t 슬라이더).
 // 3D 큐브 + 좌표축 triad 를 raylib 의 Camera3D 로 렌더.
 

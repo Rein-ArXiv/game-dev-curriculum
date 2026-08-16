@@ -26,6 +26,7 @@
 
 ## 1. 2D OBB 자료구조
 
+<!-- snippet: src/algo/collision2d.h#OBB2D -->
 ```cpp
 struct OBB2D {
     Vector2 center;
@@ -61,6 +62,7 @@ struct OBB2D {
 
 2D 의 SAT 는 *4 후보 축* — 각 OBB 의 두 면 법선.
 
+<!-- snippet: src/algo/collision2d.h#OBBOBBSat2D -->
 ```cpp
 inline SATResult OBBOBBSat2D(const OBB2D& A, const OBB2D& B) {
     SATResult r{};
@@ -70,10 +72,11 @@ inline SATResult OBBOBBSat2D(const OBB2D& A, const OBB2D& B) {
     auto axesB    = B.Axes();
 
     Vector2 candidates[4] = {axesA[0], axesA[1], axesB[0], axesB[1]};
-    bool  intersect   = true;
-    int   bestIdx    = -1;
-    float bestOverlap = 1e30f;
+    r.axes.reserve(4);
 
+    bool intersect = true;
+    int  bestIdx   = -1;
+    float bestOverlap = 1e30f;
     for (int i = 0; i < 4; ++i) {
         SATAxisInfo info = SATEvaluateAxis(cornersA, cornersB, candidates[i]);
         r.axes.push_back(info);
@@ -91,6 +94,7 @@ inline SATResult OBBOBBSat2D(const OBB2D& A, const OBB2D& B) {
 
 `SATEvaluateAxis` 가 *한 축에 두 도형 투영* 후 overlap 계산.
 
+<!-- snippet: src/algo/collision2d.h#SATEvaluateAxis -->
 ```cpp
 inline SATAxisInfo SATEvaluateAxis(const std::array<Vector2, 4>& a,
                                      const std::array<Vector2, 4>& b,
@@ -151,6 +155,7 @@ for (int i = 0; i < (int)sat.axes.size(); ++i) {
 
 GJK 의 핵심: *지원 함수 + Minkowski 차*.
 
+<!-- snippet: src/algo/collision2d.h@gjk-support -->
 ```cpp
 inline Vector2 OBBSupport2D(const OBB2D& obb, Vector2 d) {
     auto axes = obb.Axes();
@@ -165,7 +170,9 @@ inline Vector2 OBBSupport2D(const OBB2D& obb, Vector2 d) {
 }
 
 inline Vector2 MinkowskiSupport2D(const OBB2D& a, const OBB2D& b, Vector2 d) {
-    return Sub2(OBBSupport2D(a, d), OBBSupport2D(b, Neg2(d)));
+    Vector2 p1 = OBBSupport2D(a, d);
+    Vector2 p2 = OBBSupport2D(b, Neg2(d));
+    return Sub2(p1, p2);
 }
 ```
 
@@ -177,53 +184,53 @@ GJK 의 모든 알고리즘이 *이 한 함수만* 호출. 도형이 OBB 든 임
 
 시각화를 위해 *각 단계의 simplex 상태* 를 vector 에 기록.
 
+<!-- snippet: src/algo/collision2d.h#GJKStep -->
 ```cpp
 struct GJKStep {
-    std::vector<Vector2> simplex;
-    Vector2              direction;
-    Vector2              newPoint;
+    std::vector<Vector2> simplex;   // 이 단계의 simplex
+    Vector2              direction; // 다음 search direction
+    Vector2              newPoint;  // 이 단계에서 추가된 지원점
     bool                 done;
     bool                 intersect;
     int                  iter;
 };
+```
 
+알고리즘은 그 구조체를 매 반복 하나씩 쌓는다.
+
+<!-- snippet: src/algo/collision2d.h#GJK2DTraced -->
+```cpp
 inline std::vector<GJKStep> GJK2DTraced(const OBB2D& A, const OBB2D& B,
                                           int maxIter = 32) {
     std::vector<GJKStep> trace;
-    Vector2 d = {1, 0};
+    Vector2 d = {1, 0};   // 초기 임의 방향
     Vector2 a = MinkowskiSupport2D(A, B, d);
 
     GJKStep first{};
-    first.simplex = {a};
+    first.simplex   = {a};
+    first.newPoint  = a;
     first.direction = Neg2(a);
-    trace.push_back(first);
-
+    // ... first 의 나머지 필드 + trace.push_back(first) ...
     d = Neg2(a);
+    if (d.x * d.x + d.y * d.y < 1e-12f) d = {1, 0};
     std::vector<Vector2> S = {a};
 
     for (int i = 1; i <= maxIter; ++i) {
         Vector2 newP = MinkowskiSupport2D(A, B, d);
         if (Dot2(newP, d) < 0) {
-            // 분리 결정
-            // ... trace.push_back ... return
+            // ... 분리됨 — done/intersect=false 를 trace 에 남기고 return ...
         }
         S.push_back(newP);
 
         if (S.size() == 2) {
-            // 선분: ab 에 수직 + ao 쪽으로
-            Vector2 ab = Sub2(S[0], S[1]);
-            Vector2 perp = {-ab.y, ab.x};
-            if (Dot2(perp, Neg2(S[1])) < 0) perp = {ab.y, -ab.x};
-            d = perp;
+            // ... 선분: ab 에 수직인 방향 중 ao 쪽 ...
         } else if (S.size() == 3) {
-            // 삼각형: 원점이 각 변의 "반대 정점과 다른 쪽" 에 있는지 검사.
-            // triple-product (cross2D) 부호 두 개 비교:
-            //   sign(cross(edge, AO))  vs  sign(cross(edge, oppositeVertex))
-            // 두 부호가 다르면 그 변의 외부 — 반대 정점 버림.
+            // ... 삼각형: 변마다 sign(cross(e, AO)) 와 sign(cross(e, e_opp))
+            //     를 비교해 원점이 그 변의 외부면 반대 정점을 버린다 ...
         }
-
-        // 매 단계 trace 기록
+        // ... 매 단계 trace 기록 ...
     }
+    // ... 최대 반복 도달 — 안전 종료 ...
     return trace;
 }
 ```
@@ -232,18 +239,27 @@ inline std::vector<GJKStep> GJK2DTraced(const OBB2D& A, const OBB2D& B,
 
 ## 6. GJK 의 stepping UI
 
+<!-- snippet: src/scenes/collision_scene.cpp@gjk-auto-step -->
 ```cpp
 if (mode_ == Mode::GJK && gjkAuto_) {
     gjkAccum_ += dt;
-    if (gjkAccum_ > 0.4f) { gjkAccum_ = 0; ++gjkStep_; }
+    if (gjkAccum_ > 0.4f) {
+        gjkAccum_ = 0;
+        ++gjkStep_;
+    }
 }
 ```
 
 자동 모드에서 *0.4 초마다 한 단계*. 수동 모드는 raygui 의 *Step + 버튼*.
 
+<!-- snippet: src/scenes/collision_scene.cpp@gjk-step-buttons -->
 ```cpp
-if (GuiButton(btnRect, "Step +"))  gjkStep_++;
-if (GuiButton(resetRect, "Reset")) gjkStep_ = 0;
+if (GuiButton(Rectangle{(float)(px + 8), (float)y, 90, 22}, "Step +")) {
+    gjkStep_++;
+}
+if (GuiButton(Rectangle{(float)(px + 100), (float)y, 90, 22}, "Reset")) {
+    gjkStep_ = 0;
+}
 ```
 
 매 프레임 전체 trace 를 *재계산* — OBB 가 바뀌면 trace 도 바뀜. 단계 인덱스만 *유지*.
@@ -269,15 +285,20 @@ for (auto& p : step.simplex) {
 
 OBB 의 *회전을 어떻게 입력* 받을까. 슬라이더 라디언은 추상적 — *회전 핸들* 패턴을 도입.
 
-```cpp
-DragHandle centerA_;     // OBB 중심
-DragHandle rotA_;        // OBB X 축 끝의 회전 핸들
+Scene 의 멤버는 OBB 하나당 *중심 핸들 + 회전 핸들* 두 개다 (`centerA_` / `rotA_`,
+`centerB_` / `rotB_`). 두 핸들 사이의 각도가 곧 OBB 의 회전.
 
-OBB2D BuildOBB(...) const {
+<!-- snippet: src/scenes/collision_scene.cpp#CollisionScene::BuildOBB -->
+```cpp
+OBB2D CollisionScene::BuildOBB(DragHandle const& center, DragHandle const& rot,
+                                  float halfX, float halfY) const {
     OBB2D r{};
-    r.center = centerA_.Position();
-    Vector2 d = rotA_.Position() - r.center;
+    r.center = center.Position();
+    Vector2 d = {rot.Position().x - r.center.x,
+                  rot.Position().y - r.center.y};
     r.angle  = std::atan2(d.y, d.x);   // 두 핸들 사이 각도
+    r.halfX  = halfX;
+    r.halfY  = halfY;
     return r;
 }
 ```
@@ -301,14 +322,40 @@ cmake --build build --config Release
 
 빌드: MSVC `/W4`, 새 Scene 추가 후도 *경고 0 (third-party 외)* + `math_lab.exe` 정상.
 
-이 step 이 `tests/core_tests.cpp` 에 추가한 것은 `TestCollision()` — 겹치는 OBB 쌍과 떨어진 OBB 쌍에서 `OBBOBBSat2D().intersect` 가 각각 참·거짓인지, 같은 두 쌍에 대해 `GJK2DTraced` 의 *마지막 trace 단계* 가 `done` 이고 그 `intersect` 가 SAT 결과와 일치하는지.
+이 step 이 `tests/core_tests.cpp` 에 추가한 것은 `collision/sat_vs_gjk` 다. 이 Scene 은 *같은 질문에 답하는 두 알고리즘* 을 나란히 두고 있으므로, 검증도 그 구조를 그대로 쓴다 — 서로가 서로의 오라클이다. 고정 seed LCG 로 만든 OBB 20,000 쌍에서 두 판정이 한 번도 갈리지 않아야 한다.
+
+<!-- snippet: tests/core_tests.cpp@step05-sat-gjk-agree -->
+```cpp
+const bool sat = mathlab::OBBOBBSat2D(A, B).intersect;
+const auto trace = mathlab::GJK2DTraced(A, B);
+const bool gjk =
+    !trace.empty() && trace.back().done && trace.back().intersect;
+// ...
+CHECK(disagree == 0);
+// 표본이 한쪽으로 쏠려 위 CHECK 가 자명해지지 않았는지 확인.
+CHECK(hits > kPairs / 10);
+CHECK(hits < kPairs - kPairs / 10);
+```
+
+뒤의 두 CHECK 가 없으면 이 대조는 자명해질 수 있다. 표본이 전부 "떨어짐" 으로 쏠려 있으면 *두 함수가 모두 `false` 를 상수로 돌려줘도* 일치하기 때문이다. 표본의 10~90% 가 충돌이라는 하한·상한이 그 구멍을 막는다.
+
+무작위 대조만으로는 놓치는 경우가 하나 있어 배치를 손으로 하나 더 만들었다 — *오직 B 의 면 법선에서만 분리되는* 배치다. 45° 로 기운 얇고 긴 막대를 정사각형의 대각선 투영 반경 바깥에 법선 방향으로만 밀어 두면, A 의 두 축과 B 의 긴 축에서는 투영이 겹친다. 후보 축에서 B 의 법선을 빼면 "충돌" 로 오판하는 배치이고, 실제로 `axes[0..2]` 는 분리되지 않고 `axes[3]` 만 분리된다는 것까지 못 박아 뒀다.
 
 ```text
-$ ctest --test-dir build -C Release --output-on-failure
-    Start 1: math_core_tests
-1/1 Test #1: math_core_tests ..................   Passed    0.04 sec
+$ ctest --test-dir build -C Release -R math_step05_collision --output-on-failure
+    Start 5: math_step05_collision
+1/1 Test #5: math_step05_collision ............   Passed    0.05 sec
+
 100% tests passed out of 1
 ```
+
+```text
+$ ./build/Release/math_core_tests.exe step05
+[step05] collision/sat_vs_gjk ............ 14 checks, 0 failed
+step05: 1 case(s), 14 check(s), 0 failure(s)
+```
+
+CHECK 는 14 개지만 그 뒤에서 도형 쌍 20,000 개가 돌아간다 — 루프 안에서 세고 밖에서 한 번 단언하는 형태라 실패해도 출력이 터지지 않는다. 갈리는 쌍이 나오면 처음 3 개의 인덱스와 두 판정값이 `stderr` 로 찍힌다.
 
 ---
 
@@ -322,7 +369,7 @@ Step 5 에서 만든 것.
 
 math 시리즈 part12 (SAT) + part13 (GJK/EPA) 가 *마우스로 도형을 끌면 4 축 막대 / GJK simplex 가 즉시 갱신되는* 형태로 살아 있다. *분리축이 발견되면 즉시 분리 결정*, *GJK 의 simplex 가 원점 향해 자라는 과정*, *지원 함수의 추상화* 를 사용자가 *직접 본다*.
 
-이 step 의 한계. 자동 검증이 *축 정렬 OBB 한 쌍 + 살짝 회전한 한 쌍* 이라는 두 배치뿐이라, 후보 축에서 B 의 면 법선을 빼거나 GJK 삼각형 케이스의 바깥 판정을 상수로 고정해도 `ctest` 는 통과한다. SAT 와 GJK 가 *같은 답을 내는지* 를 무작위 배치에서 교차 확인하는 코드도 아직 없다. EPA (관통 깊이) 는 다루지 않아 `intersect` 가 참일 때 *얼마나* 겹쳤는지는 SAT 의 MTV 축 한 개로만 근사한다.
+이 step 의 한계. 교차 검증이 고정하는 것은 *충돌하는가* 라는 불리언 하나다. SAT 의 MTV 축과 overlap 값, GJK 가 몇 번 만에 끝나는지, simplex 정점이 어떤 순서로 자라는지는 화면에만 있다 — 두 알고리즘이 같은 답을 내되 *같은 이유로* 내는지는 검사하지 않는다. 접촉면이 정확히 맞닿는 퇴화 배치도 무작위 표본에서는 사실상 뽑히지 않아 부동소수 경계 동작은 미검증이고, EPA (관통 깊이) 는 다루지 않아 `intersect` 가 참일 때 *얼마나* 겹쳤는지는 SAT 의 MTV 축 한 개로만 근사한다.
 
 ## 더 읽을거리
 

@@ -25,6 +25,7 @@
 5. factory의 폴백 정책
 6. HUD 콤보의 disabled 표시
 7. 빌드와 측정 결과
+8. 검증 — 포기한 사이클이 뒤를 오염시키지 않는가
 
 ---
 
@@ -602,6 +603,7 @@ if (ImGui::BeginCombo("backend", preview)) {
 
 라벨 배열을 `io_backend_factory.h` 에 둔다.
 
+<!-- snippet: src/io/io_backend_factory.h comments=keep -->
 ```cpp
 inline constexpr const char* kBackendTypeLabels[kBackendTypeCount] = {
     "read", "pread", "mmap", "aio", "io_uring",
@@ -682,6 +684,93 @@ cmake --build build -j
 - 측정 도구의 한 사이클은 *fixture 16 파일 × 1 MB* 로 고정. 실제 게임 엔진의 *수만 개 작은 파일* 또는 *몇 개 큰 파일* 시나리오는 결과가 다를 수 있다.
 
 이 lab은 *워크로드를 명시적으로 고정* 한 *비교 환경* 이다. 결과를 시리즈 글에 인용할 때는 *워크로드 + 환경 + backend* 를 함께 명시한다.
+
+## 8. 검증 — 포기한 사이클이 뒤를 오염시키지 않는가
+
+비동기 backend가 동기 backend와 다른 점은 *실패했을 때* 드러난다. 동기 backend는 `read` 가 `-1` 을 돌려주면 그걸로 끝이지만, 비동기 backend는 실패한 시점에 커널이 이미 여러 요청을 들고 있다. 그 요청들의 목적지는 곧 스코프를 벗어날 버퍼다. 수확하지 않고 반환하면 해제된 메모리로 커널이 계속 쓴다.
+
+그래서 이 단계의 검사는 던지는지가 아니라 *던지기 전에 전부 거둬들였는지* 를 센다. io_uring 쪽은 `LastDrainStats()` 가 CQE 회계를 관측 전용으로 노출하므로 숫자로 직접 비교할 수 있다.
+
+<!-- snippet: tests/system_io_path_tests.cpp@uring-drain-accounting -->
+```cpp
+// tests/system_io_path_tests.cpp
+
+{
+    ScopedFault fault("io_uring_wait_cqe:0:EIO:1");
+    const CycleResult bad = RunOneCycle(*backend, fixture.Paths(), kRequest);
+    CHECK(bad.threw);
+    CHECK(Contains(bad.what, "io_uring_wait_cqe failed"));
+}
+{
+    const auto& st = backend->LastDrainStats();
+    PrintDrainStats("wait_cqe failure", st);
+    CHECK(st.cancelSqes   == kFiles);  // 남은 요청마다 취소 요청 하나
+    CHECK(st.cancelCqes   == kFiles);  // 취소 요청 CQE 전부 수확
+    CHECK(st.requestCqes  == kFiles);  // 원 요청 CQE 도 전부 수확
+    CHECK(st.leftoverCqes == 0);       // 링에 남긴 것 없음
+}
+```
+
+`leftoverCqes == 0` 이 링을 버리기 전에 아무것도 남기지 않았다는 뜻이다. POSIX AIO 쪽은 같은 질문을 `aio_cancel` / `aio_return` 호출 횟수로 센다 — 취소를 건 개수와 수확한 개수가 둘 다 파일 수와 같아야 한다. 대조군으로 *정상 사이클에서는 취소가 0회* 라는 것도 함께 확인한다. 그게 없으면 "항상 취소하는" 구현도 통과한다.
+
+factory의 런타임 폴백도 여기서 못 박힌다. `io_uring_queue_init` 이 `ENOSYS` 를 돌려주는 커널을 seam으로 재현하고, `CreateBackend` 가 `actualType` 에 `read` 를 써 넣는지 본다. 그리고 주입 없이 한 번 더 불러 `io_uring` 이 나오는지 확인한다 — 이게 없으면 "항상 read를 보고하는" 구현도 통과한다.
+
+```bash
+cmake --build build -j
+ctest --test-dir build -R skl_step04 --output-on-failure
+```
+
+```text
+    Start 16: skl_step04_core
+1/3 Test #16: skl_step04_core ..................   Passed    0.00 sec
+    Start 17: skl_step04_fault
+2/3 Test #17: skl_step04_fault .................   Passed    0.02 sec
+    Start 18: skl_step04_io_path
+3/3 Test #18: skl_step04_io_path ...............   Passed    0.33 sec
+
+100% tests passed, 0 tests failed out of 3
+```
+
+```bash
+./build/system_io_path_tests --step=04
+```
+
+```text
+[ run  ] step04  short read contract (aio/io_uring)
+  aio/io_uring: mixed fixture {16384, 8192, 4097, 1, 0, 32775} request=16384 -> total=45058 bytes, one onRead per path
+[  ok  ] step04  short read contract (aio/io_uring)
+[ run  ] step04  fifo blocking async wait EINTR
+  aio wait via aio_suspend: calls(base)=1 calls(signalled)=71
+  io_uring wait via io_uring_wait_cqe: calls(base)=1 calls(signalled)=71
+[  ok  ] step04  fifo blocking async wait EINTR
+[ run  ] step04  aio cancel drains every request
+  aio drain: healthy cycle aio_cancel=0 aio_return=4; suspend EBADF aio_cancel=4 aio_return=4 (every request harvested before the buffers go)
+[  ok  ] step04  aio cancel drains every request
+[ run  ] step04  io_uring cancel drains both cqes
+  wait_cqe failure: requestCqes=4 cancelSqes=4 cancelCqes=4 leftoverCqes=0
+  short submit: requestCqes=4 cancelSqes=4 cancelCqes=4 leftoverCqes=0
+[  ok  ] step04  io_uring cancel drains both cqes
+system_io_path_tests --step=4: 4/9 check(s) run, 0 failed
+```
+
+`total=45058` 은 동기 backend가 내는 값과 같다. 완료 순서가 제출 순서와 달라도 `(크기, 체크섬)` 기록을 정렬해 비교하므로 같은 값으로 수렴한다.
+
+`calls(base)=1` 은 데이터가 한 번에 도착할 때 대기 지점을 정확히 한 번만 지난다는 뜻이고, `calls(signalled)=71` 은 시그널이 그 대기를 70번 끊었는데도 결과가 같았다는 뜻이다. 두 비동기 backend가 각자 다른 API(`aio_suspend`, `io_uring_wait_cqe`)에서 같은 성질을 보인다.
+
+`requestCqes=4 cancelSqes=4 cancelCqes=4 leftoverCqes=0` 은 요청 4개가 in-flight인 채로 사이클을 포기했을 때의 회계다. 취소 요청 4개를 걸고, 원 요청 CQE 4개와 취소 CQE 4개를 모두 거둔 뒤 링을 버렸다. `short submit` 줄은 *실제로는 4개가 in-flight인데 3개만 제출됐다고 보고* 되는 경우인데, 같은 회계가 나온다.
+
+```bash
+./build/system_fault_tests --step=04
+```
+
+```text
+[ run  ] step04  factory uring runtime fallback
+skl: io_uring runtime init failed (io_uring_queue_init failed: Function not implemented), falling back to read
+  factory: queue_init ENOSYS -> actual=read (usable), no injection -> actual=io_uring
+[  ok  ] step04  factory uring runtime fallback
+```
+
+stderr의 경고가 함께 나오는 것이 정상이다. 폴백은 조용히 일어나면 안 되는 사건이고, 그 경고가 나오는지까지가 계약이다.
 
 ---
 

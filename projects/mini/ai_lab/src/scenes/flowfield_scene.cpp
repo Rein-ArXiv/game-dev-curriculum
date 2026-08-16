@@ -145,7 +145,7 @@ void FlowFieldScene::Update(float dt) {
         a.pos.x += a.vel.x * dt;
         a.pos.y += a.vel.y * dt;
 
-        // goal 도달 시 무작위 재배치 (지속적 흐름 관찰).
+        // goal 도달 시 SafeSpawnCell 로 재배치 (지속적 흐름 관찰).
         if (grid_.ScreenToCell(a.pos, c) && c == grid_.Goal()) {
             a.pos = grid_.CellCenter(SafeSpawnCell());
             a.vel = {0, 0};

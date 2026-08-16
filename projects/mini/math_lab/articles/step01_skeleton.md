@@ -134,22 +134,33 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} PRIVATE raylib)
 
 # GUI 없이 도는 코어 검증 타깃. 창을 띄우지 않으므로 CI 에서도 돈다.
+# algo/ 는 헤더온리라 소스가 필요 없고, 화면 분할 계산인 ComputeLayout 만
+# scene_chrome.cpp 에 있어 함께 컴파일한다 (그리기 함수는 부르지 않는다).
 enable_testing()
-add_executable(math_core_tests tests/core_tests.cpp)
+add_executable(math_core_tests
+    tests/core_tests.cpp
+    src/ui/scene_chrome.cpp)
 target_include_directories(math_core_tests PRIVATE src)
 target_link_libraries(math_core_tests PRIVATE raylib)
+
+# 실행 단위는 step 입도다. 인자는 core_tests.cpp 의 kCases 표에 있는 step 키고,
+# ctest 이름은 그 step 의 문서 이름과 같다.
+add_test(NAME math_step01_skeleton COMMAND math_core_tests step01)
+# 필터 없이 표 전체를 도는 타깃 — step 타깃들의 합집합.
 add_test(NAME math_core_tests COMMAND math_core_tests)
 ```
 
 새 Scene 추가 시 *`add_executable` 의 cpp 목록* 에 추가. Scene 하나당 한 줄씩 늘어난다.
 
-테스트 타깃도 *처음부터* 깔아 둔다. `tests/core_tests.cpp` 는 이 단계에선 *`CHECK` 매크로 + 실패 카운터 + `main`* 만 있는 껍데기다. Scene 이 `algo/` 헤더를 쓰기 시작하면 그 헤더의 검증 함수가 여기에 하나씩 붙는 구조다. 실행 파일 (`math_lab`) 은 *창을 띄워야* 확인되지만 이쪽은 *헤드리스* 라 빌드마다 돌릴 수 있다.
+테스트 타깃은 *처음부터* 깔되 껍데기로 두지 않는다. 골격에서 유일하게 raylib 호출이 없는 순수 산술이 `ComputeLayout` 이고, 그것이 첫 검증 대상이다. `tests/core_tests.cpp` 의 구조는 *`CHECK` 매크로 + 실패·검사 카운터 + `{step, 이름, 함수}` 표 + 이름 필터를 받는 `main`*. Scene 이 `algo/` 헤더를 쓰기 시작하면 그 헤더의 검증 함수가 표에 한 줄씩 붙는다. 실행 파일 (`math_lab`) 은 *창을 띄워야* 확인되지만 이쪽은 *헤드리스* 라 빌드마다 돌릴 수 있다.
 
 ```cpp
 int failures = 0;
+int checks   = 0;   // 실행된 CHECK 수 — step 별 출력에 그대로 찍힌다.
 
 #define CHECK(expr)                                                     \
     do {                                                                \
+        ++checks;                                                       \
         if (!(expr)) {                                                  \
             std::cerr << "CHECK failed: " #expr << " ("                 \
                       << __FILE__ << ':' << __LINE__ << ")\n";          \
@@ -157,21 +168,37 @@ int failures = 0;
         }                                                               \
     } while (false)
 
-int main() {
-    // Scene 이 검증 함수를 들고 오면 여기에 Test... () 호출이 하나씩 추가된다.
-    if (failures != 0) {
-        std::cerr << failures << " math core test(s) failed\n";
-        return 1;
+// 검증 함수를 *그것을 들여온 step* 에 묶는다. step 키가 곧 ctest 타깃의 인자다.
+struct TestCase {
+    const char* step;
+    const char* name;
+    void (*fn)();
+};
+
+const TestCase kCases[] = {
+    {"step01", "layout/tab_canvas_footer", TestLayout},
+};
+
+int main(int argc, char** argv) {
+    const char* filter = (argc > 1) ? argv[1] : nullptr;
+    int selected = 0;
+    for (const TestCase& testCase : kCases) {
+        if (filter && std::strcmp(filter, testCase.step) != 0) continue;
+        ++selected;
+        testCase.fn();
+        // [step] 이름 ..... N checks, M failed 출력
     }
-    std::cout << "math core tests passed\n";
-    return 0;
+    // selected == 0 이면 2, failures != 0 이면 1, 아니면 0.
 }
 ```
+
+필터가 있으니 *깨진 step 만 골라 다시 돌릴 수 있고*, 무엇보다 각 step 의 문서가 *자기 것만* 부르는 명령을 적을 수 있다.
 
 ## 4. Scene 인터페이스
 
 `math_lab` 의 모든 토픽이 *한 Scene* 으로 구현된다. 인터페이스가 단순 — 5개 함수.
 
+<!-- snippet: src/scenes/iscene.h -->
 ```cpp
 namespace mathlab {
 
@@ -179,17 +206,22 @@ class IScene {
 public:
     virtual ~IScene() = default;
 
+    // Scene 이 활성화될 때 호출. 자료구조 초기화, 핸들 위치 리셋 등.
     virtual void OnEnter() {}
-    virtual void OnExit()  {}
 
+    // Scene 이 비활성화될 때 호출. 리소스 해제.
+    virtual void OnExit() {}
+
+    // 매 프레임 입력·로직 갱신. dt 단위 초.
     virtual void Update(float dt) = 0;
 
-    virtual void DrawWorld(int canvasX, int canvasY,
-                            int canvasW, int canvasH) = 0;
+    // 메인 캔버스에 그리기. 렌더 영역은 (canvasX, canvasY, canvasW, canvasH).
+    virtual void DrawWorld(int canvasX, int canvasY, int canvasW, int canvasH) = 0;
 
-    virtual void DrawPanel(int panelX, int panelY,
-                            int panelW, int panelH) = 0;
+    // 사이드 패널에 그리기. 패널 영역은 (panelX, panelY, panelW, panelH).
+    virtual void DrawPanel(int panelX, int panelY, int panelW, int panelH) = 0;
 
+    // Scene 의 이름 — 탭 라벨에 쓰임.
     virtual std::string_view Name() const = 0;
 };
 
@@ -209,6 +241,7 @@ public:
 
 거의 모든 Scene 이 *한 개 이상의 드래그 가능한 점* 을 입력으로 받는다. 회전 Scene 의 회전 축, 보간 Scene 의 control point, 충돌 Scene 의 도형 위치, 공간 분할 Scene 의 객체 위치. 이 *공통 위젯* 을 처음부터 분리해 둔다.
 
+<!-- snippet: src/ui/handle.h#DragHandle -->
 ```cpp
 class DragHandle {
 public:
@@ -237,29 +270,43 @@ private:
 
 *잡힌 상태를 핸들 자신이 들고 있지 않는다*. `dragging_` 멤버 대신 *모든 핸들이 공유하는 static capture 상태* 를 쓴다 — 그래야 *프로세스 전체에서 한 번에 한 핸들만* 잡힌다는 불변식이 성립한다.
 
+<!-- snippet: src/ui/handle.cpp -->
 ```cpp
 namespace {
-uint32_t g_activeId         = 0;   // 0 = 잡혀 있는 핸들 없음
-uint32_t g_nextId           = 1;
-uint32_t g_pendingId        = 0;   // 이번 프레임 클릭의 최근접 후보
-float    g_pendingDistSq    = std::numeric_limits<float>::infinity();
-bool     g_clickedThisFrame = false;
+
+// 모든 DragHandle 이 공유하는 capture 상태.
+// activeId == 0 은 "잡혀 있는 핸들 없음" 의미.
+uint32_t g_activeId          = 0;
+uint32_t g_nextId            = 1;
+
+// 현재 프레임의 클릭이 잡힐 후보 (가장 가까운 핸들).
+// EndFrame 에서 g_activeId 로 승격.
+uint32_t g_pendingId         = 0;
+float    g_pendingDistSq     = std::numeric_limits<float>::infinity();
+bool     g_clickedThisFrame  = false;
+
 }  // namespace
 
 DragHandle::DragHandle() : id_(g_nextId++) {}
 DragHandle::DragHandle(Vector2 initial) : pos_(initial), id_(g_nextId++) {}
 
-bool DragHandle::IsDragging() const { return g_activeId == id_; }
+bool DragHandle::IsDragging() const {
+    return g_activeId == id_;
+}
 
 void DragHandle::BeginFrame() {
-    g_pendingId        = 0;
-    g_pendingDistSq    = std::numeric_limits<float>::infinity();
-    g_clickedThisFrame = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
-    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) g_activeId = 0;
+    g_pendingId         = 0;
+    g_pendingDistSq     = std::numeric_limits<float>::infinity();
+    g_clickedThisFrame  = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+        g_activeId = 0;
+    }
 }
 
 void DragHandle::EndFrame() {
-    if (g_clickedThisFrame && g_pendingId != 0) g_activeId = g_pendingId;
+    if (g_clickedThisFrame && g_pendingId != 0) {
+        g_activeId = g_pendingId;
+    }
     g_clickedThisFrame = false;
 }
 
@@ -275,6 +322,7 @@ void DragHandle::Update() {
         pos_ = m;
         return;
     }
+
     // 새 클릭의 후보가 될 수 있나 — 핸들 위 + 다른 핸들보다 가까움.
     if (g_clickedThisFrame && d2 <= r2 && d2 < g_pendingDistSq) {
         g_pendingId     = id_;
@@ -298,6 +346,7 @@ DragHandle::EndFrame();     // 후보들 중 가장 가까운 하나만 잡기 �
 
 `Draw` 는 *상태에 따라 외곽 링 색상* 변경 — hover / drag 시 밝게.
 
+<!-- snippet: src/ui/handle.cpp#DragHandle::Draw -->
 ```cpp
 void DragHandle::Draw(Color fill, const char* label) const {
     Vector2 m  = GetMousePosition();
@@ -310,7 +359,7 @@ void DragHandle::Draw(Color fill, const char* label) const {
                                         : Color{60, 60, 60, 255};
     DrawCircleV(pos_, radius_ + 2.0f, ring);
     DrawCircleV(pos_, radius_, fill);
-    // 라벨 ...
+    // ... label 이 nullptr 이 아니면 오른쪽에 DrawText ...
 }
 ```
 
@@ -318,6 +367,7 @@ void DragHandle::Draw(Color fill, const char* label) const {
 
 Scene 이 *자기 영역에만 집중* 하려면 *상하좌우 영역 분할* 이 분리되어야 한다. `scene_chrome` 모듈이 그 역할.
 
+<!-- snippet: src/ui/scene_chrome.h -->
 ```cpp
 struct LayoutRects {
     Rectangle tabBar;   // 상단
@@ -339,6 +389,7 @@ flowchart TB
 
 탭 바는 *Scene 라벨들을 균등 분할* 후 클릭 검출.
 
+<!-- snippet: src/ui/scene_chrome.h -->
 ```cpp
 int DrawTabBar(Rectangle bar,
                 const std::vector<std::string_view>& labels,
@@ -349,6 +400,7 @@ int DrawTabBar(Rectangle bar,
 
 푸터는 *프레임 타이머의 ms / fps + 활성 Scene 이름*. 디버그·튜닝에 즉시 보이는 정보.
 
+<!-- snippet: src/ui/scene_chrome.h -->
 ```cpp
 void DrawFooter(Rectangle footer, float frameMs, float fps,
                   std::string_view sceneName);
@@ -358,20 +410,19 @@ void DrawFooter(Rectangle footer, float frameMs, float fps,
 
 Step 1 의 placeholder Scene — 두 개의 드래그 핸들 + 그 사이를 잇는 선분 + 거리 표시.
 
+<!-- snippet: src/scenes/welcome_scene.h#WelcomeScene -->
 ```cpp
 class WelcomeScene : public IScene {
 public:
     void OnEnter() override;
     void Update(float dt) override;
-    void DrawWorld(int canvasX, int canvasY,
-                    int canvasW, int canvasH) override;
-    void DrawPanel(int panelX, int panelY,
-                    int panelW, int panelH) override;
+    void DrawWorld(int canvasX, int canvasY, int canvasW, int canvasH) override;
+    void DrawPanel(int panelX, int panelY, int panelW, int panelH) override;
     std::string_view Name() const override { return "Welcome"; }
 
 private:
-    DragHandle handleA_;
-    DragHandle handleB_;
+    DragHandle handleA_{};
+    DragHandle handleB_{};
     bool       initialized_ = false;
 };
 ```
@@ -380,17 +431,22 @@ private:
 
 `DrawWorld` 가 거리 측정 + 시각화.
 
+<!-- snippet: src/scenes/welcome_scene.cpp#WelcomeScene::DrawWorld -->
 ```cpp
-void WelcomeScene::DrawWorld(int cx, int cy, int cw, int ch) {
+void WelcomeScene::DrawWorld(int canvasX, int canvasY, int canvasW, int canvasH) {
     if (!initialized_) {
-        handleA_.SetPosition({(float)(cx + cw / 3),
-                                (float)(cy + ch / 2)});
-        handleB_.SetPosition({(float)(cx + 2 * cw / 3),
-                                (float)(cy + ch / 2)});
+        handleA_.SetPosition({(float)(canvasX + canvasW / 3),
+                               (float)(canvasY + canvasH / 2)});
+        handleB_.SetPosition({(float)(canvasX + 2 * canvasW / 3),
+                               (float)(canvasY + canvasH / 2)});
         initialized_ = true;
     }
-    DrawRectangle(cx, cy, cw, ch, Color{20, 22, 28, 255});
 
+    // 캔버스 배경
+    DrawRectangle(canvasX, canvasY, canvasW, canvasH, Color{20, 22, 28, 255});
+    DrawRectangleLines(canvasX, canvasY, canvasW, canvasH, Color{60, 62, 70, 255});
+
+    // 핸들 두 개를 잇는 선분 + 거리
     Vector2 a = handleA_.Position();
     Vector2 b = handleB_.Position();
     DrawLineEx(a, b, 2.0f, Color{180, 200, 220, 255});
@@ -398,13 +454,14 @@ void WelcomeScene::DrawWorld(int cx, int cy, int cw, int ch) {
     handleA_.Draw(Color{255, 200, 80, 255}, "A");
     handleB_.Draw(Color{120, 200, 255, 255}, "B");
 
-    float dist = std::sqrt((b.x - a.x) * (b.x - a.x)
-                            + (b.y - a.y) * (b.y - a.y));
-    char buf[64];
+    float dx   = b.x - a.x;
+    float dy   = b.y - a.y;
+    float dist = std::sqrt(dx * dx + dy * dy);
+    char  buf[64];
     std::snprintf(buf, sizeof(buf), "dist = %.1f px", dist);
-    Vector2 mid = {(a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f - 12};
-    DrawText(buf, (int)mid.x - 50, (int)mid.y, 16,
-              Color{220, 220, 220, 255});
+    Vector2 mid = {(a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f - 12.0f};
+    DrawText(buf, (int)mid.x - 50, (int)mid.y, 16, Color{220, 220, 220, 255});
+    // ... 캔버스 좌상단 안내 문구 두 줄 ...
 }
 ```
 
@@ -478,16 +535,39 @@ cmake --build build --config Release -j
 
 실행하면 *상단 탭 (Welcome 한 개), 중앙 캔버스 (두 핸들 + 거리), 우측 패널 (좌표 표시), 하단 푸터 (frame ms, fps)* 가 보인다. 두 핸들을 마우스로 끌면 거리가 즉시 갱신.
 
-창을 띄우지 않는 검증은 `ctest` 로.
+창을 띄우지 않는 검증은 `ctest` 로. 골격이 건 계약은 `ComputeLayout` 의 분할 하나다 — 탭 바 / (캔버스 + 패널) / 푸터가 화면을 *빈틈도 겹침도 없이* 나눠 갖는가.
+
+<!-- snippet: tests/core_tests.cpp@step01-layout-partition -->
+```cpp
+// 세로: 탭 바 아래가 곧 캔버스, 캔버스 아래가 곧 푸터, 푸터 끝이 화면 끝.
+CHECK(Near(L.tabBar.y + L.tabBar.height, L.canvas.y));
+CHECK(Near(L.canvas.y + L.canvas.height, L.footer.y));
+CHECK(Near(L.footer.y + L.footer.height, (float)kH));
+// 가로: 캔버스 + 패널 = 화면 폭이고 패널이 오른쪽 끝에 붙는다.
+CHECK(Near(L.canvas.width + L.panel.width, (float)kW));
+CHECK(Near(L.canvas.x + L.canvas.width, L.panel.x));
+CHECK(Near(L.panel.width, (float)kPanel));
+```
+
+여기에 *chrome 높이가 화면 크기와 무관한 상수* 라는 것 (화면을 400px 키우면 캔버스만 400px 커진다) 과 *패널을 120px 넓히면 캔버스가 정확히 120px 좁아진다* 는 총합 보존을 더해 19 개.
 
 ```text
-$ ctest --test-dir build -C Release --output-on-failure
-    Start 1: math_core_tests
-1/1 Test #1: math_core_tests ..................   Passed    0.04 sec
+$ ctest --test-dir build -C Release -R math_step01_skeleton --output-on-failure
+    Start 1: math_step01_skeleton
+1/1 Test #1: math_step01_skeleton .............   Passed    0.03 sec
+
 100% tests passed out of 1
 ```
 
-이 단계의 `math_core_tests` 는 아직 `CHECK` 가 하나도 없어 *항상 통과* 한다. 타깃과 실행 경로가 살아 있다는 것만 확인하는 용도.
+무엇이 몇 개 돌았는지는 실행 파일을 직접 부르면 보인다.
+
+```text
+$ ./build/Release/math_core_tests.exe step01
+[step01] layout/tab_canvas_footer ........ 19 checks, 0 failed
+step01: 1 case(s), 19 check(s), 0 failure(s)
+```
+
+이 검증이 자명하지 않다는 근거: `contentH` 에서 `kFooterH` 를 빼는 항을 지우면 `CHECK(Near(L.canvas.y + L.canvas.height, L.footer.y))` 가 그 자리에서 깨진다 — 캔버스가 푸터 아래로 24px 넘어간 상태다. 화면에서는 푸터 글자가 캔버스에 가려지는 정도로만 보여 놓치기 쉬운 종류다.
 
 ---
 
@@ -501,7 +581,7 @@ Step 1 에서 만든 것.
 4. **FrameTimer** — `BeginFrame / EndFrame` + EMA 로 ms / fps 안정 표시.
 5. **Welcome Scene + main 루프** — 두 드래그 핸들 + 거리. 골격이 동작하는지 검증.
 
-이 단계의 한계도 분명하다. *수학이 하나도 없다* — Welcome Scene 이 하는 계산은 두 점 사이 거리 한 줄이고, `math_core_tests` 에는 `CHECK` 가 하나도 없어 항상 통과한다. Scene 인터페이스는 *Scene 간 데이터 공유* 와 *마우스 capture 를 Scene 이 조율하는 경로* 를 아직 갖고 있지 않고, 레이아웃은 1280×720 고정 크기를 전제로 계산한다. 골격이 옳은지는 *그 위에 실제 알고리즘 Scene 을 올려봐야* 드러난다.
+이 단계의 한계도 분명하다. *수학이 하나도 없다* — Welcome Scene 이 하는 계산은 두 점 사이 거리 한 줄이고, 자동 검증이 잡는 것은 `ComputeLayout` 의 사각형 분할 19 개뿐이다. `DragHandle` 의 capture 정책 (겹친 핸들 중 가장 가까운 하나만 잡힘) 도, `FrameTimer` 의 EMA 평활도 raylib 의 입력·시계 전역 상태에 붙어 있어 창 없이는 못 부른다 — 눈으로 끌어 보는 것이 유일한 확인이다. Scene 인터페이스는 *Scene 간 데이터 공유* 와 *마우스 capture 를 Scene 이 조율하는 경로* 를 아직 갖고 있지 않고, 레이아웃은 1280×720 고정 크기를 전제로 계산한다. 골격이 옳은지는 *그 위에 실제 알고리즘 Scene 을 올려봐야* 드러난다.
 
 ## 더 읽을거리
 

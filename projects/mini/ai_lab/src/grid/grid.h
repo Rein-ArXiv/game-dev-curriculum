@@ -2,7 +2,7 @@
 //
 // 책임:
 //   - 셀 walkable 비트맵 + 마우스 페인트 (좌클릭 드래그=벽, 우클릭=지움).
-//   - start / goal 셀 (우클릭으로 이동, 모드에 따라).
+//   - start / goal 셀 (MoveStart/MoveGoal 모드에서 좌클릭으로 이동).
 //   - 셀 <-> 화면 좌표 변환 (캔버스 영역 안에 맞춤).
 //   - 셀·격자선·start·goal 기본 그리기.
 //
@@ -24,11 +24,11 @@ struct Cell {
     bool operator!=(const Cell& o) const { return !(*this == o); }
 };
 
-// 마우스 페인트 모드 — 우클릭이 무엇을 하는지.
+// 마우스 페인트 모드 — 좌/우클릭이 무엇을 하는지.
 enum class EditMode {
     Walls,     // 좌클릭=벽 추가, 우클릭=벽 제거
-    MoveStart, // 우클릭=start 이동
-    MoveGoal,  // 우클릭=goal 이동
+    MoveStart, // 좌클릭=start 이동
+    MoveGoal,  // 좌클릭=goal 이동
 };
 
 class Grid {

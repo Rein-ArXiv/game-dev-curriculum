@@ -22,6 +22,7 @@ inline uint32_t HashU32(uint32_t x) {
     return x;
 }
 
+// snippet-begin: hash-2d
 inline uint32_t Hash2(int x, int y, uint32_t seed) {
     uint32_t h = (uint32_t)x * 374761393u + (uint32_t)y * 668265263u + seed * 2246822519u;
     return HashU32(h);
@@ -31,9 +32,12 @@ inline uint32_t Hash2(int x, int y, uint32_t seed) {
 inline float HashTo01(int x, int y, uint32_t seed) {
     return (Hash2(x, y, seed) >> 8) * (1.0f / 16777216.0f);   // 24 bit
 }
+// snippet-end: hash-2d
 
+// snippet-begin: fade-curves
 inline float Smoothstep(float t) { return t * t * (3.0f - 2.0f * t); }
 inline float Quintic(float t)    { return t * t * t * (t * (t * 6 - 15) + 10); }
+// snippet-end: fade-curves
 
 // ---- Value Noise (2D) ----
 // 격자 정점에 [0, 1) 값을 배치 + 셀 안에서 보간.
@@ -56,7 +60,8 @@ inline float Value2D(float x, float y, uint32_t seed) {
 }
 
 // ---- Perlin Noise (2D, gradient) ----
-// 격자 정점에 *단위 그라디언트* — 4 방향 (대각) 으로 충분 (math part10).
+// 격자 정점에 *단위 그라디언트* — 4 방향 (축 정렬) 으로 충분 (math part10).
+// snippet-begin: perlin-2d
 inline void Grad2(int ix, int iy, uint32_t seed, float& gx, float& gy) {
     uint32_t h = Hash2(ix, iy, seed);
     switch (h & 3) {
@@ -87,6 +92,7 @@ inline float Perlin2D(float x, float y, uint32_t seed) {
     // 축 정렬 단위 그라디언트 4종을 쓰므로 교과서의 [-1, 1] 보다 좁다.
     return a + (b - a) * v;
 }
+// snippet-end: perlin-2d
 
 // ---- Simplex Noise (2D) — 단순화 버전 ----
 // 정확한 Ken Perlin 의 Simplex 보다는 *정삼각형 격자 + radial fall-off*.
@@ -132,6 +138,7 @@ inline float Simplex2D(float x, float y, uint32_t seed) {
 
 // ---- FBM (Fractal Brownian Motion) ----
 // 옥타브를 누적해 *멀티스케일 디테일*.
+// snippet-begin: fbm-2d
 template <class NoiseFn>
 inline float FBM2D(float x, float y, uint32_t seed,
                     int octaves, float lacunarity, float gain,
@@ -148,6 +155,7 @@ inline float FBM2D(float x, float y, uint32_t seed,
     }
     return (norm > 0.0f) ? sum / norm : 0.0f;
 }
+// snippet-end: fbm-2d
 
 }  // namespace nz
 }  // namespace mathlab

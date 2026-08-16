@@ -29,6 +29,7 @@
 아직 비어 있는지까지 확인한다. 두 frame을 이어 붙여 coalescing도 만든다. 실패 시 즉시 종료하는
 helper는 `Require`다.
 
+<!-- snippet: tests/protocol_tests.cpp#TestFraming -->
 ```cpp
 FrameDecoder decoder;
 Require(decoder.Push(std::span(frame).first(3)), "push first fragment");
@@ -49,6 +50,7 @@ buffer를 늘리지 않고 decoder를 실패 상태로 만든다. 실패 상태�
 알려진 byte 배열과 손상 입력을 함께 사용해야 한다. golden 배열은 encoder 출력을 복사한 것이
 아니라 wire format 표를 보고 손으로 적은 값이다.
 
+<!-- snippet: tests/protocol_tests.cpp#TestGoldenControlFrame -->
 ```cpp
 const std::array<std::byte, 17> expected{
     std::byte{0x47}, std::byte{0x4e}, std::byte{0x4c}, std::byte{0x31}, // magic
@@ -65,6 +67,7 @@ const std::array<std::byte, 17> expected{
 `game_network_runtime_tests`는 `SendStream`·`SendDatagram`·`Disconnect` 호출을 기록하는 fake
 backend를 주입하고, `NetworkEvent`를 손으로 만들어 넣는다. 시계는 `Advance()` 인자로 주입한다.
 
+<!-- snippet: tests/runtime_tests.cpp#AdvanceTicks -->
 ```cpp
 // Advance() runs a tick only when now has reached nextTick_, and it caps
 // catch-up at 4, so N ticks need N calls spaced one interval apart.
@@ -111,10 +114,16 @@ queue에 넣은 뒤 event loop에서 닫는다. 그래서 공통 판정 기준�
 - 서버 ACK와 권위 위치를 출력한다.
 - 두 프로세스가 제한 시간 안에 정상 exit한다.
 
-자동 process test는 정상 client를 시작하기 전에 IOCP의 preposted UDP receive 수보다 많은 4KiB
-데이터그램을 보낸다. 각 completion은 `WSAEMSGSIZE`로 실패하지만 서버는 오류 payload를 버리고
-receive를 재게시해야 한다. 그 뒤 정상 UDP Connect와 snapshot이 성공하므로 오류 입력이 receive
-capacity를 영구 감소시키지 않았음을 확인한다.
+같은 두 프로세스를 두 case로 돌린다. `two_process_smoke`는 오류 입력 없이 handshake부터
+snapshot까지만 확인하고, `oversized_datagram_recovery`는 정상 client를 시작하기 전에 IOCP의
+preposted UDP receive 수보다 많은 4KiB 데이터그램을 보낸다. 각 completion은 `WSAEMSGSIZE`로
+실패하지만 서버는 오류 payload를 버리고 receive를 재게시해야 한다. 그 뒤 정상 UDP Connect와
+snapshot이 성공하므로 오류 입력이 receive capacity를 영구 감소시키지 않았음을 확인한다.
+
+두 case를 나눠 두면 실패가 어디서 났는지가 결과에서 바로 갈린다. 앞의 case까지 무너지면
+프로세스 경로 자체가 깨진 것이고, 뒤의 case만 무너지면 오류 completion 처리가 깨진 것이다.
+뒤의 case는 지금 컴파일된 backend에 속하므로 Windows 빌드와 Linux 빌드에서 서로 다른 구현이
+판정 대상이 된다.
 
 클라이언트 snapshot 수가 0인데 exit 0을 반환하면 smoke가 거짓 양성이 된다. 구현은 snapshot이
 없을 때 별도 실패 code를 반환한다.
@@ -155,6 +164,11 @@ Windows Release 빌드는 raw IOCP 경로와 실제 process smoke를 검증한�
 `eventfd`, `accept4`를 컴파일하고 같은 protocol test와 process smoke를 실행해야 한다. 한 플랫폼
 통과를 다른 backend 통과로 간주하지 않는다.
 
+두 환경 모두에서 실행 결과를 받았다. Windows는 Visual Studio 18 Release 빌드에서 CTest 12개,
+Linux는 WSL2 Ubuntu 26.04(커널 6.18.33.2, g++ 15.2, CMake 4.2)에서 같은 12개가 통과했다. 두
+결과에서 실행되는 backend는 다르다 — `game_network_step03_*`은 Windows 빌드에만,
+`game_network_step04_*`은 Linux 빌드에만 등록되므로 이름만 봐도 어느 구현이 판정됐는지 갈린다.
+
 WSL 명령이 존재해도 distribution이 설치되지 않았다면 Linux backend는 미검증 상태다. 문서에는
 "지원하도록 작성됨"과 "해당 환경에서 실행 검증됨"을 구분해 기록한다.
 
@@ -170,6 +184,54 @@ cmake --build projects/mini/game_network_lab/build-vs18 --config Release
 ctest --test-dir projects/mini/game_network_lab/build-vs18 `
       -C Release --output-on-failure
 ```
+
+```text
+      Start  1: game_network_protocol
+ 1/12 Test  #1: game_network_protocol ...................   Passed    0.09 sec
+      Start  2: game_network_runtime
+ 2/12 Test  #2: game_network_runtime ....................   Passed    0.09 sec
+      Start  3: game_network_send_queue
+ 3/12 Test  #3: game_network_send_queue .................   Passed    0.23 sec
+      Start  4: game_network_lifecycle
+ 4/12 Test  #4: game_network_lifecycle ..................   Passed    0.11 sec
+      Start  5: game_network_process
+ 5/12 Test  #5: game_network_process ....................   Passed    8.27 sec
+      Start  6: game_network_step01_protocol
+ 6/12 Test  #6: game_network_step01_protocol ............   Passed    0.03 sec
+      Start  7: game_network_step02_tick_clock
+ 7/12 Test  #7: game_network_step02_tick_clock ..........   Passed    0.05 sec
+      Start  8: game_network_step02_send_queue
+ 8/12 Test  #8: game_network_step02_send_queue ..........   Passed    0.19 sec
+      Start  9: game_network_step05_authority
+ 9/12 Test  #9: game_network_step05_authority ...........   Passed    0.05 sec
+      Start 10: game_network_step06_process_smoke
+10/12 Test #10: game_network_step06_process_smoke .......   Passed    4.13 sec
+      Start 11: game_network_step03_backend_restart
+11/12 Test #11: game_network_step03_backend_restart .....   Passed    0.06 sec
+      Start 12: game_network_step03_datagram_recovery
+12/12 Test #12: game_network_step03_datagram_recovery ...   Passed    4.10 sec
+
+100% tests passed out of 12
+
+Total Test time (real) =  17.70 sec
+```
+
+이 목록은 두 종류로 나뉜다. 앞의 다섯은 실행 파일 하나를 통째로 돌리고, 뒤의 일곱은 같은
+실행 파일에 태그를 넘겨 그 글이 추가한 case만 돌린다. 태그는 argv 하나로 걸러진다.
+
+<!-- snippet: tests/step_cases.h@case-filter -->
+```cpp
+if (filter != nullptr && std::strcmp(filter, item.step) != 0 &&
+    std::strcmp(filter, item.name) != 0) {
+    continue;
+}
+```
+
+필터가 없으면 전체가 돌고, 있으면 태그나 case 이름 하나로 좁혀진다. 어느 case가 어느 글에
+속하는지는 각 실행 파일의 `main`에 있는 표가 정하며, 기준은 "그 글이 무엇을 추가했는가"다.
+그래서 `game_network_step02_send_queue`가 실패하면 송신 queue 상한을 고정한 판정이 깨진
+것이고, `game_network_step05_authority`가 실패하면 권위 tick과 snapshot 계약이 깨진 것이다.
+전체 타깃만 있을 때는 두 실패가 같은 한 줄로 보인다.
 
 실제 동작을 별도로 관측할 때는 서버를 숨김 프로세스로 실행하고 클라이언트 exit code를 보존한다.
 

@@ -16,6 +16,9 @@
 // "분기가 정말 실행됐는가" 는 fault seam 을 *주입 없이* 무장해서 센다.
 // skip 을 아주 크게 준 규칙("read:100000000")은 아무것도 주입하지 않고
 // 호출 횟수만 세는 순수 관측 모드다.
+//
+// 검사들은 파일 끝의 표에서 *그것을 추가한 step* 에 묶인다. 인자 없이 부르면
+// 전부 돌고, `--step=N` 은 그 step 이 추가한 검사만 돈다(tests/step_filter.h).
 
 #include "fault/fault_inject.h"
 #include "io/io_backend.h"
@@ -48,9 +51,20 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "step_filter.h"
+
 namespace {
 
 std::atomic<int> failures{0};
+
+int Failures() { return failures.load(); }
+
+// backend 를 한 step 에 하나씩 얹으므로, 계약 검사도 같은 단위로 가른다.
+constexpr skl::BackendType kReadBackend[]  = {skl::BackendType::Read};
+constexpr skl::BackendType kSyncBackends[] = {skl::BackendType::Pread,
+                                              skl::BackendType::Mmap};
+constexpr skl::BackendType kAsyncBackends[] = {skl::BackendType::Aio,
+                                               skl::BackendType::Uring};
 
 #define CHECK(expr)                                                           \
     do {                                                                      \
@@ -227,39 +241,42 @@ private:
 // (a) short read 계약
 // ---------------------------------------------------------------------------
 
+// snippet-begin: short-read-contract
 void CheckContractOnFixture(const SizedFixture& fixture, std::size_t requestBytes,
-                            const char* label) {
-    for (int raw = 0; raw < skl::kBackendTypeCount; ++raw) {
-        const auto type = static_cast<skl::BackendType>(raw);
+                            const char* label, const skl::BackendType* types,
+                            std::size_t count) {
+    for (std::size_t idx = 0; idx < count; ++idx) {
+        const auto type = types[idx];
         if (!skl::BackendCompiledIn(type)) continue;
+        const char* name = skl::kBackendTypeLabels[static_cast<int>(type)];
         auto backend = MakeExact(type);
 
         const std::size_t fdBefore = OpenFdCount();
         const CycleResult out = RunOneCycle(*backend, fixture.Paths(),
                                              requestBytes);
         if (out.threw) {
-            std::cerr << label << '/' << skl::kBackendTypeLabels[raw]
-                      << ": threw: " << out.what << '\n';
+            std::cerr << label << '/' << name << ": threw: " << out.what << '\n';
             failures.fetch_add(1);
             continue;
         }
         // path 당 정확히 한 번.
         CHECK(out.reads.size() == fixture.Paths().size());
-        CheckReadsEqual(out.reads, fixture.ExpectedReads(requestBytes),
-                        skl::kBackendTypeLabels[raw]);
+        CheckReadsEqual(out.reads, fixture.ExpectedReads(requestBytes), name);
         CHECK(out.bytes == fixture.ExpectedBytes(requestBytes));
         CHECK(OpenFdCount() == fdBefore);
     }
 }
+// snippet-end: short-read-contract
 
-void TestShortReadContract() {
+void CheckShortReadContract(const skl::BackendType* types, std::size_t count,
+                            const char* group) {
     constexpr std::size_t kRequest = 16 * 1024;
 
     // 대조군: 파일이 요청과 정확히 같으면 요청 전량. 아래 short 케이스가
     // "그냥 아무 값이나 통과" 하는 게 아님을 보인다.
     {
         SizedFixture exact({kRequest, kRequest, kRequest}, "exact");
-        CheckContractOnFixture(exact, kRequest, "exact");
+        CheckContractOnFixture(exact, kRequest, "exact", types, count);
         CHECK(exact.ExpectedBytes(kRequest) == 3 * kRequest);
     }
 
@@ -270,20 +287,35 @@ void TestShortReadContract() {
     //   1             — 1 바이트
     //   0             — 빈 파일 (mmap 은 length 0 매핑이 EINVAL 이라 별도 경로)
     //   kRequest*2+7  — 요청보다 김 (초과 읽기 금지)
-    {
-        SizedFixture mixed({kRequest, kRequest / 2, 4096 + 1, 1, 0,
-                            kRequest * 2 + 7}, "mixed");
-        CheckContractOnFixture(mixed, kRequest, "mixed");
-        CHECK(mixed.ExpectedBytes(kRequest)
-              == kRequest + kRequest / 2 + 4097 + 1 + 0 + kRequest);
-    }
+    SizedFixture mixed({kRequest, kRequest / 2, 4096 + 1, 1, 0,
+                        kRequest * 2 + 7}, "mixed");
+    CheckContractOnFixture(mixed, kRequest, "mixed", types, count);
+    CHECK(mixed.ExpectedBytes(kRequest)
+          == kRequest + kRequest / 2 + 4097 + 1 + 0 + kRequest);
 
     // 전부 빈 파일: 총 0 바이트를 돌려주고 아무도 throw 하지 않는다.
     {
         SizedFixture empties({0, 0, 0}, "empty");
-        CheckContractOnFixture(empties, kRequest, "empty");
+        CheckContractOnFixture(empties, kRequest, "empty", types, count);
         CHECK(empties.ExpectedBytes(kRequest) == 0);
     }
+
+    std::cout << "  " << group << ": mixed fixture {16384, 8192, 4097, 1, 0, "
+              << kRequest * 2 + 7 << "} request=" << kRequest
+              << " -> total=" << mixed.ExpectedBytes(kRequest)
+              << " bytes, one onRead per path\n";
+}
+
+void TestShortReadContractRead() {
+    CheckShortReadContract(kReadBackend, 1, "read");
+}
+
+void TestShortReadContractSyncBackends() {
+    CheckShortReadContract(kSyncBackends, 2, "pread/mmap");
+}
+
+void TestShortReadContractAsyncBackends() {
+    CheckShortReadContract(kAsyncBackends, 2, "aio/io_uring");
 }
 
 // ---------------------------------------------------------------------------
@@ -525,24 +557,20 @@ void TestFifoPartialReadLoopAndEintr() {
 // payload 를 한 번에(PIPE_BUF 원자 write) 늦게 보내면 backend 는 각자의 대기
 // 지점에서 오래 블록한다: read backend 는 read, aio 는 aio_suspend,
 // io_uring 은 io_uring_wait_cqe. 그 지점의 재시도 분기를 시그널로 밟는다.
-void TestFifoBlockingWaitEintr() {
+struct WaitCase {
+    skl::BackendType type;
+    const char*      observeOp;
+};
+
+void CheckFifoBlockingWaitEintr(const WaitCase* cases, std::size_t caseCount) {
     constexpr std::size_t kBytes    = 4096;  // = PIPE_BUF, 원자적 write
     constexpr int         kDelayMs  = 80;
-
-    struct Case {
-        skl::BackendType type;
-        const char*      observeOp;
-    };
-    const Case cases[] = {
-        {skl::BackendType::Read,  "read"},
-        {skl::BackendType::Aio,   "aio_suspend"},
-        {skl::BackendType::Uring, "io_uring_wait_cqe"},
-    };
 
     const auto payload = MakePayload(kBytes);
     const ReadRecords expected{{kBytes, SumOf(payload)}};
 
-    for (const Case& c : cases) {
+    for (std::size_t idx = 0; idx < caseCount; ++idx) {
+        const WaitCase& c = cases[idx];
         const int raw = static_cast<int>(c.type);
         if (!skl::BackendCompiledIn(c.type)) {
             std::cout << "  " << skl::kBackendTypeLabels[raw]
@@ -602,6 +630,21 @@ void TestFifoBlockingWaitEintr() {
     }
 }
 
+// read backend 의 대기 지점은 read(2) 자신이다.
+void TestFifoBlockingReadEintr() {
+    const WaitCase cases[] = {{skl::BackendType::Read, "read"}};
+    CheckFifoBlockingWaitEintr(cases, 1);
+}
+
+// 비동기 backend 의 대기 지점은 완료를 기다리는 API 다.
+void TestFifoBlockingAsyncWaitEintr() {
+    const WaitCase cases[] = {
+        {skl::BackendType::Aio,   "aio_suspend"},
+        {skl::BackendType::Uring, "io_uring_wait_cqe"},
+    };
+    CheckFifoBlockingWaitEintr(cases, 2);
+}
+
 // (b-3) 스트림을 읽을 수 없는 backend 는 조용히 0 바이트를 돌려주는 대신
 // 명시적으로 거부한다. 위 두 테스트가 pread·mmap 을 제외하는 근거를 못 박는다.
 void TestFifoRejectedByNonStreamBackends() {
@@ -619,6 +662,9 @@ void TestFifoRejectedByNonStreamBackends() {
         CHECK(out.threw);
         CHECK(Contains(out.what, "requires a regular file"));
     }
+    std::cout << "  fifo on a seekless path: pread throws 'pread failed', "
+                 "mmap throws 'requires a regular file' (neither returns 0 "
+                 "bytes silently)\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -671,6 +717,9 @@ void TestAioCancelDrainsEveryRequest() {
     CHECK(!after.threw);
     CHECK(after.bytes == fixture.ExpectedBytes(kRequest));
     CHECK(OpenFdCount() == fdBefore);
+    std::cout << "  aio drain: healthy cycle aio_cancel=0 aio_return=" << kFiles
+              << "; suspend EBADF aio_cancel=" << kFiles << " aio_return="
+              << kFiles << " (every request harvested before the buffers go)\n";
 }
 
 void PrintDrainStats(const char* label,
@@ -727,6 +776,7 @@ void TestUringCancelDrainsBothCqes() {
 
     // (1) 첫 대기에서 대기 API 가 죽는다 → 4개 요청이 전부 in-flight 인 채로
     //     사이클을 포기해야 하는 상황.
+    // snippet-begin: uring-drain-accounting
     {
         ScopedFault fault("io_uring_wait_cqe:0:EIO:1");
         const CycleResult bad = RunOneCycle(*backend, fixture.Paths(), kRequest);
@@ -741,6 +791,7 @@ void TestUringCancelDrainsBothCqes() {
         CHECK(st.requestCqes  == kFiles);  // 원 요청 CQE 도 전부 수확
         CHECK(st.leftoverCqes == 0);       // 링에 남긴 것 없음
     }
+    // snippet-end: uring-drain-accounting
     CHECK(OpenFdCount() == fdBefore);
     {
         const CycleResult ok = RunOneCycle(*backend, fixture.Paths(), kRequest);
@@ -772,39 +823,28 @@ void TestUringCancelDrainsBothCqes() {
     CHECK(OpenFdCount() == fdBefore);
 }
 
-struct NamedTest {
-    const char* name;
-    void (*fn)();
+// 검사 ↔ step 대응표. 소속은 *그 step 이 무엇을 추가했는가* 로 정한다 —
+// 계약은 하나지만 그 계약을 지켜야 하는 구현은 step 마다 늘어난다.
+const skl_test::StepCase kCases[] = {
+    {2, "short read contract (read)",       &TestShortReadContractRead},
+    {2, "fifo partial read loop + EINTR",   &TestFifoPartialReadLoopAndEintr},
+    {2, "fifo blocking read EINTR",         &TestFifoBlockingReadEintr},
+    {3, "short read contract (pread/mmap)",
+     &TestShortReadContractSyncBackends},
+    {3, "fifo rejected by pread/mmap",
+     &TestFifoRejectedByNonStreamBackends},
+    {4, "short read contract (aio/io_uring)",
+     &TestShortReadContractAsyncBackends},
+    {4, "fifo blocking async wait EINTR",   &TestFifoBlockingAsyncWaitEintr},
+    {4, "aio cancel drains every request",  &TestAioCancelDrainsEveryRequest},
+    {4, "io_uring cancel drains both cqes", &TestUringCancelDrainsBothCqes},
 };
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     InstallInterruptingHandler();
-
-    const NamedTest tests[] = {
-        {"short read contract",        &TestShortReadContract},
-        {"fifo partial read + EINTR",  &TestFifoPartialReadLoopAndEintr},
-        {"fifo blocking wait EINTR",   &TestFifoBlockingWaitEintr},
-        {"fifo rejected by pread/mmap", &TestFifoRejectedByNonStreamBackends},
-        {"aio cancel drain",           &TestAioCancelDrainsEveryRequest},
-        {"io_uring cancel drain",      &TestUringCancelDrainsBothCqes},
-    };
-
-    for (const NamedTest& test : tests) {
-        const int before = failures.load();
-        std::cout << "[ run  ] " << test.name << '\n';
-        test.fn();
-        skl::ClearFaults();
-        std::cout << (failures.load() == before ? "[  ok  ] " : "[ FAIL ] ")
-                  << test.name << '\n';
-    }
-
-    if (failures.load() != 0) {
-        std::cerr << failures.load() << " system io path test(s) failed\n";
-        return 1;
-    }
-    std::cout << "system io path tests passed ("
-              << (sizeof(tests) / sizeof(tests[0])) << " groups)\n";
-    return 0;
+    return skl_test::RunStepCases(argc, argv, "system_io_path_tests", kCases,
+                                  sizeof(kCases) / sizeof(kCases[0]),
+                                  &Failures, &skl::ClearFaults);
 }

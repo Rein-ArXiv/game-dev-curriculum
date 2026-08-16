@@ -24,10 +24,11 @@
 
 프로그램은 명령열, 숫자 상수 풀, 이름 테이블로 구성된다.
 
+<!-- snippet: src/language.hpp@bytecode-structs mode=exact -->
 ```cpp
 struct Instruction {
-    OpCode op;
-    int32_t operand;
+    OpCode op = OpCode::Halt;
+    int32_t operand = 0;
     SourceLocation location;
 };
 
@@ -46,7 +47,9 @@ struct Program {
 
 검증기는 명령을 실행하기 전에 모든 인덱스를 대응 테이블 크기와 비교한다.
 
+<!-- snippet: src/language.hpp#Verify -->
 ```cpp
+// language.hpp: Verify 안의 requireOperand 람다 중 범위 검사 발췌
 if (instruction.operand < 0 ||
     static_cast<size_t>(instruction.operand) >= limit) {
     error = std::string(label) + " 인덱스가 범위를 벗어났다";
@@ -78,6 +81,7 @@ if (instruction.operand < 0 ||
 검증기는 프로그램 카운터별 예상 깊이를 `unknown`으로 초기화하고 진입점의 깊이를 0으로
 둔다. 작업 큐로 도달 가능한 후속 명령에 깊이를 전파한다.
 
+<!-- snippet: src/language.hpp#Verify -->
 ```cpp
 // language.hpp: Verify 안의 enqueue 람다 전문
 auto enqueue = [&](size_t target) -> bool {
@@ -105,12 +109,13 @@ auto enqueue = [&](size_t target) -> bool {
 
 테스트는 컴파일러를 거치지 않고 잘못된 프로그램을 직접 만든다.
 
+<!-- snippet: src/tests.cpp#TestVerifierRejectsMalformedProgram -->
 ```cpp
-Program malformed;
-malformed.code.push_back({OpCode::Pop, 0, {1, 1}});
-malformed.code.push_back({OpCode::Halt, 0, {1, 2}});
+lab::lang::Program malformed;
+malformed.code.push_back({lab::lang::OpCode::Pop, 0, {1, 1}});
+malformed.code.push_back({lab::lang::OpCode::Halt, 0, {1, 2}});
 std::string error;
-CHECK(!Verify(malformed, error));
+CHECK(!lab::lang::Verify(malformed, error));
 ```
 
 분기 없는 선형 프로그램만 넣으면 합류 깊이 검사는 한 번도 실행되지 않는다. 그래서 손으로
@@ -118,6 +123,7 @@ CHECK(!Verify(malformed, error));
 합류 깊이가 같은 정상 프로그램이 통과하는지 확인하는 대조군을 둔다. 대조군이 없으면 불일치
 케이스가 엉뚱한 이유로 거부돼도 알아채지 못한다.
 
+<!-- snippet: src/tests.cpp#TestVerifierBranchContracts -->
 ```cpp
 // 참 경로는 Pop으로 깊이를 줄이고 거짓 경로는 그대로 통과해 인덱스 4에서 0과 1이 만난다.
 Program mismatched;
@@ -127,7 +133,8 @@ mismatched.code.push_back({OpCode::JumpIfFalse, 3, {1, 2}});
 mismatched.code.push_back({OpCode::Jump, 4, {1, 3}});
 mismatched.code.push_back({OpCode::Pop, 0, {1, 4}});
 mismatched.code.push_back({OpCode::Halt, 0, {1, 5}});
-CHECK(!Verify(mismatched, error));
+// ...
+CHECK(!lab::lang::Verify(mismatched, error));
 CHECK(error == "분기 합류점의 스택 깊이가 일치하지 않는다");
 ```
 
@@ -135,14 +142,25 @@ CHECK(error == "분기 합류점의 스택 깊이가 일치하지 않는다");
 프로그램(`프로그램은 Halt로 끝나야 한다`)이다. 사유까지 비교하기 때문에 합류 검사를 항상
 성공으로 바꾸거나 종결 검사를 지우면 곧바로 실패한다. 모두 VM 실행 전에 걸러진다.
 
+두 사례는 등록표에서 `step03` 라벨을 달고 있다. VM을 한 번도 만들지 않고 `Verify`만
+직접 부르므로, 실행기가 통째로 망가져 있어도 이 타깃의 결과는 바뀌지 않는다.
+
 ```powershell
-ctest --test-dir build -C Release --output-on-failure
+ctest --test-dir build -C Release -R languages_step03 --output-on-failure
+.\build\Release\languages_tests.exe step03
 ```
 
 ```text
-1/1 Test #1: languages_tests ..................   Passed
+1/1 Test #4: languages_step03_bytecode_verifier ...   Passed
 100% tests passed out of 1
+[step03] verifier_rejects_malformed_program ok
+[step03] verifier_branch_contracts ok
+languages_tests [step03]: all checks passed (2 case(s), 11 check(s))
 ```
+
+11개의 단언 중 절반 이상이 `verifier_branch_contracts` 안의 사유 문자열 비교다. 거부
+여부만 세는 검증이었다면 같은 사례가 4~5개 단언으로 끝났을 것이고, 합류 검사를 항상
+성공으로 바꿔도 다른 이유로 거부되어 통과했을 것이다.
 
 ---
 

@@ -72,13 +72,38 @@ cmake --build build --config Release
 build\Release\graphics_dx_lab.exe
 ```
 
-GUI 없이 도는 자동 검증은 CTest 타깃 `graphics_dx_contract_tests` 하나다.
+GUI 없이 도는 자동 검증은 실행 파일 하나(`graphics_dx_contract_tests`)이지만, CTest 타깃은 여덟이다 — 전체를 도는 하나와 step 별로 하나씩. step 타깃은 같은 실행 파일에 `step01` ~ `step07` 을 인자로 넘겨 그 step 이 추가한 검사 그룹만 돌린다.
 
 ```powershell
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-기대 출력은 `1/1 Test #1: graphics_dx_contract_tests .... Passed`와 `DirectX contract tests passed`다.
+```text
+1/8 Test #1: graphics_dx_contract_tests ........   Passed    0.10 sec
+2/8 Test #2: graphics_dx_step01_skeleton .......   Passed    0.02 sec
+3/8 Test #3: graphics_dx_step02_measure ........   Passed    0.02 sec
+4/8 Test #4: graphics_dx_step03_drawcall_pso ...   Passed    0.02 sec
+5/8 Test #5: graphics_dx_step04_rootsig ........   Passed    0.02 sec
+6/8 Test #6: graphics_dx_step05_descriptor .....   Passed    0.02 sec
+7/8 Test #7: graphics_dx_step06_barrier ........   Passed    0.02 sec
+8/8 Test #8: graphics_dx_step07_scale ..........   Passed    0.03 sec
+
+100% tests passed out of 8
+```
+
+실행 파일을 직접 부르면 그룹 이름과 판정 수까지 나온다. 없는 이름을 넘기면 `no test group matches` 를 찍고 exit 2 로 죽으므로, 0 개를 돌고 통과하는 상태가 없다.
+
+```powershell
+build\Release\graphics_dx_contract_tests.exe step06
+```
+
+```text
+  [step06] barrier_description                         5 checks
+  [step06] barrier_flush_counts                        44 checks
+  [step06] back_buffer_barrier_sequence                12 checks
+step06: 3 groups, 61 checks, 0 failures
+DirectX contract tests passed
+```
 
 이 타깃은 헬퍼만 컴파일하지 않고 **제품 TU 를 그대로 링크한다** — `src/scene/scene_record.cpp`, `src/barrier/barrier_helpers.cpp`, `src/descriptor/heap_manager.cpp`, `src/measure/timestamp_query.cpp`. GPU·디바이스·윈도우가 필요 없는 이유는 세 가지다. (1) 명령 기록부(`Scene::RecordDraw`)가 `ID3D12GraphicsCommandList*` 와 오브젝트 배열만 쓰도록 분리돼 있고, 테스트는 모든 가상 함수를 채운 command list 대역에 호출을 기록한다. (2) descriptor 작성 지점(`HeapManager::WriteNullSrvs`)이 virtual 이라 파생 클래스가 가로챈다. (3) fence/readback 은 스텁을 주입하는 헤드리스 초기화 경로로 물린다.
 
@@ -96,6 +121,9 @@ ctest --test-dir build -C Release --output-on-failure
 | `IsSlotReady` / `TimestampQuery` | 미완료 slot 을 Map 하지 않고, 덮어쓰기 전 완료를 확인하는지 |
 | `MakeFrameCB` | 원점이 NDC 중심, near/far 평면이 깊이 0/1, aspect 가 가로에만 적용되는지 |
 | `ComputeInstanceModel` | 회전 후 이동 합성 결과가 해석적 기대 행렬과 일치하는지 |
+| `App::Shutdown` 순서 | GPU 완료 대기(`ctx_.Flush()`)가 모든 자원 해제보다 앞서는지(소스 텍스트 검사) |
+| `Scene::BuildObjects` 재빌드 | 1k/10k/100k 를 오간 뒤 오브젝트 수가 정확하고, 같은 규모로 돌아오면 같은 격자가 나오는지 |
+| 인스턴스 저장소 클램프 | 격자가 알린 용량보다 클 때 기록부가 용량 밖을 쓰지 않는지 |
 
 Windows 전용이다. DX12 기능 레벨 12_0 이상 GPU가 필요하다. 의존성(ImGui, ImPlot, DirectXMath)은 `FetchContent`로 내려받는다.
 

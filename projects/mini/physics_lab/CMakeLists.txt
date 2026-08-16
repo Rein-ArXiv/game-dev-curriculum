@@ -89,6 +89,8 @@ function(physlab_add_scene_test target)
     endif()
 endfunction()
 
+physlab_add_scene_test(physics_chrome_tests      src/ui/scene_chrome.cpp)
+physlab_add_scene_test(physics_forces_tests      src/scenes/forces_scene.cpp)
 physlab_add_scene_test(physics_collision_tests   src/scenes/narrow_phase_scene.cpp)
 physlab_add_scene_test(physics_broad_tests       src/scenes/broad_phase_scene.cpp)
 physlab_add_scene_test(physics_response_tests    src/scenes/response_scene.cpp)
@@ -97,6 +99,28 @@ physlab_add_scene_test(physics_constraints_tests src/scenes/constraints_scene.cp
 # 그 동치를 ctest 가 직접 확인한다.
 physlab_add_scene_test(physics_determinism_tests src/scenes/measure_scene.cpp
                                                  src/scenes/response_scene.cpp)
+
+# --- step 단위 실행 ---------------------------------------------------------
+# 위의 전체 실행 타깃은 그대로 두고 *더한다*. 각 실행 파일은 argv[1] 로 케이스
+# 필터를 받으므로(tests/step_cases.h), step k 를 막 끝낸 독자는
+#   ctest --test-dir build -C Release -R stepNN
+# 로 *그 step 이 추가한 것만* 돌릴 수 있다. 어느 검사가 어느 step 소속인지는
+# 그 step 이 무엇을 추가했는지로 정했다 — 각 테스트 파일의 케이스 표 참고.
+function(physlab_add_step_test name target filter)
+    add_test(NAME ${name} COMMAND ${target} ${filter})
+endfunction()
+
+physlab_add_step_test(step01.layout             physics_chrome_tests      step01)
+physlab_add_step_test(step02.integrators        physics_core_tests        step02)
+physlab_add_step_test(step03.forces             physics_forces_tests      step03)
+physlab_add_step_test(step04.aabb_overlap       physics_core_tests        step04)
+physlab_add_step_test(step04.broad_phase        physics_broad_tests       step04)
+physlab_add_step_test(step05.narrow_phase       physics_collision_tests   step05)
+physlab_add_step_test(step06.contact_impulse    physics_core_tests        step06)
+physlab_add_step_test(step06.response           physics_response_tests    step06)
+physlab_add_step_test(step07.distance_projection physics_core_tests       step07)
+physlab_add_step_test(step07.constraints        physics_constraints_tests step07)
+physlab_add_step_test(step08.determinism        physics_determinism_tests step08)
 
 # 플랫폼 분기.
 if(UNIX AND NOT APPLE)

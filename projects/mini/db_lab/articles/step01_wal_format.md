@@ -29,12 +29,11 @@
 
 디스크 바이트 순서는 little-endian으로 고정한다. `uint32_t`를 그대로 `fwrite`하거나 `memcpy`하면 호스트 엔디언에 따라 형식이 달라지므로 바이트를 명시적으로 조립한다.
 
+<!-- snippet: src/wal_kv.hpp -->
 ```cpp
-inline void AppendU32(std::vector<uint8_t>& out, uint32_t value) {
-    out.push_back(uint8_t(value));
-    out.push_back(uint8_t(value >> 8));
-    out.push_back(uint8_t(value >> 16));
-    out.push_back(uint8_t(value >> 24));
+inline void AppendU32(std::vector<uint8_t>& b, uint32_t v) {
+    b.push_back(uint8_t(v)); b.push_back(uint8_t(v >> 8));
+    b.push_back(uint8_t(v >> 16)); b.push_back(uint8_t(v >> 24));
 }
 
 inline uint32_t ReadU32Le(const uint8_t* p) {
@@ -47,6 +46,7 @@ inline uint32_t ReadU32Le(const uint8_t* p) {
 
 연산 종류와 프레임 본문은 다음과 같이 정의한다. `src/wal_kv.hpp`에 그대로 들어간다.
 
+<!-- snippet: src/wal_kv.hpp -->
 ```cpp
 enum class Op : uint8_t { Put = 1, Del = 2, Commit = 3 };
 
@@ -55,6 +55,8 @@ struct Frame {
     std::string key;    // Put/Del
     std::string value;  // Put
 };
+
+// ... 위의 AppendU32 / ReadU32Le
 
 inline void AppendStr(std::vector<uint8_t>& b, const std::string& s) {
     AppendU32(b, uint32_t(s.size()));
@@ -78,6 +80,7 @@ CRC는 공격자를 막는 암호학적 MAC이 아니다. 저장 장치 오류�
 
 구현은 IEEE 다항식 테이블 방식이다.
 
+<!-- snippet: src/wal_kv.hpp#Crc32 -->
 ```cpp
 inline uint32_t Crc32(const uint8_t* data, size_t n) {
     static uint32_t table[256];
@@ -111,6 +114,7 @@ inline uint32_t Crc32(const uint8_t* data, size_t n) {
 
 payload 역직렬화는 읽기 전에 남은 바이트를 항상 확인한다. 문자열 길이 필드가 payload 경계를 넘으면 실패로 처리한다.
 
+<!-- snippet: src/wal_kv.hpp#DecodePayload -->
 ```cpp
 static bool DecodePayload(const std::vector<uint8_t>& p, Frame& out) {
     size_t off = 0;
@@ -144,8 +148,11 @@ static bool DecodePayload(const std::vector<uint8_t>& p, Frame& out) {
 4. 비정상 길이가 메모리 과다 할당을 유발하지 않는다.
 5. 빈 파일은 정상적인 빈 로그로 처리된다.
 
-빌드는 CMake 파일 하나로 끝난다. 외부 의존성이 없고 lab의 모든 실행 파일이 이 파일을 공유한다.
+빌드는 CMake 파일 하나로 끝난다. 외부 의존성이 없고 lab의 모든 실행 파일이 이 파일을 공유한다. 스토어 헤더와 벤치는 `src/`에, 검사 실행 파일은 `tests/`에 둔다.
 
+ctest 등록은 두 층이다. `db_tests`는 파일 전체를 돌리고, `db_tests_step01`은 이 step이 추가한 검사만 돌린다. 뒤 step에서 검사가 늘어도 이 step 독자가 보는 대상은 그대로다.
+
+<!-- snippet: CMakeLists.txt -->
 ```cmake
 cmake_minimum_required(VERSION 3.20)
 project(db_lab CXX)
@@ -157,8 +164,8 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 add_executable(db_bench      src/db_bench.cpp)
-add_executable(db_crash_test src/db_crash_test.cpp)
-add_executable(db_tests      src/db_tests.cpp)
+add_executable(db_crash_test tests/db_crash_test.cpp)
+add_executable(db_tests      tests/db_tests.cpp)
 
 foreach(t db_bench db_crash_test db_tests)
   target_include_directories(${t} PRIVATE src)
@@ -174,21 +181,63 @@ endforeach()
 enable_testing()
 add_test(NAME db_tests      COMMAND db_tests)
 add_test(NAME db_crash_test COMMAND db_crash_test)
+# ... db_bench_smoke — step03
+add_test(NAME db_tests_step01 COMMAND db_tests --step=01)
 ```
 
-프레임 형식 관련 검사는 `db_tests`의 `TestBasic`(왕복 직렬화)과 `TestCorruptionDetected`(CRC 불일치)가 담당한다.
+이 step이 추가한 것은 스토어가 아니라 형식이므로, 검사도 스토어 없이 인코더와 CRC만 본다. 아래가 `db_tests_step01`에 들어간 `frame_codec_bytes`의 단정이다 — 위 검증 기준 1·3에 그대로 대응한다.
+
+<!-- snippet: tests/db_tests.cpp#TestFrameCodecBytes -->
+```cpp
+static void TestFrameCodecBytes() {
+    std::vector<uint8_t> le;
+    walkv::AppendU32(le, 0x01020304u);
+    CHECK(le.size() == 4);
+    CHECK(le[0] == 0x04 && le[1] == 0x03 && le[2] == 0x02 && le[3] == 0x01);
+    CHECK(walkv::ReadU32Le(le.data()) == 0x01020304u);
+
+    // ... Put payload 의 배치: op(1) + [keylen(4)+key] + [vallen(4)+value]
+    const std::vector<uint8_t> put = walkv::EncodePayload({walkv::Op::Put, "ab", "xyz"});
+    CHECK(put.size() == 1 + 4 + 2 + 4 + 3);
+    CHECK(put[0] == uint8_t(walkv::Op::Put));
+    CHECK(walkv::ReadU32Le(put.data() + 1) == 2u);
+    CHECK(std::string(put.begin() + 5, put.begin() + 7) == "ab");
+    CHECK(walkv::ReadU32Le(put.data() + 7) == 3u);
+    CHECK(std::string(put.begin() + 11, put.end()) == "xyz");
+
+    // ... Del 은 key 만, Commit 은 op 바이트 하나뿐
+
+    // CRC32 는 표준 IEEE 여야 한다. 아래 검사값은 반사·init·최종 xor 조합까지 고정한다.
+    const std::string check_vector = "123456789";
+    CHECK(walkv::Crc32(reinterpret_cast<const uint8_t*>(check_vector.data()),
+                       check_vector.size()) == 0xCBF43926u);
+
+    std::vector<uint8_t> flipped = put;
+    flipped.back() ^= 0xFF;
+    CHECK(walkv::Crc32(put.data(), put.size()) !=
+          walkv::Crc32(flipped.data(), flipped.size()));
+}
+```
+
+나머지 셋은 파서 경계 쪽이다 — `crc_mismatch_stops_replay`(CRC 불일치 뒤를 버린다), `garbage_length_rejected`(검증 기준 4의 과다 할당), `oversized_frame_rejected`(길이 상한 가드). 셋 다 `Replay`를 통해 돌지만 단정하는 대상은 이 step이 정한 파싱 경계다.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
-./build/Release/db_tests
+./build/Release/db_tests --step=01
 ```
 
-관측 결과 — 실패한 검사가 있으면 파일·줄 번호와 함께 출력되고 종료 코드가 1이 된다.
+관측 결과 — 이 step이 추가한 네 검사가 이름과 함께 찍힌다. 실패하면 그 줄이 `FAIL`이 되고 어긋난 CHECK의 파일·줄 번호가 위에 함께 출력되며 종료 코드가 1이 된다.
 
 ```text
-db_tests: all passed
+  ok   frame_codec_bytes
+  ok   crc_mismatch_stops_replay
+  ok   garbage_length_rejected
+  ok   oversized_frame_rejected
+db_tests[step01]: 4/4 passed
 ```
+
+같은 대상이 ctest에도 있다 — `ctest --test-dir build -C Release -R db_tests_step01`. 다만 통과 여부만 알려 주므로, 무엇을 확인했는지 보려면 위처럼 직접 실행한다.
 
 ---
 

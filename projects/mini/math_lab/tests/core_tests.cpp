@@ -4,6 +4,10 @@
 // 퇴화 입력(t=0, k=0, octaves=0, a==b)만 보는 CHECK 는 알고리즘을 우회하므로
 // 반드시 비퇴화 케이스를 짝으로 둔다. 독립 오라클(brute force / 다른 알고리즘)
 // 과의 대조는 제품 함수를 다시 호출하지 않고 이 파일 안에서 따로 구현한다.
+//
+// 실행 단위: 파일 끝의 kCases 표가 각 검증 함수를 그것을 들여온 step 에 묶는다.
+// 인자 없이 부르면 전부 돌고, `math_core_tests step05` 처럼 step 키를 주면
+// 그 step 이 추가한 것만 돈다. CMake 의 add_test 가 step 마다 하나씩 걸려 있다.
 
 #include "algo/bvh2d.h"
 #include "algo/collision2d.h"
@@ -14,19 +18,23 @@
 #include "algo/noise.h"
 #include "algo/quaternion.h"
 #include "algo/sdf2d.h"
+#include "ui/scene_chrome.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <vector>
 
 namespace {
 
 int failures = 0;
+int checks   = 0;   // 실행된 CHECK 수 — step 별 출력에 그대로 찍힌다.
 
 #define CHECK(expr)                                                           \
     do {                                                                      \
+        ++checks;                                                             \
         if (!(expr)) {                                                        \
             std::cerr << "CHECK failed: " #expr << " (" << __FILE__ << ':'  \
                       << __LINE__ << ")\n";                                   \
@@ -73,6 +81,50 @@ double SampleVariance(const std::vector<float>& v) {
         acc += d * d;
     }
     return acc / (double)(v.size() - 1);
+}
+
+// ==================== layout (골격의 화면 분할) ====================
+
+// ComputeLayout 은 raylib 호출이 없는 순수 산술이라 창 없이 그대로 검사된다.
+// 계약은 하나다 — 탭 바 / (캔버스 + 패널) / 푸터가 화면을 빈틈도 겹침도 없이
+// 나눠 갖고, chrome 높이는 고정이라 화면이 커지면 캔버스만 커진다.
+void TestLayout() {
+    constexpr int kW = 1280, kH = 720, kPanel = 300;
+    const mathlab::LayoutRects L = mathlab::ComputeLayout(kW, kH, kPanel);
+
+    // snippet-begin: step01-layout-partition
+    // 세로: 탭 바 아래가 곧 캔버스, 캔버스 아래가 곧 푸터, 푸터 끝이 화면 끝.
+    CHECK(Near(L.tabBar.y + L.tabBar.height, L.canvas.y));
+    CHECK(Near(L.canvas.y + L.canvas.height, L.footer.y));
+    CHECK(Near(L.footer.y + L.footer.height, (float)kH));
+    // 가로: 캔버스 + 패널 = 화면 폭이고 패널이 오른쪽 끝에 붙는다.
+    CHECK(Near(L.canvas.width + L.panel.width, (float)kW));
+    CHECK(Near(L.canvas.x + L.canvas.width, L.panel.x));
+    CHECK(Near(L.panel.width, (float)kPanel));
+    // snippet-end: step01-layout-partition
+
+    // 패널은 캔버스와 같은 세로 구간을 쓴다.
+    CHECK(Near(L.panel.y, L.canvas.y));
+    CHECK(Near(L.panel.height, L.canvas.height));
+
+    // chrome 높이는 화면 크기와 무관한 상수다 — 화면을 키우면 캔버스만 커진다.
+    const mathlab::LayoutRects tall = mathlab::ComputeLayout(kW, kH + 400, kPanel);
+    CHECK(Near(tall.tabBar.height, L.tabBar.height));
+    CHECK(Near(tall.footer.height, L.footer.height));
+    CHECK(Near(tall.canvas.height, L.canvas.height + 400.0f));
+    CHECK(Near(tall.footer.y, L.footer.y + 400.0f));
+
+    // 패널을 넓히면 캔버스가 정확히 그만큼 좁아진다 (총합 보존).
+    const mathlab::LayoutRects wide = mathlab::ComputeLayout(kW, kH, kPanel + 120);
+    CHECK(Near(wide.canvas.width, L.canvas.width - 120.0f));
+    CHECK(Near(wide.canvas.width + wide.panel.width, (float)kW));
+    CHECK(Near(wide.canvas.height, L.canvas.height));
+
+    // 모든 영역이 양수 크기이고 탭 바는 화면 전폭을 쓴다.
+    CHECK(L.tabBar.width > 0.0f && L.canvas.width > 0.0f && L.panel.width > 0.0f);
+    CHECK(L.canvas.height > 0.0f && L.footer.height > 0.0f);
+    CHECK(Near(L.tabBar.width, (float)kW) && Near(L.footer.width, (float)kW));
+    CHECK(Near(L.tabBar.x, 0.0f) && Near(L.canvas.x, 0.0f));
 }
 
 // ==================== quaternion ====================
@@ -145,6 +197,7 @@ void TestQuaternionSlerpUniformSpeed() {
         return (minStep > 1e-9f) ? (maxStep / minStep) : 1e30f;
     };
 
+    // snippet-begin: step02-slerp-uniform-speed
     const float slerpRatio = stepRatio(&mathlab::QuatSlerp);
     const float nlerpRatio = stepRatio(&mathlab::QuatNlerp);
     if (!(slerpRatio < 1.05f) || !(nlerpRatio > 1.3f)) {
@@ -155,6 +208,7 @@ void TestQuaternionSlerpUniformSpeed() {
     // 대조군 — nlerp 는 같은 호에서 균일하지 않아야 한다.
     // (이 CHECK 가 없으면 위 상한이 자명해질 수 있다)
     CHECK(nlerpRatio > 1.3f);
+    // snippet-end: step02-slerp-uniform-speed
 
     // 끝점 보존 + 중간점이 단위 노름.
     CHECK(Near(QuatAbsDot(mathlab::QuatSlerp(a, b, 0.0f), a), 1.0f, 1e-6f));
@@ -189,6 +243,7 @@ void TestQuaternionGimbalLock() {
         return worst;
     };
 
+    // snippet-begin: step02-gimbal-lock
     const float locked = worstMismatch(halfPi);
     const float free   = worstMismatch(0.0f);
     if (!(locked < 1e-5f) || !(free > 1e-3f)) {
@@ -197,6 +252,7 @@ void TestQuaternionGimbalLock() {
     }
     CHECK(locked < 1e-5f);
     CHECK(free > 1e-3f);
+    // snippet-end: step02-gimbal-lock
 }
 
 // ==================== curves ====================
@@ -262,6 +318,7 @@ void TestCurves() {
         minSeg = std::min(minSeg, seg);
         prev = cur;
     }
+    // snippet-begin: step03-arc-length-uniform
     CHECK(maxSeg / minSeg < 1.1f);
     // 대조군: 같은 곡선을 t 로 균일 샘플하면 전혀 균일하지 않다.
     float rawMax = 0.0f, rawMin = 1e30f;
@@ -274,6 +331,7 @@ void TestCurves() {
         rawPrev = cur;
     }
     CHECK(rawMax / rawMin > 5.0f);
+    // snippet-end: step03-arc-length-uniform
 
     lut.Build(0, line);
     CHECK(Near(lut.TotalLength(), 0.0f));
@@ -327,6 +385,7 @@ void TestCollision() {
         const mathlab::OBB2D B{{rng.Range(-4.0f, 4.0f), rng.Range(-4.0f, 4.0f)},
                                rng.Range(0.3f, 1.5f), rng.Range(0.3f, 1.5f),
                                rng.Range(0.0f, 3.14159265f)};
+        // snippet-begin: step05-sat-gjk-agree
         const bool sat = mathlab::OBBOBBSat2D(A, B).intersect;
         const auto trace = mathlab::GJK2DTraced(A, B);
         const bool gjk =
@@ -344,6 +403,7 @@ void TestCollision() {
     // 표본이 한쪽으로 쏠려 위 CHECK 가 자명해지지 않았는지 확인.
     CHECK(hits > kPairs / 10);
     CHECK(hits < kPairs - kPairs / 10);
+    // snippet-end: step05-sat-gjk-agree
 }
 
 // ==================== sdf ====================
@@ -381,12 +441,14 @@ void TestSdf() {
     // Smooth min — k>0 이어야 실제 blend 식이 실행된다.
     //   |a-b| < k 구간에서는 min 보다 *작아야* 하고,
     //   |a-b| > k 구간에서는 min 과 같아야 한다.
+    // snippet-begin: step07-smin-blend-band
     CHECK(mathlab::sdf::SminPoly(1.0f, 1.2f, 1.0f) < 1.0f);
     CHECK(Near(mathlab::sdf::SminPoly(1.0f, 1.2f, 1.0f), 1.0f - 0.16f, 1e-5f));
     CHECK(Near(mathlab::sdf::SminPoly(1.0f, 5.0f, 1.0f), 1.0f, 1e-6f));
     CHECK(Near(mathlab::sdf::SminPoly(2.0f, 2.0f, 1.0f), 2.0f - 0.25f, 1e-5f));
     // k → 0 이면 min 으로 수렴한다.
     CHECK(Near(mathlab::sdf::SminPoly(1.0f, 1.2f, 1e-3f), 1.0f, 1e-3f));
+    // snippet-end: step07-smin-blend-band
     // 대칭성과 하한: smin 은 min 보다 크지 않고 min - k/4 보다 작지 않다.
     Lcg rng(77u);
     for (int i = 0; i < 500; ++i) {
@@ -617,6 +679,7 @@ void TestBvh() {
             ++mismatch;
         }
     }
+    // snippet-begin: step06-bvh-vs-brute-force
     CHECK(mismatch == 0);
     CHECK(hitCount > kRays / 4);   // 대부분 빗나가면 위 대조가 자명해진다
     // 가지치기가 실제로 동작하면 광선당 방문 노드는 전체 노드 수보다 훨씬 적다.
@@ -626,6 +689,7 @@ void TestBvh() {
                   << big.Nodes().size() << " nodes\n";
     }
     CHECK(avgVisited < 0.5 * (double)big.Nodes().size());
+    // snippet-end: step06-bvh-vs-brute-force
 
     bvh.Build({}, 0);
     CHECK(bvh.Nodes().empty());
@@ -672,6 +736,7 @@ void TestNoise() {
     // 격자선 위(fy=0)에서는 x 방향 1차원 보간만 남으므로 가중치를 직접 고정할 수 있다.
     {
         const uint32_t seed = 5u;
+        // snippet-begin: step04-perlin-quintic-fade
         const float fx = 0.25f;
         const float u = mathlab::nz::Quintic(fx);
         int discriminating = 0;
@@ -690,6 +755,7 @@ void TestNoise() {
         }
         // 가중치가 결과에 실제로 드러나는 셀이 있어야 위 CHECK 가 의미를 갖는다.
         CHECK(discriminating > 4);
+        // snippet-end: step04-perlin-quintic-fade
     }
 
     // 세 노이즈 모두 상수가 아니어야 한다 (해시/그라디언트를 상수로 바꾸면 0).
@@ -782,6 +848,7 @@ void TestDepth() {
     CHECK(Near(mathlab::ReverseNdcZ(-f, n, f), 0.0f, 1e-5f));
 
     // 두 매핑은 서로 뒤집힌 관계다: reverse = 1 - std. 그리고 std 는 단조 증가.
+    // snippet-begin: step08-depth-reverse
     float prev = -1.0f;
     for (int i = 0; i <= 40; ++i) {
         const float z = -(n + (f - n) * (float)i / 40.0f);
@@ -796,6 +863,7 @@ void TestDepth() {
     CHECK(mathlab::StdNdcZ(-(n + (f - n) * 0.5f), n, f) > 0.99f);
     // 반대로 reverse-Z 는 같은 지점에서 0.01 미만이다.
     CHECK(mathlab::ReverseNdcZ(-(n + (f - n) * 0.5f), n, f) < 0.01f);
+    // snippet-end: step08-depth-reverse
 }
 
 // ==================== kahan (math part20) ====================
@@ -827,12 +895,14 @@ void TestKahan() {
     CHECK(std::fabs((double)k2 - truth2) < 1e-2);
 
     // 누적기 자체의 계약: 보상항이 실제로 잘린 몫을 담는다.
+    // snippet-begin: step08-kahan-absorption
     mathlab::KahanAccumulator acc(1.0f);
     acc.Add(1e-8f);
     CHECK(Near(acc.Sum(), 1.0f, 1e-9f));      // float 1.0 에 흡수되고
     CHECK(std::fabs(acc.Compensation()) > 1e-9f);  // 보상항에 남는다
     for (int i = 0; i < 1000; ++i) acc.Add(1e-8f);
     CHECK(acc.Sum() > 1.0f);   // 모이면 되살아난다
+    // snippet-end: step08-kahan-absorption
 }
 
 // ==================== vectors (math part02) ====================
@@ -903,6 +973,7 @@ void TestMatrix() {
     const Matrix trs = mathlab::MatComposeTRS(t, q, s);
 
     // (a) M·M⁻¹ = I (양쪽 모두).
+    // snippet-begin: step08-matrix-identities
     const Matrix inv = mathlab::MatInverse(trs);
     CHECK(NearMat(mathlab::MatMul(trs, inv), mathlab::MatIdentity(), 1e-5f));
     CHECK(NearMat(mathlab::MatMul(inv, trs), mathlab::MatIdentity(), 1e-5f));
@@ -919,6 +990,7 @@ void TestMatrix() {
     CHECK(NearMat(mathlab::MatMul(R, mathlab::MatTranspose(R)),
                   mathlab::MatIdentity(), 1e-5f));
     CHECK(Near(mathlab::MatDeterminant(R), 1.0f, 1e-4f));
+    // snippet-end: step08-matrix-identities
     // 아핀 TRS 의 행렬식은 스케일 곱.
     CHECK(Near(mathlab::MatDeterminant(trs), s.x * s.y * s.z, 1e-3f));
     // 좌표계 반전(스케일 음수)은 행렬식 부호를 뒤집는다 — 핸드니스 판정.
@@ -981,25 +1053,65 @@ void TestMatrix() {
     CHECK(!mathlab::MatInvert(mathlab::MatScale({1.0f, 0.0f, 1.0f}), dummy));
 }
 
+// ==================== 실행 단위 ====================
+
+// 검증 함수를 *그것을 들여온 step* 에 묶는다. step 키가 곧 ctest 타깃의 인자다.
+struct TestCase {
+    const char* step;
+    const char* name;
+    void (*fn)();
+};
+
+const TestCase kCases[] = {
+    {"step01", "layout/tab_canvas_footer",        TestLayout},
+    {"step02", "quaternion/identities",           TestQuaternion},
+    {"step02", "quaternion/slerp_uniform_speed",  TestQuaternionSlerpUniformSpeed},
+    {"step02", "quaternion/gimbal_lock",          TestQuaternionGimbalLock},
+    {"step03", "curves/basis_and_arc_length",     TestCurves},
+    {"step04", "noise/value_perlin_simplex_fbm",  TestNoise},
+    {"step05", "collision/sat_vs_gjk",            TestCollision},
+    {"step06", "bvh/median_split_and_traversal",  TestBvh},
+    {"step07", "sdf/primitives_and_smin",         TestSdf},
+    {"step08", "depth/std_vs_reverse",            TestDepth},
+    {"step08", "kahan/compensated_sum",           TestKahan},
+    {"step08", "vector/cross_project_reflect",    TestVectorAlgebra},
+    {"step08", "matrix/inverse_orthogonal_trs",   TestMatrix},
+};
+
 }  // namespace
 
-int main() {
-    TestQuaternion();
-    TestQuaternionSlerpUniformSpeed();
-    TestQuaternionGimbalLock();
-    TestCurves();
-    TestCollision();
-    TestSdf();
-    TestBvh();
-    TestNoise();
-    TestDepth();
-    TestKahan();
-    TestVectorAlgebra();
-    TestMatrix();
+// 인자 없이 부르면 표 전체, `step05` 처럼 키를 주면 그 step 이 추가한 것만 돈다.
+int main(int argc, char** argv) {
+    const char* filter = (argc > 1) ? argv[1] : nullptr;
+
+    int selected = 0;
+    for (const TestCase& testCase : kCases) {
+        if (filter && std::strcmp(filter, testCase.step) != 0) continue;
+        ++selected;
+
+        const int checksBefore   = checks;
+        const int failuresBefore = failures;
+        testCase.fn();
+
+        std::cout << '[' << testCase.step << "] " << testCase.name << ' ';
+        for (size_t pad = std::strlen(testCase.name); pad < 32; ++pad) {
+            std::cout << '.';
+        }
+        std::cout << ' ' << (checks - checksBefore) << " checks, "
+                  << (failures - failuresBefore) << " failed\n";
+    }
+
+    if (selected == 0) {
+        std::cerr << "no test case for '" << (filter ? filter : "") << "'\n";
+        return 2;
+    }
+
+    std::cout << (filter ? filter : "all") << ": " << selected
+              << " case(s), " << checks << " check(s), " << failures
+              << " failure(s)\n";
     if (failures != 0) {
         std::cerr << failures << " math core test(s) failed\n";
         return 1;
     }
-    std::cout << "math core tests passed\n";
     return 0;
 }

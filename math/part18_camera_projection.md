@@ -13,7 +13,7 @@
 5. **Near/Far Plane과 깊이 정밀도** — $1/z$ 분포의 함의. Near 가 *훨씬 큰 영향*.
 6. **Reverse-Z** — 부동소수점 depth 표현과 $1/z$ 매핑을 더 잘 맞추고, 개선 폭이 near/far와 format에 어떻게 의존하는지 본다.
 7. **무한 Far Plane** — far → ∞ 의 닫힌 형식.
-8. **Frustum 추출** — VP 행렬의 행 조합으로 6평면.
+8. **Frustum 추출** — VP 행렬의 행 조합으로 6평면. 깊이 관례가 갈리는 두 평면.
 
 이 글의 목표는 *왜 게임 엔진이 reverse-Z 를 쓰는가, 왜 near 를 *너무 작게* 두면 안 되는가, 왜 frustum culling 이 VP 행렬에서 직접 평면을 뽑을 수 있는가* — 그 *수학적 이유* 를 명확히.
 
@@ -115,7 +115,7 @@ View 공간 점 $(x, y, z, 1)$ → Clip 공간 점 $(x_c, y_c, z_c, w_c)$ 로 �
 
 1. **X, Y**: $x_c / w_c = $ NDC x. 닮은꼴 삼각형 비례 적용 + 화면 사이즈 정규화.
 2. **Z**: $z_c / w_c = $ NDC z. near 가 -1 또는 0 (API 따라), far 가 1 에 매핑.
-3. **W**: 닦임 위해 *원본 -z* 가 들어가야 함.
+3. **W**: 나눗셈을 위해 $w_c$ 에 *원본 -z* 가 들어가야 함.
 
 ### 2.2 W 행: 원본 -z 보존
 
@@ -135,7 +135,19 @@ $$
 
 (t = top plane 좌표.)
 
-대칭 frustum (left = -right, bottom = -top) 가정. 비대칭 frustum 은 *추가 시프트 항*.
+*대칭 frustum* (left = -right, bottom = -top) 가정이다. 비대칭이면 시프트 항이 하나 더 붙는데, 유도는 같은 두 줄이다. near 평면 위의 투영 좌표 $x_p = \frac{n x}{-z}$ 를 $[l, r]$ 에서 $[-1, 1]$ 로 선형 사상하면:
+
+$$
+x_n = \frac{2 x_p - (r + l)}{r - l} = \frac{1}{-z} \left( \frac{2n}{r-l} x + \frac{r+l}{r-l} z \right)
+$$
+
+$w_c = -z$ 이므로 괄호 안이 그대로 $x_c$ 다.
+
+$$
+\text{x 행} = \begin{pmatrix} \frac{2n}{r-l} & 0 & \frac{r+l}{r-l} & 0 \end{pmatrix}, \quad \text{y 행} = \begin{pmatrix} 0 & \frac{2n}{t-b} & \frac{t+b}{t-b} & 0 \end{pmatrix}
+$$
+
+*z 열에 놓인 시프트 항* 이 비대칭의 전부다. $l = -r$ 을 넣으면 $\frac{2n}{2r} = \frac{n}{r}$, 시프트 항은 0 이 되어 위의 대칭 형태로 돌아온다. 비대칭이 필요한 곳은 좌우 눈의 광축이 어긋난 VR, 화면 일부만 다시 그리는 포털·거울, 그림자 캐스케이드처럼 *중심이 화면 중앙이 아닌* 투영이다.
 
 ### 2.4 Z 행: near → −1, far → +1 매핑 (OpenGL)
 
@@ -184,17 +196,20 @@ $$
 \text{z 행} = \begin{pmatrix} 0 & 0 & -\frac{f}{f-n} & -\frac{fn}{f-n} \end{pmatrix}
 $$
 
-DirectX 는 *왼손 좌표계* (View 공간 +Z 향함) — 부호 반대 추가. Vulkan 은 *우수 + Z [0, 1]*. API 별 미묘한 차이를 알고 있어야 한다.
+여기서 바뀐 것은 *z 행 하나뿐* 이다. x·y 행은 두 관례가 같다 — 클립 조건 $-w_c \le x_c \le w_c$ 가 깊이 범위와 무관하기 때문이다.
 
 ### 2.7 정리
 
-| API | 좌표계 (View) | NDC Z | Y 방향 |
-|---|---|---|---|
-| OpenGL | 우수 (-Z 시야) | [-1, 1] | 위 (+) |
-| DirectX 11/12 | 좌수 (+Z 시야) | [0, 1] | 위 (+) |
-| Vulkan | 우수 (-Z 시야) | [0, 1] | *아래 (+)* |
+유도가 갈리는 축은 하나, *목표 NDC z 범위* 다.
 
-Vulkan 의 *Y 뒤집힘* 이 흔한 함정 — 텍스처가 거꾸로 보이는 이유.
+| 목표 NDC z | z 행 $(A, B)$ | 대표적으로 이 범위를 쓰는 곳 |
+|---|---|---|
+| $[-1, 1]$ | $-\frac{f+n}{f-n}, \; -\frac{2fn}{f-n}$ | OpenGL 기본 |
+| $[0, 1]$ | $-\frac{f}{f-n}, \; -\frac{fn}{f-n}$ | Direct3D · Vulkan 기본, `GL_ZERO_TO_ONE` 을 켠 OpenGL |
+
+*핸드니스는 이 유도의 변수가 아니다.* 위 두 행은 카메라가 $-Z$ 를 보는 우수 기저를 가정하고 세웠다. $+Z$ 를 보는 좌수 기저로 옮기면 같은 사상을 표현하는 부호가 바뀔 뿐 조건식은 그대로다. 어떤 API 도 기저를 강제하지 않으며, 널리 쓰이는 수학 라이브러리들이 `...RH` 와 `...LH` 를 나란히 제공하는 것이 그 증거다. 프로젝트 안에서 하나로 고정하는 것이 요점이다.
+
+화면에서 $+Y$ 가 위로 가는지 아래로 가는지도 투영 유도가 아니라 *뷰포트 변환* 의 몫이라, 필요하면 y 행의 부호를 뒤집거나 뷰포트 쪽에서 맞춘다. 이것은 이미지 파일의 첫 행이 위인지 아래인지와는 별개 문제다 — 두 가지를 같은 것으로 놓으면 한쪽을 고칠 때마다 다른 쪽이 어긋난다.
 
 ## 3. 직교 투영
 
@@ -598,86 +613,116 @@ far 를 *임의의 큰 값* 으로 잡아 깊이 정밀도를 낭비하지 않�
 
 VP 행렬에서 *6평면을 직접 추출*. *frustum culling 의 표준 방법*.
 
-### 8.1 Gribb-Hartmann 방법
+### 8.1 클립 부등식에서 평면이 나온다
 
 Gil Gribb, Klaus Hartmann, "Fast Extraction of Viewing Frustum Planes" (2001).
 
-핵심: VP 행렬의 *행 합 / 차* 가 *frustum 평면 식 (Ax + By + Cz + D = 0)*.
+추출은 트릭이 아니라 *클립 조건을 그대로 옮겨 적은 것* 이다. VP 행렬의 행을 $\text{row}_i$ 라 하면 클립 좌표는 $x_c = \text{row}_1 \cdot \vec{p}$, $y_c = \text{row}_2 \cdot \vec{p}$, $z_c = \text{row}_3 \cdot \vec{p}$, $w_c = \text{row}_4 \cdot \vec{p}$ 다 ($\vec{p}$ 는 동차 world 좌표). 안쪽 조건 $-w_c \le x_c$ 를 이항하면:
 
 $$
-\text{plane}_{\text{Left}} = \text{row}_4 + \text{row}_1, \quad \text{plane}_{\text{Right}} = \text{row}_4 - \text{row}_1
+x_c + w_c \ge 0 \iff (\text{row}_1 + \text{row}_4) \cdot \vec{p} \ge 0
+$$
+
+좌변이 $(A, B, C, D) \cdot (x, y, z, 1) = Ax + By + Cz + D$ 형태이므로 *행의 합이 곧 평면의 일반형 계수* 다. 나머지 다섯도 같은 방식.
+
+$$
+\text{Left} = \text{row}_4 + \text{row}_1, \quad \text{Right} = \text{row}_4 - \text{row}_1
 $$
 
 $$
-\text{plane}_{\text{Bottom}} = \text{row}_4 + \text{row}_2, \quad \text{plane}_{\text{Top}} = \text{row}_4 - \text{row}_2
+\text{Bottom} = \text{row}_4 + \text{row}_2, \quad \text{Top} = \text{row}_4 - \text{row}_2
 $$
 
-$$
-\text{plane}_{\text{Near}} = \text{row}_4 + \text{row}_3, \quad \text{plane}_{\text{Far}} = \text{row}_4 - \text{row}_3
-$$
+*좌우·상하 네 평면은 API 와 무관하다* — 클립 조건 $-w_c \le x_c \le w_c$, $-w_c \le y_c \le w_c$ 가 어디서나 같기 때문이다. 갈리는 것은 *깊이 두 평면* 뿐이고, 이유는 2.6절에서 본 NDC z 범위 차이다.
 
-(z [-1, 1] OpenGL 관례. DX/Vulkan z [0, 1] 은 Near 가 *row_3* 만으로 (`row_3` 자체).)
+| 클립 깊이 조건 | near 쪽 평면 | far 쪽 평면 |
+|---|---|---|
+| $-w_c \le z_c \le w_c$ (z [-1, 1]) | $\text{row}_4 + \text{row}_3$ | $\text{row}_4 - \text{row}_3$ |
+| $0 \le z_c \le w_c$ (z [0, 1]) | $\text{row}_3$ | $\text{row}_4 - \text{row}_3$ |
+| $0 \le z_c \le w_c$ + reverse-Z | $\text{row}_4 - \text{row}_3$ | $\text{row}_3$ |
+
+*z [0, 1] 에 z [-1, 1] 공식을 쓰면 near 평면이 엉뚱한 자리에 생긴다.* 2.6절의 z [0, 1] 행렬을 $n = 1$, $f = 11$ 로 세우면 $\text{row}_3 = (0, 0, -1.1, -1.1)$, $\text{row}_4 = (0, 0, -1, 0)$ 이다. $\text{row}_3$ 만 쓰면 정규화 후 $\hat{n} = (0,0,-1)$, $d = -(-1.1)/1.1 = 1$ — view 공간 $z = -1$, 즉 진짜 near 다. 그런데 $\text{row}_4 + \text{row}_3 = (0, 0, -2.1, -1.1)$ 을 쓰면 $d = -(-1.1)/2.1 \approx 0.524$ 가 나와 평면이 $z = -0.524$ 로 앞당겨진다. GPU 는 $z = -1$ 에서 자르는데 컬링은 $z = -0.524$ 기준으로 통과시키므로, *잘릴 물체를 그리는* 낭비가 매 프레임 남는다. 6.3절의 reverse-Z 행렬 ($\text{row}_3 = (0, 0, 0.1, 1.1)$) 에서는 더 나빠서 $\text{row}_4 + \text{row}_3 = (0, 0, -0.9, 1.1)$ 이 $d \approx -1.22$ — *카메라 뒤쪽* 평면이 되어 near 컬링이 사실상 사라진다.
 
 ### 8.2 코드
 
 ```cpp
-struct Plane {
+struct Plane {              // n·p = d 관례. d = 원점에서 평면까지의 부호 거리
     vec3  normal;
     float d;
 };
 
-void ExtractFrustumPlanes(mat4 viewProj, Plane planes[6]) {
+enum class ClipDepth { MinusOneToOne, ZeroToOne };
+
+// v = (A, B, C, D). frustum 안쪽이 Ax + By + Cz + D >= 0 인 일반형.
+static Plane MakePlane(vec4 v) {
+    float len = length(vec3(v));
+    Plane p;
+    p.normal = vec3(v) / len;
+    p.d      = -v.w / len;      // 일반형 D → Hessian d 는 부호 반전
+    return p;
+}
+
+void ExtractFrustumPlanes(mat4 viewProj, ClipDepth depth, Plane planes[6]) {
     // 행 = 열의 의미가 행렬 메모리 레이아웃에 따라 다름
     auto row = [&](int i) {
         return vec4(viewProj[0][i], viewProj[1][i], viewProj[2][i], viewProj[3][i]);
     };
     vec4 r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
 
-    auto makePlane = [](vec4 v) {
-        Plane p;
-        float len = length(vec3(v));
-        p.normal = vec3(v) / len;
-        p.d      = v.w / len;
-        return p;
-    };
-
-    planes[0] = makePlane(r3 + r0);  // Left
-    planes[1] = makePlane(r3 - r0);  // Right
-    planes[2] = makePlane(r3 + r1);  // Bottom
-    planes[3] = makePlane(r3 - r1);  // Top
-    planes[4] = makePlane(r3 + r2);  // Near (GL 관례)
-    planes[5] = makePlane(r3 - r2);  // Far  (GL 관례)
+    planes[0] = MakePlane(r3 + r0);  // Left
+    planes[1] = MakePlane(r3 - r0);  // Right
+    planes[2] = MakePlane(r3 + r1);  // Bottom
+    planes[3] = MakePlane(r3 - r1);  // Top
+    planes[4] = MakePlane(depth == ClipDepth::MinusOneToOne ? r3 + r2 : r2);
+    planes[5] = MakePlane(r3 - r2);
+    // reverse-Z 면 [4]와 [5]의 near/far 이름만 서로 바뀐다.
+    // 여섯 반공간의 교집합은 같으므로 컬링 결과는 달라지지 않는다.
 }
 ```
 
-*행렬 한 번 계산* 으로 *6 평면 동시 추출*. 매 프레임 카메라가 변하면 다시.
+*행렬 한 번 계산* 으로 *6 평면 동시 추출*. 매 프레임 카메라가 변하면 다시. 수식의 $\text{row}_1 \ldots \text{row}_4$ 가 코드의 `r0 … r3` 다 — 1-기반과 0-기반 표기만 다르다.
 
-### 8.3 평면 정규화
+world 공간 VP 를 넣으면 world 평면이, view·projection 만 곱한 행렬을 넣으면 view 공간 평면이 나온다 — *넣은 행렬의 입력 공간* 이 곧 평면이 사는 공간이다. 컬링 대상의 바운딩 볼륨이 어느 공간에 있는지와 반드시 맞춰야 한다.
 
-`makePlane` 의 *normal 정규화*. 분기 후 *normal 단위 벡터* 로 만들고 d 도 같이 나눔. *AABB 검사에서 거리 비교가 의미* 있도록.
+`p.d = -v.w / len` 의 *마이너스* 가 이 함수에서 가장 틀리기 쉬운 한 글자다. 추출식은 일반형 $(A, B, C, D)$ 를 주는데 `Plane` 은 Hessian $\hat{n} \cdot \vec{p} = d$ 를 담기 때문이다. 부호를 빠뜨리면 여섯 평면이 전부 원점 반대편으로 옮겨 앉는다.
 
-정규화 안 하면 *각 평면의 normal 길이 다름* → AABB 검사 시 *부호만 검사 OK*, *거리 검사는 정규화 필요*.
+### 8.3 정규화와 안쪽 판정 계약
 
-### 8.4 AABB vs Frustum
+`MakePlane` 이 법선 길이로 `normal` 과 `d` 를 함께 나눈다. 나누기 전 $(A,B,C)$ 는 단위 벡터가 아니라 평면마다 길이가 다르므로, 정규화 없이는 *부호 판정만 옳고 거리 값은 평면끼리 비교할 수 없다*. 바운딩 구 반지름을 빼는 식의 검사가 성립하려면 정규화가 필수다.
 
-*p-vertex / n-vertex 트릭*. 평면 6개에 대해:
+추출된 여섯 평면은 두 가지를 보장한다.
+
+- **내향 법선** — 안쪽 조건을 $\ge 0$ 형태로 이항해 만들었으므로 법선이 frustum 안을 향한다.
+- **Hessian 부호** — 점 $\vec{p}$ 가 안쪽일 조건은 여섯 평면 모두에서 $\hat{n} \cdot \vec{p} - d \ge 0$.
+
+이 두 줄이 평면을 받아 쓰는 쪽과의 계약 전부다. 컬링 질의는 이 계약 위에서만 작성한다.
+
+### 8.4 검산과 최소 질의
+
+계약이 실제로 맞는지 숫자로 확인해 둔다. 2.5절의 z [-1, 1] 행렬을 $n = 1$, $f = 11$, 대칭 90° FOV, 종횡비 1 로 세우고 view 행렬을 항등으로 두면 $\text{row}_3 = (0, 0, -1.2, -2.2)$, $\text{row}_4 = (0, 0, -1, 0)$ 이다.
+
+| 평면 | 일반형 $(A,B,C,D)$ | 정규화 후 $\hat{n}$ | $d$ | 뜻 |
+|---|---|---|---|---|
+| Left | $(1, 0, -1, 0)$ | $(0.707, 0, -0.707)$ | $0$ | 원점을 지나는 45° 벽 |
+| Near | $(0, 0, -2.2, -2.2)$ | $(0, 0, -1)$ | $+1$ | $z = -1$ |
+| Far | $(0, 0, 0.2, 2.2)$ | $(0, 0, 1)$ | $-11$ | $z = -11$ |
+
+near 평면은 $\hat{n} \cdot \vec{p} = d$ 에서 $-z = 1$, 즉 $z = -1$ — 행렬에 넣은 near 거리 1 과 정확히 같다. 점 $(0, 0, -5)$ 를 넣으면 near 에서 $5 - 1 = +4$, far 에서 $-5 - (-11) = +6$, left 에서 $0.707 \cdot 5 = +3.54$ — 셋 다 양수이므로 안쪽이다. $(0, 0, -0.5)$ 는 near 에서 $0.5 - 1 = -0.5$ 로 음수, 즉 너무 가까워 잘린다. $(-10, 0, -5)$ 는 left 에서 $-7.07 + 3.54 = -3.54$ 로 음수 — 시야 왼쪽 밖이다.
+
+가장 싼 질의는 *바운딩 구* 다. 중심의 부호 거리에서 반지름을 빼면 끝난다.
 
 ```cpp
-bool AABBOutsideFrustum(AABB box, Plane planes[6]) {
-    for (int i = 0; i < 6; ++i) {
-        // p-vertex: 평면 외향 방향 코너
-        vec3 p = vec3(
-            planes[i].normal.x >= 0 ? box.max.x : box.min.x,
-            planes[i].normal.y >= 0 ? box.max.y : box.min.y,
-            planes[i].normal.z >= 0 ? box.max.z : box.min.z
-        );
-        if (dot(planes[i].normal, p) + planes[i].d < 0) return true;
-    }
+bool SphereOutsideFrustum(vec3 center, float radius, const Plane planes[6]) {
+    for (int i = 0; i < 6; ++i)
+        if (dot(planes[i].normal, center) - planes[i].d < -radius)
+            return true;    // 한 평면 바깥으로 완전히 벗어남
     return false;
 }
 ```
 
-AABB 의 *p-vertex 한 점만 검사*. 6개 평면 × 1점 = *6 dot + 6 비교*. 매우 빠름.
+*6 dot + 6 비교*. 반환값의 의미를 정확히 읽어야 한다 — `true` 는 "확실히 바깥", `false` 는 "겹친다" 가 아니라 *"바깥이라고 단정할 수 없음"* 이다.
+
+여섯 반공간의 교집합은 frustum 자체가 맞다. 어긋나는 것은 검사 방식 쪽이다. 이 루프는 *구가 어느 한 평면 바깥에 통째로 있는가* 만 묻는데, 두 평면이 만나는 모서리 근처의 구는 어느 한 평면으로도 완전히 밀려나지 않으면서 frustum 밖에 있을 수 있다. 결과는 *보수적 컬링* — 못 지운 것이 남을 뿐 지워선 안 될 것을 지우지는 않으므로 그림은 맞고 낭비만 조금 남는다. 컬링 코드는 이 방향의 오차만 허용해야 한다.
 
 ### 8.5 Frustum 8 코너 추출
 
@@ -736,7 +781,7 @@ GPU의 *Hierarchical Z-buffer*, *Hardware Occlusion Query*, *Software Rasterizer
 4. **Near 가 정밀도의 결정자** — far 보다 near 가 훨씬 영향 큼.
 5. **Reverse-Z** — float depth와 reverse mapping의 조합은 넓은 원근 구간의 정밀도 분포를 크게 개선하며, 실제 이득은 역투영한 한 ULP 간격으로 측정한다.
 6. **무한 Far Plane** — far clipping parameter를 제거하지만 world 좌표 정밀도와 수학적 무한점 처리는 별도 문제다.
-7. **Frustum 추출** — Gribb-Hartmann 으로 VP 행렬에서 6평면 직접.
+7. **Frustum 추출** — 클립 부등식을 이항하면 VP 행렬의 행 조합이 곧 6평면. 좌우·상하 넷은 어디서나 같고, 깊이 두 평면만 NDC z 범위와 reverse-Z 에 따라 갈린다. 결과는 $\hat{n} \cdot \vec{p} = d$ 관례의 내향 평면으로 정규화해 넘긴다.
 
 *기하 프리미티브* 는 점·선·평면·다각형의 *수학적 도구*(면적·무게중심·convex hull·triangulation)를 다룬다. 광선·행렬·기하 프리미티브·수치 안정성이 합쳐져 게임 수학의 구현 기반을 이룬다.
 

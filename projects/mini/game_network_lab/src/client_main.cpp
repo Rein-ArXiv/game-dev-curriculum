@@ -1,4 +1,5 @@
 #include "protocol.h"
+#include "server_runtime.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -294,7 +295,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        nextTick += std::chrono::microseconds(16'667);
+        nextTick += gnl::kTickInterval;
         std::this_thread::sleep_until(nextTick);
     }
 

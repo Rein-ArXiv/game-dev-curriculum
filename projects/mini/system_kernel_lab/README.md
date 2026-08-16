@@ -124,7 +124,9 @@ system_kernel_lab/
   tools/
     bench_main.cpp             헤드리스 측정 러너 (조합 → 4채널 CSV)
   tests/
-    system_core_tests.cpp      성공 경로 (backend 동등성 · sync 상호배제 ·
+    step_filter.h              `--step=N` 필터 + {step, 이름, 함수} 대응표 러너
+    system_core_tests.cpp      성공 경로 (워크로드 골격 · 프레임 타이머 회계 ·
+                               backend 동등성 · sync 상호배제 ·
                                backend×실행모델×sync 전수 · 작업 큐 인계 회귀)
     system_fault_tests.cpp     오류 경로 (seam 주입: 폴백 · 링 재초기화 · 권한 실패)
     system_io_path_tests.cpp   부분 읽기 계약 · 실제 시그널 EINTR · 취소 후 배수
@@ -148,6 +150,21 @@ ctest --test-dir build --output-on-failure
 ./build/system_kernel_lab                                # GUI 도구
 ./build/system_kernel_bench --cycles=200 --out=run.csv   # 헤드리스 측정
 ```
+
+`ctest`는 25개 케이스를 돈다. 앞의 여덟은 실행 파일 전체를 도는 케이스(테스트
+바이너리 3 + strict 1 + 러너 4)이고, 나머지 열일곱은 같은 검사들을 **step 입도**로
+다시 건 것이다. 어느 단계의 무엇이 깨졌는지가 케이스 이름에 바로 나온다.
+
+```bash
+ctest --test-dir build -R skl_step05 --output-on-failure   # 한 단계만
+./build/system_core_tests --step=05                        # 같은 검사를 직접
+./build/system_core_tests --list                           # 검사 ↔ step 대응표
+```
+
+소속은 *그 step이 무엇을 추가했는가* 로 정한다 — `pread`·`mmap` 을 도는 검사는
+그 둘을 얹은 단계, 코루틴 풀 조합은 코루틴을 얹은 단계에 속한다. 대응표에 없는
+step을 CMake에서 걸면 실행 파일이 종료 코드 2로 실패하므로, 배선이 어긋난 채
+초록이 되는 상태가 없다.
 
 SCHED_FIFO는 권한이 필요하다(`ulimit -r` 또는 CAP_SYS_NICE). 권한이 없으면
 stderr 안내 후 기본 정책으로 동작한다.
@@ -190,7 +207,9 @@ io_uring 취소의 `-ECANCELED`)과 그 규약이 이미 닫혔는지도 구분�
   `ctest -L strict` 로 요구, `ctest -LE strict` 로 이식성 모드.
 - **backend × 실행 모델 × sync 전수 순회.** 컴파일된 모든 backend를
   `{pthread 워커풀, 코루틴}` × 4 sync × 워커 4개로 돌려 단일 스레드 기준값과 총
-  바이트·체크섬을 대조한다(현재 이 머신에서 40조합). 워커가 4개면 io_uring 링이
+  바이트·체크섬을 대조한다(현재 이 머신에서 40조합). 실행 단위는 인자라서
+  워커 풀 20조합과 코루틴 풀 20조합이 각자의 step 케이스로 따로 돌고, 전체
+  실행에서는 둘 다 돈다. 워커가 4개면 io_uring 링이
   4개 동시에 생기는 조합을 실제로 밟는다. 값이 같다고 해서 그 backend가 돌았다는
   뜻은 아니므로 — 폴백한 read도 같은 값을 낸다 — fault seam을 *주입 없이* 무장해
   backend별 syscall 호출 횟수를 세고 `> 0` 인지 `CHECK` 한다

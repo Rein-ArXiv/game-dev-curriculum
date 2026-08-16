@@ -23,6 +23,7 @@
 
 VM은 프로그램 카운터로 명령을 가져오고 opcode에 따라 상태를 전이한다.
 
+<!-- snippet: src/language.hpp#Run -->
 ```cpp
 // language.hpp: VirtualMachine::Run 의 디스패치 루프 발췌
 while (pc < program.code.size()) {
@@ -37,9 +38,11 @@ while (pc < program.code.size()) {
                     instruction.location))
                 return *failure;
             break;
+        // ...
         case OpCode::Jump:
             pc = static_cast<size_t>(instruction.operand);
             break;
+        // ...
         case OpCode::Halt:
             return {true, executed, std::nullopt};
         // ...
@@ -56,6 +59,7 @@ while (pc < program.code.size()) {
 이항 연산은 오른쪽 값을 먼저 꺼내고 왼쪽 값을 꺼낸다. 뺄셈과 나눗셈은 순서를 바꾸면
 결과가 달라진다.
 
+<!-- snippet: src/language.hpp#Run -->
 ```cpp
 // language.hpp: 이항 연산 처리 발췌
 const double rhs = pop();
@@ -71,12 +75,14 @@ switch (instruction.op) {
 전역 슬롯은 `optional<double>`이다. 기본값 0과 초기화되지 않은 상태를 구분해야 오타 난
 이름이 조용히 0으로 실행되지 않는다.
 
+<!-- snippet: src/language.hpp#Run -->
 ```cpp
 // language.hpp: VirtualMachine::Run 의 LoadGlobal 처리 발췌
 const size_t index = static_cast<size_t>(instruction.operand);
 if (!globals_[index])
     return Failure(instruction.location,
-                   "초기화되지 않은 변수: " + program.names[index], executed);
+                   "초기화되지 않은 변수: " + program.names[index],
+                   executed);
 if (auto failure = push(*globals_[index], instruction.location))
     return *failure;
 ```
@@ -89,14 +95,22 @@ VM 인스턴스를 실행할 때마다 전역 슬롯과 스택을 초기화한�
 IEEE 754는 0 나눗셈과 오버플로에서 `inf`나 `NaN`을 만들 수 있다. 게임 밸런스 값에
 비유한 수가 들어가면 비교가 항상 거짓이 되거나 직렬화가 플랫폼별로 달라질 수 있다.
 
+<!-- snippet: src/language.hpp#Run -->
 ```cpp
 // language.hpp: Divide 처리 발췌
 case OpCode::Divide:
     if (rhs == 0.0)
-        return Failure(instruction.location, "0으로 나눌 수 없다", executed);
+        return Failure(instruction.location, "0으로 나눌 수 없다",
+                       executed);
     value = lhs / rhs;
     break;
+```
 
+0 나눗셈은 명령별 가드지만 비유한 값은 명령별로 막지 않는다. 스택에 값을 올리는 모든
+경로가 하나의 람다를 지나고, 그 람다가 유한성과 스택 한도를 함께 본다.
+
+<!-- snippet: src/language.hpp#Run -->
+```cpp
 // language.hpp: 모든 적재 경로가 지나는 push 람다 전문
 auto push = [&](double value, SourceLocation location) -> std::optional<RunResult> {
     if (!std::isfinite(value))
@@ -117,6 +131,7 @@ auto push = [&](double value, SourceLocation location) -> std::optional<RunResul
 `while (true)`에 해당하는 프로그램은 구조적으로 유효하다. VM은 명령 하나를 실행할 때마다
 카운터를 올리고 한도를 넘으면 중단한다.
 
+<!-- snippet: src/language.hpp#Run -->
 ```cpp
 // language.hpp: VirtualMachine::Run 의 명령 예산 검사 발췌
 if (++executed > instructionBudget)
@@ -136,9 +151,9 @@ VM 예산은 실행 시점의 값 스택만 막는다. 컴파일 시점의 C++ �
 
 무한 반복 프로그램을 낮은 명령 예산으로 실행한다.
 
+<!-- snippet: src/tests.cpp#TestBudgetStopsUntrustedLoop -->
 ```cpp
-auto execution =
-    Execute("let x = 1; while (x > 0) { x = x + 1; }", 250);
+auto execution = Execute("let x = 1; while (x > 0) { x = x + 1; }", 250);
 CHECK(!execution.run.ok);
 CHECK(execution.run.instructions == 251);
 ```
@@ -146,12 +161,37 @@ CHECK(execution.run.instructions == 251);
 스택 상한은 `Run`의 세 번째 인자로만 관측된다. 기본값으로 도는 테스트만 있으면 상한 검사를
 통째로 지워도 통과하므로, 같은 소스를 낮은 상한으로 한 번 더 실행해 대조한다.
 
+<!-- snippet: src/tests.cpp#TestStackLimitStopsDeepExpression -->
 ```cpp
 const char* source = "let x = 1 + (2 + (3 + (4 + (5 + 6))));";
-CHECK(Execute(source).run.ok);                      // 기본 상한 256
-auto limited = Execute(source, 100000, 4);          // 상한 4
+// ...
+auto ok = Execute(source);                  // 대조군: 기본 상한 256
+CHECK(ok.compiled.program.has_value());
+CHECK(ok.run.ok);
+CHECK(Global(ok, "x") == 21.0);
+// ...
+auto limited = Execute(source, 100000, 4);  // 상한 4
+CHECK(limited.compiled.program.has_value());
 CHECK(!limited.run.ok);
-CHECK(limited.run.diagnostic->message == "VM 스택 한도를 초과했다");
+CHECK(limited.run.diagnostic.has_value());
+if (limited.run.diagnostic)
+    CHECK(limited.run.diagnostic->message == "VM 스택 한도를 초과했다");
+```
+
+컴파일 시점 한도는 VM을 거치지 않으므로 실행 예산으로는 관측되지 않는다. 괄호 20,000겹을
+넣어 `Program`이 만들어지지 않는 것과 진단 문구를 함께 확인한다. 한도를 지우면 이 사례는
+실패가 아니라 프로세스 스택 오버플로로 죽는다.
+
+<!-- snippet: src/tests.cpp#TestParserRejectsDeepNesting -->
+```cpp
+const int depth = 20000;
+std::string source = "let x = ";
+source.append(static_cast<size_t>(depth), '(');
+// ...
+const auto compiled = lab::lang::Compiler{}.Compile(source);
+CHECK(!compiled.program.has_value());
+CHECK(!compiled.diagnostics.empty());
+CHECK(compiled.diagnostics.front().message == "중첩 깊이가 파서 한도를 초과했다");
 ```
 
 0 나눗셈과 비유한 값은 서로를 가릴 수 있다. 0 나눗셈 가드를 지워도 결과가 무한대라 실행은
@@ -159,11 +199,14 @@ CHECK(limited.run.diagnostic->message == "VM 스택 한도를 초과했다");
 두 경로를 메시지까지 구분하고, 0 나눗셈을 거치지 않고 오버플로만으로 무한대에 도달하는
 프로그램을 따로 둔다.
 
+<!-- snippet: src/tests.cpp#TestRuntimeValueDiagnostics -->
 ```cpp
 auto division = Execute("let x = 1 / 0;");
+// ...
 CHECK(division.run.diagnostic->message == "0으로 나눌 수 없다");
 
 auto overflow = Execute("let x = 2; while (x > 0) { x = x * x; }");
+// ...
 CHECK(overflow.run.diagnostic->message == "연산 결과가 유한하지 않다");
 ```
 
@@ -171,15 +214,28 @@ CHECK(overflow.run.diagnostic->message == "연산 결과가 유한하지 않다"
 되어 메시지가 명령 예산 초과로 바뀌므로, 메시지 비교가 반드시 필요하다. 초기화되지 않은
 전역 변수도 같은 방식으로 실패해야 한다.
 
+네 사례는 등록표에서 `step04` 라벨을 달고 있다. 실행기의 정책 — 값 진단, 시간 예산,
+스택 상한, 컴파일 시점 재귀 한도 — 만 이 타깃에 모인다.
+
 ```powershell
-.\build\Release\languages_tests.exe
+ctest --test-dir build -C Release -R languages_step04 --output-on-failure
+.\build\Release\languages_tests.exe step04
 .\build\Release\languages_demo.exe
 ```
 
 ```text
-languages_tests: all checks passed
+1/1 Test #5: languages_step04_vm_runtime ......   Passed
+100% tests passed out of 1
+[step04] runtime_value_diagnostics ok
+[step04] budget_stops_untrusted_loop ok
+[step04] stack_limit_stops_deep_expression ok
+[step04] parser_rejects_deep_nesting ok
+languages_tests [step04]: all checks passed (4 case(s), 20 check(s))
 instructions=96 hp=270.271
 ```
+
+네 이름이 네 가지 한도에 하나씩 대응한다. 어느 하나를 지우면 `ok`가 `FAIL`로 바뀌는
+줄이 그 이름 하나뿐이므로, 어떤 정책이 무너졌는지가 출력에서 바로 읽힌다.
 
 데모는 유한한 웨이브 체력 계산을 실행하고 실제 명령 수와 결과를 출력한다. 두 값은 소스가
 바뀌지 않는 한 환경과 무관하게 같다.

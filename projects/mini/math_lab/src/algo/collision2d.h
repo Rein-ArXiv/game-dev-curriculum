@@ -1,7 +1,8 @@
 // 2D OBB-OBB SAT + 2D GJK. Step 5 의 시각화 대상.
 //
 // SAT: 두 OBB 의 4 분리축 후보 (각 OBB 의 두 면 법선) 에 투영.
-// GJK: 2D 에서는 simplex 가 점 → 선분 → 삼각형 으로 진화 (3 점이면 종료).
+// GJK: 2D 에서는 simplex 가 점 → 선분 → 삼각형 으로 진화. 삼각형이 원점을
+//      품으면 종료, 아니면 한 정점을 버리고 선분으로 되돌아가 반복한다.
 //
 // math part12 / part13 의 식들을 시각화에 적합한 형태로.
 
@@ -108,6 +109,7 @@ inline SATResult OBBOBBSat2D(const OBB2D& A, const OBB2D& B) {
 
 // ==== GJK 2D ====
 // 두 도형의 지원 함수만 알면 동작. 이 lab 은 OBB 만 다루므로 OBB 의 지원 함수.
+// snippet-begin: gjk-support
 inline Vector2 OBBSupport2D(const OBB2D& obb, Vector2 d) {
     auto axes = obb.Axes();
     float dx = Dot2(d, axes[0]);
@@ -125,6 +127,7 @@ inline Vector2 MinkowskiSupport2D(const OBB2D& a, const OBB2D& b, Vector2 d) {
     Vector2 p2 = OBBSupport2D(b, Neg2(d));
     return Sub2(p1, p2);
 }
+// snippet-end: gjk-support
 
 struct GJKStep {
     std::vector<Vector2> simplex;   // 이 단계의 simplex

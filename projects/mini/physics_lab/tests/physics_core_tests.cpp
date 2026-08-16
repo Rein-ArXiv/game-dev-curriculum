@@ -1,5 +1,7 @@
 #include "core/physics_core.h"
 
+#include "step_cases.h"
+
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -47,6 +49,11 @@ void TestIntegratorOrder() {
         physlab::core::HarmonicIntegrator::RK4, 0.1f);
     CHECK(rkFine < rkCoarse);
     CHECK(rkCoarse / rkFine > 10.0f);
+
+    std::cout << "  error ratio (dt -> dt/2): explicit="
+              << explicitCoarse / explicitFine
+              << " verlet=" << verletCoarse / verletFine
+              << " rk4=" << rkCoarse / rkFine << '\n';
 }
 
 void TestNormalImpulse() {
@@ -72,6 +79,9 @@ void TestNormalImpulse() {
     CHECK(std::fabs((vj - vi) - 1.0f) < 1e-6f);
     CHECK(std::fabs(impulse - 1.5f) < 1e-6f);
 
+    std::cout << "  restitution target=" << target << " impulse=" << impulse
+              << " -> vi=" << vi << " vj=" << vj << '\n';
+
     const float repeated = physlab::core::AccumulateNormalImpulse(
         vj - vi, target, 2.0f, lambda);
     CHECK(std::fabs(repeated) < 1e-6f);
@@ -88,6 +98,7 @@ void TestNormalImpulse() {
 void TestNormalImpulseClamp() {
     float lambda = 0.0f;
 
+    // snippet-begin: lambda-clamp
     // 이미 분리 중인 접촉(법선 속도 +2)에 임펄스를 요구하면 음수 λ 가 되므로
     // 0 으로 잘려야 한다 — 접촉은 당길 수 없다.
     const float separating = physlab::core::AccumulateNormalImpulse(
@@ -107,6 +118,10 @@ void TestNormalImpulseClamp() {
         10.0f, 0.0f, 2.0f, lambda);
     CHECK(lambda == 0.0f);
     CHECK(std::fabs(released - (-previousLambda)) < 1e-6f);
+    // snippet-end: lambda-clamp
+    std::cout << "  lambda clamp: separating=" << separating
+              << " approaching=" << approaching << " released=" << released
+              << '\n';
 
     // 질량이 없는(inverseMassSum == 0) 접촉은 임펄스를 만들지 않는다.
     float staticLambda = 0.0f;
@@ -142,6 +157,9 @@ void TestIntegratorEnergy() {
             if (!(e >= prevE - 1e-6f)) monotone = false;
             prevE = e;
         }
+        std::cout << "  explicit euler E/E0 after " << steps << " steps = "
+                  << prevE / e0 << '\n';
+        // snippet-begin: energy-checks
         CHECK(monotone);
         CHECK(prevE / e0 > 1.5f);
     }
@@ -163,6 +181,10 @@ void TestIntegratorEnergy() {
         CHECK(worst < 0.15f);
         // 실제로 진동해야 한다 — 아무것도 하지 않는 적분기도 에너지는 보존한다.
         CHECK(minX < -0.9f);
+        // snippet-end: energy-checks
+        std::cout << "  " << ((kind == 0) ? "semi-implicit" : "verlet")
+                  << " |E/E0 - 1| max = " << worst << " minX = " << minX
+                  << '\n';
     }
 
     // (c) 순서 뒤바뀜 검출. 1 스텝 뒤 위치가 갈라진다:
@@ -179,6 +201,8 @@ void TestIntegratorEnergy() {
         CHECK(std::fabs(xSemi - 0.99f) < 1e-6f);
         CHECK(std::fabs(xExplicit - xSemi) > 1e-3f);
         CHECK(std::fabs(vExplicit - vSemi) < 1e-6f);
+        std::cout << "  1 step: x_explicit=" << xExplicit
+                  << " x_semi=" << xSemi << '\n';
     }
 }
 
@@ -191,35 +215,54 @@ void TestDegenerateNormal() {
     const auto n = physlab::core::SafeUnitNormal(3.0f, 4.0f);
     CHECK(std::fabs(n.x - 0.6f) < 1e-6f);
     CHECK(std::fabs(n.y - 0.8f) < 1e-6f);
+    std::cout << "  degenerate fallback: (" << a.x << ',' << a.y << ") ("
+              << b.x << ',' << b.y << ")  (3,4) -> (" << n.x << ',' << n.y
+              << ")\n";
 }
 
 void TestAabbOverlap() {
     using physlab::core::Aabb2;
-    CHECK(physlab::core::AabbOverlap(
+    // snippet-begin: aabb-contract
+    // 경계가 정확히 맞닿는 두 박스 (x-max == x-min) 는 overlap 이다 — `<=` 규약.
+    const bool touching = physlab::core::AabbOverlap(
         Aabb2{0.0f, 0.0f, 1.0f, 1.0f},
-        Aabb2{2.0f, 0.0f, 1.0f, 1.0f}));
-    CHECK(!physlab::core::AabbOverlap(
+        Aabb2{2.0f, 0.0f, 1.0f, 1.0f});
+    // 0.1 px 벌어지면 아니다.
+    const bool apart = physlab::core::AabbOverlap(
         Aabb2{-4.0f, -3.0f, 0.5f, 0.5f},
-        Aabb2{-2.9f, -3.0f, 0.5f, 0.5f}));
-    CHECK(physlab::core::AabbOverlap(
+        Aabb2{-2.9f, -3.0f, 0.5f, 0.5f});
+    // 음수 half 는 0 으로 clamp — 퇴화 입력에서 겹침이 뒤집히지 않는다.
+    const bool degenerate = physlab::core::AabbOverlap(
         Aabb2{0.0f, 0.0f, -1.0f, -1.0f},
-        Aabb2{0.0f, 0.0f, 0.0f, 0.0f}));
+        Aabb2{0.0f, 0.0f, 0.0f, 0.0f});
+    CHECK(touching);
+    CHECK(!apart);
+    CHECK(degenerate);
+    // snippet-end: aabb-contract
+    std::cout << "  touching=" << touching << " apart=" << apart
+              << " negative-half=" << degenerate << '\n';
 }
 
 void TestDistanceProjection() {
+    // snippet-begin: projection-mass-split
+    // invMass 0 인 끝(anchor)은 움직이지 않고, 반대쪽만 rest 길이로 끌려온다.
     float ax = 0.0f, ay = 0.0f;
-    float bx = 3.0f, by = 4.0f;
+    float bx = 3.0f, by = 4.0f;                     // 거리 5, rest 2
     CHECK(physlab::core::ProjectDistance(
         ax, ay, 0.0f, bx, by, 1.0f, 2.0f));
     CHECK(ax == 0.0f && ay == 0.0f);
     CHECK(std::fabs(std::sqrt(bx * bx + by * by) - 2.0f) < 1e-5f);
 
+    // 질량이 같으면 보정량을 절반씩 나눠 가진다: (-2,0),(2,0) → (-1,0),(1,0).
     ax = -2.0f; ay = 0.0f;
     bx = 2.0f; by = 0.0f;
     CHECK(physlab::core::ProjectDistance(
         ax, ay, 1.0f, bx, by, 1.0f, 2.0f));
     CHECK(std::fabs(ax + 1.0f) < 1e-6f);
     CHECK(std::fabs(bx - 1.0f) < 1e-6f);
+    // snippet-end: projection-mass-split
+    std::cout << "  equal mass split: a=(" << ax << ',' << ay << ") b=("
+              << bx << ',' << by << ")\n";
 
     ax = bx = 1.0f;
     ay = by = 1.0f;
@@ -227,20 +270,26 @@ void TestDistanceProjection() {
         ax, ay, 1.0f, bx, by, 1.0f, 1.0f));
 }
 
+// 어느 검사가 어느 step 소속인가 — 그 step 이 *무엇을 추가했는지* 로 정한다.
+//   step02 integrators_scene  → StepHarmonic
+//   step04 broad_phase_scene  → AabbOverlap
+//   step06 contact_solver     → SafeUnitNormal / RestitutionTarget /
+//                                AccumulateNormalImpulse
+//   step07 constraints_scene  → ProjectDistance
+const physlab::testkit::StepCase kCases[] = {
+    {"step02", "integrator_order",     TestIntegratorOrder},
+    {"step02", "integrator_energy",    TestIntegratorEnergy},
+    {"step04", "aabb_overlap",         TestAabbOverlap},
+    {"step06", "degenerate_normal",    TestDegenerateNormal},
+    {"step06", "normal_impulse",       TestNormalImpulse},
+    {"step06", "normal_impulse_clamp", TestNormalImpulseClamp},
+    {"step07", "distance_projection",  TestDistanceProjection},
+};
+
 }  // namespace
 
-int main() {
-    TestIntegratorOrder();
-    TestIntegratorEnergy();
-    TestNormalImpulse();
-    TestNormalImpulseClamp();
-    TestDegenerateNormal();
-    TestAabbOverlap();
-    TestDistanceProjection();
-    if (failures != 0) {
-        std::cerr << failures << " physics core test(s) failed\n";
-        return 1;
-    }
-    std::cout << "physics core tests passed\n";
-    return 0;
+int main(int argc, char** argv) {
+    return physlab::testkit::RunStepCases(
+        argc, argv, kCases, (int)(sizeof(kCases) / sizeof(kCases[0])),
+        "physics core", &failures);
 }

@@ -25,6 +25,7 @@
 5. ImGui 3-zone HUD와 콤보박스
 6. main 통합과 토글 변경 처리
 7. 빌드와 실행 결과
+8. 검증 — 두 backend가 같은 계약 위에 있는가
 
 ---
 
@@ -221,6 +222,7 @@ mmap은 *파일을 가상 메모리에 매핑* 하는 시스템 콜이다. 매�
 
 ### 헤더
 
+<!-- snippet: src/io/mmap_backend.h -->
 ```cpp
 // src/io/mmap_backend.h
 #pragma once
@@ -345,6 +347,7 @@ flowchart LR
 
 ### Hud::Draw 시그니처 변경
 
+<!-- snippet: src/ui/hud.h#Hud -->
 ```cpp
 // src/ui/hud.h
 class Hud {
@@ -535,6 +538,91 @@ cmake --build build -j
 - **첫 사이클의 spike** 는 mmap만의 특성이 아니다. read도 콜드 캐시 첫 사이클에서 디스크 IO로 spike가 나는데, 우리 fixture는 시작 직후 디스크에 막 쓰여진 상태라 이미 페이지 캐시에 있다. 그래서 read의 첫 사이클은 spike가 *상대적으로 작다*.
 
 현재 범위 밖의 확장의 *file size 토글* 이 캐시 초과 시나리오를 만들 수 있고, *worker count 토글* 이 다중 스레드 시나리오를 만든다. 이 단계의 결과는 그 시나리오들의 *기준선* 이다.
+
+## 8. 검증 — 두 backend가 같은 계약 위에 있는가
+
+콤보박스로 backend를 바꿨을 때 수치가 달라지는 것은 당연하다. 문제는 *수치가 달라진 이유가 IO 모델 때문인지* 다. 셋이 서로 다른 바이트를 읽고 있으면 그래프 비교는 아무 의미가 없다.
+
+그래서 세 backend에 같은 fixture를 물리고 총 바이트와 체크섬이 *글자까지 같은지* 를 먼저 본다. 크기가 제각각인 파일을 섞은 fixture에서 `(크기, 체크섬)` 기록이 셋 다 같아야 한다 — mmap은 매핑 후에는 EOF를 관측조차 못 하고 pread는 offset 인자로 읽으므로, 셋이 같은 값으로 수렴한다는 것 자체가 검사 대상이다.
+
+`MmapBackend` 는 오류 경로가 셋 더 늘었다는 점에서 앞의 두 동기 backend와 다르다 — `fstat` · `mmap` · `munmap`. 정상 파일과 정상 커널에서는 하나도 실행되지 않으므로, 검사는 syscall wrapper의 주입 seam으로 그 셋을 하나씩 강제로 실패시킨다.
+
+<!-- snippet: tests/system_fault_tests.cpp#TestMmapErrorPaths -->
+```cpp
+// tests/system_fault_tests.cpp
+
+void TestMmapErrorPaths() {
+    TempFixture fixture(4, 64 * 1024);
+    auto backend = MakeExact(skl::BackendType::Mmap);
+    const std::size_t fdBefore = OpenFdCount();
+
+    {
+        ScopedFault fault("fstat:0:EIO:1");
+        const CycleOutcome bad = RunOne(*backend, fixture);
+        CHECK(bad.threw);
+        CHECK(Contains(bad.what, "fstat failed"));
+        CHECK(skl::FaultInjectionCount("fstat") == 1);
+    }
+    CHECK(OpenFdCount() == fdBefore);
+    // ...
+    {
+        // munmap 실패는 매핑을 회수하지 못한 채 던진다. fd 는 그래도 닫혀야 한다.
+        ScopedFault fault("munmap:0:EINVAL:1");
+        const CycleOutcome bad = RunOne(*backend, fixture);
+        CHECK(bad.threw);
+        CHECK(Contains(bad.what, "munmap failed"));
+    }
+    CHECK(OpenFdCount() == fdBefore);
+
+    CheckHealthyAfterFault(*backend, fixture, "mmap");
+    CHECK(OpenFdCount() == fdBefore);
+    // ...
+}
+```
+
+세 실패 모두에 같은 사후조건 둘을 건다. `/proc/self/fd` 개수가 그대로일 것(오류 경로가 fd를 흘리지 않음), 그리고 주입을 푼 다음 사이클이 정상값을 낼 것(오류 처리가 backend를 못 쓰는 상태로 두지 않음). 예외를 던지는 것만 확인하면 "던지면서 fd를 흘리는" 구현이 그대로 통과한다.
+
+`PreadBackend` 와 `MmapBackend` 가 스트림을 *조용히* 받아들이지 않는 것도 여기서 확인한다. FIFO 경로를 주면 pread는 `ESPIPE` 로, mmap은 정규 파일이 아니라는 이유로 거부해야 한다 — 0 바이트를 돌려주고 넘어가면 HUD의 처리량이 무한대로 튄다.
+
+```bash
+cmake --build build -j
+ctest --test-dir build -R skl_step03 --output-on-failure
+```
+
+```text
+    Start 13: skl_step03_core
+1/3 Test #13: skl_step03_core ..................   Passed    0.00 sec
+    Start 14: skl_step03_fault
+2/3 Test #14: skl_step03_fault .................   Passed    0.00 sec
+    Start 15: skl_step03_io_path
+3/3 Test #15: skl_step03_io_path ...............   Passed    0.00 sec
+
+100% tests passed, 0 tests failed out of 3
+```
+
+```bash
+./build/system_fault_tests --step=03
+```
+
+```text
+[ run  ] step03  pread/mmap: open failure releases fds
+  pread: open failed at file 3, fds back to 5, next cycle healthy
+  mmap: open failed at file 3, fds back to 5, next cycle healthy
+[  ok  ] step03  pread/mmap: open failure releases fds
+[ run  ] step03  pread: EINTR retry transparency
+  pread: 3 injected EINTR retried, bytes=262144 unchanged
+[  ok  ] step03  pread: EINTR retry transparency
+[ run  ] step03  mmap error paths
+  mmap: fstat/mmap/munmap each failed once -> throw with a named cause, fds stay at 5, next cycle healthy
+[  ok  ] step03  mmap error paths
+[ run  ] step03  pread/mmap: repeated cycles leak no fds
+  pread: 20 clean cycles, open fds 5 -> 5
+  mmap: 20 clean cycles, open fds 5 -> 5
+[  ok  ] step03  pread/mmap: repeated cycles leak no fds
+system_fault_tests --step=3: 4/17 check(s) run, 0 failed
+```
+
+`fds back to 5` 가 반복해서 나오는 것이 이 절의 핵심 관측값이다. 네 번째 파일의 open이 실패한 시점에 backend는 이미 fd를 세 개 열었다 닫은 상태이고, 예외가 그 위로 지나갔는데도 열린 fd 수가 시작값으로 돌아왔다. `20 clean cycles, open fds 5 -> 5` 는 오류가 없는 경로에서의 같은 질문 — 사이클을 스무 번 돌려도 누적되지 않는다.
 
 ---
 

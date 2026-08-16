@@ -10,6 +10,7 @@
 // event carrying kSendQueueOverflowError.
 
 #include "network_types.h"
+#include "step_cases.h"
 
 #include <chrono>
 #include <cstddef>
@@ -97,9 +98,7 @@ SocketHandle ConnectSilentClient(std::uint16_t port) {
     return socket;
 }
 
-} // namespace
-
-int main() {
+int RunBoundedSendQueue() {
 #if defined(_WIN32)
     WSADATA data{};
     if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return Fail("WSAStartup");
@@ -191,6 +190,7 @@ int main() {
     WSACleanup();
 #endif
 
+    // snippet-begin: overflow-verdict
     if (sent >= 8192 && !sendStreamRefused && overflowDisconnects == 0) {
         return Fail("32 MiB was queued for a receiver that never reads: no send queue bound");
     }
@@ -204,8 +204,25 @@ int main() {
                   << otherDisconnects << " events)\n";
         return 1;
     }
+    // snippet-end: overflow-verdict
 
-    std::cout << "game_network_send_queue_tests: bounded send queue closed the connection after "
-              << sent << " queued sends\n";
+    // The number of sends the peer absorbs before the bound bites depends on the
+    // kernel send buffer, so it is reported rather than asserted. What the case
+    // asserts is the pair after the arrow.
+    gnl_test::Observe(
+        "limit=8KiB, gave up after " + std::to_string(sent) + " of at most 8192 "
+        "4KiB sends -> Disconnected(kSendQueueOverflowError) x" +
+        std::to_string(overflowDisconnects) + ", other closes " +
+        std::to_string(otherDisconnects));
     return 0;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    return gnl_test::Run("game_network_send_queue_tests",
+                         {
+                             {"step02", "bounded_send_queue", RunBoundedSendQueue},
+                         },
+                         argc, argv);
 }

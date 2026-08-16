@@ -142,13 +142,13 @@ void ResponseScene::ApplyPositionCorrection(const std::vector<Contact>& contacts
 
 void ResponseScene::ApplyPBD(float dt) {
     // PBD 패턴:
-    //   1. predicted pos: prevPos = pos; vel += g*dt; pos += vel*dt;  (이미
-    //      IntegrateGravity 에서 했지만 prevPos 가 적분 전 위치여야 한다.)
+    //   1. predicted pos: prevPos = pos; vel += g*dt; pos += vel*dt;  (Step 의
+    //      PBD 분기가 prevPos 저장 + 예측 적분까지 마치고 여기로 들어온다.)
     //   2. iterations 반복: contact 마다 position 직접 보정.
     //   3. vel = (pos - prevPos) / dt
     //
-    // 호출 흐름이 *Step* 안의 IntegrateGravity 다음 → 여기서 prevPos 는
-    // *integrate 전 위치* 이어야 한다. main loop 에서 미리 저장.
+    // 호출 흐름이 *Step* 안의 예측 적분 다음 → 여기서 prevPos 는
+    // *integrate 전 위치* 이어야 한다. Step 이 적분 직전에 미리 저장한다.
     for (int iter = 0; iter < iterations_; ++iter) {
         std::vector<Contact> contacts;
         GatherContacts(contacts);

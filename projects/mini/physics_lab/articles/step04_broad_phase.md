@@ -21,6 +21,7 @@
 4. [Spatial Hash 구현 + dedupe](#4-spatial-hash-구현--dedupe)
 5. [측정: us / candidates / 정확성](#5-측정-us--candidates--정확성)
 6. [어느 알고리즘이 언제 빠른가](#6-어느-알고리즘이-언제-빠른가)
+7. [쌍 집합으로 대조하기](#7-쌍-집합으로-대조하기)
 
 ---
 
@@ -274,6 +275,92 @@ flowchart LR
     G --> H[Draw: bodies + 2 graphs]
 ```
 
+## 7. 쌍 집합으로 대조하기
+
+화면의 `missed` 라벨은 *개수* 비교라 false positive 와 false negative 가 같은 수로 생기면 0 을 표시한다. 그래서 `physics_broad_tests` 타깃이 세 알고리즘의 overlap **쌍 집합** 을 그대로 받아 brute 의 집합과 대조한다. `RunBrute` / `RunSAP` / `RunSpatialHash` 에 선택적 출력 인자를 하나 붙여 GUI 경로는 그대로 두고 (`nullptr` 이면 기존 동작) 테스트만 쌍을 수확한다.
+
+```cpp
+using OverlapPair = std::pair<int, int>;
+void RunSAP(int& candidates, int& trueOverlap,
+            std::vector<OverlapPair>* outPairs = nullptr);
+```
+
+핵심은 이 세 줄이다 — 개수가 아니라 정렬된 집합끼리 `==` 로 비교하고, 어긋나면 *어느 쌍이 빠졌고 어느 쌍이 남았는지* 를 찍는다.
+
+<!-- snippet: tests/physics_broad_tests.cpp@pair-set-equality -->
+```cpp
+// 개수가 아니라 *쌍 집합* 을 통째로 대조한다. 개수 비교는 false positive 와
+// false negative 가 같은 수로 생기면 둘 다 가린다.
+if (sap != truth) ReportDiff(label + "/SAP", truth, sap);
+if (hash != truth) ReportDiff(label + "/Hash", truth, hash);
+CHECK(sap == truth);
+CHECK(hash == truth);
+```
+
+검사 배치는 다섯 갈래다 — 정확히 맞닿는 행 / 열 (tie-break 를 지우면 쌍이 통째로 사라진다), 음수 셀 좌표, `cellSize < bodyHalf` (한 body 가 여러 셀에 등록되어 dedupe 경로를 밟는다), 무작위 50 배치 × N=200, 그리고 한 점에 겹친 퇴화 배치.
+
+경계 접촉의 근거인 `AabbOverlap` 자체는 core 헤더에 있으므로 core 실행 파일 쪽에 케이스가 있다. `<=` 규약과 음수 half clamp 를 리터럴로 못 박는다.
+
+<!-- snippet: tests/physics_core_tests.cpp@aabb-contract -->
+```cpp
+// 경계가 정확히 맞닿는 두 박스 (x-max == x-min) 는 overlap 이다 — `<=` 규약.
+const bool touching = physlab::core::AabbOverlap(
+    Aabb2{0.0f, 0.0f, 1.0f, 1.0f},
+    Aabb2{2.0f, 0.0f, 1.0f, 1.0f});
+// 0.1 px 벌어지면 아니다.
+const bool apart = physlab::core::AabbOverlap(
+    Aabb2{-4.0f, -3.0f, 0.5f, 0.5f},
+    Aabb2{-2.9f, -3.0f, 0.5f, 0.5f});
+// 음수 half 는 0 으로 clamp — 퇴화 입력에서 겹침이 뒤집히지 않는다.
+const bool degenerate = physlab::core::AabbOverlap(
+    Aabb2{0.0f, 0.0f, -1.0f, -1.0f},
+    Aabb2{0.0f, 0.0f, 0.0f, 0.0f});
+CHECK(touching);
+CHECK(!apart);
+CHECK(degenerate);
+```
+
+두 실행 파일을 `step04` 필터로 묶어 등록한다.
+
+```cmake
+add_test(NAME step04.aabb_overlap COMMAND physics_core_tests  step04)
+add_test(NAME step04.broad_phase  COMMAND physics_broad_tests step04)
+```
+
+```powershell
+cmake --build build --config Release -j
+ctest --test-dir build -C Release -R step04 --output-on-failure
+.\build\Release\physics_core_tests.exe  step04    # 같은 것을 직접 — 관측값까지 본다
+.\build\Release\physics_broad_tests.exe step04
+```
+
+`ctest` 는 두 실행 파일의 통과 / 실패만 알려 준다. 직접 돌리면 각 배치가 몇 쌍을 냈는지가 보인다.
+
+```text
+[step04] aabb_overlap
+  touching=1 apart=0 negative-half=1
+  ok
+1 case(s) ok: physics core [step04]
+[step04] exact_touch_row
+  touching pairs: row=23 row(cell37)=23 column=11
+  ok
+[step04] negative_cells
+  negative-cell pairs=83 straddle-origin pairs=408
+  ok
+[step04] small_cells
+  same pairs at every cell size: 161 161 161
+  ok
+[step04] random_batches
+  50 batches x 200 bodies: 7570 overlap pairs, all three algorithms agree
+  ok
+[step04] degenerate
+  7 coincident bodies + 1 loner -> 21 pairs
+  ok
+5 case(s) ok: physics broad phase [step04]
+```
+
+`row=23` 은 24 개를 정확히 맞닿게 놓았을 때 나오는 23 쌍이다 — SAP 의 tie-break (같은 좌표면 min 먼저) 를 지우면 이 수가 무너진다. `same pairs at every cell size: 161 161 161` 은 셀 크기를 4 → 1 → 0.25 로 줄여도 (한 body 가 수백 셀에 등록되어도) dedupe 가 같은 집합을 낸다는 뜻이고, 무작위 50 배치의 7570 쌍은 세 알고리즘이 전부 같은 집합을 냈다는 뜻이다.
+
 ---
 
 ## 결론
@@ -285,20 +372,11 @@ Step 4 에서 추가한 것.
 3. **시간 측정 + 2 그래프** — `std::chrono::high_resolution_clock` 으로 us. candidates / algo overlap / ground truth / us 시계열 동시.
 4. **cellSize / bodyHalf / N / speed 슬라이더** — 워크로드 변경 후 *각 알고리즘이 어떻게 반응* 하는지 직접 실험.
 5. **격자 시각화 (Spatial Hash 모드)** — 점선 격자가 *셀 크기를 시각적으로* 표현. body 가 셀에 어떻게 걸치는지 보임.
+6. **`physics_broad_tests` 타깃 + `step04` 필터** — `ctest --test-dir build -C Release -R step04` 로 세 알고리즘의 overlap *쌍 집합* 을 brute 와 대조. 화면의 개수 비교가 가리는 false positive / negative 상쇄를 여기서 잡는다.
 
 이 Scene 에서 얻을 결론은 *간단하지만 강력함* — "Spatial Hash 가 항상 빠르다" 같은 단정은 *워크로드 의존*. N, 분포, body 크기, cellSize 조합이 *모두* 결과에 영향. 시리즈가 강조하는 *"측정 없이 선택하지 말 것"* 이 한 Scene 에 압축.
 
-이 Scene 이 답하는 것은 *어느 쌍이 후보인가* 까지다. 후보 쌍이 진짜 충돌인지, contact normal 과 침투 깊이가 얼마인지는 여기서 계산하지 않는다.
-
-화면의 `missed` 라벨은 *개수* 비교라 false positive 와 false negative 가 같은 수로 생기면 0 을 표시한다. 그래서 `physics_broad_tests` 타깃이 세 알고리즘의 overlap **쌍 집합** 을 그대로 받아 brute 의 집합과 대조한다. `RunBrute` / `RunSAP` / `RunSpatialHash` 에 선택적 출력 인자를 하나 붙여 GUI 경로는 그대로 두고 (`nullptr` 이면 기존 동작) 테스트만 쌍을 수확한다.
-
-```cpp
-using OverlapPair = std::pair<int, int>;
-void RunSAP(int& candidates, int& trueOverlap,
-            std::vector<OverlapPair>* outPairs = nullptr);
-```
-
-검사 배치는 네 갈래다 — 정확히 맞닿는 행 / 열 (tie-break 를 지우면 15 쌍이 사라진다), 음수 셀 좌표, `cellSize < bodyHalf` (한 body 가 여러 셀에 등록되어 dedupe 경로를 밟는다), 무작위 50 배치 × N=200.
+이 Scene 이 답하는 것은 *어느 쌍이 후보인가* 까지다. 후보 쌍이 진짜 충돌인지, contact normal 과 침투 깊이가 얼마인지는 여기서 계산하지 않는다. 자동 검사가 보증하는 것도 *쌍 집합의 동일성* 이며, us 측정값은 기계마다 달라 통과 / 실패로 갈리지 않는다 — 성능 비교는 슬라이더를 움직이며 눈으로 읽는 몫이다.
 
 ## 더 읽을거리
 

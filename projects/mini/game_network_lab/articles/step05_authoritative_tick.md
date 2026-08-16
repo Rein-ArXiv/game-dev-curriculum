@@ -17,6 +17,7 @@
 4. 고정 틱 시뮬레이션
 5. snapshot과 prediction error
 6. 이 모델의 한계
+7. 검증 실행
 
 ---
 
@@ -36,12 +37,19 @@ TCP connection과 UDP source endpoint는 운영체제에서 서로 관련이 없
 믿으면 다른 송신자가 ID를 추측해 input을 보낼 수 있다. 서버는 Welcome token을 UDP Connect
 payload에서 상수 시간으로 비교한다.
 
+<!-- snippet: src/server_runtime.cpp#GameServerRuntime::OnDatagram -->
 ```cpp
-if (message.type == DatagramType::Connect) {
-    if (!TokenEquals(message.payload, client.token)) return Reject();
+if (message->type == DatagramType::Connect) {
+    if (!TokenEquals(message->payload, client.token)) {
+        ++metrics_.rejectedPackets;
+        return;
+    }
     client.endpoint = endpoint;
     client.udpBound = true;
-    SendConnectAccepted(endpoint);
+    auto accepted = EncodeDatagram(DatagramType::ConnectAccepted,
+                                   message->connection, message->sequence, {});
+    backend_.SendDatagram(endpoint, accepted);
+    return;
 }
 ```
 
@@ -57,12 +65,14 @@ endpoint 일치, message type, payload 길이를 모두 통과시킨 뒤 input�
 
 같거나 오래된 sequence는 버린다.
 
+<!-- snippet: src/server_runtime.cpp#GameServerRuntime::OnDatagram -->
 ```cpp
 if (client.hasInput &&
-    !IsNewerSequence(message.sequence, client.lastInputSequence)) return;
-client.lastInputSequence = message.sequence;
-client.moveX = DecodeI16(message.payload, 0);
-client.moveY = DecodeI16(message.payload, 2);
+    !IsNewerSequence(message->sequence, client.lastInputSequence)) return;
+client.hasInput = true;
+client.lastInputSequence = message->sequence;
+client.moveX = DecodeI16(message->payload, 0);
+client.moveY = DecodeI16(message->payload, 2);
 ```
 
 현재 모델은 가장 최근 input을 매 server tick에 적용한다. 실제 게임에서는 command가 어느 tick을
@@ -74,8 +84,10 @@ clamp할지를 게임 규칙으로 명시해야 한다.
 서버 위치는 정수다. float drift를 보여 주려는 물리 lab이 아니라 네트워크 시계와 권위 순서를
 검증하는 것이 목적이므로, 한 tick의 상태 전이는 단순하다.
 
+<!-- snippet: src/server_runtime.cpp#GameServerRuntime::RunTick -->
 ```cpp
-for (auto& [id, client] : clients) {
+for (auto& [id, client] : clients_) {
+    static_cast<void>(id);
     client.positionX += client.moveX;
     client.positionY += client.moveY;
 }
@@ -97,9 +109,10 @@ sequence와 권위 위치가 들어간다. ACK는 클라이언트가 어떤 입�
 클라이언트는 input 전송과 동시에 같은 이동량을 로컬 위치에 적용해 prediction을 관측한다. snapshot이
 오면 권위 위치와 로컬 위치의 차이를 출력하고 권위 위치로 맞춘다.
 
+<!-- snippet: src/client_main.cpp#main -->
 ```cpp
-errorX = authoritativeX - predictedX;
-errorY = authoritativeY - predictedY;
+std::int32_t errorX = authoritativeX - predictedX;
+std::int32_t errorY = authoritativeY - predictedY;
 predictedX = authoritativeX;
 predictedY = authoritativeY;
 ```
@@ -115,6 +128,75 @@ input history replay, remote entity interpolation, teleport threshold도 없다.
 
 서버도 reliable UDP channel, congestion control, delta baseline, AOI를 구현하지 않는다. 이 기능은
 단순히 field를 추가하는 문제가 아니라 별도 window·lifetime·bandwidth 불변식을 요구한다.
+
+## 검증 실행
+
+여기서 만든 판정은 전부 `GameServerRuntime` 안에 있고, 그 객체는 `IServerBackend`만 참조한다.
+그래서 socket도 thread도 없이 통째로 돌릴 수 있다. 기록용 fake backend를 주입하고
+`NetworkEvent`를 손으로 만들어 넣으며 시각은 `Advance()` 인자로 준다. CTest 이름은
+`game_network_step05_authority`다.
+
+```powershell
+ctest --test-dir projects/mini/game_network_lab/build -C Release `
+      -R game_network_step05 --output-on-failure
+```
+
+```text
+    Start 9: game_network_step05_authority
+1/1 Test #9: game_network_step05_authority ....   Passed    0.06 sec
+
+100% tests passed out of 1
+
+Total Test time (real) =   0.08 sec
+```
+
+실행 파일을 직접 부르면 case 다섯 개가 각각 관측한 값이 나온다.
+
+```powershell
+projects/mini/game_network_lab/build/Release/game_network_runtime_tests.exe step05
+```
+
+```text
+[step05] hello_welcome          ok  Welcome payload = 8B id + 16B token, token non-zero; a second Hello -> rejectedPackets=1 disconnects=1
+[step05] forged_token           ok  one flipped token byte -> rejectedPackets=2 ConnectAccepted=0 snapshots=0 after 3 ticks
+[step05] foreign_endpoint       ok  Input from an unbound endpoint -> rejectedPackets=1 position=(0, 0) ack=0
+[step05] stale_input_ack        ok  duplicate and older sequences dropped, ack 0xfffffff0 -> 2 across the wrap, positionX=21
+[step05] tick_snapshot_cadence  ok  ticks=12 snapshots=4 ack=7 position=(36, -24)
+game_network_runtime_tests: 5 case(s) passed [step05 5]
+```
+
+`forged_token`의 reject가 2인 이유는 token 위조 하나와, 결합되지 않은 연결에서 이어 보낸
+Input 하나가 각각 세어지기 때문이다. 결합에 실패한 연결은 계속 거부되어야지 조용히 통과해서는
+안 된다.
+
+마지막 case가 고정 틱과 snapshot 주기를 함께 못 박는다. 기대값은 `kTickInterval`이나
+`kSnapshotEveryTicks`를 다시 계산해서 만들지 않고 숫자로 적는다. 상수를 인용해 기대값을
+만들면 상수를 바꾸는 회귀에서 기대값도 같이 움직여 아무것도 잡지 못한다.
+
+<!-- snippet: tests/runtime_tests.cpp#TestAuthoritativeTickAndSnapshotCadence -->
+```cpp
+AdvanceTicks(runtime, 12);
+Require(runtime.Metrics().ticks == 12, "twelve spaced Advance calls run twelve ticks");
+
+auto snapshots = CollectSnapshots(fake);
+Require(snapshots.size() == 4, "twelve ticks broadcast four snapshots");
+Require(runtime.Metrics().snapshots == 4, "the snapshot metric matches the sends");
+
+for (std::size_t i = 0; i < snapshots.size(); ++i) {
+    const std::int32_t tick = static_cast<std::int32_t>(3 * (i + 1));
+    Require(snapshots[i].sequence == static_cast<std::uint32_t>(i + 1),
+            "snapshot sequence increases by one per broadcast");
+    Require(snapshots[i].ack == 7, "every snapshot acks the applied input");
+    Require(snapshots[i].positionX == 3 * tick,
+            "positionX integrates moveX once per tick");
+    Require(snapshots[i].positionY == -2 * tick,
+            "positionY integrates moveY once per tick");
+}
+```
+
+`ack == 7`은 위치보다 먼저 깨지는 검사다. 서버가 마지막으로 *수신한* sequence를 ack에 넣으면
+중복 input이 들어온 뒤 값이 달라진다. 권위 위치는 그대로여도 ack가 틀리면 클라이언트는
+확정되지 않은 입력을 확정으로 판단한다.
 
 ---
 
