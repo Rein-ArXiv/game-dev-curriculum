@@ -10,17 +10,17 @@
 
 | 항목 | 수 |
 |---|---|
-| `include/` 헤더 전체 | 112 |
-| 제품 도달 | 96 |
-| 랩 전용(`docs/LAB_ONLY.md` 등재) | 16 |
+| `include/` 헤더 전체 | 114 |
+| 제품 도달 | 114 |
+| 랩 전용(`docs/LAB_ONLY.md` 등재) | 0 |
 | 근거 없는 미도달 | 0 (있으면 빌드가 실패한다) |
 
 제품 진입점별 도달 수:
 
 | 제품 타깃 | 도달 헤더 |
 |---|---|
-| `mega_defense` | 92 |
-| `mega_defense_server` | 72 |
+| `mega_defense` | 110 |
+| `mega_defense_server` | 85 |
 
 ## 계층별 도달 현황
 
@@ -31,22 +31,22 @@
 | `db/` | 3 / 3 |
 | `ecs/` | 1 / 1 |
 | `engine/` | 7 / 7 |
-| `game/` | 20 / 20 |
+| `game/` | 21 / 21 |
 | `io/` | 3 / 3 |
 | `jobs/` | 1 / 1 |
-| `live/` | 2 / 6 |
+| `live/` | 6 / 6 |
 | `math/` | 12 / 12 |
 | `memory/` | 3 / 3 |
-| `mp/` | 0 / 5 |
-| `net/` | 7 / 9 |
+| `mp/` | 6 / 6 |
+| `net/` | 9 / 9 |
 | `physics/` | 6 / 6 |
-| `platform/` | 6 / 10 |
+| `platform/` | 10 / 10 |
 | `profiler/` | 1 / 1 |
 | `render/` | 4 / 4 |
 | `sched/` | 1 / 1 |
 | `serialize/` | 1 / 1 |
 | `sync/` | 2 / 2 |
-| `tools/` | 3 / 4 |
+| `tools/` | 4 / 4 |
 
 ## 제품 도달 헤더
 
@@ -93,6 +93,7 @@
 | `game/game.hpp` | O | O |
 | `game/map_gen.hpp` | O | O |
 | `game/nav.hpp` | O | O |
+| `game/replay.hpp` | O | - |
 | `game/sfx_bus.hpp` | O | - |
 | `game/switches.hpp` | O | O |
 | `game/terrain.hpp` | O | O |
@@ -102,6 +103,10 @@
 | `jobs/scheduler.h` | O | O |
 | `live/admission_token.hpp` | - | O |
 | `live/analytics.hpp` | O | - |
+| `live/economy.hpp` | O | - |
+| `live/event_schedule.hpp` | O | O |
+| `live/feature_flag.hpp` | O | O |
+| `live/patch.hpp` | O | O |
 | `math/interp.hpp` | O | O |
 | `math/mat.hpp` | O | O |
 | `math/noise.hpp` | O | O |
@@ -117,7 +122,15 @@
 | `memory/arena.h` | O | O |
 | `memory/pool.h` | O | O |
 | `memory/slab.h` | O | O |
+| `mp/det_sim.hpp` | O | O |
+| `mp/golden.hpp` | O | - |
+| `mp/input.hpp` | O | O |
+| `mp/lockstep.hpp` | O | - |
+| `mp/matchmaking.hpp` | O | O |
+| `mp/rollback.hpp` | O | O |
+| `net/packet.hpp` | O | O |
 | `net/reliable_channel.hpp` | O | O |
+| `net/rtt.hpp` | O | - |
 | `net/sequence.hpp` | O | O |
 | `net/session.hpp` | O | O |
 | `net/snapshot.hpp` | O | O |
@@ -131,6 +144,10 @@
 | `physics/solver/sequential_impulse.hpp` | O | O |
 | `physics/world.hpp` | O | O |
 | `platform/audio_device.hpp` | O | - |
+| `platform/byteorder.hpp` | O | O |
+| `platform/capability.hpp` | O | O |
+| `platform/console.hpp` | O | O |
+| `platform/detect.hpp` | O | O |
 | `platform/paths.hpp` | O | O |
 | `platform/process.hpp` | - | O |
 | `platform/vfs.hpp` | O | - |
@@ -145,6 +162,7 @@
 | `serialize/archive.h` | O | O |
 | `sync/futex.h` | O | O |
 | `sync/lock.h` | O | O |
+| `tools/asset_pipeline.hpp` | O | O |
 | `tools/level_editor.hpp` | O | O |
 | `tools/procgen.hpp` | O | O |
 | `tools/script.hpp` | O | O |
@@ -155,7 +173,4 @@
 
 | 도입 단계 | 헤더 수 | 헤더 |
 |---|---|---|
-| P5 | 6 | `mp/det_sim.hpp` `mp/input.hpp` `mp/lockstep.hpp` `mp/rollback.hpp` `net/packet.hpp` `net/rtt.hpp` |
-| P7 | 5 | `live/economy.hpp` `live/event_schedule.hpp` `live/feature_flag.hpp` `live/patch.hpp` `mp/matchmaking.hpp` |
-| P8 | 5 | `platform/byteorder.hpp` `platform/capability.hpp` `platform/console.hpp` `platform/detect.hpp` `tools/asset_pipeline.hpp` |
 

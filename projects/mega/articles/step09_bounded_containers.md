@@ -145,6 +145,7 @@ void EnemyAdvanceSystem(float dt) {
     MEGA_PROFILE_SCOPE("sim.enemy_advance");
     const size_t count = enemies_.Size();
     if (count == 0) return;
+    // ...
 
     // 개체별 코어 피해를 따로 받아 둔다. 워커가 coreHp_ 를 직접 깎으면 감산
     // 순서가 실행마다 달라져 부동소수 결과가 갈린다.
@@ -211,6 +212,7 @@ inline int SelectTargetIn(const math::Vec2& towerPos, const math::Vec2& corePos,
     const size_t count = enemies.Size();
     for (size_t i = 0; i < count; ++i) {
         if (!enemies.Alive(i)) continue;
+        // ...
         float d2 = math::LengthSq(enemies.Pos(i) - towerPos);
         if (d2 > r2) continue;
         const float score = TargetScore(enemies, i, towerPos, corePos, mode);

@@ -11,7 +11,8 @@
 //
 //   잡몹   수백~수천. 상태 기계 하나를 전원이 돌려 쓴다(flyweight). 상태·전이는
 //          한 벌이고 `current_` 만 개체가 든다 — 개체마다 StateMachine 을 하나씩
-//          두면 std::function 여섯 개와 vector 둘이 개체 수만큼 복제된다.
+//          두면 std::function 열아홉 자리(상태 4 x 진입·갱신·이탈 + 전이 7)와
+//          vector 둘이 개체 수만큼 복제된다.
 //   정예   한둘. 우선순위 있는 조합(후퇴 → 회복, 슬램, 전진)이 필요하고, 그
 //          조합을 두 가지 방식으로 쓸 수 있다. 그 둘이 이 파일의 A/B 다.
 //
@@ -28,6 +29,14 @@
 //   자기 Composite 를 끝내는 노드(Heal · Slam · Advance) → **행동한 뒤** 완료를
 //       검사한다. 그러면 BT 는 그 틱을 그 노드로 끝내고, FSM 도 그 틱을 그
 //       상태로 끝낸 뒤 다음 틱에 전이한다.
+//   완료 판정이 **세계의 함수**면(Heal 은 체력을 본다) 그 결과를 문맥에 남긴다.
+//       FSM 의 가드는 다음 틱의 시작에 평가되는데, 그 사이 타워가 체력을 도로
+//       깎으면 같은 식이 다른 답을 낸다. 타이머로 끝나는 Retreat · Slam 은
+//       타이머 자체가 그 기록이라 따로 남길 것이 없다.
+//   그리고 **끝날 수 있는 상태마다 우선순위 목록을 다시 적는다.** Selector 는
+//       어느 가지가 끝나는 순간 목록 전체를 처음부터 다시 보지만 상태 기계는
+//       그러지 않는다. Heal 뒤에도 Slam 뒤에도 "다쳤는가 → 슬램이 준비됐는가
+//       → 전진" 순서가 그대로 서 있어야 두 팔이 같은 틱에 같은 선택을 한다.
 //
 // 이 규칙을 지키면 두 팔의 상태 해시가 매치 내내 비트 동일하다. 행동 본체를
 // 자유 함수로 한 벌만 두는 것(EliteRetreatStep 등)은 저장 세 팔이
@@ -160,6 +169,12 @@ struct EliteCtx {
     float slamCooldown = 0;
     int   retreats = 0;        // 이번 생에 물러난 횟수
 
+    // 직전 틱의 회복이 목표에 닿았는가. 후퇴·슬램의 완료는 문맥의 타이머가
+    // 그대로 들고 있어(retreat · slam) 두 팔이 같은 식을 다시 계산해도 같은
+    // 답이 나오지만, 회복의 완료는 **체력**의 함수이고 체력은 회복 중에도
+    // 타워가 계속 깎는다. 그래서 완료를 판정한 그 자리에 결과를 남긴다.
+    bool  healed = false;
+
     float speedScale = 1.0f;   // 출력
     bool  away = false;        // 출력: 코어 반대 방향으로
     float heal = 0;            // 출력: 이번 틱 회복량
@@ -181,13 +196,17 @@ inline ai::bt::Status EliteRetreatStep(EliteCtx& c) {
     return ai::bt::Status::Running;
 }
 
-// Sequence 를 끝내는 노드 → **행동한 뒤** 완료 검사.
+// Sequence 를 끝내는 노드 → **행동한 뒤** 완료 검사. 그 판정을 `healed` 에
+// 남기는 이유는 FSM 팔 때문이다 — 그쪽 가드는 다음 틱의 **시작**에 평가되는데,
+// 그 사이 타워가 체력을 도로 깎으면 같은 식이 다른 답을 낸다. 실제로 그 상태를
+// 관측했다: 회복 중 초당 피해가 회복률을 넘는 구간에서 FSM 팔만 한 틱 더
+// 회복했고, 그 한 틱이 매치가 끝날 때까지 남았다.
 inline ai::bt::Status EliteHealStep(EliteCtx& c) {
     const float gain = kEliteHealRate * c.maxHp * c.dt;
     c.heal = gain;
     c.speedScale = 0.0f;
-    return (c.hp + gain >= c.maxHp * kEliteHealTarget) ? ai::bt::Status::Success
-                                                       : ai::bt::Status::Running;
+    c.healed = c.hp + gain >= c.maxHp * kEliteHealTarget;
+    return c.healed ? ai::bt::Status::Success : ai::bt::Status::Running;
 }
 
 inline ai::bt::Status EliteSlamStep(EliteCtx& c) {
@@ -277,6 +296,10 @@ public:
     }
 
     EliteCtx& Context(uint8_t slot) { return slots_[slot].ctx; }
+    // 읽기 전용 사본. 호스트 밖(검사·표시)에서 "정예가 지금 물러나는 중인가"를
+    // 물을 수 있어야 한다 — 그 답을 위치의 변화로 되짚으면 굽은 회랑에서
+    // "코어에서 멀어졌다"와 "후퇴한다"가 구분되지 않는다.
+    const EliteCtx& Context(uint8_t slot) const { return slots_[slot].ctx; }
     EliteState State(uint8_t slot) const { return slots_[slot].state; }
     const ai::bt::Blackboard& Board(uint8_t slot) const { return slots_[slot].board; }
 
@@ -423,16 +446,36 @@ private:
             [](EliteCtx& c) { EliteAdvanceStep(c); });
         const int retreat = m.AddState("Retreat", [](EliteCtx& c) { EliteArmRetreat(c); },
             [](EliteCtx& c) { EliteRetreatStep(c); });
-        const int heal = m.AddState("Heal", {}, [](EliteCtx& c) { EliteHealStep(c); });
+        const int heal = m.AddState("Heal", [](EliteCtx& c) { c.healed = false; },
+            [](EliteCtx& c) { EliteHealStep(c); });
         const int slam = m.AddState("Slam", [](EliteCtx& c) { EliteArmSlam(c); },
             [](EliteCtx& c) { EliteSlamStep(c); });
 
+        // 전이가 여덟인데 트리의 가지는 셋이다. 그 차이가 이 A/B 의 결론이다 —
+        // memory Selector 는 어느 가지가 **끝나는 순간** 우선순위 목록 전체를
+        // 처음부터 다시 본다. 상태 기계에는 그런 장치가 없어서, 끝날 수 있는
+        // 상태(Heal · Slam)마다 그 목록을 손으로 다시 적어야 한다. 빠뜨리면
+        // 그 상태에서는 우선순위가 한 칸씩 밀려 두 팔이 갈린다.
+        //
+        // StateMachine::Update 는 참인 **첫** 전이를 택하므로 같은 출발
+        // 상태끼리는 등록 순서가 곧 우선순위다. 아래 세 덩어리가 트리의
+        // Selector 자식 순서(다침 → 슬램 → 전진)와 같은 순서로 놓여 있다.
         m.AddTransition(advance, [](const EliteCtx& c) { return EliteHurt(c); }, retreat);
         m.AddTransition(advance, [](const EliteCtx& c) { return EliteSlamReady(c); }, slam);
-        m.AddTransition(retreat, [](const EliteCtx& c) { return c.retreat <= 0.0f; }, heal);
+
         m.AddTransition(heal,
-            [](const EliteCtx& c) { return c.hp >= c.maxHp * kEliteHealTarget; }, advance);
+            [](const EliteCtx& c) { return c.healed && EliteHurt(c); }, retreat);
+        m.AddTransition(heal,
+            [](const EliteCtx& c) { return c.healed && EliteSlamReady(c); }, slam);
+        m.AddTransition(heal, [](const EliteCtx& c) { return c.healed; }, advance);
+
+        m.AddTransition(slam,
+            [](const EliteCtx& c) { return c.slam <= 0.0f && EliteHurt(c); }, retreat);
         m.AddTransition(slam, [](const EliteCtx& c) { return c.slam <= 0.0f; }, advance);
+
+        // 후퇴는 언제나 회복으로 이어진다(트리에서도 같은 Sequence 안이라
+        // 중간에 우선순위가 다시 평가되지 않는다).
+        m.AddTransition(retreat, [](const EliteCtx& c) { return c.retreat <= 0.0f; }, heal);
     }
     // snippet-end: elite-machine
 

@@ -189,6 +189,7 @@ void Submit(wire::CommandType type, const math::Vec2& position, uint8_t argument
     command.x = wire::EncodePosition(position.x);
     command.y = wire::EncodePosition(position.y);
     command.argument = argument;
+    // ...
     if (options_.mode == RunMode::Client) {
         localCommands_.Queue(command);        // 시퀀스는 채널이 부여한다
         ++commandsQueued_;
@@ -643,4 +644,4 @@ core_hp = 260
 7. **인터프리터의 세 방어** — 전역 스텝 예산 10^6, 중첩 깊이 64, 파서 전진 보장. 셋 다 진단 문자열을 남긴다.
 8. **실행 성공 ≠ 값 유효** — 문법이 맞고 실행이 끝나도 도메인 범위 밖이면 거부한다. 두 거부의 진단 형태가 다르므로 어느 쪽인지 밖에서 읽힌다.
 
-현재 상태의 한계. 명령은 구조체로 만들어졌지만 **바이트가 된 적이 없다.** `Submit` 의 클라이언트 갈래는 큐에 넣기만 하고, 그 큐를 비우는 코드도 그 바이트를 받는 코드도 아직 없다. `EncodePosition` 이 1/8픽셀이라는 사실만 등장했지 왜 그 정밀도인지, 스냅샷은 몇 바이트인지, 그 상한을 무엇이 지키는지가 비어 있다. 그 포맷이 다음 편의 주제다.
+현재 상태의 한계. 명령은 구조체로 만들어졌지만 **바이트가 된 적이 없다.** `Submit` 의 클라이언트 갈래는 큐에 넣기만 하고, 그 큐를 비우는 코드도 그 바이트를 받는 코드도 아직 없다. `EncodePosition` 이 1/8픽셀이라는 사실만 등장했지 왜 그 정밀도인지, 스냅샷은 몇 바이트인지, 그 상한을 무엇이 지키는지가 비어 있다. 그 포맷은 아직 어디에도 정해져 있지 않다.

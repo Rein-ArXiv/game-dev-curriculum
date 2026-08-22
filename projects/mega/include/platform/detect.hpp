@@ -6,6 +6,8 @@
 #pragma once
 
 #include <bit>
+#include <cstdint>
+#include <string>
 
 namespace mega {
 namespace platform {
@@ -70,6 +72,38 @@ constexpr const char* ArchName(Arch a) {
         case Arch::Wasm:   return "Wasm";
         default:           return "Unknown";
     }
+}
+constexpr const char* EndianName(Endian e) {
+    return e == Endian::Little ? "LE" : "BE";
+}
+
+// ── 와이어 코드 ────────────────────────────────────────────────────
+// 입장 핸드셰이크에 실린다. 열거 값이 곧 와이어 값이므로 순서를 바꾸면
+// 프로토콜이 바뀐다 — 그 사실을 컴파일 시간에 못박는다. 새 플랫폼은 언제나
+// Unknown **앞이 아니라** 그 자리를 유지한 채 뒤에 붙인다.
+// snippet-begin: os-wire-code
+static_assert(static_cast<uint8_t>(OS::Windows) == 0 && static_cast<uint8_t>(OS::Unknown) == 6,
+              "OS 열거 값은 입장 핸드셰이크의 와이어 코드다");
+static_assert(static_cast<uint8_t>(Arch::X86_64) == 0 && static_cast<uint8_t>(Arch::Unknown) == 5,
+              "Arch 열거 값은 입장 핸드셰이크의 와이어 코드다");
+
+constexpr uint8_t OSCode(OS os) { return static_cast<uint8_t>(os); }
+constexpr OS OSFromCode(uint8_t code) {
+    return code <= static_cast<uint8_t>(OS::Unknown) ? static_cast<OS>(code) : OS::Unknown;
+}
+constexpr uint8_t ArchCode(Arch a) { return static_cast<uint8_t>(a); }
+constexpr Arch ArchFromCode(uint8_t code) {
+    return code <= static_cast<uint8_t>(Arch::Unknown) ? static_cast<Arch>(code) : Arch::Unknown;
+}
+// snippet-end: os-wire-code
+
+// 로그 한 줄. 서버 시작과 입장 승인에 이 문자열이 실려, 어느 OS 클라이언트가
+// 어느 OS 서버에 붙었는지가 로그만으로 답해진다.
+inline std::string PlatformLine(OS os, Arch arch, Endian endian) {
+    return std::string(OSName(os)) + "/" + ArchName(arch) + "/" + EndianName(endian);
+}
+inline std::string CurrentPlatformLine() {
+    return PlatformLine(CurrentOS(), CurrentArch(), CurrentEndian());
 }
 
 }  // namespace platform

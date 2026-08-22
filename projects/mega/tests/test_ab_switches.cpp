@@ -28,6 +28,19 @@ static void TestDefaultsAreThePreSwitchBehaviour() {
     CHECK(s.broadphase == BroadphaseKind::Naive);
     CHECK(s.integrator == IntegratorKind::Symplectic);
     CHECK(s.bossRender == BossRenderKind::Sprite);
+    // AI 축의 네 팔도 전부 스위치 이전의 동작이다. 경로는 레벨이 준 폴리라인,
+    // 이동은 격자 방향 그대로, 모든 적이 언제나 보이고, 정예는 걷기만 한다.
+    CHECK(s.pathing == PathingKind::Polyline);
+    CHECK(s.eliteBrain == EliteBrainKind::Plain);
+    CHECK(!s.steering);
+    CHECK(!s.stealth);
+    // 네트워크 축의 네 팔도 전부 스위치 이전의 동작이다. 스냅샷은 매 장 전체,
+    // 보간 지연과 재전송 주기는 상수, 클라이언트는 아바타를 예측하지 않고,
+    // 건설은 아바타 위치와 무관하다.
+    CHECK(s.snapshotMode == SnapshotMode::Full);
+    CHECK(s.interpDelay == InterpDelayKind::Fixed);
+    CHECK(!s.avatarPredict);
+    CHECK(!s.avatarGate);
     CHECK_EQ(s.solverIters, 8);
     CHECK_EQ(s.mapSeed, 7);
     CHECK_EQ(s.jobs, 0);
@@ -53,6 +66,14 @@ static void TestEveryNameParses() {
     CHECK(s.Parse("broadphase=grid", &error));
     CHECK(s.Parse("integrator=explicit", &error));
     CHECK(s.Parse("boss_render=rig", &error));
+    CHECK(s.Parse("pathing=flowfield", &error));
+    CHECK(s.Parse("elite_brain=bt", &error));
+    CHECK(s.Parse("steering=1", &error));
+    CHECK(s.Parse("stealth=1", &error));
+    CHECK(s.Parse("snapshot_mode=delta", &error));
+    CHECK(s.Parse("interp_delay=rtt", &error));
+    CHECK(s.Parse("avatar_predict=1", &error));
+    CHECK(s.Parse("avatar_gate=1", &error));
     CHECK(s.Parse("solver_iters=16", &error));
     CHECK(s.Parse("jobs=8", &error));
     CHECK(s.Parse("affinity=1", &error));
@@ -72,6 +93,10 @@ static void TestEveryNameParses() {
     CHECK(s.broadphase == BroadphaseKind::Grid);
     CHECK(s.integrator == IntegratorKind::Explicit);
     CHECK(s.bossRender == BossRenderKind::Rig);
+    CHECK(s.pathing == PathingKind::FlowField);
+    CHECK(s.eliteBrain == EliteBrainKind::Bt);
+    CHECK(s.steering);
+    CHECK(s.stealth);
     CHECK_EQ(s.solverIters, 16);
     CHECK_EQ(s.jobs, 8);
     CHECK(s.affinity);
@@ -84,11 +109,46 @@ static void TestEveryNameParses() {
     CHECK(described.find("map=procgen/3") != std::string::npos);
     CHECK(described.find("solver_iters=16") != std::string::npos);
     CHECK(described.find("boss_render=rig") != std::string::npos);
+    CHECK(described.find("pathing=flowfield") != std::string::npos);
+    CHECK(described.find("elite_brain=bt") != std::string::npos);
+    CHECK(s.snapshotMode == SnapshotMode::Delta);
+    CHECK(s.interpDelay == InterpDelayKind::Rtt);
+    CHECK(s.avatarPredict);
+    CHECK(s.avatarGate);
+    CHECK(described.find("snapshot_mode=delta") != std::string::npos);
+    CHECK(described.find("interp_delay=rtt") != std::string::npos);
+    CHECK(described.find("avatar_predict=1") != std::string::npos);
+    CHECK(described.find("avatar_gate=1") != std::string::npos);
+    CHECK(described.find("steering=1") != std::string::npos);
     // 세 번째 팔도 로그에 그대로 남아야 한다.
     Switches ecs;
     CHECK(ecs.Parse("entity_store=ecs", &error));
     CHECK(ecs.entityStore == EntityStoreKind::Ecs);
     CHECK(ecs.Describe().find("entity_store=ecs") != std::string::npos);
+    // 경로·정예의 가운데 팔도 마찬가지다. 셋 중 둘만 로그에 남으면 세 번째
+    // 팔로 잰 수치가 어느 팔의 것인지 나중에 알 수 없다.
+    Switches mid;
+    CHECK(mid.ParseList("pathing=astar,elite_brain=fsm,snapshot_mode=delta,"
+                        "interp_delay=rtt", &error));
+    CHECK(mid.pathing == PathingKind::AStar);
+    CHECK(mid.eliteBrain == EliteBrainKind::Fsm);
+    CHECK(mid.Describe().find("pathing=astar") != std::string::npos);
+    CHECK(mid.Describe().find("elite_brain=fsm") != std::string::npos);
+    CHECK(mid.Describe().find("snapshot_mode=delta") != std::string::npos);
+    CHECK(mid.Describe().find("interp_delay=rtt") != std::string::npos);
+    // 폴리라인·plain 으로 되돌리는 것도 이름이 있어야 한다. 되돌릴 수 없는
+    // 스위치는 A/B 가 아니라 일방통행이다.
+    CHECK(mid.ParseList("pathing=poly,elite_brain=plain,steering=0,stealth=0,"
+                        "snapshot_mode=full,interp_delay=fixed,avatar_predict=0,"
+                        "avatar_gate=0", &error));
+    CHECK(mid.pathing == PathingKind::Polyline);
+    CHECK(mid.eliteBrain == EliteBrainKind::Plain);
+    CHECK(!mid.steering);
+    CHECK(!mid.stealth);
+    CHECK(mid.snapshotMode == SnapshotMode::Full);
+    CHECK(mid.interpDelay == InterpDelayKind::Fixed);
+    CHECK(!mid.avatarPredict);
+    CHECK(!mid.avatarGate);
 }
 
 // 모르는 이름·값은 거절이지 무시가 아니다. 무시하면 오타 난 팔이 기준선과 같은
@@ -110,12 +170,28 @@ static void TestUnknownIsRejected() {
     CHECK(!s.Parse("broadphase=sap", &error));
     CHECK(!s.Parse("integrator=rk4", &error));
     CHECK(!s.Parse("boss_render=skeleton", &error));
+    CHECK(!s.Parse("pathing=dijkstra", &error));
+    CHECK(error.find("poly|astar|flowfield") != std::string::npos);
+    CHECK(!s.Parse("elite_brain=goap", &error));
+    CHECK(!s.Parse("steering=on", &error));   // 0|1 만 — true/on 은 받지 않는다
+    CHECK(!s.Parse("stealth=yes", &error));
+    // 네 이름의 범위 밖 값. 조용히 무시되면 두 팔이 같은 코드를 돌면서
+    // "차이가 없다"는 거짓 결론이 난다.
+    CHECK(!s.Parse("snapshot_mode=partial", &error));
+    CHECK(!s.Parse("interp_delay=adaptive", &error));
+    CHECK(!s.Parse("avatar_predict=on", &error));
+    CHECK(!s.Parse("avatar_gate=2", &error));
+    CHECK(!s.Parse("snapshotmode=full", &error));      // 오타 난 이름
     CHECK(!s.Parse("entity_store", &error));  // 형식 위반
     CHECK(!s.Parse("=soa", &error));
     CHECK(!s.Parse("entity_store=", &error));
     // 거절된 파싱은 상태를 바꾸지 않는다.
     CHECK(s.entityStore == EntityStoreKind::Aos);
     CHECK_EQ(s.jobs, 0);
+    CHECK(s.pathing == PathingKind::Polyline);
+    CHECK(s.eliteBrain == EliteBrainKind::Plain);
+    CHECK(!s.steering);
+    CHECK(!s.stealth);
 }
 
 static void TestListAndOverride() {

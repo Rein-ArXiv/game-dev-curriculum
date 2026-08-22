@@ -16,6 +16,38 @@
 
 > 총 **32건** — 치명 2 · 높음 12 · 중간 11 · 낮음 7
 
+## 상태 (2026-08-23) - 32건 전부 닫힘
+
+마지막까지 열려 있던 **#25** 가 닫혔다. 그것으로 이 감사의 32건은 전부 닫힌 상태다.
+
+| # | 이전 상태 | 지금 |
+|---|---|---|
+| #25 | 미해소 - sanitizer 문자열 0건, 제품 시뮬의 결정성 replay·checksum 없음 | **닫힘** |
+
+**#25 의 두 반쪽이 각각 어디로 갔는가.**
+
+- *sanitizer* - `CMakeLists.txt` 에 `MEGA_SANITIZE` 캐시 변수가 생겼고(MSVC 는 `address`
+  하나만 허용하고 나머지는 구성 단계에서 `FATAL_ERROR` 다), `.github/workflows/ci.yml` 에
+  `asan-windows` 잡이 있다. ASan 빌드로 ctest 117개가 전부 통과한다.
+- *고정 seed replay·checksum* - `mega_defense --record` / `--verify-replay` 가 제품
+  실행 파일 안에 있고, `mp::GoldenChain` 이 매 틱 (틱 수, 월드 해시, 아바타 체크섬,
+  아바타 프레임)을 접는다. ctest 에 솔로·호스트·아바타 세 팔의 기록·재생 짝 여섯이
+  fixture 로 묶여 있다. 감사가 지적한 "checksum 을 쓰는 테스트가 제품 미사용 모듈
+  `mp/det_sim.hpp` 만 겨냥한다" 는 상태는 사라졌다 - `mp/det_sim.hpp` 도 `mp/lockstep.hpp`
+  도 이제 제품 도달 헤더다.
+
+**감사 시점과의 대조(실측).**
+
+| 항목 | 감사 시점 | 2026-08-23 |
+|---|---|---|
+| `include/` 헤더 | 89 | 114 |
+| 제품 도달 헤더 | 25 | **114** |
+| 랩 전용 등재 | - | **0행** |
+| ctest | 51 | **117** (5회 연속 green) |
+
+아래 본문의 지적들은 여전히 **감사 시점의 현재형**으로 쓰여 있다. 할 일 목록이 아니라
+그 시점의 기록으로 읽어야 하며, 건별 판정은 각 항목 아래의 상태 줄이 소유한다.
+
 ---
 
 ## 먼저: 빌드와 테스트는 멀쩡하다
@@ -725,6 +757,8 @@ CMakeLists.txt의 add_test는 단 하나다: CMakeLists.txt:59  add_test(NAME me
 
 ## 25. [중간] PROJECTS_PLAN 검증 단계표의 sanitizer와 고정 seed replay·checksum이 mega에 없다
 
+> **[닫힘 · 2026-08-23]** 둘 다 생겼다. `MEGA_SANITIZE=address` 로 구성하는 ASan 빌드가 `CMakeLists.txt` 와 CI(`asan-windows`)에 있고, 제품 실행 파일이 `--record` / `--verify-replay` 를 갖는다. 후자는 `mp::GoldenChain` 으로 매 틱의 (월드 해시 · 아바타 체크섬)을 접어 **다른 프로세스**가 같은 값을 재생하는지 본다 - 솔로·호스트·아바타 세 팔의 기록·재생 짝 여섯이 ctest 에 있다.
+>
 > **[미해소 · 2026-08-13]** sanitizer 관련 문자열이 CMakeLists·`.github/`·docs 전체에 0건이고, `GameWorld`를 대상으로 한 고정 seed replay·checksum 테스트도 없다.
 
 <sub>관점: 빌드·테스트 실제 실행과 검증력 판정</sub>

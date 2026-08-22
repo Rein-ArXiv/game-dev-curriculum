@@ -20,6 +20,7 @@
 #include "game/defense_app.hpp"
 #include "game/defense_content.hpp"
 #include "game/defense_protocol.hpp"
+#include "net/packet.hpp"
 #include "net/udp_transport.hpp"
 #include "test_util.h"
 
@@ -130,6 +131,106 @@ int main() {
 
     // 셀프테스트가 이 상태를 성공으로 읽는가 — 제품의 판정 기준 자체를 검사한다.
     CHECK(ClientRoundTripProven(app));
+
+    // ── 3단계: 스냅샷 A/B — 두 팔의 결과는 같고 비용만 다르다 ────────
+    //
+    // 규약(game/switches.hpp 5): (a) 두 팔의 결과가 같다 (b) 두 팔의 비용이 다르다.
+    // (a) 없는 (b)는 의미가 없다 — 싼 쪽이 다른 답을 냈을 수 있기 때문이다.
+    //
+    // 여기서 도는 것은 제품이 부르는 바로 그 함수 셋이다:
+    // wire::WriteSnapshotPacket(DefenseApp::SendSnapshot) ·
+    // net::BaselineStore::Acknowledge(PumpHost) ·
+    // wire::ReadSnapshotPacket(PumpClient, 제품 클라이언트 안에서).
+    net::PacketSequencer hostSeq;
+    net::AckWindow       hostWindow;
+    net::BaselineStore   baselines(wire::kSnapshotBaselineSlots);
+
+    // (1) 첫 장은 기준선이 없으므로 전체다. 그 전에 월드를 웨이브가 돌 만큼
+    //     굴린다 — 적이 하나뿐인 스냅샷에서 잰 차분 비율은 이 프로토콜의
+    //     비용에 대해 아무것도 말하지 않는다.
+    for (int i = 0; i < 900; ++i) world.Step(kDefenseFixedDt);
+    ++hostTick;
+    const uint16_t fullSeq = hostSeq.Next();
+    const net::Bytes fullPacket = wire::WriteSnapshotPacket(
+        world, hostTick, received.sequence, hostWindow.Header(fullSeq), baselines, fullSeq);
+    CHECK(!fullPacket.empty());
+    CHECK_EQ(fullPacket[16], wire::kSnapshotFull);
+    const uint64_t snapshotsBeforeFull = app.SnapshotsReceived();
+    host.Send(fullPacket);
+
+    // (2) 클라이언트가 그 장을 받았다는 사실은 **클라이언트가 보내는 헤더**로
+    //     돌아온다. 여기서 손으로 ack 를 지어내면 1단계에서 배선한 합류 헤더가
+    //     실제로 돌아오는지를 검사하지 못한다.
+    const auto baselineDeadline = Clock::now() + std::chrono::seconds(5);
+    while (Clock::now() < baselineDeadline && !baselines.Confirmed()) {
+        app.Step(FrameInput{}, kDefenseFixedDt);
+        net::Bytes packet;
+        net::PacketHeader framing;
+        while (host.Receive(packet)) {
+            wire::Command ignored;
+            if (wire::ReadCommand(packet, ignored, &framing) ||
+                wire::ReadHello(packet, &framing)) {
+                hostWindow.OnReceived(framing.seq);
+                baselines.Acknowledge(framing);
+            }
+        }
+    }
+    CHECK(app.SnapshotsReceived() > snapshotsBeforeFull);
+    CHECK(baselines.Confirmed());                 // 클라이언트의 ack 가 돌아왔다
+    CHECK_EQ(baselines.ConfirmedSeq(), fullSeq);
+
+    // (3) 둘째 장은 호스트가 실제로 쓰는 간격(3틱) 뒤다. 기준선이 있으므로
+    //     차분이 나간다.
+    for (int i = 0; i < 3; ++i) world.Step(kDefenseFixedDt);
+    ++hostTick;
+    const uint16_t deltaSeq = hostSeq.Next();
+    const net::PacketHeader deltaHeader = hostWindow.Header(deltaSeq);
+    const net::Bytes deltaPacket = wire::WriteSnapshotPacket(
+        world, hostTick, received.sequence, deltaHeader, baselines, deltaSeq);
+    CHECK(!deltaPacket.empty());
+    CHECK_EQ(deltaPacket[16], wire::kSnapshotDelta);
+
+    // 같은 월드·같은 틱을 전체 인코더로도 적어 둔다. 이것이 (a) 결과 동일의 기준이다.
+    const net::Bytes sameTickFull =
+        wire::WriteSnapshot(world, hostTick, received.sequence, nullptr, deltaHeader);
+    CHECK(!sameTickFull.empty());
+
+    // (a) 결과 동일 — 복원 바이트가 전체 인코딩과 **비트 동일**하다.
+    net::SequenceBuffer<net::Bytes> held(wire::kSnapshotHeldSlots);
+    held.Insert(fullSeq, fullPacket);
+    wire::Snapshot fromDelta;
+    net::Bytes restored;
+    bool baselineMiss = true;
+    CHECK(wire::ReadSnapshotPacket(deltaPacket, held, fromDelta, nullptr, &restored,
+                                   &baselineMiss));
+    CHECK(!baselineMiss);
+    CHECK(restored == sameTickFull);
+    wire::Snapshot fromFull;
+    CHECK(wire::ReadSnapshot(sameTickFull, fromFull));
+    CHECK_EQ(fromDelta.tick, fromFull.tick);
+    CHECK_EQ(fromDelta.gold, fromFull.gold);
+    CHECK_EQ(fromDelta.enemies.size(), fromFull.enemies.size());
+    CHECK_EQ(fromDelta.towers.size(), fromFull.towers.size());
+
+    // (b) 비용 상이 — 차분이 전체보다 작다. 같으면 두 팔이 같은 코드를 돈 것이다.
+    CHECK(deltaPacket.size() < sameTickFull.size());
+
+    // (4) 제품 클라이언트가 그 차분을 실제로 복원하는가. 이 줄이 없으면 위
+    //     전부는 코덱 검사일 뿐 배선 검사가 아니다.
+    const uint64_t snapshotsBeforeDelta = app.SnapshotsReceived();
+    host.Send(deltaPacket);
+    const auto deltaDeadline = Clock::now() + std::chrono::seconds(5);
+    while (Clock::now() < deltaDeadline && app.SnapshotsReceived() == snapshotsBeforeDelta)
+        app.Step(FrameInput{}, kDefenseFixedDt);
+    CHECK(app.SnapshotsReceived() > snapshotsBeforeDelta);
+    CHECK_EQ(app.Metrics().GetCounter("snapshot_baseline_miss").Value(), 0ull);
+
+    std::printf("[test] defense_client_loop: snapshot A/B full=%zuB delta=%zuB (%.1f%%) "
+                "enemies=%zu baseline_seq=%u\n",
+                sameTickFull.size(), deltaPacket.size(),
+                100.0 * static_cast<double>(deltaPacket.size()) /
+                    static_cast<double>(sameTickFull.size()),
+                fromFull.enemies.size(), baselines.ConfirmedSeq());
 
     std::printf("[test] defense_client_loop: frames=%d hello=%llu sent=%llu "
                 "queued=%llu snapshots=%llu ack=%u\n",

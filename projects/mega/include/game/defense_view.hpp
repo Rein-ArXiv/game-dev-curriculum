@@ -223,6 +223,11 @@ struct HudState {
     int         mouseX = -100, mouseY = -100;   // 화면 좌표
     math::Vec2  mouseWorld{-100.0f, -100.0f};   // 카메라가 푼 지면 좌표
     bool        mouseOnGround = false;
+    // 아바타 사거리 규칙이 켜져 있는가와, 커서 칸이 그 안인가. 호스트의 승인이
+    // 쓰는 것과 **같은 함수**(mp::DetState::CellsWithinReach)가 낸 답이어야
+    // 한다 — 둘이 갈라지면 초록으로 칠해 놓고 안 서는 칸이 생긴다.
+    bool        avatarGate = false;
+    bool        withinReach = true;
     const char* modeLabel = "SOLO";
     bool        paused = false;
     // 보스를 스프라이트로 그릴 것인가 리그로 풀 것인가. 리그 팔은 포즈 묶음을
@@ -583,9 +588,14 @@ inline void DrawGame(render::Framebuffer& framebuffer, const DefenseMap& map,
     // 쓰면 기울인 시점에서 커서와 하이라이트가 어긋난다.
     if (hud.mouseOnGround && hud.mouseY >= map.OriginY()) {
         math::Vec2 snapped = map.Snap(hud.mouseWorld);
+        // 사거리 팔에서는 "규칙이 허락하는 칸"과 "지금 닿는 칸"이 다르다.
+        // 닿지 않는 자리를 초록으로 칠하면 플레이어는 눌렀는데 안 서는 것을
+        // 버그로 읽는다. 노랑이 그 셋째 상태의 이름이다.
         bool valid = CanPlaceInView(map, view, hud.mouseWorld);
-        render::Color preview = valid ? render::Color{100, 240, 155, 230}
-                                      : render::Color{245, 90, 90, 230};
+        const bool blockedByReach = hud.avatarGate && valid && !hud.withinReach;
+        render::Color preview = blockedByReach ? render::Color{240, 210, 90, 230}
+                              : valid          ? render::Color{100, 240, 155, 230}
+                                               : render::Color{245, 90, 90, 230};
         const math::Vec2 screen = camera.Project(snapped);
         render::DrawRectOutline(framebuffer, static_cast<int>(screen.x) - 10,
                                 static_cast<int>(screen.y) - 10, 21, 21, preview);

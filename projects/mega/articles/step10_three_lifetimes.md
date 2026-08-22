@@ -78,6 +78,7 @@ void Step(float dt) {
     MEGA_PROFILE_SCOPE("sim.step");
     scratch_.Begin();
     SpawnSystem(dt);
+    // ...
     EnemyAdvanceSystem(dt);
     TowerFireSystem(dt);
     ProjectileSystem(dt);
@@ -143,6 +144,7 @@ void ProjectileSystem(float dt) {
             ? enemies_.Pos(static_cast<size_t>(tracked)) : p.target;
         const float splash = p.splash;
         const float damage = p.damage;
+        const float stun = p.stun;
 
         size_t hits = 0;
         for (size_t i = 0; i < enemyCount; ++i) {
@@ -154,6 +156,7 @@ void ProjectileSystem(float dt) {
         }
         for (size_t k = 0; k < hits; ++k) {
             const size_t i = candidates[k];
+            // ...
             const float hp = enemies_.Hp(i) - damage;
             enemies_.SetHp(i, hp);
             if (hp <= 0.0f) {

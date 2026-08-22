@@ -87,6 +87,7 @@ void Step(float dt) {
     MEGA_PROFILE_SCOPE("sim.step");
     scratch_.Begin();
     SpawnSystem(dt);
+    // ...
     EnemyAdvanceSystem(dt);
     TowerFireSystem(dt);
     ProjectileSystem(dt);
@@ -221,7 +222,7 @@ struct Switches {
     // ...
     int             jobs        = 0;      // 워커 수. 0 = 직렬(기준선)
     bool            affinity    = false;  // 워커를 코어에 고정하는가
-
+    // ...
     // 이름 하나에 값 하나. 모르는 이름이나 허용되지 않은 값이면 false 와 사유.
     bool Set(std::string_view name, std::string_view value, std::string* error = nullptr);
     // "name=value" 한 덩어리.

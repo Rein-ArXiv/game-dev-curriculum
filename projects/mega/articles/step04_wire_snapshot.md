@@ -75,30 +75,27 @@
 ```cpp
 class Writer {
 public:
-    explicit Writer(PacketType type) {
+    explicit Writer(PacketType type, const net::PacketHeader& framing = net::PacketHeader()) {
         U32(kMagic);
         U8(kVersion);
         U8(static_cast<uint8_t>(type));
         U16(0);  // payload size, finalized by Finish()
+        U16(framing.seq);
+        U16(framing.ack);
+        U32(framing.ackBits);
     }
 
-    void U8(uint8_t value) { bytes_.push_back(value); }
-    void U16(uint16_t value) {
-        bytes_.push_back(static_cast<uint8_t>(value));
-        bytes_.push_back(static_cast<uint8_t>(value >> 8));
-    }
-    void U32(uint32_t value) {
-        U16(static_cast<uint16_t>(value));
-        U16(static_cast<uint16_t>(value >> 16));
-    }
+    void U8(uint8_t value) { platform::AppendLE8(bytes_, value); }
+    void U16(uint16_t value) { platform::AppendLE16(bytes_, value); }
+    void U32(uint32_t value) { platform::AppendLE32(bytes_, value); }
+    void U64(uint64_t value) { platform::AppendLE64(bytes_, value); }
     void Raw(std::string_view value) {
         bytes_.insert(bytes_.end(), value.begin(), value.end());
     }
 
     net::Bytes Finish() {
-        uint16_t payload = static_cast<uint16_t>(bytes_.size() - 8);
-        bytes_[6] = static_cast<uint8_t>(payload);
-        bytes_[7] = static_cast<uint8_t>(payload >> 8);
+        uint16_t payload = static_cast<uint16_t>(bytes_.size() - 16);
+        platform::WriteLE16(bytes_.data() + 6, payload);
         return bytes_;
     }
 
@@ -117,15 +114,20 @@ class Reader {
 public:
     explicit Reader(const net::Bytes& bytes) : bytes_(bytes) {}
 
-    bool Header(PacketType expected) {
-        if (bytes_.size() < 8) return false;
+    bool Header(PacketType expected, net::PacketHeader* framing = nullptr) {
+        if (bytes_.size() < 16) return false;
         uint32_t magic = U32();
         uint8_t version = U8();
         uint8_t type = U8();
         uint16_t payload = U16();
+        net::PacketHeader decoded;
+        decoded.seq = U16();
+        decoded.ack = U16();
+        decoded.ackBits = U32();
         if (!ok_ || magic != kMagic || version != kVersion ||
             type != static_cast<uint8_t>(expected)) return false;
-        if (payload != bytes_.size() - 8) return false;
+        if (payload != bytes_.size() - 16) return false;
+        if (framing) *framing = decoded;
         return true;
     }
 
@@ -220,7 +222,7 @@ static constexpr size_t kSnapshotMaxProjectiles = 20;
 
 <!-- snippet: include/game/defense_protocol.hpp@snapshot-budget -->
 ```cpp
-static constexpr size_t kSnapshotFixedBytes = 8 + 4 + 4 + 4 + 2 + 2 + 2 + 1 + 3;
+static constexpr size_t kSnapshotFixedBytes = 16 + 1 + 4 + 4 + 4 + 2 + 2 + 2 + 1 + 3 + 4 + 4;
 static constexpr size_t kSnapshotTowerBytes = 4 + 2 + 2 + 1 + 1 + 1;
 static constexpr size_t kSnapshotEnemyBytes = 4 + 2 + 2 + 2 + 2 + 1;
 static constexpr size_t kSnapshotProjectileBytes = 4 + 2 + 2;
@@ -291,7 +293,10 @@ return bytes.size() <= kMaxPacketBytes ? bytes : net::Bytes{};
 ```cpp
 inline net::Bytes WriteSnapshot(const GameWorld& world, uint32_t tick,
                                 uint32_t acknowledgedCommand,
-                                bool* truncatedOut = nullptr) {
+                                bool* truncatedOut = nullptr,
+                                const net::PacketHeader& framing = net::PacketHeader(),
+                                uint32_t avatarFrame = 0,
+                                uint32_t avatarChecksum = 0) {
     size_t aliveEnemies = 0;
     const size_t enemyRows = world.Enemies().Size();
     for (size_t i = 0; i < enemyRows; ++i)
@@ -306,9 +311,12 @@ inline net::Bytes WriteSnapshot(const GameWorld& world, uint32_t tick,
                      projectileCount != liveProjectiles;
     if (truncatedOut) *truncatedOut = truncated;
 
-    Writer writer(PacketType::Snapshot);
+    Writer writer(PacketType::Snapshot, framing);
+    writer.U8(kSnapshotFull);
     writer.U32(tick);
     writer.U32(acknowledgedCommand);
+    writer.U32(avatarFrame);
+    writer.U32(avatarChecksum);
     writer.U32(static_cast<uint32_t>(std::max(world.Gold(), 0)));
     writer.U16(EncodeHp(world.CoreHp()));
     writer.U16(EncodeHp(world.CoreMaxHp()));
@@ -343,10 +351,12 @@ inline net::Bytes WriteSnapshot(const GameWorld& world, uint32_t tick,
 
 <!-- snippet: include/game/defense_protocol.hpp#ReadSnapshot -->
 ```cpp
-inline bool ReadSnapshot(const net::Bytes& bytes, Snapshot& snapshot) {
+inline bool ReadSnapshot(const net::Bytes& bytes, Snapshot& snapshot,
+                         net::PacketHeader* framing = nullptr) {
     Reader reader(bytes);
-    if (!reader.Header(PacketType::Snapshot)) return false;
-
+    if (!reader.Header(PacketType::Snapshot, framing)) return false;
+    // ...
+    if (reader.U8() != kSnapshotFull) return false;
     Snapshot decoded;
     decoded.tick = reader.U32();
     // ... 고정부를 지역 구조체에 푼다
@@ -420,9 +430,10 @@ inline bool CommandArgumentInRange(CommandType type, uint8_t argument) {
 
 <!-- snippet: include/game/defense_protocol.hpp#ReadCommand -->
 ```cpp
-inline bool ReadCommand(const net::Bytes& bytes, Command& command) {
+inline bool ReadCommand(const net::Bytes& bytes, Command& command,
+                        net::PacketHeader* framing = nullptr) {
     Reader reader(bytes);
-    if (!reader.Header(PacketType::Command)) return false;
+    if (!reader.Header(PacketType::Command, framing)) return false;
 
     // ReadSnapshot 과 같은 규율: 지역에 풀고, 전부 검증된 뒤에만 내보낸다.
     Command decoded;
@@ -539,4 +550,4 @@ Total Test time (real) =   0.08 sec
 9. **디코더 규율 넷** — 지역에 풀고 나중에 내보내기, 개수 상한 선검사, 열거 범위 검사, 필드 간 관계 검사.
 10. **검사 위치의 실질적 차이** — 인자 검사가 `Accept` 앞에 있어야 위조 패킷이 정직한 클라이언트의 시퀀스를 태우지 못한다.
 
-현재 상태의 한계. 이 바이트들을 **아무도 나르지 않는다.** `WriteSnapshot` 이 만든 벡터는 테스트 안에서 곧바로 `ReadSnapshot` 으로 들어가고, 그 사이에 손실도 재정렬도 지연도 없다. 명령을 몇 번 재전송할지, 스냅샷 사이의 빈 시간을 어떻게 채울지, 두 프로세스가 같은 프레임 루프를 어떻게 나눠 도는지가 다음 편의 주제다.
+현재 상태의 한계. 이 바이트들을 **아무도 나르지 않는다.** `WriteSnapshot` 이 만든 벡터는 테스트 안에서 곧바로 `ReadSnapshot` 으로 들어가고, 그 사이에 손실도 재정렬도 지연도 없다. 명령을 몇 번 재전송할지, 스냅샷 사이의 빈 시간을 어떻게 채울지, 두 프로세스가 같은 프레임 루프를 어떻게 나눠 도는지는 어느 것도 정해져 있지 않다.

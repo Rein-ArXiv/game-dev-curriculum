@@ -102,6 +102,7 @@ struct ClientSession {
     live::GameAdmission  admission;
     // 클라이언트당 신뢰·순서 수신. 클라이언트가 1번부터 센다.
     net::ReliableOrderedReceiver<wire::Command> commands{1};
+    // ...
     Clock::time_point    lastSeen{};
 };
 ```
@@ -121,14 +122,17 @@ void Step(Clock::time_point now) {
     if (!simulationStarted_ && clients_.size() == kServerMaximumPlayers) {
         simulationStarted_ = true;
         nextTick_ = now;
-        std::printf("[match] start id=%s\n", activeMatch_.c_str());
+        std::printf("[match] start id=%s capacity=%zu\n", activeMatch_.c_str(),
+                    matches_.Capacity(activeMatch_));
     }
 
     if (simulationStarted_ && now >= nextTick_) {
         int catchUp = 0;
         while (now >= nextTick_ && catchUp < 5) {
             if (!world_.Won() && !world_.Lost()) world_.Step(kServerFixedDt);
+            // ...
             ++tick_;
+            // ...
             ++catchUp;
             nextTick_ += std::chrono::duration_cast<Clock::duration>(
                 std::chrono::duration<double>(kServerFixedDt));
@@ -154,9 +158,12 @@ void HandleDatagram(const net::UdpDatagram& datagram, Clock::time_point now) {
         return;
     }
 
+    // ...
     std::string token;
-    if (wire::ReadAdmissionHello(datagram.bytes, token)) {
-        AdmitClient(datagram, endpointKey, token, now);
+    net::PacketHeader framing;
+    wire::AdmissionHelloDetail detail;
+    if (wire::ReadAdmissionHello(datagram.bytes, token, &framing, &detail)) {
+        AdmitClient(datagram, endpointKey, token, now, framing, detail);
         return;
     }
 
@@ -166,14 +173,18 @@ void HandleDatagram(const net::UdpDatagram& datagram, Clock::time_point now) {
         return;
     }
     client->second.lastSeen = now;
+    // ...
     wire::Command command;
-    if (!wire::ReadCommand(datagram.bytes, command) ||
+    if (!wire::ReadCommand(datagram.bytes, command, &framing) ||
         !client->second.commands.Accept(command.sequence, command)) {
         ++rejectedPackets_;
         return;
     }
-    while (client->second.commands.Poll(command))
+    // ...
+    while (client->second.commands.Poll(command)) {
+        // ...
         if (wire::ApplyCommand(world_, command)) ++acceptedCommands_;
+    }
 }
 ```
 
@@ -203,11 +214,21 @@ if (!simulationStarted_ && clients_.size() == kServerMaximumPlayers) {
 <!-- snippet: include/game/defense_server.hpp#BroadcastSnapshot -->
 ```cpp
 void BroadcastSnapshot() {
-    for (const auto& [key, client] : clients_) {
+    for (auto& [key, client] : clients_) {
         (void)key;
+        const uint16_t seq = client.seq.Next();
+        const net::PacketHeader header = client.window.Header(seq);
         const net::Bytes snapshot =
-            wire::WriteSnapshot(world_, tick_, client.commands.LastDelivered());
-        if (!snapshot.empty()) socket_.SendTo(client.endpoint, snapshot);
+            options_.switches.snapshotMode == SnapshotMode::Delta
+                ? wire::WriteSnapshotPacket(world_, tick_, client.commands.LastDelivered(),
+                                            header, client.baselines, seq, nullptr,
+                                            avatarFrame_, AvatarChecksum32())
+                : wire::WriteSnapshot(world_, tick_, client.commands.LastDelivered(),
+                                      nullptr, header, avatarFrame_, AvatarChecksum32());
+        if (!snapshot.empty()) {
+            socket_.SendTo(client.endpoint, snapshot);
+            // ...
+        }
     }
 }
 ```
@@ -272,7 +293,9 @@ inline bool VerifyGameAdmission(
 <!-- snippet: include/game/defense_server.hpp#AdmitClient -->
 ```cpp
 void AdmitClient(const net::UdpDatagram& datagram, const std::string& endpointKey,
-                 const std::string& token, Clock::time_point now) {
+                 const std::string& token, Clock::time_point now,
+                 const net::PacketHeader& framing,
+                 const wire::AdmissionHelloDetail& detail) {
     live::GameAdmission admission;
     if (!live::VerifyGameAdmission(token, secret_, options_.serverId, UnixNow(), admission)) {
         ++rejectedPackets_;
@@ -285,6 +308,7 @@ void AdmitClient(const net::UdpDatagram& datagram, const std::string& endpointKe
         } else {
             existingClient->second.endpoint = datagram.sender;
             existingClient->second.lastSeen = now;
+            // ...
         }
         return;
     }
@@ -294,13 +318,20 @@ void AdmitClient(const net::UdpDatagram& datagram, const std::string& endpointKe
                                tokenOwner->second != endpointKey;
     const bool playerConflict = playerOwner != playerEndpoints_.end() &&
                                 playerOwner->second != endpointKey;
-    const bool matchConflict = !activeMatch_.empty() && activeMatch_ != admission.matchId;
-    const bool full = clients_.size() >= kServerMaximumPlayers;
-    if (tokenConflict || playerConflict || matchConflict || full) {
+    // ...
+    if (!matches_.Allows(admission.matchId, wire::PlayerKey(admission.playerId))) {
         ++rejectedPackets_;
         return;
     }
-    if (activeMatch_.empty()) activeMatch_ = admission.matchId;
+    // ...
+    const size_t capacity = matches_.Capacity(admission.matchId);
+    const bool full = clients_.size() >= capacity ||
+                      clients_.size() >= kServerMaximumPlayers;
+    if (tokenConflict || playerConflict || full) {
+        ++rejectedPackets_;
+        return;
+    }
+    activeMatch_ = admission.matchId;
     tokenEndpoints_[admission.tokenId] = endpointKey;
     playerEndpoints_[admission.playerId] = endpointKey;
     ClientSession& session = clients_[endpointKey];
@@ -376,6 +407,8 @@ bool ShouldContinue(Clock::time_point now) const {
 <!-- snippet: include/game/defense_server.hpp#RunDefenseServer -->
 ```cpp
 inline int RunDefenseServer(const DefenseServerOptions& options) {
+    // ...
+    platform::EnableUtf8Console();
     DefenseServer server;
     if (!server.Init(options)) return 1;
     platform::InstallShutdownSignals();
@@ -552,7 +585,7 @@ bool Open(const char* path) {
 <!-- snippet: include/game/defense_progression.hpp#Record -->
 ```cpp
 bool Record(uint32_t wave, uint32_t score, bool cleared, uint64_t endedAt,
-            Profile& updated) {
+            Profile& updated, const live::Wallet* wallet = nullptr) {
     if (!open_) return false;
     Profile profile;
     Load(profile);
@@ -574,6 +607,12 @@ bool Record(uint32_t wave, uint32_t score, bool cleared, uint64_t endedAt,
     db::Repository<db::MatchResult> matches(store_, "match:");
     profiles.Save(1, profile);
     matches.Save(match.id, match);
+    if (wallet) {
+        // ...
+        live::Wallet copy = *wallet;
+        db::Repository<live::Wallet> wallets(store_, "wallet:");
+        wallets.Save(1, copy);
+    }
     if (!store_.Commit()) return false;
     updated = profile;
     return true;
@@ -761,4 +800,4 @@ Total Test time (real) =   3.32 sec
 10. **한 트랜잭션, 두 레포지토리** — `match.id = profile.totalMatches` 라는 관계가 둘의 원자성을 요구한다. `endedAt` 은 시스템 시각이 아니라 시뮬 틱이다.
 11. **사용자 데이터 디렉터리** — 설치 경로는 쓰기 권한도, 사용자 분리도, 업데이트 내성도 없다. 셀프테스트는 코드 경로가 아니라 데이터 경로만 바꾼다.
 
-현재 상태의 한계. 여기까지 세운 것들은 전부 **사람의 규율에 의존한다.** 진입점이 얇아야 한다는 규칙도, `games/` 가 OS API 를 직접 부르면 안 된다는 규칙도, 헤더가 제품에서 실제로 쓰여야 한다는 규칙도 문서에 적혀 있을 뿐 무엇도 강제하지 않는다. 규칙은 사람이 어기고, 어긴 것을 아무도 알아채지 못한다. 그 규칙들을 빌드 실패로 바꾸는 것이 다음 편의 주제다.
+현재 상태의 한계. 여기까지 세운 것들은 전부 **사람의 규율에 의존한다.** 진입점이 얇아야 한다는 규칙도, `games/` 가 OS API 를 직접 부르면 안 된다는 규칙도, 헤더가 제품에서 실제로 쓰여야 한다는 규칙도 문서에 적혀 있을 뿐 무엇도 강제하지 않는다. 규칙은 사람이 어기고, 어긴 것을 아무도 알아채지 못한다. 그 규칙들을 빌드 실패로 바꾸는 장치는 아직 하나도 없다.

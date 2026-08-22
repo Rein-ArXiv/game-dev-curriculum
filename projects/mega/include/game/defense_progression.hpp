@@ -10,6 +10,7 @@
 
 #include "db/records.hpp"
 #include "db/repository.hpp"
+#include "live/economy.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -50,8 +51,17 @@ public:
         return profiles.Load(1, profile);
     }
 
+    // 메타 통화 지갑. 프로필과 **같은 저장소**에 있고 아래에서 **같은 트랜잭션**에
+    // 커밋된다. 따로 쓰면 매치가 끝난 직후 프로세스가 죽었을 때 "판은 세어졌는데
+    // 스크랩은 안 들어온" 상태가 남고, 그 상태는 어느 쪽도 복구할 수 없다.
+    bool LoadWallet(live::Wallet& wallet) {
+        if (!open_) return false;
+        db::Repository<live::Wallet> wallets(store_, "wallet:");
+        return wallets.Load(1, wallet);
+    }
+
     bool Record(uint32_t wave, uint32_t score, bool cleared, uint64_t endedAt,
-                Profile& updated) {
+                Profile& updated, const live::Wallet* wallet = nullptr) {
         if (!open_) return false;
         Profile profile;
         Load(profile);
@@ -73,6 +83,13 @@ public:
         db::Repository<db::MatchResult> matches(store_, "match:");
         profiles.Save(1, profile);
         matches.Save(match.id, match);
+        if (wallet) {
+            // Repository::Save 는 방문자를 쓰므로 비const 참조를 요구한다.
+            // 사본을 뜨는 것이 호출자의 지갑을 건드리지 않는 유일한 방법이다.
+            live::Wallet copy = *wallet;
+            db::Repository<live::Wallet> wallets(store_, "wallet:");
+            wallets.Save(1, copy);
+        }
         if (!store_.Commit()) return false;
         updated = profile;
         return true;

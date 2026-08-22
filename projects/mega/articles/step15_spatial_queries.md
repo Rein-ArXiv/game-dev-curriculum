@@ -103,6 +103,7 @@ inline int SelectTargetAmong(const math::Vec2& towerPos, const math::Vec2& coreP
     for (size_t k = 0; k < candidateCount; ++k) {
         const size_t i = candidates[k];
         if (!enemies.Alive(i)) continue;
+        if (!sight.Targetable(i)) continue;
         if (math::LengthSq(enemies.Pos(i) - towerPos) > r2) continue;
         const float score = TargetScore(enemies, i, towerPos, corePos, mode);
         if (best >= 0 && score >= bestScore) continue;
@@ -187,6 +188,7 @@ public:
 ```cpp
 void TowerFireSystem(float dt) {
     MEGA_PROFILE_SCOPE("sim.tower_fire");
+    // ...
     const size_t towerCount = towers_.size();
     if (towerCount == 0) return;
 
@@ -206,6 +208,7 @@ void TowerFireSystem(float dt) {
     RunChunks(towerCount, [=](size_t begin, size_t end) {
         for (size_t i = begin; i < end; ++i) {
             const Tower& t = towers[i];
+            // ...
             if (t.timer - dt > 0.0f) { targets[i] = -1; continue; }
             if (!useIndex) {
                 targets[i] = SelectTargetIn(t.pos, core, *enemies, t.range, t.targetMode, sight);

@@ -8,6 +8,12 @@
 #pragma once
 
 #include "game/game.hpp"
+#include "live/feature_flag.hpp"
+#include "mp/det_sim.hpp"
+#include "mp/input.hpp"
+#include "net/packet.hpp"
+#include "platform/byteorder.hpp"
+#include "platform/detect.hpp"
 #include "net/sequence.hpp"
 #include "net/session.hpp"
 #include "net/transport.hpp"
@@ -24,7 +30,7 @@ namespace game {
 namespace wire {
 
 static constexpr uint32_t kMagic = 0x3146444du;  // "MDF1" in little endian
-static constexpr uint8_t kVersion = 1;
+static constexpr uint8_t kVersion = 6;
 static constexpr size_t kMaxPacketBytes = 1200;
 
 // ── 스냅샷 컬렉션 상한 ─────────────────────────────────────────────
@@ -34,13 +40,42 @@ static constexpr size_t kMaxPacketBytes = 1200;
 // 프로토콜이 바뀐다 — kVersion 도 함께 올려야 한다.
 static constexpr size_t kSnapshotMaxTowers = 16;
 static constexpr size_t kSnapshotMaxEnemies = 64;
-static constexpr size_t kSnapshotMaxProjectiles = 20;
+// 발사체 상한이 20 이 아니라 18 인 이유. 합류 헤더(net::PacketHeader 8바이트)가
+// 게임 헤더 뒤에 들어오면서 고정부가 8바이트 늘었고, 그대로 두면 가득 찬 스냅샷이
+// 1206바이트가 되어 아래 static_assert 가 빌드를 멈춘다. 예산 1200 을 올려서
+// 해결하지 않는다 — 그 상수는 UDP 경로가 정한 값이지 우리가 정한 값이 아니다.
+// 세 컬렉션 중 이 행만 순수 표시용이고 매 틱 새로 생겼다 사라지므로(타워는
+// 플레이어가 세운 것, 적은 권위 상태다) 한 줄 잃는 비용이 가장 싸다.
+// 그 뒤 아바타 서브시뮬의 (프레임 · 체크섬) 8바이트가 더 들어오면서 19 에서
+// 18 로 한 줄 더 내렸다. 체크섬만 4바이트 싣지 않는 이유는 비교가 성립하지
+// 않기 때문이다 — 클라이언트가 자기 어느 프레임과 맞춰 봐야 하는지 모르면
+// 그 수는 대조할 수 없는 숫자다. 프레임 번호가 그 대조의 좌표다.
+static constexpr size_t kSnapshotMaxProjectiles = 18;
+
+// ── 스냅샷 본문의 첫 바이트 ────────────────────────────────────────
+// 전체인가 차분인가. 차분이면 뒤에 기준선 seq 2바이트가 더 붙는다. 이 바이트를
+// 본문 맨 앞에 두는 이유는 디코더가 **무엇을 읽을지 정하기 전에** 알아야 하는
+// 유일한 정보이기 때문이다.
+inline constexpr uint8_t kSnapshotFull  = 0;
+inline constexpr uint8_t kSnapshotDelta = 1;
+
+// 두 보관소의 칸 수. 나란히 두는 이유가 static_assert 그 자체다 — 호스트가
+// 기준선으로 가리킬 수 있는 seq 는 자기 보관소 안에 있고, 클라이언트는 그
+// 전부를 복원해 들고 있어야 한다. 클라이언트 쪽이 더 좁으면 호스트가 살아
+// 있다고 믿는 기준선을 클라이언트는 이미 버린 뒤이고, 그 차분은 복원 불가다.
+// snippet-begin: baseline-slots
+inline constexpr size_t kSnapshotBaselineSlots = 32;   // 호스트: 보낸 전체 스냅샷
+inline constexpr size_t kSnapshotHeldSlots     = 64;   // 클라이언트: 복원해 둔 것
+static_assert(kSnapshotHeldSlots > kSnapshotBaselineSlots,
+              "클라이언트 보관 칸이 호스트 기준선 칸보다 적으면 호스트가 "
+              "클라이언트에 없는 기준선을 가리킨다");
+// snippet-end: baseline-slots
 
 // 상한이 어디서 왔는지는 산수다. 가득 찬 스냅샷 한 장이 1200바이트 예산 안에
 // 들어가야 하고, 각 개수는 U8 한 바이트에 실린다. 상한을 올리면 둘 중 하나가
 // 먼저 깨지므로 컴파일 시간에 센다.
 // snippet-begin: snapshot-budget
-static constexpr size_t kSnapshotFixedBytes = 8 + 4 + 4 + 4 + 2 + 2 + 2 + 1 + 3;
+static constexpr size_t kSnapshotFixedBytes = 16 + 1 + 4 + 4 + 4 + 2 + 2 + 2 + 1 + 3 + 4 + 4;
 static constexpr size_t kSnapshotTowerBytes = 4 + 2 + 2 + 1 + 1 + 1;
 static constexpr size_t kSnapshotEnemyBytes = 4 + 2 + 2 + 2 + 2 + 1;
 static constexpr size_t kSnapshotProjectileBytes = 4 + 2 + 2;
@@ -70,6 +105,10 @@ enum class PacketType : uint8_t {
     Snapshot = 3,
     AdmissionHello = 4,
     Terrain = 5,
+    Input = 6,
+    QueueRequest = 7,
+    QueueResponse = 8,
+    AdmissionGrant = 9,
 };
 enum class CommandType : uint8_t { Place = 1, Upgrade = 2, Sell = 3, Target = 4, Blast = 5 };
 
@@ -124,6 +163,11 @@ struct ProjectileState {
 struct Snapshot {
     uint32_t tick = 0;
     uint32_t acknowledgedCommand = 0;
+    // 아바타 서브시뮬의 대조 좌표. frame 은 이 체크섬이 어느 프레임의 것인지,
+    // checksum 은 그 프레임 상태의 하위 32비트다. 둘이 함께 있어야 클라이언트가
+    // "내 같은 프레임"과 맞춰 볼 수 있다.
+    uint32_t avatarFrame = 0;
+    uint32_t avatarChecksum = 0;
     int gold = 0;
     float coreHp = 0;
     float coreMaxHp = 0;
@@ -138,30 +182,34 @@ struct Snapshot {
 
 class Writer {
 public:
-    explicit Writer(PacketType type) {
+    // 프레이밍 기본 인자는 프레이밍을 쓰지 않는 호출자(테스트의 위조 패킷 생성기
+    // 등)를 위한 것이다. 기본값 seq=0/ack=0/ackBits=0 은 "아직 아무것도 못 받았다"와
+    // 구분되지 않으므로 **제품 경로는 반드시 명시적으로 넘긴다**.
+    explicit Writer(PacketType type, const net::PacketHeader& framing = net::PacketHeader()) {
         U32(kMagic);
         U8(kVersion);
         U8(static_cast<uint8_t>(type));
         U16(0);  // payload size, finalized by Finish()
+        U16(framing.seq);
+        U16(framing.ack);
+        U32(framing.ackBits);
     }
 
-    void U8(uint8_t value) { bytes_.push_back(value); }
-    void U16(uint16_t value) {
-        bytes_.push_back(static_cast<uint8_t>(value));
-        bytes_.push_back(static_cast<uint8_t>(value >> 8));
-    }
-    void U32(uint32_t value) {
-        U16(static_cast<uint16_t>(value));
-        U16(static_cast<uint16_t>(value >> 16));
-    }
+    // 리틀엔디안 정규화는 platform/byteorder.hpp 하나가 소유한다. 여기 있던
+    // 손으로 쓴 시프트는 "리틀엔디안 머신이라서 옳은가, 시프트로 적어서 옳은가"를
+    // 구분할 수 없게 만들던 자리다 — 나가는 바이트는 하나도 변하지 않으며,
+    // test_golden_packet 이 그 동치를 잠근다.
+    void U8(uint8_t value) { platform::AppendLE8(bytes_, value); }
+    void U16(uint16_t value) { platform::AppendLE16(bytes_, value); }
+    void U32(uint32_t value) { platform::AppendLE32(bytes_, value); }
+    void U64(uint64_t value) { platform::AppendLE64(bytes_, value); }
     void Raw(std::string_view value) {
         bytes_.insert(bytes_.end(), value.begin(), value.end());
     }
 
     net::Bytes Finish() {
-        uint16_t payload = static_cast<uint16_t>(bytes_.size() - 8);
-        bytes_[6] = static_cast<uint8_t>(payload);
-        bytes_[7] = static_cast<uint8_t>(payload >> 8);
+        uint16_t payload = static_cast<uint16_t>(bytes_.size() - 16);
+        platform::WriteLE16(bytes_.data() + 6, payload);
         return bytes_;
     }
 
@@ -173,15 +221,20 @@ class Reader {
 public:
     explicit Reader(const net::Bytes& bytes) : bytes_(bytes) {}
 
-    bool Header(PacketType expected) {
-        if (bytes_.size() < 8) return false;
+    bool Header(PacketType expected, net::PacketHeader* framing = nullptr) {
+        if (bytes_.size() < 16) return false;
         uint32_t magic = U32();
         uint8_t version = U8();
         uint8_t type = U8();
         uint16_t payload = U16();
+        net::PacketHeader decoded;
+        decoded.seq = U16();
+        decoded.ack = U16();
+        decoded.ackBits = U32();
         if (!ok_ || magic != kMagic || version != kVersion ||
             type != static_cast<uint8_t>(expected)) return false;
-        if (payload != bytes_.size() - 8) return false;
+        if (payload != bytes_.size() - 16) return false;
+        if (framing) *framing = decoded;
         return true;
     }
 
@@ -189,15 +242,26 @@ public:
         if (offset_ + 1 > bytes_.size()) { ok_ = false; return 0; }
         return bytes_[offset_++];
     }
+    // U8 은 그대로 둔다 — 이미 경계 검사가 있고 바이트 하나에 엔디안이 없다.
+    // 아래 셋은 읽기를 byteorder 로 옮기되 **경계 검사를 앞에 남긴다**. 검사를
+    // 잃으면 잘린 패킷이 버퍼 밖을 읽는다.
     uint16_t U16() {
-        uint16_t lo = U8();
-        uint16_t hi = U8();
-        return static_cast<uint16_t>(lo | (hi << 8));
+        if (offset_ + 2 > bytes_.size()) { ok_ = false; return 0; }
+        const uint16_t v = platform::ReadLE16(bytes_.data() + offset_);
+        offset_ += 2;
+        return v;
     }
     uint32_t U32() {
-        uint32_t lo = U16();
-        uint32_t hi = U16();
-        return lo | (hi << 16);
+        if (offset_ + 4 > bytes_.size()) { ok_ = false; return 0; }
+        const uint32_t v = platform::ReadLE32(bytes_.data() + offset_);
+        offset_ += 4;
+        return v;
+    }
+    uint64_t U64() {
+        if (offset_ + 8 > bytes_.size()) { ok_ = false; return 0; }
+        const uint64_t v = platform::ReadLE64(bytes_.data() + offset_);
+        offset_ += 8;
+        return v;
     }
     std::string Raw(size_t count) {
         if (offset_ + count > bytes_.size()) {
@@ -232,37 +296,122 @@ inline float DecodeHp(uint16_t value) {
     return static_cast<float>(value) * 0.25f;
 }
 
-inline net::Bytes WriteHello() {
-    Writer writer(PacketType::Hello);
+inline net::Bytes WriteHello(const net::PacketHeader& framing = net::PacketHeader()) {
+    Writer writer(PacketType::Hello, framing);
     return writer.Finish();
 }
 
-inline bool ReadHello(const net::Bytes& bytes) {
+inline bool ReadHello(const net::Bytes& bytes, net::PacketHeader* framing = nullptr) {
     Reader reader(bytes);
-    return reader.Header(PacketType::Hello) && reader.Done();
+    return reader.Header(PacketType::Hello, framing) && reader.Done();
 }
 
-inline net::Bytes WriteAdmissionHello(std::string_view token) {
+// 입장 인사가 실어 오는 클라이언트의 정체. 토큰은 "누구인가"에 답하고, 아래
+// 셋은 "무엇을 들고 있는가"에 답한다 — 콘텐츠 해시가 다른 클라이언트는 같은
+// 게임을 돌고 있지 않다.
+struct AdmissionHelloDetail {
+    uint64_t contentHash = 0;
+    uint8_t  osCode = 0;
+    uint8_t  archCode = 0;
+};
+
+inline net::Bytes WriteAdmissionHello(std::string_view token,
+                                      const net::PacketHeader& framing = net::PacketHeader(),
+                                      uint64_t contentHash = 0,
+                                      uint8_t osCode = 0, uint8_t archCode = 0) {
     if (token.empty() || token.size() > 1024) return {};
-    Writer writer(PacketType::AdmissionHello);
+    Writer writer(PacketType::AdmissionHello, framing);
     writer.U16(static_cast<uint16_t>(token.size()));
     writer.Raw(token);
+    writer.U64(contentHash);
+    writer.U8(osCode);
+    writer.U8(archCode);
     return writer.Finish();
 }
 
-inline bool ReadAdmissionHello(const net::Bytes& bytes, std::string& token) {
+inline bool ReadAdmissionHello(const net::Bytes& bytes, std::string& token,
+                               net::PacketHeader* framing = nullptr,
+                               AdmissionHelloDetail* detail = nullptr) {
     Reader reader(bytes);
-    if (!reader.Header(PacketType::AdmissionHello)) return false;
+    if (!reader.Header(PacketType::AdmissionHello, framing)) return false;
     const uint16_t length = reader.U16();
     if (length == 0 || length > 1024) return false;
     std::string decoded = reader.Raw(length);
+    AdmissionHelloDetail out;
+    out.contentHash = reader.U64();
+    out.osCode = reader.U8();
+    out.archCode = reader.U8();
     if (!reader.Done()) return false;
     token = std::move(decoded);
+    if (detail) *detail = out;
     return true;
 }
 
-inline net::Bytes WriteCommand(const Command& command) {
-    Writer writer(PacketType::Command);
+// ── 입장 승인 ──────────────────────────────────────────────────────
+// 서버가 승인과 함께 내려보내는 것 넷: 콘텐츠 정체성(버전·해시), 서버 플랫폼,
+// 매치 시작 시각(이벤트 판정의 유일한 입력), 확정된 플래그 배정.
+//
+// 시작 시각을 서버가 정하는 이유는 이벤트가 기간이기 때문이다. 두 클라이언트가
+// 각자 시계를 읽으면 한쪽만 주말 이벤트 안에 있는 매치가 생긴다.
+struct AdmissionGrant {
+    uint32_t    contentVersion = 0;
+    uint64_t    contentHash = 0;
+    uint8_t     serverOs = 0;
+    uint8_t     serverArch = 0;
+    int64_t     matchStartUnix = 0;
+    std::string flags;              // live::FlagSet::Encode()
+};
+
+// snippet-begin: grant-budget
+static constexpr size_t kAdmissionGrantFixedBytes = 4 + 8 + 1 + 1 + 8 + 2;
+static constexpr size_t kAdmissionGrantMaxBytes =
+    16 + kAdmissionGrantFixedBytes + live::kFlagWireMax;
+static_assert(kAdmissionGrantMaxBytes <= kMaxPacketBytes,
+              "입장 승인 패킷이 UDP payload 예산을 넘는다");
+// snippet-end: grant-budget
+
+inline net::Bytes WriteAdmissionGrant(const AdmissionGrant& grant,
+                                      const net::PacketHeader& framing = net::PacketHeader()) {
+    if (grant.flags.size() > live::kFlagWireMax) return {};
+    Writer writer(PacketType::AdmissionGrant, framing);
+    writer.U32(grant.contentVersion);
+    writer.U64(grant.contentHash);
+    writer.U8(grant.serverOs);
+    writer.U8(grant.serverArch);
+    writer.U64(static_cast<uint64_t>(grant.matchStartUnix));
+    writer.U16(static_cast<uint16_t>(grant.flags.size()));
+    writer.Raw(grant.flags);
+    return writer.Finish();
+}
+
+inline bool ReadAdmissionGrant(const net::Bytes& bytes, AdmissionGrant& grant,
+                               net::PacketHeader* framing = nullptr) {
+    Reader reader(bytes);
+    if (!reader.Header(PacketType::AdmissionGrant, framing)) return false;
+    AdmissionGrant decoded;
+    decoded.contentVersion = reader.U32();
+    decoded.contentHash = reader.U64();
+    decoded.serverOs = reader.U8();
+    decoded.serverArch = reader.U8();
+    decoded.matchStartUnix = static_cast<int64_t>(reader.U64());
+    const uint16_t flagBytes = reader.U16();
+    if (flagBytes > live::kFlagWireMax) return false;
+    decoded.flags = reader.Raw(flagBytes);
+    if (!reader.Done()) return false;
+    // 디코더가 배정 문법까지 본다. 여기서 안 보면 잘못된 문자열이 스위치 표까지
+    // 흘러가고, 거기서는 "모르는 이름"과 구분되지 않는다. 빈 배정은 허용이다 —
+    // 정의가 하나도 없는 서버가 정상 상태이기 때문이다.
+    if (flagBytes > 0) {
+        live::FlagSet parsed;
+        if (!live::FlagSet::Decode(decoded.flags, parsed)) return false;
+    }
+    grant = std::move(decoded);
+    return true;
+}
+
+inline net::Bytes WriteCommand(const Command& command,
+                               const net::PacketHeader& framing = net::PacketHeader()) {
+    Writer writer(PacketType::Command, framing);
     writer.U32(command.sequence);
     writer.U8(static_cast<uint8_t>(command.type));
     writer.U16(command.x);
@@ -272,17 +421,19 @@ inline net::Bytes WriteCommand(const Command& command) {
 }
 
 // snippet-begin: terrain-packet
-inline net::Bytes WriteTerrain(const std::vector<uint16_t>& cells) {
-    Writer writer(PacketType::Terrain);
+inline net::Bytes WriteTerrain(const std::vector<uint16_t>& cells,
+                               const net::PacketHeader& framing = net::PacketHeader()) {
+    Writer writer(PacketType::Terrain, framing);
     const size_t count = std::min(cells.size(), kMaxTerrainCells);
     writer.U8(static_cast<uint8_t>(count));
     for (size_t i = 0; i < count; ++i) writer.U16(cells[i]);
     return writer.Finish();
 }
 
-inline bool ReadTerrain(const net::Bytes& bytes, std::vector<uint16_t>& cells) {
+inline bool ReadTerrain(const net::Bytes& bytes, std::vector<uint16_t>& cells,
+                        net::PacketHeader* framing = nullptr) {
     Reader reader(bytes);
-    if (!reader.Header(PacketType::Terrain)) return false;
+    if (!reader.Header(PacketType::Terrain, framing)) return false;
     const uint8_t count = reader.U8();
     if (static_cast<size_t>(count) > kMaxTerrainCells) return false;
     std::vector<uint16_t> decoded;
@@ -293,6 +444,131 @@ inline bool ReadTerrain(const net::Bytes& bytes, std::vector<uint16_t>& cells) {
     return true;
 }
 // snippet-end: terrain-packet
+
+// ── 레이팅 큐 ──────────────────────────────────────────────────────
+// 매치에 이름이 생기기 전에는 서버가 "먼저 도착한 토큰이 말한 matchId" 를 그대로
+// 믿을 수밖에 없었다. 큐 엔드포인트가 그 주체를 바꾼다: 플레이어가 자기 id 와
+// 레이팅을 들고 줄을 서고, 서버가 매치를 **형성해서** 이름을 돌려준다.
+static constexpr size_t kMaxPlayerIdBytes = 64;
+// FormatMatchId 가 내는 폭. 정확히 이 길이만 받는다 — 길이를 느슨하게 두면
+// 형성되지 않은 이름이 문법만 맞춰 들어올 통로가 생긴다.
+static constexpr size_t kMatchIdBytes = 15;
+static constexpr int    kMaxQueueRating = 3000;
+
+inline net::Bytes WriteQueueRequest(std::string_view playerId, int rating,
+                                    const net::PacketHeader& framing = net::PacketHeader()) {
+    if (playerId.empty() || playerId.size() > kMaxPlayerIdBytes) return {};
+    if (rating < 0 || rating > kMaxQueueRating) return {};
+    Writer writer(PacketType::QueueRequest, framing);
+    writer.U8(static_cast<uint8_t>(playerId.size()));
+    writer.Raw(playerId);
+    writer.U16(static_cast<uint16_t>(rating));
+    return writer.Finish();
+}
+
+inline bool ReadQueueRequest(const net::Bytes& bytes, std::string& playerId, int& rating,
+                             net::PacketHeader* framing = nullptr) {
+    Reader reader(bytes);
+    if (!reader.Header(PacketType::QueueRequest, framing)) return false;
+    const uint8_t length = reader.U8();
+    if (length == 0 || static_cast<size_t>(length) > kMaxPlayerIdBytes) return false;
+    std::string decodedId = reader.Raw(length);
+    const uint16_t decodedRating = reader.U16();
+    if (!reader.Done()) return false;
+    // 레이팅은 클라이언트가 말하는 값이다. 신뢰 경계 밖이므로 상한에서 자른다 —
+    // 여기서 안 자르면 3000 위의 수 하나가 큐 정렬을 통째로 왜곡한다.
+    if (static_cast<int>(decodedRating) > kMaxQueueRating) return false;
+    playerId = std::move(decodedId);
+    rating = static_cast<int>(decodedRating);
+    return true;
+}
+
+inline net::Bytes WriteQueueResponse(std::string_view matchId,
+                                     const net::PacketHeader& framing = net::PacketHeader()) {
+    if (matchId.size() != kMatchIdBytes) return {};
+    Writer writer(PacketType::QueueResponse, framing);
+    writer.U8(static_cast<uint8_t>(matchId.size()));
+    writer.Raw(matchId);
+    return writer.Finish();
+}
+
+inline bool ReadQueueResponse(const net::Bytes& bytes, std::string& matchId,
+                              net::PacketHeader* framing = nullptr) {
+    Reader reader(bytes);
+    if (!reader.Header(PacketType::QueueResponse, framing)) return false;
+    const uint8_t length = reader.U8();
+    if (static_cast<size_t>(length) != kMatchIdBytes) return false;
+    std::string decoded = reader.Raw(length);
+    if (!reader.Done()) return false;
+    matchId = std::move(decoded);
+    return true;
+}
+
+// ── 건설 사거리 규칙 ───────────────────────────────────────────────
+// 규칙이 한 곳에만 있어야 하는 자리다. 로컬 제출 · 원격 명령 · 전용 서버 ·
+// HUD 커서가 전부 이 둘을 부른다 — 어느 하나가 자기 사본을 쓰면 초록으로
+// 칠해 놓고 안 서는 칸이 생긴다.
+// snippet-begin: build-reach
+inline constexpr int32_t kBuildReach = 2;   // 체비셰프 칸 거리
+
+// 맵 좌표를 아바타 격자(16x16)의 칸 번호로. 절차 맵은 크기가 다를 수 있으므로
+// 비례로 접는다 — 두 격자가 같은 칸 수라는 가정을 코드에 심으면 map=procgen
+// 에서 사거리 규칙이 조용히 다른 것을 뜻하게 된다.
+inline int32_t AvatarCellOfMap(const DefenseMap& map, const math::Vec2& position) {
+    const DefenseMap::Cell cell = map.WorldToCell(position);
+    const int columns = map.Columns() > 0 ? map.Columns() : 1;
+    const int rows = map.Rows() > 0 ? map.Rows() : 1;
+    const double fx = (static_cast<double>(cell.x) + 0.5) / columns;
+    const double fy = (static_cast<double>(cell.y) + 0.5) / rows;
+    return mp::DetState::CellIndex(static_cast<int32_t>(fx * mp::DetState::kWorld),
+                                   static_cast<int32_t>(fy * mp::DetState::kWorld));
+}
+
+inline bool BuildWithinReach(const DefenseMap& map, int32_t avatarCell,
+                             const math::Vec2& position) {
+    return mp::DetState::CellsWithinReach(avatarCell, AvatarCellOfMap(map, position),
+                                          kBuildReach);
+}
+// snippet-end: build-reach
+
+// 문자열 playerId 를 매치메이커의 정수 id 로. 큐 요청과 입장 토큰이 **같은
+// 함수**를 지나야 "줄 선 사람"과 "들어온 사람"이 같은 사람인지 물을 수 있다.
+inline uint32_t PlayerKey(std::string_view playerId) {
+    uint32_t hash = 2166136261u;
+    for (char c : playerId) { hash ^= static_cast<uint8_t>(c); hash *= 16777619u; }
+    return hash;
+}
+
+// ── 아바타 프레임 입력 ─────────────────────────────────────────────
+// 명령과 성질이 반대다: 촘촘하고, 최신이 중요하고, 늦으면 무의미하다. 그래서
+// 신뢰 채널을 **쓰지 않는다** — 손실 한 번이 뒤의 모든 입력을 막으면 아바타가
+// 그 자리에 굳는다. 대신 최근 몇 프레임분을 매번 통째로 다시 싣는다.
+//
+// 본문은 mp::WriteInputStream 그대로다. 이 층이 더하는 것은 합류 헤더와
+// 패킷 종류뿐이라, 입력 레코드의 바이트 계약은 mp/ 하나가 소유한다.
+static constexpr size_t kInputPacketMaxBytes =
+    16 + mp::kInputStreamHeaderBytes + mp::kMaxInputFrames * mp::kInputBytes;
+static_assert(kInputPacketMaxBytes <= kMaxPacketBytes,
+              "아바타 입력 패킷이 UDP payload 예산을 넘는다");
+
+inline net::Bytes WriteInputPacket(uint32_t baseFrame, const mp::Input* inputs, size_t count,
+                                   const net::PacketHeader& framing = net::PacketHeader()) {
+    const std::vector<uint8_t> body = mp::WriteInputStream(baseFrame, inputs, count);
+    Writer writer(PacketType::Input, framing);
+    writer.Raw(std::string_view(reinterpret_cast<const char*>(body.data()), body.size()));
+    return writer.Finish();
+}
+
+inline bool ReadInputPacket(const net::Bytes& bytes, uint32_t& baseFrame,
+                            std::vector<mp::Input>& inputs,
+                            net::PacketHeader* framing = nullptr) {
+    Reader reader(bytes);
+    if (!reader.Header(PacketType::Input, framing)) return false;
+    if (bytes.size() < 16) return false;
+    const std::vector<uint8_t> body(bytes.begin() + 16, bytes.end());
+    if (!mp::ReadInputStream(body, baseFrame, inputs)) return false;
+    return true;
+}
 
 // argument 의 의미는 type 이 정하지만, 그 도메인은 전부 와이어 포맷이 이미 아는
 // 것이다 — TowerType 집합도 TargetMode 집합도 월드를 봐야 알 수 있는 값이 아니다.
@@ -321,9 +597,10 @@ inline bool CommandArgumentInRange(CommandType type, uint8_t argument) {
     return false;
 }
 
-inline bool ReadCommand(const net::Bytes& bytes, Command& command) {
+inline bool ReadCommand(const net::Bytes& bytes, Command& command,
+                        net::PacketHeader* framing = nullptr) {
     Reader reader(bytes);
-    if (!reader.Header(PacketType::Command)) return false;
+    if (!reader.Header(PacketType::Command, framing)) return false;
 
     // ReadSnapshot 과 같은 규율: 지역에 풀고, 전부 검증된 뒤에만 내보낸다.
     // 출력 인자에 먼저 쓰면 거부된 패킷의 범위 밖 값이 호출자 구조체에 남는다.
@@ -347,7 +624,10 @@ inline bool ReadCommand(const net::Bytes& bytes, Command& command) {
 // 기본값 nullptr 이라 관심 없는 호출자는 그대로 둔다.
 inline net::Bytes WriteSnapshot(const GameWorld& world, uint32_t tick,
                                 uint32_t acknowledgedCommand,
-                                bool* truncatedOut = nullptr) {
+                                bool* truncatedOut = nullptr,
+                                const net::PacketHeader& framing = net::PacketHeader(),
+                                uint32_t avatarFrame = 0,
+                                uint32_t avatarChecksum = 0) {
     // 저장이 AoS 든 SoA 든 이 인코더는 같은 바이트를 낸다 — 여기서 읽는 것은
     // 배치가 아니라 행 번호별 필드다. 살아 있는 개체만 세는 것도 저장과 무관하다.
     size_t aliveEnemies = 0;
@@ -364,9 +644,12 @@ inline net::Bytes WriteSnapshot(const GameWorld& world, uint32_t tick,
                      projectileCount != liveProjectiles;
     if (truncatedOut) *truncatedOut = truncated;
 
-    Writer writer(PacketType::Snapshot);
+    Writer writer(PacketType::Snapshot, framing);
+    writer.U8(kSnapshotFull);
     writer.U32(tick);
     writer.U32(acknowledgedCommand);
+    writer.U32(avatarFrame);
+    writer.U32(avatarChecksum);
     writer.U32(static_cast<uint32_t>(std::max(world.Gold(), 0)));
     writer.U16(EncodeHp(world.CoreHp()));
     writer.U16(EncodeHp(world.CoreMaxHp()));
@@ -419,13 +702,20 @@ inline net::Bytes WriteSnapshot(const GameWorld& world, uint32_t tick,
     return bytes.size() <= kMaxPacketBytes ? bytes : net::Bytes{};
 }
 
-inline bool ReadSnapshot(const net::Bytes& bytes, Snapshot& snapshot) {
+inline bool ReadSnapshot(const net::Bytes& bytes, Snapshot& snapshot,
+                         net::PacketHeader* framing = nullptr) {
     Reader reader(bytes);
-    if (!reader.Header(PacketType::Snapshot)) return false;
+    if (!reader.Header(PacketType::Snapshot, framing)) return false;
 
+    // 차분 패킷은 기준선 없이 해석할 수 없다. 여기서 통과시키면 뒤따르는 varint
+    // 스트림이 스냅샷 필드로 읽혀 쓰레기 상태가 그려진다 — 거부가 유일하게
+    // 정직한 답이고, 기준선을 아는 ReadSnapshotPacket 이 그 답을 낸다.
+    if (reader.U8() != kSnapshotFull) return false;
     Snapshot decoded;
     decoded.tick = reader.U32();
     decoded.acknowledgedCommand = reader.U32();
+    decoded.avatarFrame = reader.U32();
+    decoded.avatarChecksum = reader.U32();
     decoded.gold = static_cast<int>(reader.U32());
     decoded.coreHp = DecodeHp(reader.U16());
     decoded.coreMaxHp = DecodeHp(reader.U16());
@@ -477,6 +767,91 @@ inline bool ReadSnapshot(const net::Bytes& bytes, Snapshot& snapshot) {
     }
     if (!reader.Done()) return false;
     snapshot = std::move(decoded);
+    return true;
+}
+
+// ── 델타 스냅샷 ────────────────────────────────────────────────────
+// 위의 WriteSnapshot/ReadSnapshot 은 그대로 전체 인코더·디코더로 남는다. 아래
+// 둘은 그 위에 얹는 얇은 층이다: 호스트가 **클라이언트가 확실히 갖고 있는**
+// 스냅샷을 기준선으로 골라 차분만 싣고, 클라이언트가 보관분으로 복원한다.
+//
+// 차분의 기준선은 net::BaselineStore 가 고른다(net/packet.hpp). 그 보관소에서
+// 밀려난 seq 는 Baseline() 이 nullptr 을 돌려주고, 그것이 곧 "전체를 보내라"는
+// 신호다 — 복원 불가 상태를 따로 감지할 필요가 없다.
+
+// 호스트: 기준선이 있으면 차분, 없으면 전체. 반환 바이트는 어느 쪽이든 그대로
+// 소켓에 실을 수 있는 완성 패킷이다.
+inline net::Bytes WriteSnapshotPacket(const GameWorld& world, uint32_t tick,
+                                      uint32_t acknowledgedCommand,
+                                      const net::PacketHeader& framing,
+                                      net::BaselineStore& baselines,
+                                      uint16_t seq,
+                                      bool* truncatedOut = nullptr,
+                                      uint32_t avatarFrame = 0,
+                                      uint32_t avatarChecksum = 0) {
+    net::Bytes full = WriteSnapshot(world, tick, acknowledgedCommand, truncatedOut, framing,
+                                    avatarFrame, avatarChecksum);
+    if (full.empty()) return full;
+
+    // snippet-begin: delta-write
+    uint16_t baselineSeq = 0;
+    const net::BaselineStore::Entry* baseline = baselines.Baseline(&baselineSeq);
+    net::Bytes packet;
+    if (baseline) {
+        const net::Bytes delta = net::EncodeDelta(baseline->bytes, full);
+        Writer writer(PacketType::Snapshot, framing);
+        writer.U8(kSnapshotDelta);
+        writer.U16(baselineSeq);
+        writer.Raw(std::string_view(reinterpret_cast<const char*>(delta.data()), delta.size()));
+        packet = writer.Finish();
+        // 차분이 원본보다 큰 경우가 이론상 가능하다(바뀐 구간이 흩어져 있으면
+        // 세그먼트 머리값이 절약분을 먹는다). 예산을 넘으면 전체로 되돌린다.
+        if (packet.size() > kMaxPacketBytes) packet.clear();
+    }
+    if (packet.empty()) packet = full;
+    // 보관하는 것은 언제나 **전체** 바이트다. 차분을 보관하면 다음 차분이
+    // 차분의 차분이 되어 한 장만 잃어도 그 뒤가 전부 복원 불가가 된다.
+    baselines.Sent(seq, tick, std::move(full));
+    return packet;
+    // snippet-end: delta-write
+}
+
+// 클라이언트: 플래그를 보고 필요하면 보관분으로 복원한 뒤 전체 디코더에 먹인다.
+// restoredOut 은 복원된 **전체 패킷 바이트**다. 호출자는 그것을 자기 보관소에
+// framing.seq 로 넣어야 다음 차분의 기준선이 된다.
+// baselineMissOut 은 "스냅샷이긴 한데 기준선이 없어서 못 읽었다"를 "스냅샷이
+// 아니다"와 가른다. 둘을 같은 false 로 묶으면 지형 패킷 한 장이 기준선 손실로
+// 세어지고, 그 카운터로는 델타 배선의 건강을 물을 수 없다.
+inline bool ReadSnapshotPacket(const net::Bytes& bytes,
+                               const net::SequenceBuffer<net::Bytes>& held,
+                               Snapshot& snapshot,
+                               net::PacketHeader* framing = nullptr,
+                               net::Bytes* restoredOut = nullptr,
+                               bool* baselineMissOut = nullptr) {
+    if (baselineMissOut) *baselineMissOut = false;
+    net::PacketHeader decodedFraming;
+    Reader reader(bytes);
+    if (!reader.Header(PacketType::Snapshot, &decodedFraming)) return false;
+    const uint8_t kind = reader.U8();
+    if (kind == kSnapshotFull) {
+        if (!ReadSnapshot(bytes, snapshot, framing)) return false;
+        if (restoredOut) *restoredOut = bytes;
+        return true;
+    }
+    if (kind != kSnapshotDelta) return false;
+    const uint16_t baselineSeq = reader.U16();
+    const net::Bytes* baseline = held.Find(baselineSeq);
+    if (!baseline) {                          // 기준선이 없다 — 이 장은 버린다
+        if (baselineMissOut) *baselineMissOut = true;
+        return false;
+    }
+    const size_t offset = 16 + 1 + 2;
+    if (bytes.size() < offset) return false;
+    const net::Bytes delta(bytes.begin() + static_cast<std::ptrdiff_t>(offset), bytes.end());
+    net::Bytes restored;
+    if (!net::ApplyDelta(*baseline, delta, restored)) return false;
+    if (!ReadSnapshot(restored, snapshot, framing)) return false;
+    if (restoredOut) *restoredOut = std::move(restored);
     return true;
 }
 

@@ -62,11 +62,24 @@ static void TestAuthoritativeCommandAndSnapshotOverUdp() {
     CHECK(wire::ApplyCommand(hostWorld, received));
     CHECK_EQ(hostWorld.TowerCount(), 1);
 
+    // 합류 헤더가 진짜 UDP 왕복에서 채워지는가. 클라이언트가 두 장을 받았다고
+    // 말하는 ack 비트필드는 손으로 만든 값이 아니라 AckWindow 가 접은 것이다.
+    net::AckWindow hostWindow;
+    net::PacketSequencer hostSeq;
+    hostWindow.OnReceived(11);
+    hostWindow.OnReceived(13);                  // 12 는 아직 안 왔다
+    const net::PacketHeader outgoing = hostWindow.Header(hostSeq.Next());
+
     hostWorld.Step(1.0f / 60.0f);
-    host.Send(wire::WriteSnapshot(hostWorld, 3, received.sequence));
+    host.Send(wire::WriteSnapshot(hostWorld, 3, received.sequence, nullptr, outgoing));
     CHECK(ReceiveWithin(client, packet, 500));
     wire::Snapshot replica;
-    CHECK(wire::ReadSnapshot(packet, replica));
+    net::PacketHeader arrived;
+    CHECK(wire::ReadSnapshot(packet, replica, &arrived));
+    CHECK_EQ(arrived.seq, outgoing.seq);
+    CHECK_EQ(arrived.ack, static_cast<uint16_t>(13));
+    CHECK(net::HeaderAcknowledges(arrived, 11));
+    CHECK(!net::HeaderAcknowledges(arrived, 12));   // 구멍은 구멍으로 전달된다
     CHECK_EQ(replica.acknowledgedCommand, 1u);
     CHECK_EQ(replica.towers.size(), 1u);
     CHECK_EQ(replica.towers[0].type, TowerType::Cannon);

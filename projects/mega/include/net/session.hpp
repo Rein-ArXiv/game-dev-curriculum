@@ -84,6 +84,16 @@ public:
     }
     // snippet-end: interp-advance
 
+    // 시계를 매 프레임 갈아 끼울 수 있어야 한다. 지연이 링크 측정값에서 나오면
+    // 그 값은 링크가 변할 때마다 변하고, 생성자에서 한 번 받은 상수로는 그것을
+    // 표현할 수 없다. keep 은 버퍼 용량이라 여기서 바꾸지 않는다 — 용량을
+    // 줄이면 이미 들고 있는 스냅샷을 버려야 하고, 그것은 시계의 일이 아니다.
+    void SetClock(InterpolationClock clock) {
+        clock_.delayTicks = clock.delayTicks;
+        clock_.leadTicks = clock.leadTicks;
+    }
+    const InterpolationClock& Clock() const { return clock_; }
+
     bool     Ready() const { return !buf_.Empty(); }
     uint32_t NewestTick() const { return buf_.NewestTick(); }
     const Snap* Newest() const { return buf_.Newest(); }

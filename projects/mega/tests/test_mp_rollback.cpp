@@ -60,6 +60,45 @@ static void TestLongerDelay()        { RunRollback(8, 200, 999, true); }
 static void TestDelay1()             { RunRollback(1, 150, 7, true); }
 
 // 예측이 우연히 맞으면(원격 입력 불변) 되감기 없이도 정합.
+// 비예측 팔. 같은 확정 입력 열이면 **같은 상태**에 도달하고, 다른 것은 언제
+// 도달하는가뿐이다 — 그 차이를 Stalls 가 센다. 두 팔의 결과가 같다는 이 단언이
+// 없으면 "예측이 싸다"는 수치는 다른 답을 낸 결과일 수 있다.
+static void TestNoPredictionSameStateMoreStalls() {
+    const int P = 2, D = 3, F = 120;
+    auto inputs = MakeInputs(P, F + D + 4, 4242);
+
+    Rollback predicted, stalled;
+    predicted.Init(P, D + 4);
+    stalled.Init(P, D + 4);
+    stalled.SetPrediction(false);
+    CHECK(predicted.Prediction());
+    CHECK(!stalled.Prediction());
+
+    auto feed = [&](Rollback& rb) {
+        for (int f = 0; f < F + D; ++f) {
+            rb.SetInput((uint32_t)f, 0, inputs[f][0], true);
+            if (f - D >= 0) rb.SetInput((uint32_t)(f - D), 1, inputs[f - D][1], true);
+            rb.Tick();
+        }
+    };
+    feed(predicted);
+    feed(stalled);
+
+    // 비예측 팔은 원격이 D 늦으므로 정확히 D 프레임 뒤처진 자리에서 멈춰 있다.
+    CHECK(stalled.Frame() < predicted.Frame());
+    CHECK(stalled.Stalls() > 0);
+    CHECK_EQ(predicted.Stalls(), (uint64_t)0);
+    CHECK_EQ(predicted.Rollbacks() > 0, true);
+    CHECK_EQ(stalled.Rollbacks(), (uint64_t)0);   // 예측하지 않으면 되감을 것도 없다
+
+    // 결과 동일: 비예측 팔이 도달한 프레임까지는 두 팔의 상태가 같아야 한다.
+    const uint32_t common = stalled.Frame();
+    CHECK_EQ(stalled.Checksum(), GroundTruth(inputs, P, (int)common));
+    std::printf("  비예측 팔: frame=%u stalls=%llu / 예측 팔: frame=%u rollbacks=%llu\n",
+                stalled.Frame(), (unsigned long long)stalled.Stalls(),
+                predicted.Frame(), (unsigned long long)predicted.Rollbacks());
+}
+
 static void TestNoMispredict() {
     const int P = 2, F = 100, D = 3;
     std::vector<std::vector<Input>> inputs(F + D + 4, std::vector<Input>(P));
@@ -75,6 +114,7 @@ static void TestNoMispredict() {
 }
 
 static void RunTests() {
+    TestNoPredictionSameStateMoreStalls();
     TestRollbackConverges();
     TestLongerDelay();
     TestDelay1();

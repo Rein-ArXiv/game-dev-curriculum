@@ -21,6 +21,79 @@ endif()
 
 enable_testing()
 
+# ══ 새니타이저(선택) ═════════════════════════════════════════════════
+#
+#   cmake -S . -B build_asan -DMEGA_SANITIZE=address
+#   cmake --build build_asan --config Release
+#   ctest --test-dir build_asan -C Release --output-on-failure
+#
+# 왜 별도 빌드 디렉터리인가. ASan 은 컴파일 옵션이자 런타임이다 — 같은 트리에서
+# 켰다 껐다 하면 주석이 붙은 TU 와 안 붙은 TU 가 섞여 **없는 결함을 보고한다**.
+# 옵션을 캐시 변수로 두고 디렉터리를 나누면 그 혼합이 구조적으로 불가능하다.
+#
+# 왜 기본값이 꺼짐인가. ASan 은 이 저장소의 3000틱 셀프테스트를 몇 배 느리게
+# 만든다. 늘 켜 두면 개발 루프가 느려져 사람이 검사를 덜 돌리고, 그러면 켜 둔
+# 이유가 사라진다. 켜는 것은 CI 와 "지금 이 결함을 쫓는 중" 두 자리다.
+#
+# MSVC 는 `/fsanitize=address` 하나만 지원한다(UBSan 이 없다). 그 사실을 조용히
+# 무시하지 않고 구성 단계에서 실패시킨다 — `-DMEGA_SANITIZE=undefined` 를 주고
+# green 을 받은 사람은 자기가 검사하지 않은 것을 검사했다고 믿게 된다.
+# snippet-begin: sanitize-option
+set(MEGA_SANITIZE "" CACHE STRING
+    "address | undefined | address,undefined (빈 값 = 끔). MSVC 는 address 만.")
+if(MEGA_SANITIZE)
+    if(MSVC)
+        if(NOT MEGA_SANITIZE STREQUAL "address")
+            message(FATAL_ERROR
+                "MSVC 가 지원하는 새니타이저는 address 하나다(요청: ${MEGA_SANITIZE}).\n"
+                "UndefinedBehaviorSanitizer 가 필요하면 clang-cl 또는 GCC/Clang 으로 빌드하라.")
+        endif()
+        # /Zi 는 보고서에 파일·줄을 넣는다. 주소만 나오는 ASan 보고서는 읽는
+        # 데 드는 비용이 커서 무시당하고, 무시당하는 진단은 없는 진단이다.
+        add_compile_options(/fsanitize=address /Zi)
+        # ASan 은 증분 링크와 함께 쓸 수 없다. CMake 의 MSVC 기본 Debug 구성은
+        # /INCREMENTAL 을 켜므로 여기서 꺼 둔다.
+        add_link_options(/INCREMENTAL:NO /DEBUG)
+    else()
+        add_compile_options(-fsanitize=${MEGA_SANITIZE} -fno-omit-frame-pointer -g)
+        add_link_options(-fsanitize=${MEGA_SANITIZE})
+    endif()
+    add_compile_definitions(MEGA_SANITIZER_BUILD=1)
+    message(STATUS "새니타이저 빌드: ${MEGA_SANITIZE}")
+    # snippet-end: sanitize-option
+
+    # MSVC 의 ASan 은 정적이 아니라 DLL 이다. 그 DLL 은 컴파일러 옆에 있고 보통
+    # 개발자 프롬프트의 PATH 에만 있으므로, 평범한 셸이나 CTest 에서 실행하면
+    # 모든 실행 파일이 0xC0000135(DLL not found)로 죽는다. **테스트가 하나도
+    # 돌지 않았는데 ctest 는 전부 실패로 보고**하는 상태라, 원인을 찾는 데
+    # 드는 시간이 통째로 낭비된다. 실행 파일 옆에 복사해 그 상태를 없앤다.
+    # snippet-begin: asan-runtime
+    if(MSVC)
+        get_filename_component(MEGA_MSVC_BIN_DIR ${CMAKE_CXX_COMPILER} DIRECTORY)
+        find_file(MEGA_ASAN_RUNTIME_DLL
+                  NAMES clang_rt.asan_dynamic-x86_64.dll clang_rt.asan_dynamic-i386.dll
+                  HINTS ${MEGA_MSVC_BIN_DIR}
+                  NO_DEFAULT_PATH)
+        if(MEGA_ASAN_RUNTIME_DLL)
+            file(COPY ${MEGA_ASAN_RUNTIME_DLL}
+                 DESTINATION ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+            if(CMAKE_CONFIGURATION_TYPES)
+                foreach(cfg ${CMAKE_CONFIGURATION_TYPES})
+                    file(COPY ${MEGA_ASAN_RUNTIME_DLL}
+                         DESTINATION ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${cfg})
+                endforeach()
+            endif()
+            message(STATUS "ASan 런타임 복사: ${MEGA_ASAN_RUNTIME_DLL}")
+        else()
+            message(WARNING
+                "ASan 런타임 DLL 을 ${MEGA_MSVC_BIN_DIR} 에서 찾지 못했다.\n"
+                "실행 파일이 0xC0000135 로 죽으면 Visual Studio 의 Developer "
+                "PowerShell 에서 돌리거나 그 DLL 을 PATH 에 넣어라.")
+        endif()
+    endif()
+    # snippet-end: asan-runtime
+endif()
+
 # ══ 계층 규칙 검사(재설계안 A3) ══════════════════════════════════════
 #
 #   games/ 는 OS API(소켓·창·파일·오디오·GPU·신호)를 직접 부를 수 없다.
@@ -288,6 +361,100 @@ add_test(NAME mega_defense_selftest_rig
                  --ab entity_store=ecs --ab boss_render=rig --ab camera=tilted3d)
 set_tests_properties(mega_defense_selftest_rig PROPERTIES TIMEOUT 300)
 
+# G4 가 들여온 팔들. 통행 격자 · 플로우 필드 · 군집 조향 · 은신 인지 · 정예 행동
+# 트리는 기본 팔(pathing=poly · steering=0 · stealth=0 · elite_brain=plain)에서
+# 한 줄도 돌지 않는다. 절차 맵을 함께 켜는 것은 선택이 아니다 — 저작된 무분기
+# 회랑에는 탐색할 분기도, 시야를 막을 내부 벽도 없어 경로와 인지가 표현할 것을
+# 갖지 못한다.
+add_test(NAME mega_defense_selftest_ai
+         COMMAND mega_defense --selftest 25000
+                 --ab map=procgen --ab pathing=flowfield --ab steering=1
+                 --ab stealth=1 --ab elite_brain=bt)
+set_tests_properties(mega_defense_selftest_ai PROPERTIES TIMEOUT 300)
+
+# 같은 축의 **다른 팔**. 위 검사가 도는 것은 필드 팔과 트리 팔뿐이라, A* 경로와
+# 상태 기계 정예는 제품 안에서 한 줄도 돌지 않는다. 두 팔을 다 등록해야 "두
+# 표현이 같은 게임"이라는 판정이 제품 경계 안에서도 성립한다.
+add_test(NAME mega_defense_selftest_ai_astar
+         COMMAND mega_defense --selftest 25000
+                 --ab map=procgen --ab pathing=astar --ab elite_brain=fsm)
+set_tests_properties(mega_defense_selftest_ai_astar PROPERTIES TIMEOUT 300)
+
+# G5·G6 가 들여온 팔들. 셋 다 기본 팔에서는 한 줄도 돌지 않는다.
+#
+#   poly        assets/flags.txt 가 pathing 을 flowfield 로 **강제**하므로, 이제
+#               기본 실행은 필드 팔이다. 명령줄이 그 배정을 이긴다는 것과 폴리라인
+#               팔이 여전히 제품 안에서 도는 것을 이 한 줄이 함께 지킨다.
+#   avatar_gate 건설이 아바타 사거리 안으로 묶이는 팔. 셀프테스트 스크립트가
+#               목표 칸까지 걸어간 뒤에만 클릭하므로, 이 팔이 켜지면 걷는 코드가
+#               제품 안에서 실제로 돈다.
+#   meta        매치 밖 소비(sink). --buy-tier 가 지갑에서 스크랩을 빼 시작 골드
+#               티어를 올리고, 그 값이 다음 판의 balance_.startGold 에 더해진다.
+add_test(NAME mega_defense_selftest_poly
+         COMMAND mega_defense --selftest 25000 --ab pathing=poly)
+set_tests_properties(mega_defense_selftest_poly PROPERTIES TIMEOUT 300)
+
+add_test(NAME mega_defense_selftest_avatar_gate
+         COMMAND mega_defense --selftest 25000 --ab avatar_gate=1)
+set_tests_properties(mega_defense_selftest_avatar_gate PROPERTIES TIMEOUT 300)
+
+add_test(NAME mega_defense_selftest_meta
+         COMMAND mega_defense --selftest 25000 --buy-tier 5)
+set_tests_properties(mega_defense_selftest_meta PROPERTIES TIMEOUT 300)
+
+# ══ G7: 골든 해시 체인 리플레이 ══════════════════════════════════════
+#
+# 지금까지의 결정성 검사는 전부 **한 프로세스 안에서 두 번 돌린** 결과를 비교했다
+# (A/B 두 팔의 상태 해시). 그 방식은 프로세스 경계를 넘는 비결정성 — 시각, 환경
+# 변수, 저장된 프로필, 주소에 좌우되는 순회 — 을 두 팔에 똑같이 넣어 서로 상쇄시킨다.
+#
+# 아래 짝은 그 경계를 넘는다. `--record` 를 돌린 프로세스가 죽은 뒤, **다른
+# 프로세스**가 그 파일의 입력만 가지고 같은 체인을 다시 만든다. 상쇄될 상대가 없다.
+#
+# 짝을 fixture 로 묶는 이유는 순서 때문이다. 기록이 먼저 끝나야 재생이 읽을 파일이
+# 있고, CTest 는 `-j` 로 병렬 실행할 수 있다. FIXTURES_SETUP/REQUIRED 가 그 순서를
+# 강제하고, 기록이 실패하면 재생은 실행되지 않고 NOT RUN 으로 남는다.
+#
+# 세 팔의 성격이 다르다.
+#   solo    1인 서브시뮬. 매 틱 전진하므로 lockstep 재생이 체크섬 전량을 대조한다.
+#   host    2인인데 원격이 없다. 비예측 팔이라 서브시뮬이 **한 번도 전진하지 않고**,
+#           lockstep 도 같은 이유로 멈춘다 — 문지기가 제품 안에서 도는 자리다.
+#   avatar  2인 + 예측. 되감기 기계가 돌고, 없는 원격은 바닥값으로 메워진다.
+set(MEGA_REPLAY_DIR ${CMAKE_CURRENT_BINARY_DIR}/replays)
+file(MAKE_DIRECTORY ${MEGA_REPLAY_DIR})
+
+# port 0 = 솔로(소켓 없음). 재생 쪽에는 --ab 를 넘기지 않는다 — 팔은 파일이
+# 소유하고, 재생 실행 파일은 명령줄 스위치를 만나면 무시하지 않고 거절한다.
+# snippet-begin: replay-pair
+function(mega_add_replay_pair arm ticks port)
+    set(path ${MEGA_REPLAY_DIR}/${arm}.mgrp)
+    set(shared "")
+    if(NOT port EQUAL 0)
+        set(shared --host ${port})
+    endif()
+    add_test(NAME mega_defense_record_${arm}
+             COMMAND mega_defense --selftest ${ticks} --record ${path} ${shared} ${ARGN})
+    set_tests_properties(mega_defense_record_${arm} PROPERTIES
+                         TIMEOUT 300 FIXTURES_SETUP replay_${arm})
+    add_test(NAME mega_defense_replay_${arm}
+             COMMAND mega_defense --verify-replay ${path} ${shared})
+    set_tests_properties(mega_defense_replay_${arm} PROPERTIES
+                         TIMEOUT 300 FIXTURES_REQUIRED replay_${arm})
+endfunction()
+# snippet-end: replay-pair
+
+mega_add_replay_pair(solo 4000 0)
+# 호스트 팔은 UDP 포트를 잡는다. 기록과 재생이 같은 포트를 쓰지만 fixture 가
+# 순서를 강제하므로 겹치지 않고, 두 팔이 서로 다른 포트를 쓰므로 병렬 실행에서도
+# 겹치지 않는다.
+mega_add_replay_pair(host 4000 47821)
+mega_add_replay_pair(avatar 4000 47822 --ab avatar_predict=1 --ab avatar_gate=1)
+
+# 체인·포맷·lockstep 재생의 단위 검사. 제품 프레임 루프를 두 번 돌리므로 실행
+# 파일 옆의 assets/ 가 필요하다(그 디렉터리를 만드는 것은 mega_defense 의 POST_BUILD).
+add_dependencies(test_replay_golden mega_defense)
+set_tests_properties(test_replay_golden PROPERTIES TIMEOUT 180)
+
 # GPU 표시 경로도 ctest 대상이다. 감사 #7·#24 는 README·docs 가 "Vulkan 스왑체인
 # 5프레임 present 를 자동 검증한다"고 적으면서 ctest 에도 CI 에도 그 항목이 없는
 # 상태를 지적했다. 여기서 등록해 그 문장을 사실로 만든다.
@@ -330,6 +497,10 @@ add_dependencies(test_frame_trace mega_defense)
 add_dependencies(test_pose_content mega_defense)
 # 핸들 소유 검사도 실행 파일 옆의 assets/ 로 한 프레임을 실제로 그린다.
 add_dependencies(test_asset_handles mega_defense)
+# 정예 행동 트리도 실행 파일 옆의 assets/ 에서 온다. 이 테스트는 **배포되는
+# 그 파일**을 읽어 조용히 거부되고 있지 않은지까지 확인하므로, 인라인 문자열만
+# 으로는 "저장소의 elite.bt 가 실제로 쓰이는가"에 답할 수 없다.
+add_dependencies(test_elite_content mega_defense)
 # 규모를 올린 A/B 는 실제로 오래 돈다. 매달리지는 않게 상한을 둔다.
 set_tests_properties(test_entity_store_ab PROPERTIES TIMEOUT 180)
 set_tests_properties(test_id_map_ab PROPERTIES TIMEOUT 180)

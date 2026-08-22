@@ -20,6 +20,38 @@ jobs:
       - name: Test (ctest)
         run: ctest --test-dir build -C Release --output-on-failure
 
+  # AddressSanitizer 잡. 위 잡과 **같은 테스트 목록**을 다른 계측으로 다시 돌린다.
+  #
+  # 왜 같은 목록인가. ASan 전용 테스트를 따로 쓰면 그 테스트만 계측되고, 실제로
+  # 결함이 사는 자리 — 3000틱을 도는 셀프테스트, 두 프로세스가 오가는 협동 검사 —
+  # 는 계측되지 않는다. 결함은 새 코드가 아니라 오래 도는 코드에 있다.
+  #
+  # 왜 별도 빌드 디렉터리인가. ASan 은 컴파일 옵션이자 런타임이다. 같은 트리에서
+  # 켰다 껐다 하면 주석이 붙은 TU 와 안 붙은 TU 가 섞여 **없는 결함을 보고한다.**
+  #
+  # 이 잡이 green 이라는 것은 "ASan 이 아무것도 못 찾았다"이지 "메모리 결함이
+  # 없다"가 아니다. ASan 은 **실행된 경로**의 힙 경계·해제 후 사용·스택 경계만
+  # 본다. 돌지 않은 팔은 계측되지 않고, 초기화되지 않은 읽기는 이 도구의 범위
+  # 밖이다(그쪽은 MSan 이고 MSVC 에는 없다).
+  # snippet-begin: asan-job
+  asan-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (CMake, ASan)
+        run: cmake -S . -B build_asan -DMEGA_SANITIZE=address
+
+      - name: Build (ASan)
+        run: cmake --build build_asan --config Release
+
+      # ASan 보고서는 프로세스를 즉시 죽인다(exitcode=1 기본). 타임아웃은
+      # CMakeLists 가 테스트별로 이미 걸어 두었고, ASan 은 그것을 2~4배 늘리므로
+      # --timeout 로 전역 하한을 올려 준다.
+      - name: Test (ctest, ASan)
+        run: ctest --test-dir build_asan -C Release --output-on-failure --timeout 900
+  # snippet-end: asan-job
+
 # Vulkan SDK가 없는 러너에서는 GDI 표시 경로만 빌드된다. CI는 창을 열지 않고
 # mega_defense --selftest와 엔진·게임 테스트를 실행한다.
 #
@@ -28,5 +60,23 @@ jobs:
 # green 은 "GPU 경로가 검증됐다"는 뜻이 아니다 — 그 항목이 Passed로 셌을 때만 그렇다.
 #
 # 이 파일은 저장소 루트가 아니라 projects/mega/ 아래에 있다. GitHub Actions는 루트의
-# .github/workflows/ 만 읽으므로 이 워크플로는 자동 실행되지 않는다. 지금은 위 세
-# 단계가 로컬 재현 절차의 기계 판독 가능한 형태로만 존재한다.
+# .github/workflows/ 만 읽으므로 이 워크플로는 자동 실행되지 않는다. 지금은 위 두 잡이
+# 로컬 재현 절차의 기계 판독 가능한 형태로만 존재한다.
+#
+# 로컬 재현(Windows / Developer PowerShell):
+#
+#   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+#   cmake --build build --config Release
+#   ctest --test-dir build -C Release --output-on-failure
+#
+#   cmake -S . -B build_asan -DMEGA_SANITIZE=address
+#   cmake --build build_asan --config Release
+#   ctest --test-dir build_asan -C Release --output-on-failure --timeout 900
+#
+# 하나만 다시 돌릴 때:
+#
+#   ctest --test-dir build_asan -C Release -R test_replay_golden --output-on-failure
+#   build_asan\bin\Release\mega_defense.exe --selftest 4000
+#
+# ASan 보고서가 주소만 보이고 파일·줄이 안 보이면 llvm-symbolizer 가 PATH 에
+# 없는 것이다. Visual Studio 의 Developer PowerShell 에서 돌리면 해결된다.

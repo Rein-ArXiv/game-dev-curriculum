@@ -103,6 +103,33 @@ static void TestRtt() {
     CHECK(e.Timeout() > e.Rtt());            // 타임아웃 = rtt + 4·jitter
 }
 
+// 위 TestRtt 는 추정기 자체를 가상 표본으로 재고, test_rtt_adaptive 는 가상
+// 시계로 재전송 주기를 잰다. 여기서 남는 질문은 하나다 — **실제 채널 위에서**
+// 표본이 나오는가. 나오지 않으면 추정기는 영원히 fallback 을 돌려주고, 그
+// 상태는 "링크가 빠르다"와 밖에서 구분되지 않는다.
+static void TestRttSamplerOverChannel() {
+    RttSampler sampler(64, 0.1f);
+    AckWindow  remote;
+    PacketSequencer seq;
+
+    double now = 0.0;
+    int fresh = 0;
+    for (int i = 0; i < 40; ++i) {
+        const uint16_t sent = seq.Next();
+        sampler.OnSent(sent, now);
+        now += 12.0;                       // 편도 12ms
+        remote.OnReceived(sent);           // 상대가 받았다
+        now += 12.0;                       // 그 헤더가 돌아오기까지 또 12ms
+        fresh += sampler.OnRemoteHeader(remote.Header(seq.Peek()), now);
+    }
+    CHECK(fresh > 0);                      // ← 표본이 하나도 없으면 여기서 죽는다
+    CHECK(sampler.Ready());
+    CHECK(sampler.Rtt() > 0.0f);
+    CHECK(sampler.Timeout() >= sampler.Rtt());
+    std::printf("  실채널 RTT 표본 %d개 rtt=%.1fms timeout=%.1fms\n",
+                fresh, sampler.Rtt(), sampler.Timeout());
+}
+
 static void RunTests() {
     TestIdeal();
     TestLossy();
@@ -111,6 +138,7 @@ static void RunTests() {
     TestNoDuplicates();
     TestSequenceWrap();
     TestRtt();
+    TestRttSamplerOverChannel();
 }
 
 TEST_MAIN("net_reliable")

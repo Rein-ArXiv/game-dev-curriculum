@@ -154,17 +154,22 @@ accumulator_ += frameSeconds;
 ```cpp
 void PumpHost() {
     net::Bytes packet;
+    net::PacketHeader framing;
     while (network_.Receive(packet)) {
-        if (wire::ReadHello(packet)) {
+        if (wire::ReadHello(packet, &framing)) {
+            // ...
             network_.AcceptLastSender();
             continue;
         }
+        // ...
         wire::Command command;
-        if (!wire::ReadCommand(packet, command)) continue;
+        if (!wire::ReadCommand(packet, command, &framing)) continue;
+        // ...
         remoteCommands_.Accept(command.sequence, command);
     }
     wire::Command command;
     while (remoteCommands_.Poll(command)) {   // 순서대로, 정확히 한 번
+        // ...
         wire::ApplyCommand(world_, command);
         metrics_.GetCounter("remote_commands").Add();
     }
@@ -181,8 +186,18 @@ void PumpHost() {
 ```cpp
 void SendSnapshot() {
     bool truncated = false;
-    net::Bytes snapshot = wire::WriteSnapshot(
-        world_, hostTick_, remoteCommands_.LastDelivered(), &truncated);
+    const uint16_t seq = outgoingSeq_.Next();
+    const net::PacketHeader header = ackWindow_.Header(seq);
+    // ...
+    net::Bytes snapshot =
+        options_.switches.snapshotMode == SnapshotMode::Delta
+            ? wire::WriteSnapshotPacket(world_, hostTick_,
+                                        remoteCommands_.LastDelivered(), header,
+                                        baselines_, seq, &truncated, avatarFrame_,
+                                        AvatarChecksum32())
+            : wire::WriteSnapshot(world_, hostTick_,
+                                  remoteCommands_.LastDelivered(), &truncated, header,
+                                  avatarFrame_, AvatarChecksum32());
     if (snapshot.empty()) return;
     network_.Send(snapshot);
     metrics_.GetCounter("snapshots_sent").Add();
@@ -193,7 +208,7 @@ void SendSnapshot() {
 
 `remoteCommands_.LastDelivered()` 가 **누적 ACK** 다. 스냅샷은 어차피 매 3틱 나가므로, 거기에 "여기까지 순서대로 반영했다"는 정수 하나를 실으면 별도의 ACK 패킷이 필요 없다. 4편에서 스냅샷 고정부에 `acknowledgedCommand` 4바이트를 잡아 둔 것이 이 자리다.
 
-전송 주기는 `hostTick_ % 3 == 0`, 즉 20Hz 다. 60Hz 로 보내면 대역폭이 세 배인데, 클라이언트는 어차피 보간해 그리므로 화면 품질 차이가 거의 없다. 20Hz 는 보간 버퍼가 감당하는 하한(뒤에서 다룬다)과 대역폭 사이의 타협이다.
+전송 주기는 `hostTick_ % 3 == 0`, 즉 20Hz 다. 60Hz 로 보내면 대역폭이 세 배인데, 클라이언트는 어차피 보간해 그리므로 화면 품질 차이가 거의 없다. 20Hz 는 보간 버퍼가 감당하는 하한과 대역폭 사이의 타협이다.
 
 ## 5. 신뢰 채널: 프레이밍을 갖지 않는 두 코어
 
@@ -279,30 +294,43 @@ bool Accept(uint32_t sequence, Payload payload) {
 <!-- snippet: include/game/defense_app.hpp#PumpClient -->
 ```cpp
 void PumpClient(Clock::time_point now, double frameSeconds) {
-    if (now - lastHello_ >= std::chrono::milliseconds(500)) {
+    // ...
+    if (now - lastHello_ >= std::chrono::milliseconds(500) &&
+        (options_.queuePlayerId.empty() || !queueMatchId_.empty())) {
+        const net::PacketHeader header = ackWindow_.Header(outgoingSeq_.Next());
+        // ...
         network_.Send(options_.admissionToken.empty()
-            ? wire::WriteHello()
-            : wire::WriteAdmissionHello(options_.admissionToken));
+            ? wire::WriteHello(header)
+            : wire::WriteAdmissionHello(
+                  options_.admissionToken, header, contentHash_,
+                  platform::OSCode(platform::CurrentOS()),
+                  platform::ArchCode(platform::CurrentArch())));
         lastHello_ = now;
         ++helloPacketsSent_;
     }
+    // ...
+    const int resendMs = AppliedResendMs();
+    // ...
     if (!localCommands_.Empty() &&
-        now - lastResend_ >= std::chrono::milliseconds(100)) {
+        now - lastResend_ >= std::chrono::milliseconds(resendMs)) {
         localCommands_.ForEachUnacked(
             [&](uint32_t sequence, const wire::Command& queued) {
                 wire::Command outgoing = queued;
                 outgoing.sequence = sequence;
-                network_.Send(wire::WriteCommand(outgoing));
+                const net::PacketHeader header = ackWindow_.Header(outgoingSeq_.Next());
+                // ...
+                network_.Send(wire::WriteCommand(outgoing, header));
                 ++commandPacketsSent_;
             });
         lastResend_ = now;
     }
+    // ...
     net::Bytes packet;
     // ...
     while (network_.Receive(packet)) {
         // ...
         wire::Snapshot snapshot;
-        if (!wire::ReadSnapshot(packet, snapshot)) continue;
+        // ...
         const bool truncated = snapshot.truncated;
         if (replicas_.Add(std::move(snapshot))) {
             lastSnapshot_ = now;
@@ -314,6 +342,7 @@ void PumpClient(Clock::time_point now, double frameSeconds) {
     if (newest && newest->acknowledgedCommand > acknowledgedCommand_)
         acknowledgedCommand_ = newest->acknowledgedCommand;
     localCommands_.AckThrough(newest ? newest->acknowledgedCommand : 0);
+    // ...
     replicas_.Advance(frameSeconds * 60.0);
 }
 ```
@@ -538,9 +567,13 @@ inline SelftestReport RunDefenseHeadless(DefenseApp& app, int maxTicks) {
         FrameInput frame;
 
         if (planCursor < plan.size()) {
-            frame.Press(static_cast<int>('1' + (planCursor % 4)));
-            clickAt(frame, map.CellCenter(plan[planCursor].x, plan[planCursor].y));
-            frame.mouseClicked = true;
+            const math::Vec2 spot = map.CellCenter(plan[planCursor].x, plan[planCursor].y);
+            // ...
+            } else {
+                frame.Press(SelftestTowerKey(planCursor, app.Options().switches));
+                clickAt(frame, spot);
+                frame.mouseClicked = true;
+            }
         } else if (!app.View().towers.empty()) {
             // 남는 골드는 강화에 쓴다. 한 틱은 선택(클릭), 다음 틱은 'U'.
             const auto& towers = app.View().towers;
@@ -749,4 +782,4 @@ Total Test time (real) =   1.19 sec
 8. **세대 재앵커링** — 카운터 순환과 첫 스냅샷을 같은 규칙으로 처리한다. 둘 다 "이어지지 않는 새 타임라인"이다.
 9. **클라이언트의 성공 정의** — "이겼는가"가 불가능하므로 "왕복이 일어났는가"로 바꿨다. 관측점 넷과 상태 셋(LINKED/NO-ACK/NO-LINK)이 실패의 방향을 밖에서 읽히게 한다.
 
-현재 상태의 한계. 이 협동은 **플레이어 둘이 서로를 신뢰한다는 전제** 위에 있다. 호스트는 Hello 를 보낸 아무나 상대로 삼고, 누가 접속했는지 묻지 않으며, 정원 개념도 없다. 그리고 호스트가 곧 플레이어이므로 호스트가 나가면 판이 끝난다. 진행도는 로컬 파일 하나에 쌓이는데 그 파일이 쓰기 도중 크래시를 견디는지는 아직 아무도 묻지 않았다. 플레이어 없는 권위 프로세스, 입장 자격 검증, 그리고 크래시를 견디는 정산이 다음 편의 주제다.
+현재 상태의 한계. 이 협동은 **플레이어 둘이 서로를 신뢰한다는 전제** 위에 있다. 호스트는 Hello 를 보낸 아무나 상대로 삼고, 누가 접속했는지 묻지 않으며, 정원 개념도 없다. 그리고 호스트가 곧 플레이어이므로 호스트가 나가면 판이 끝난다. 진행도는 로컬 파일 하나에 쌓이는데 그 파일이 쓰기 도중 크래시를 견디는지는 아직 아무도 묻지 않았다. 플레이어 없는 권위 프로세스도, 입장 자격 검증도, 크래시를 견디는 정산도 아직 없다.

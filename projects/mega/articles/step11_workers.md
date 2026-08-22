@@ -65,6 +65,7 @@ void EnemyAdvanceSystem(float dt) {
     MEGA_PROFILE_SCOPE("sim.enemy_advance");
     const size_t count = enemies_.Size();
     if (count == 0) return;
+    // ...
 
     // 개체별 코어 피해를 따로 받아 둔다. 워커가 coreHp_ 를 직접 깎으면 감산
     // 순서가 실행마다 달라져 부동소수 결과가 갈린다.
@@ -105,6 +106,7 @@ void EnemyAdvanceSystem(float dt) {
 ```cpp
 void TowerFireSystem(float dt) {
     MEGA_PROFILE_SCOPE("sim.tower_fire");
+    // ...
     const size_t towerCount = towers_.size();
     if (towerCount == 0) return;
     // ...
@@ -120,6 +122,7 @@ void TowerFireSystem(float dt) {
     RunChunks(towerCount, [=](size_t begin, size_t end) {
         for (size_t i = begin; i < end; ++i) {
             const Tower& t = towers[i];
+            // ...
             if (t.timer - dt > 0.0f) { targets[i] = -1; continue; }
             // ...
         }
@@ -127,6 +130,7 @@ void TowerFireSystem(float dt) {
 
     for (size_t i = 0; i < towerCount; ++i) {
         Tower& t = towers_[i];
+        // ...
         t.timer -= dt;
         if (t.timer > 0.0f) continue;
         const int best = targets[i];
@@ -137,6 +141,7 @@ void TowerFireSystem(float dt) {
         projectile.speed = 200.0f;
         projectile.damage = t.damage;
         projectile.splash = t.splash;
+        // ...
         projectile.id = nextEntityId_++;
         projectile.targetId = enemies_.Id(static_cast<size_t>(best));
         if (!projs_.Push(projectile)) {

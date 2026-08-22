@@ -193,6 +193,7 @@ bool RecomputeRoute() {
 void RefreshRoute() {
     const std::vector<math::Vec2> route = map_.Path();
     path_.AssignFrom(route.data(), route.size());
+    // ...
     const size_t count = enemies_.Size();
     const size_t length = path_.Size();
     if (length == 0) return;
@@ -334,7 +335,7 @@ struct BlastBrush {
 ```cpp
 int Blast(const math::Vec2& at) {
     if (won_ || lost_ || !mapEnabled_ || !map_.Generated()) return 0;
-    if (gold_ < kBlastCost) return 0;
+    if (gold_ < blastCost_) return 0;
     const math::Vec2 center = map_.Snap(at);
     const BlastBrush brush =
         BlastBrush::Sphere(center, static_cast<float>(map_.CellSize()) * 1.8f);
@@ -342,7 +343,8 @@ int Blast(const math::Vec2& at) {
     const BlastResult result = ApplyBlast(map_, geometry_, brush, switches_.staticQuery,
                                           blastScratch_, &blastOpened_);
     if (result.opened == 0) return 0;
-    gold_ -= kBlastCost;
+    gold_ -= blastCost_;
+    // ...
     for (const DefenseMap::Cell& cell : blastOpened_) {
         if (openedCells_.size() >= kMaxOpenedCells) break;
         openedCells_.push_back(static_cast<uint16_t>(cell.y * map_.Columns() + cell.x));
@@ -414,17 +416,19 @@ if (mapEnabled_ && map_.Generated()) {
 
 <!-- snippet: include/game/defense_protocol.hpp@terrain-packet -->
 ```cpp
-inline net::Bytes WriteTerrain(const std::vector<uint16_t>& cells) {
-    Writer writer(PacketType::Terrain);
+inline net::Bytes WriteTerrain(const std::vector<uint16_t>& cells,
+                               const net::PacketHeader& framing = net::PacketHeader()) {
+    Writer writer(PacketType::Terrain, framing);
     const size_t count = std::min(cells.size(), kMaxTerrainCells);
     writer.U8(static_cast<uint8_t>(count));
     for (size_t i = 0; i < count; ++i) writer.U16(cells[i]);
     return writer.Finish();
 }
 
-inline bool ReadTerrain(const net::Bytes& bytes, std::vector<uint16_t>& cells) {
+inline bool ReadTerrain(const net::Bytes& bytes, std::vector<uint16_t>& cells,
+                        net::PacketHeader* framing = nullptr) {
     Reader reader(bytes);
-    if (!reader.Header(PacketType::Terrain)) return false;
+    if (!reader.Header(PacketType::Terrain, framing)) return false;
     const uint8_t count = reader.U8();
     if (static_cast<size_t>(count) > kMaxTerrainCells) return false;
     std::vector<uint16_t> decoded;
@@ -445,7 +449,7 @@ void MaybeSendTerrain() {
     if (cells.empty()) return;
     const bool grew = cells.size() != sentTerrainCells_;
     if (!grew && hostTick_ - lastTerrainTick_ < 180) return;
-    network_.Send(wire::WriteTerrain(cells));
+    network_.Send(wire::WriteTerrain(cells, ackWindow_.Header(outgoingSeq_.Next())));
     sentTerrainCells_ = cells.size();
     lastTerrainTick_ = hostTick_;
     ++terrainPacketsSent_;

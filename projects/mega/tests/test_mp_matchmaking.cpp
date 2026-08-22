@@ -66,7 +66,34 @@ static void TestTeamOfFour() {
     CHECK_EQ(mm.QueueSize(), (size_t)0);
 }
 
+// 매치에 **이름**이 있어야 입장 토큰과 맞춰 볼 수 있고, 같은 사람이 두 자리를
+// 차지하면 정원과 명단이 동시에 거짓이 된다.
+static void TestMatchIdAndDuplicateEnqueue() {
+    Matchmaker maker;
+    maker.Init(2, 100);
+    CHECK(maker.Enqueue({1, 1000, 0}));
+    CHECK(!maker.Enqueue({1, 1500, 0}));      // 같은 id 는 두 번 줄 서지 못한다
+    CHECK_EQ(maker.QueueSize(), (size_t)1);
+    CHECK(maker.Enqueue({2, 1050, 0}));
+
+    const std::vector<Match> formed = maker.FormMatches(0);
+    CHECK_EQ(formed.size(), (size_t)1);
+    CHECK(!formed[0].id.empty());             // 이름이 비면 장부에 올릴 수 없다
+    CHECK_EQ(formed[0].id.size(), (size_t)15);
+
+    MatchRegistry registry;
+    CHECK(registry.Register(formed[0]));
+    CHECK(registry.Allows(formed[0].id, 1));
+    CHECK(registry.Allows(formed[0].id, 2));
+    CHECK(!registry.Allows(formed[0].id, 3));         // 명단 밖
+    CHECK(!registry.Allows("m-0000-00000000", 1));    // 형성되지 않은 이름
+    CHECK_EQ(registry.Capacity(formed[0].id), (size_t)2);
+    registry.Forget(formed[0].id);
+    CHECK(!registry.Allows(formed[0].id, 1));         // 끝난 매치는 사라진다
+}
+
 static void RunTests() {
+    TestMatchIdAndDuplicateEnqueue();
     TestBasicForm();
     TestOutsideWindowStays();
     TestInsufficientQueue();

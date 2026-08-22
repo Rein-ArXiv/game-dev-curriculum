@@ -7,7 +7,7 @@
 세워야 할 것이 넷이다.
 
 1. **`DefenseMap`** — 격자와 경로. 그리고 텍스트 맵이 *유효한 맵인가*를 판정하는 불변식.
-2. **엔티티와 스펙 표** — 타워 4종, 적 5종. 숫자가 어디 있어야 하는가.
+2. **엔티티와 스펙 표** — 여러 종류의 타워와 적. 숫자가 어디 있어야 하는가.
 3. **`GameWorld::Step`** — 한 틱을 여섯 시스템으로 쪼갠 것. 그 **순서**가 왜 그 순서인가.
 4. **시간** — 실시간 프레임과 시뮬 틱을 분리하는 누적기, 그리고 그 누적기가 죽지 않게 하는 상한.
 
@@ -143,7 +143,7 @@ static bool FromAscii(const std::vector<std::string>& rows, int cellSize,
 
 ## 3. 숫자는 표에 있고 코드에 없다
 
-타워 4종과 적 5종의 차이는 전부 숫자다. 그 숫자를 어디에 둘지가 이 절의 전부다.
+타워 넷과 적 다섯으로 시작한 두 표는 지금 여섯과 여섯이다. 종류의 차이는 그때나 지금이나 전부 숫자다 — 그 숫자를 어디에 둘지가 이 절의 전부고, 표가 둘 늘어나는 동안 그 자리가 바뀌지 않았다는 것이 그 선택의 값이다.
 
 - **타워마다 클래스**: 가상 함수로 사격 동작을 다르게. 기각 — 넷이 전부 "사거리 안 하나를 골라 발사체를 낸다"로 같아서, 다형성이 표현할 차이가 없다.
 - **적마다 절대 스탯**: 웨이브 정의에 종류별 완전한 스탯을 적기. 기각 — 웨이브 파일이 종류 수만큼 길어지고, "탱크는 느리다"는 규칙이 파일마다 반복돼 어긋날 수 있다.
@@ -152,11 +152,13 @@ static bool FromAscii(const std::vector<std::string>& rows, int cellSize,
 <!-- snippet: include/game/game.hpp#TowerSpecFor -->
 ```cpp
 inline TowerSpec TowerSpecFor(TowerType t) {
-    static constexpr std::array<TowerSpec, 4> specs{{
+    static constexpr std::array<TowerSpec, 6> specs{{
         {90,  25, 0.80f,  4,  70},   // Cannon: 고데미지·느림
         {75,   6, 0.12f,  2,  60},   // Gatling: 저데미지·연사
         {70,  14, 0.60f, 16,  90},   // Splash: 광역
         {180, 40, 1.40f,  2, 110},   // Sniper: 장거리·고데미지
+        {85,   4, 0.90f,  6,  80},   // Frost: 피해는 명목뿐, 값은 재우는 것
+        {200,  0, 1.00f,  0,  45},   // Radar: 쓰지 않는다. 은신을 드러낸다
     }};
     size_t index = static_cast<size_t>(t);
     return index < specs.size() ? specs[index] : TowerSpec{80, 10, 0.5f, 4, 60};
@@ -166,15 +168,16 @@ inline TowerSpec TowerSpecFor(TowerType t) {
 <!-- snippet: include/game/entity_store.hpp#EnemyModFor -->
 ```cpp
 inline EnemyMod EnemyModFor(EnemyType t) {
-    static constexpr EnemyMod mods[5] = {
+    static constexpr EnemyMod mods[6] = {
         {1.0f, 1.0f, 1.0f, 1},
         {0.6f, 1.8f, 1.0f, 1},    // Fast: 빠르고 약함
         {3.0f, 0.6f, 2.0f, 3},    // Tank: 튼튼·느림·강타·고보상
         {0.4f, 1.2f, 0.5f, 1},    // Swarm: 다수 약체
         {12.0f, 0.4f, 5.0f, 10},  // Boss: 거대 체력·매우 느림·치명타·대량 보상
+        {0.7f, 1.5f, 1.0f, 2},    // Stalker: 은신·빠름. 조준되지 않는 것이 방어력이다
     };
     size_t index = static_cast<size_t>(t);
-    return index < 5 ? mods[index] : EnemyMod{1, 1, 1, 1};
+    return index < 6 ? mods[index] : EnemyMod{1, 1, 1, 1};
 }
 ```
 
@@ -201,6 +204,7 @@ void Step(float dt) {
     MEGA_PROFILE_SCOPE("sim.step");
     scratch_.Begin();
     SpawnSystem(dt);
+    // ...
     EnemyAdvanceSystem(dt);
     TowerFireSystem(dt);
     ProjectileSystem(dt);
@@ -243,9 +247,10 @@ void SpawnSystem(float dt) {
         e.damage = 10.0f * mod.damageMul;       // 기본 코어 데미지 10 × 배수
         e.type   = w.type;
         e.id     = nextEntityId_++;
-        e.pathIndex = mapEnabled_ && path_.Size() > 1 ? 1 : 0;
+        e.pathIndex = (mapEnabled_ && path_.Size() > 1 && !GridNav()) ? 1 : 0;
         // ...
         enemies_.Push(e);
+        // ...
         ++spawned_;
         spawnTimer_ += w.interval;
     }
@@ -380,6 +385,7 @@ void ProjectileSystem(float dt) {
             ? enemies_.Pos(static_cast<size_t>(tracked)) : p.target;
         const float splash = p.splash;
         const float damage = p.damage;
+        const float stun = p.stun;
 
         size_t hits = 0;
         for (size_t i = 0; i < enemyCount; ++i) {
@@ -391,6 +397,7 @@ void ProjectileSystem(float dt) {
         }
         for (size_t k = 0; k < hits; ++k) {
             const size_t i = candidates[k];
+            // ...
             const float hp = enemies_.Hp(i) - damage;
             enemies_.SetHp(i, hp);
             if (hp <= 0.0f) {
@@ -420,6 +427,7 @@ void ProjectileSystem(float dt) {
 void CleanupSystem() {
     MEGA_PROFILE_SCOPE("sim.cleanup");
     projs_.EndStep();       // 미뤄 둔 발사체 블록이 여기서만 실제로 반납된다
+    // ...
     enemies_.CompactDead();
 }
 ```
@@ -487,16 +495,22 @@ if (options_.mode != RunMode::Client) {
     if (paused_) accumulator_ = 0.0;
     while (!paused_ && accumulator_ >= kDefenseFixedDt && catchUpSteps < 5) {
         if (!world_.Won() && !world_.Lost()) world_.Step(kDefenseFixedDt);
+        // ...
         ++hostTick_;
         accumulator_ -= kDefenseFixedDt;
         ++catchUpSteps;
-        if (options_.mode == RunMode::Host && network_.PeerKnown() && hostTick_ % 3 == 0) {
-            SendSnapshot();
-            MaybeSendTerrain();
+        if (options_.mode == RunMode::Host && network_.PeerKnown()) {
+            // ...
+            if (hostTick_ % 3 == 0) {
+                SendSnapshot();
+                MaybeSendTerrain();
+            }
         }
     }
     if (catchUpSteps == 5 && accumulator_ >= kDefenseFixedDt) accumulator_ = 0.0;
     view_ = CaptureView(world_, hostTick_);
+} else {
+    // ...
 }
 ```
 
@@ -606,4 +620,4 @@ Total Test time (real) =   0.08 sec
 7. **누적기 + 3중 방어** — 입력 클램프 0.25초, 보충 상한 5틱, 초과분 폐기. 정확한 시뮬 시간보다 응답하는 프로그램을 택했다.
 8. **결정성** — 고정 시드 xorshift, 순서 보존 삭제, 순차 루프.
 
-현재 상태의 한계. 이 규칙에 **입력이 닿지 않는다.** `PlaceTowerType` 을 부를 사람이 없고, 웨이브 목록은 호출자가 손으로 만들어 넘겨야 한다. 마우스 클릭 하나가 "어느 셀에 어느 종류를 세운다"로 변환되는 경로, 그리고 그 변환이 지나야 하는 문지기가 다음 편의 주제다.
+현재 상태의 한계. 이 규칙에 **입력이 닿지 않는다.** `PlaceTowerType` 을 부를 사람이 없고, 웨이브 목록은 호출자가 손으로 만들어 넘겨야 한다. 마우스 클릭 하나가 "어느 셀에 어느 종류를 세운다"로 변환되는 경로도, 그 변환이 지나야 하는 문지기도 아직 없다.

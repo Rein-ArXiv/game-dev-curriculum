@@ -21,6 +21,8 @@
 
 #pragma once
 
+#include "live/feature_flag.hpp"
+
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -68,6 +70,13 @@ enum class PathingKind : uint8_t { Polyline, AStar, FlowField };
 // 정예(보스)의 행동 표현. Plain = 코어로 걷기만 한다(스위치 이전의 동작),
 // Fsm = 상태와 타이머로 쓴 같은 행동, Bt = 우선순위 트리로 쓴 같은 행동.
 enum class EliteBrainKind : uint8_t { Plain, Fsm, Bt };
+// 스냅샷을 어떻게 싣는가. Full = 매 장 전체(스위치 이전의 동작), Delta =
+// 클라이언트가 확인해 준 기준선 대비 차분. **두 팔의 디코드 결과는 비트
+// 동일해야 하고**, 다른 것은 바이트 수뿐이다.
+enum class SnapshotMode : uint8_t { Full, Delta };
+// 보간 지연·재전송 주기의 출처. Fixed = 상수 3.0틱/100ms(스위치 이전의 동작),
+// Rtt = net::RttSampler 가 잰 왕복·지터에서 net::AdaptiveTiming 이 계산한 값.
+enum class InterpDelayKind : uint8_t { Fixed, Rtt };
 
 // snippet-begin: switch-table
 struct Switches {
@@ -88,12 +97,38 @@ struct Switches {
     BossRenderKind  bossRender  = BossRenderKind::Sprite;
     PathingKind     pathing     = PathingKind::Polyline;
     EliteBrainKind  eliteBrain  = EliteBrainKind::Plain;
+    SnapshotMode    snapshotMode = SnapshotMode::Full;
+    InterpDelayKind interpDelay  = InterpDelayKind::Fixed;
     bool            steering    = false;  // 격자 방향에 조향을 얹는가
     bool            stealth     = false;  // 은신 규칙(Stalker + 레이더)을 켜는가
+    bool            avatarPredict = false;  // 클라가 자기 아바타를 예측·되감는가
+    bool            avatarGate    = false;  // 건설이 아바타 사거리 안으로 묶이는가
     int             solverIters = 8;      // 잔해 접촉 솔버 속도 반복 횟수
     int             mapSeed     = 7;      // 절차 맵 시드(map=procgen 일 때만 읽는다)
     int             jobs        = 0;      // 워커 수. 0 = 직렬(기준선)
     bool            affinity    = false;  // 워커를 코어에 고정하는가
+
+    // 명시적으로 지정된 스위치 이름(쉼표로 이어 붙인다). 서버가 내려보낸
+    // 플래그가 이것을 덮지 못하게 하는 유일한 장치이고, 그래서 테스트는 언제나
+    // 팔을 이긴다 — 팔을 강제로 고를 수 없으면 A/B 는 검사할 수 없다.
+    std::string explicitNames;
+    bool WasSetExplicitly(std::string_view name) const;
+    // CLI·환경 변수 경로 전용. Set 과 같은 일을 하고 이름을 "명시됨"으로 기록한다.
+    bool SetExplicit(std::string_view name, std::string_view value, std::string* error = nullptr);
+    // 서버가 내려보낸 배정을 적용한다. 명시된 이름은 건드리지 않는다.
+    // 반환값은 실제로 적용된 개수, rejected 에는 모르는 이름·값의 사유가 쌓인다.
+    int ApplyFlags(const live::FlagSet& flags, std::string* rejected = nullptr);
+
+    // 27개 스위치 **전부**를 `ParseList` 가 그대로 되먹일 수 있는 형태로 적는다.
+    // Describe 와 셋이 다르다 — 구분자가 쉼표이고, `map_seed` 가 독립 항목이며,
+    // `explicit=` 꼬리가 없다.
+    //
+    // 왜 전부인가. 리플레이는 팔을 통째로 고정해야 한다. 명시된 것만 적으면
+    // 나머지는 재생 시점의 `assets/flags.txt` 배정을 받게 되고, 그러면 운영자가
+    // 롤아웃 하나를 바꾸는 순간 어제 기록한 리플레이가 오늘 갈린다 — 그 갈림은
+    // 결정성 결함이 아닌데 결정성 게이트가 실패로 보고한다. 전부 적어 두면
+    // `ApplyFlags` 의 `WasSetExplicitly` 가 그 배정을 통째로 막는다.
+    std::string Assignments() const;
 
     // 이름 하나에 값 하나. 모르는 이름이나 허용되지 않은 값이면 false 와 사유.
     bool Set(std::string_view name, std::string_view value, std::string* error = nullptr);
@@ -220,6 +255,30 @@ inline bool Switches::Set(std::string_view name, std::string_view value, std::st
         else return fail("plain|fsm|bt 만 허용");
         return true;
     }
+    if (name == "snapshot_mode") {
+        if (value == "full") snapshotMode = SnapshotMode::Full;
+        else if (value == "delta") snapshotMode = SnapshotMode::Delta;
+        else return fail("full|delta 만 허용");
+        return true;
+    }
+    if (name == "interp_delay") {
+        if (value == "fixed") interpDelay = InterpDelayKind::Fixed;
+        else if (value == "rtt") interpDelay = InterpDelayKind::Rtt;
+        else return fail("fixed|rtt 만 허용");
+        return true;
+    }
+    if (name == "avatar_predict") {
+        if (value == "0") avatarPredict = false;
+        else if (value == "1") avatarPredict = true;
+        else return fail("0|1 만 허용");
+        return true;
+    }
+    if (name == "avatar_gate") {
+        if (value == "0") avatarGate = false;
+        else if (value == "1") avatarGate = true;
+        else return fail("0|1 만 허용");
+        return true;
+    }
     if (name == "steering") {
         if (value == "0") steering = false;
         else if (value == "1") steering = true;
@@ -269,13 +328,55 @@ inline bool Switches::Set(std::string_view name, std::string_view value, std::st
     return false;
 }
 
+inline bool Switches::WasSetExplicitly(std::string_view name) const {
+    size_t begin = 0;
+    while (begin < explicitNames.size()) {
+        size_t comma = explicitNames.find(',', begin);
+        if (comma == std::string::npos) comma = explicitNames.size();
+        if (std::string_view(explicitNames).substr(begin, comma - begin) == name) return true;
+        begin = comma + 1;
+    }
+    return false;
+}
+
+inline bool Switches::SetExplicit(std::string_view name, std::string_view value,
+                                  std::string* error) {
+    if (!Set(name, value, error)) return false;
+    if (!WasSetExplicitly(name)) {
+        if (!explicitNames.empty()) explicitNames += ',';
+        explicitNames.append(name);
+    }
+    return true;
+}
+
+// snippet-begin: flag-source
+inline int Switches::ApplyFlags(const live::FlagSet& flags, std::string* rejected) {
+    int applied = 0;
+    for (const live::FlagAssignment& item : flags.All()) {
+        if (WasSetExplicitly(item.name)) continue;   // CLI·환경 변수가 언제나 이긴다
+        std::string reason;
+        if (Set(item.name, item.arm, &reason)) { ++applied; continue; }
+        // 모르는 이름·값은 기본 팔로 남는다. 크래시하지 않는 것이 계약이다 —
+        // 운영자가 내려보낸 오타 하나가 붙어 있는 모든 클라이언트를 죽이면
+        // 그것은 플래그가 아니라 원격 배포다.
+        if (rejected) {
+            if (!rejected->empty()) *rejected += " / ";
+            *rejected += reason;
+        }
+    }
+    return applied;
+}
+// snippet-end: flag-source
+
 inline bool Switches::Parse(std::string_view assignment, std::string* error) {
     const size_t equals = assignment.find('=');
     if (equals == std::string_view::npos || equals == 0 || equals + 1 == assignment.size()) {
         if (error) *error = "형식은 name=value 다: " + std::string(assignment);
         return false;
     }
-    return Set(assignment.substr(0, equals), assignment.substr(equals + 1), error);
+    // SetExplicit 이다. --ab 와 MEGA_AB 는 둘 다 ParseList → Parse 를 지나므로,
+    // 이 한 줄이 두 출처를 모두 "명시됨"으로 표시한다.
+    return SetExplicit(assignment.substr(0, equals), assignment.substr(equals + 1), error);
 }
 
 inline bool Switches::ParseList(std::string_view list, std::string* error) {
@@ -338,6 +439,14 @@ inline std::string Switches::Describe() const {
     out += " elite_brain=";
     out += eliteBrain == EliteBrainKind::Bt ? "bt"
          : eliteBrain == EliteBrainKind::Fsm ? "fsm" : "plain";
+    out += " snapshot_mode=";
+    out += snapshotMode == SnapshotMode::Delta ? "delta" : "full";
+    out += " interp_delay=";
+    out += interpDelay == InterpDelayKind::Rtt ? "rtt" : "fixed";
+    out += " avatar_predict=";
+    out += avatarPredict ? "1" : "0";
+    out += " avatar_gate=";
+    out += avatarGate ? "1" : "0";
     out += " steering=";
     out += steering ? "1" : "0";
     out += " stealth=";
@@ -346,8 +455,54 @@ inline std::string Switches::Describe() const {
     out += " jobs=" + std::to_string(jobs);
     out += " affinity=";
     out += affinity ? "1" : "0";
+    // 어느 출처에서 왔는지가 로그에 남아야 두 팔의 수치에 출처가 생긴다.
+    if (!explicitNames.empty()) out += " explicit=" + explicitNames;
     return out;
 }
+
+// snippet-begin: switch-assignments
+inline std::string Switches::Assignments() const {
+    std::string out;
+    auto put = [&out](const char* name, const std::string& value) {
+        if (!out.empty()) out += ',';
+        out += name;
+        out += '=';
+        out += value;
+    };
+    put("entity_store", entityStore == EntityStoreKind::Ecs ? "ecs"
+                      : entityStore == EntityStoreKind::Soa ? "soa" : "aos");
+    put("id_map", idMap == IdMapKind::Hash ? "hash" : "linear");
+    put("frame_alloc", frameAlloc == FrameAllocKind::Arena ? "arena" : "malloc");
+    put("blob_alloc", blobAlloc == BlobAllocKind::Slab ? "slab" : "malloc");
+    put("body_alloc", bodyAlloc == BodyAllocKind::Pool ? "pool" : "vector");
+    put("worker_lock", workerLock == WorkerLockKind::Futex ? "futex" : "std");
+    put("asset_io", assetIo == AssetIoKind::Async ? "async" : "sync");
+    put("scale", scale == ScaleKind::Large ? "large" : "small");
+    put("map", map == MapSource::Procgen ? "procgen" : "classic");
+    put("map_seed", std::to_string(mapSeed));
+    put("camera", camera == CameraKind::Tilted3d ? "tilted3d" : "ortho2d");
+    put("target_index", targetIndex == TargetIndexKind::Quadtree ? "quadtree"
+                      : targetIndex == TargetIndexKind::Grid     ? "grid" : "linear");
+    put("static_query", staticQuery == StaticQueryKind::Bvh ? "bvh" : "naive");
+    put("broadphase", broadphase == BroadphaseKind::Grid ? "grid" : "naive");
+    put("integrator", integrator == IntegratorKind::Explicit ? "explicit" : "symplectic");
+    put("solver_iters", std::to_string(solverIters));
+    put("boss_render", bossRender == BossRenderKind::Rig ? "rig" : "sprite");
+    put("pathing", pathing == PathingKind::FlowField ? "flowfield"
+                 : pathing == PathingKind::AStar     ? "astar" : "poly");
+    put("elite_brain", eliteBrain == EliteBrainKind::Bt ? "bt"
+                     : eliteBrain == EliteBrainKind::Fsm ? "fsm" : "plain");
+    put("snapshot_mode", snapshotMode == SnapshotMode::Delta ? "delta" : "full");
+    put("interp_delay", interpDelay == InterpDelayKind::Rtt ? "rtt" : "fixed");
+    put("steering", steering ? "1" : "0");
+    put("stealth", stealth ? "1" : "0");
+    put("avatar_predict", avatarPredict ? "1" : "0");
+    put("avatar_gate", avatarGate ? "1" : "0");
+    put("jobs", std::to_string(jobs));
+    put("affinity", affinity ? "1" : "0");
+    return out;
+}
+// snippet-end: switch-assignments
 
 }  // namespace game
 }  // namespace mega

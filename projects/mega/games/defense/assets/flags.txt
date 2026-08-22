@@ -1,0 +1,37 @@
+# 피처 플래그와 A/B 팔. 서버가 입장 승인 때 플레이어별로 확정해 내려보낸다.
+#
+#   variant <이름> <기본팔> [대안팔]... [rollout=0..100] [force=<팔>]
+#   toggle  <이름> on|off [rollout=0..100]
+#
+# 첫 번째 팔이 기본 팔이고, 그것은 정의상 "스위치가 생기기 전의 동작"이다.
+# rollout 은 기본 팔이 아닌 팔로 가는 사용자 비율이며, 롤아웃에 든 사용자는
+# 대안 팔들에 고르게 나뉜다. 같은 플레이어는 언제나 같은 팔을 받는다.
+#
+# force 는 롤아웃을 무시하고 전원을 한 팔로 보낸다. 팔 목록에 없는 이름은
+# 이 파일 단계에서 거부된다 — 런타임 폴백은 서버가 내려보낸 값을 위한 것이지
+# 운영자의 오타를 감춰 주는 장치가 아니다.
+#
+# 명령줄 `--ab name=value` 와 환경 변수 MEGA_AB 는 언제나 이 파일을 이긴다.
+# 테스트가 팔을 강제로 고를 수 없으면 A/B 는 검사할 수 없기 때문이다.
+#
+# 한 줄이라도 거부되면 파일 전체가 버려지고 전원이 기본 팔로 돈다.
+
+# 저장 배치: 절반에게 열 분리 저장을 준다.
+variant entity_store aos soa ecs rollout=50
+
+# 길찾기: 분기 맵이 기본이 된 뒤 전원 플로우 필드로 보낸다.
+variant pathing poly astar flowfield rollout=100 force=flowfield
+
+# 군집 조향: 4분의 1에게만.
+variant steering 0 1 rollout=25
+
+# 은신 규칙: 아직 관측 중이라 10%.
+variant stealth 0 1 rollout=10
+
+# 시점: 절차 맵에서만 의미가 있어 기본 팔을 유지한다.
+variant camera ortho2d tilted3d rollout=0
+
+# 운영 토글.
+toggle scrap_weekend on
+toggle meta_shop on
+toggle boss_rig_preview off rollout=5

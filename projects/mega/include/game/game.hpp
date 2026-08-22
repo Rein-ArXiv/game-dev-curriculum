@@ -576,9 +576,15 @@ public:
     // math/sdf.hpp 의 브러시를 바위 밀도장에서 감산한다. 열린 칸 수를 돌려주고,
     // 하나도 열리지 않으면 골드를 쓰지 않는다.
     // snippet-begin: world-blast
+    // 발파 비용은 이벤트가 바꾼다(live/event_schedule.hpp 의 blast_cost). 상수로
+    // 두면 "발파 무료 주간" 같은 기간 한정 수정자가 표현할 것을 갖지 못한다.
+    // 기본값은 kBlastCost 그대로라, 아무도 부르지 않으면 예전과 같은 게임이다.
+    void SetBlastCost(int cost) { blastCost_ = cost < 0 ? 0 : cost; }
+    int  BlastCost() const { return blastCost_; }
+
     int Blast(const math::Vec2& at) {
         if (won_ || lost_ || !mapEnabled_ || !map_.Generated()) return 0;
-        if (gold_ < kBlastCost) return 0;
+        if (gold_ < blastCost_) return 0;
         const math::Vec2 center = map_.Snap(at);
         const BlastBrush brush =
             BlastBrush::Sphere(center, static_cast<float>(map_.CellSize()) * 1.8f);
@@ -586,7 +592,7 @@ public:
         const BlastResult result = ApplyBlast(map_, geometry_, brush, switches_.staticQuery,
                                               blastScratch_, &blastOpened_);
         if (result.opened == 0) return 0;
-        gold_ -= kBlastCost;
+        gold_ -= blastCost_;
         // 통행 격자는 열린 칸 **전부**를 받는다. 아래 목록은 클라이언트에게
         // 보낼 예산(kMaxOpenedCells)이 있어 잘리지만, 호스트의 격자가 그 예산
         // 때문에 잘리면 발파 뒤의 항법이 사실과 다른 지형 위에서 돈다.
@@ -679,6 +685,9 @@ public:
     const NavField& Field() const { return navField_; }
     // 개체별 AI 상태. 행 번호는 EnemyStore 와 같다(삽입 순서, 압축도 같은 규칙).
     const std::vector<BrainRow>& Brains() const { return brains_; }
+    // 정예 브레인. BrainRow::elite 가 슬롯 번호이고, 그 슬롯의 문맥이 정예가
+    // 지금 무엇을 하는 중인지(후퇴·회복·슬램 충전)를 든다.
+    const EliteBrain& Elites() const { return elites_; }
     // 격자 항법을 쓰는가. 폴리라인 팔에서는 아래 전부가 한 줄도 돌지 않는다.
     bool GridNav() const { return switches_.pathing != PathingKind::Polyline; }
     // 이번 매치에서 잡몹이 타워를 때린 틱 수 / 정예가 슬램을 터뜨린 횟수.
@@ -1621,6 +1630,7 @@ private:
     bool       mapEnabled_ = false;
     float      coreHp_ = 100, coreMaxHp_ = 100;
     int        gold_ = 0;
+    int blastCost_ = kBlastCost;
     std::vector<WaveDef>    waves_;
     int        waveIdx_ = 0, spawned_ = 0;
     float      spawnTimer_ = 0;

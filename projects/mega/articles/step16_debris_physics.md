@@ -79,6 +79,7 @@ void Step(float dt) {
     MEGA_PROFILE_SCOPE("sim.step");
     scratch_.Begin();
     SpawnSystem(dt);
+    // ...
     EnemyAdvanceSystem(dt);
     TowerFireSystem(dt);
     ProjectileSystem(dt);
@@ -116,6 +117,7 @@ void DebrisSystem(float dt) {
         if (!map_.Passable(cell.x, cell.y)) continue;
         if (!map_.WouldRemainConnected(cell.x, cell.y)) continue;
         map_.SetOccupied(cell.x, cell.y, true);
+        // ...
         ++debrisSettled_;
         changed = true;
     }

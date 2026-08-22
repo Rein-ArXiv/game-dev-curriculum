@@ -161,14 +161,20 @@ PPM 로더는 P3 형식, 최대 256x256, 채널 범위, 정확한 픽셀 수를 
 |---|---|---|
 | 제품 경로 | `game`, `net`, `render`, `db`, `io`, `platform` 창·오디오·경로·VFS·표시·신호, `math` vec·scalar·aabb, `physics` shape·rigid_body·narrow phase, `engine` 입력·파티클, `tools` 스크립트, `serialize`, `live` 입장 토큰·지표 | 실제 한 판과 협동 세션에 필요 |
 | OS 경계 | `platform/window`, `platform/audio_device`, `platform/vk_present`, `platform/paths`, `platform/process`, `io/file`, `net/udp_*` | 입력·출력·전송·표시·종료 신호의 유일한 입구 |
-| 참조 구현 | `memory`, `containers`, `ecs`, `jobs`, `sync`, `profiler`, 범용 `ai`, `mp` lockstep·rollback, `physics` 솔버·적분, `math` 회전·공간 분할·노이즈, `engine` 애니메이션·IK·오디오 믹서·리소스, `live` 경제·플래그·패치, `tools` 파이프라인·에디터·절차 생성 | 이 게임의 규모와 규칙이 요구하지 않음. 근거는 축 소유권 문서에 등재하고 독립 테스트로 검증 |
+| 제품 경로(검증 장치) | `mp` golden·lockstep, `profiler` | 결정성 리플레이가 제품 실행 파일 안에서 돈다 — `--record` 가 틱마다 체인을 접고 `--verify-replay` 가 그 조작만으로 같은 체인을 다시 만든다 |
+| 참조 구현 | **없다** | `include/` 114개 헤더 전부가 제품에서 도달한다. 랩 전용 등재는 0행이다 |
 
 축 단위의 판정과 근거는 [`AXIS_OWNERSHIP.md`](AXIS_OWNERSHIP.md), 헤더 단위의 사실은 빌드가
 생성하는 `PRODUCT_LAYERS.md`가 소유한다. 도달 불가인데 `LAB_ONLY.md`에 등재도 되지 않은
 제3의 상태는 빌드 실패다.
 
-타게팅 모드와 경로 추종은 게임 규칙 안의 도메인 AI다. 범용 A*·Flow Field·Behavior
-Tree를 이름만 사용하려고 같은 계산을 반복하지 않는다. 병렬화는 프로파일 근거로만 켠다 —
+타게팅 모드는 게임 규칙 안의 도메인 AI다 — 같은 적 집합에 서로 다른 점수 함수를 적용할 뿐이라
+범용 탐색기가 들어갈 자리가 없다. 반면 경로·조향·결정·인지는 범용 `ai/` 가 소유한다. 절차 맵이 분기
+지형을 만들면서 따라갈 폴리라인이 사라졌고, 규모가 수백~수천으로 오르면서 격자 방향을 그대로 따르는
+개체들이 한 줄로 포개졌으며, 내부 벽이 생기면서 시야 차폐가 처음으로 의미를 갖는다. **이름을
+쓰려고 같은 계산을 두 번 하지 않는다**는 규칙은 그대로이고, 바뀐 것은 그 규칙의 입력인 게임이다.
+
+병렬화는 프로파일 근거로만 켠다 —
 작업 스케줄러는 `--ab jobs=N` 으로 적 전진과 조준 질의를 인덱스 구간으로 나누지만, 적 2048
 규모에서 잰 결과 청크 하나를 워커에 보내고 회수하는 비용이 청크 안의 일보다 커서 기본값은
 직렬(`jobs=0`)이다. 불필요한 모듈 호출로 통합 수를 늘리는 대신 실제 수명·권위·비용 경계가

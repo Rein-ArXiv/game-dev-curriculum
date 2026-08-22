@@ -12,10 +12,14 @@
 #include "game/game.hpp"
 #include "game/map_gen.hpp"
 #include "io/read_file.hpp"
+#include "live/event_schedule.hpp"
+#include "live/feature_flag.hpp"
+#include "tools/asset_pipeline.hpp"
 #include "tools/script.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <iterator>
 #include <sstream>
 #include <string>
@@ -178,6 +182,169 @@ inline std::string LoadEliteTree(const std::string& path, bool* found = nullptr)
 // 왜 스위치가 웨이브를 건드리는가. 은신은 **규칙**이지만 은신하는 적이 하나도
 // 없으면 그 규칙은 관측되지 않는다. 규칙만 켜고 콘텐츠를 그대로 두면
 // `stealth=1` 과 `stealth=0` 이 같은 게임이 되고, A/B 는 비교할 것을 잃는다.
+// snippet-begin: content-hash
+// 파일 바이트의 콘텐츠 해시. FNV-1a 64. 쿡 파이프라인의 입력이자 콘텐츠 정체성의
+// 바닥이다 — 이 값이 원본에서 오지 않으면 버전 해시는 아무것도 증명하지 못한다.
+inline uint64_t ContentHash(const std::string& bytes) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (char c : bytes) { h ^= static_cast<uint8_t>(c); h *= 0x100000001b3ull; }
+    return h;
+}
+// snippet-end: content-hash
+
+// assets/events.txt. balance.script 와 같은 원자적 폴백이다 — 없으면 조용히
+// 기본(이벤트 0개), 있는데 거부되면 기본 + 진단. 절반만 켜진 시즌은 없다.
+inline live::EventSchedule LoadEventSchedule(const std::string& path,
+                                             bool* loadedExternal = nullptr,
+                                             std::string* diagnostic = nullptr) {
+    live::EventSchedule schedule;
+    if (diagnostic) diagnostic->clear();
+    std::string text;
+    if (!io::ReadTextFile(path, text, 64 * 1024)) {
+        if (loadedExternal) *loadedExternal = false;
+        return schedule;
+    }
+    std::string error;
+    if (!live::ParseEventSchedule(text, schedule, &error)) {
+        if (loadedExternal) *loadedExternal = false;
+        if (diagnostic) *diagnostic = path + ": " + error;
+        return live::EventSchedule{};
+    }
+    if (loadedExternal) *loadedExternal = true;
+    return schedule;
+}
+
+// assets/flags.txt. 거부되면 정의 0개 = 전원 기본 팔.
+inline live::FeatureFlags LoadFeatureFlags(const std::string& path,
+                                           bool* loadedExternal = nullptr,
+                                           std::string* diagnostic = nullptr) {
+    live::FeatureFlags flags;
+    if (diagnostic) diagnostic->clear();
+    std::string text;
+    if (!io::ReadTextFile(path, text, 64 * 1024)) {
+        if (loadedExternal) *loadedExternal = false;
+        return flags;
+    }
+    std::string error;
+    if (!live::ParseFlagConfig(text, flags, &error)) {
+        if (loadedExternal) *loadedExternal = false;
+        if (diagnostic) *diagnostic = path + ": " + error;
+        return live::FeatureFlags{};
+    }
+    if (loadedExternal) *loadedExternal = true;
+    return flags;
+}
+
+// snippet-begin: cook-assets
+// 배포되는 원본 전부를 의존 관계와 함께 등록하고 굽는다. 반환값은 콘텐츠 버전
+// 해시이고, 실패(순환·없는 의존)면 0 — 0 은 "발행할 수 없음"의 이름이다.
+inline uint64_t CookAssets(const std::string& assetRoot, tools::AssetPipeline& pipeline,
+                           int* cooked = nullptr, int* registered = nullptr,
+                           std::string* diagnostic = nullptr) {
+    struct Source { const char* name; size_t cap; };
+    static const Source kSources[] = {
+        {"level.txt", 256 * 1024}, {"waves.txt", 64 * 1024},
+        {"balance.script", 64 * 1024}, {"events.txt", 64 * 1024},
+        {"flags.txt", 64 * 1024}, {"boss.pose", 64 * 1024}, {"elite.bt", 16 * 1024},
+        {"core.ppm", 256 * 1024},
+        {"tower_cannon.ppm", 256 * 1024}, {"tower_gatling.ppm", 256 * 1024},
+        {"tower_splash.ppm", 256 * 1024}, {"tower_sniper.ppm", 256 * 1024},
+        {"enemy_normal.ppm", 256 * 1024}, {"enemy_fast.ppm", 256 * 1024},
+        {"enemy_tank.ppm", 256 * 1024},   {"enemy_swarm.ppm", 256 * 1024},
+        {"enemy_boss.ppm", 256 * 1024},
+    };
+    std::vector<std::string> shipped;
+    for (const Source& source : kSources) {
+        std::string bytes;
+        // 없는 파일은 등록하지 않는다. 폴백으로 도는 것은 정상 경로이고,
+        // 배포되지 않은 파일이 버전 해시에 들어가면 그 해시는 거짓말이 된다.
+        if (!io::ReadTextFile(assetRoot + "/" + source.name, bytes, source.cap)) continue;
+        if (!pipeline.Register(source.name, ContentHash(bytes), {})) continue;
+        shipped.emplace_back(source.name);
+    }
+    // 원본이 하나도 없으면 발행할 것이 없다. 배포 목록 하나만으로 해시를 내면
+    // "에셋이 통째로 빠진 배포"가 유효한 콘텐츠 버전이 되고, 그 버전에 대한
+    // 입장 검사는 아무것도 지키지 않는다.
+    if (shipped.empty()) {
+        if (registered) *registered = 0;
+        if (cooked) *cooked = 0;
+        if (diagnostic) *diagnostic = assetRoot + ": 배포된 원본이 하나도 없다";
+        return 0;
+    }
+    // 배포 목록은 실제로 배포된 것 전부에 의존한다. 어느 하나가 바뀌면 이것이
+    // 다시 구워지고, 그 결과가 콘텐츠 버전이 된다.
+    pipeline.Register("pack.index", 0x9A5Eull, shipped);
+    if (registered) *registered = static_cast<int>(shipped.size());
+    int rebuilt = 0;
+    std::string error;
+    const tools::CookStatus status = pipeline.Cook(&rebuilt, nullptr, &error);
+    if (cooked) *cooked = rebuilt;
+    if (status != tools::CookStatus::Ok) {
+        if (diagnostic) *diagnostic = std::string(tools::CookStatusName(status)) + ": " + error;
+        return 0;
+    }
+    if (diagnostic) diagnostic->clear();
+    return pipeline.ContentVersionHash();
+}
+// snippet-end: cook-assets
+
+// 활성 이벤트의 수정자를 밸런스에 얹는다. balance.script 가 적용된 뒤,
+// ApplyBalance 가 웨이브에 곱해지기 **전**에 부른다.
+inline BalanceConfig ApplyEventModifiers(BalanceConfig balance,
+                                         const live::EventModifiers& mods) {
+    balance.startGold += mods.bonusStartGold;
+    if (balance.startGold < 0) balance.startGold = 0;
+    balance.enemyHpMultiplier *= mods.enemyHpMultiplier;
+    balance.rewardMultiplier  *= mods.rewardMultiplier;
+    return balance;
+}
+
+// 보스 러시: 보스 웨이브의 개체 수를 늘린다. 웨이브 표를 두 벌 두지 않기 위한
+// 변환이고, ApplyStealth 와 같은 자리에 선다.
+inline std::vector<game::WaveDef> ApplyBossRush(std::vector<game::WaveDef> waves,
+                                                bool enabled) {
+    if (!enabled) return waves;
+    for (game::WaveDef& wave : waves)
+        if (wave.type == game::EnemyType::Boss) wave.count *= 3;
+    return waves;
+}
+
+// snippet-begin: flag-split
+// 배정에는 두 종류가 섞여 있다: A/B 스위치 이름과 운영 토글. 토글을 스위치 표에
+// 그대로 먹이면 전부 "알 수 없는 이름"으로 거절되고, 그 거절 로그가 매 실행마다
+// 나오면 진짜 오타가 그 안에 묻힌다. 규칙은 한 곳에만 있어야 한다 — 클라이언트와
+// 전용 서버가 서로 다른 규칙을 쓰면 같은 배정이 두 프로세스에서 다른 팔이 된다.
+struct LiveToggles {
+    bool metaShop = false;      // 매치 밖 상점을 여는가
+    bool scrapEvent = true;     // 이벤트의 스크랩 배율을 적용하는가
+};
+
+inline live::FlagSet SplitLiveToggles(const live::FlagSet& assigned, LiveToggles& toggles) {
+    live::FlagSet forSwitches;
+    for (const live::FlagAssignment& item : assigned.All()) {
+        const bool on = item.arm == "on" || item.arm == "1";
+        if (item.name == "meta_shop") { toggles.metaShop = on; continue; }
+        if (item.name == "scrap_weekend") { toggles.scrapEvent = on; continue; }
+        if (item.name == "boss_rig_preview") {
+            // 표시 전용 팔이다. 꺼진 상태가 기본 팔(sprite)이므로 아무것도 배정하지
+            // 않는다 — 기본값을 다시 적으면 그 이름이 "명시됨"처럼 보인다.
+            if (on) forSwitches.Assign("boss_render", "rig");
+            continue;
+        }
+        forSwitches.Assign(item.name, item.arm);
+    }
+    return forSwitches;
+}
+// snippet-end: flag-split
+
+// 매치 단위 버킷 키. 플래그 배정이 플레이어마다 다르면 한 매치 안에서 두 사람이
+// 서로 다른 **권위** 팔을 요구하게 된다. 매치가 단위여야 한다.
+inline uint32_t MatchBucketId(const std::string& matchId) {
+    uint32_t h = 2166136261u;
+    for (char c : matchId) { h ^= static_cast<uint8_t>(c); h *= 16777619u; }
+    return h;
+}
+
 inline std::vector<game::WaveDef> ApplyStealth(std::vector<game::WaveDef> waves,
                                                const game::Switches& switches) {
     if (!switches.stealth) return waves;

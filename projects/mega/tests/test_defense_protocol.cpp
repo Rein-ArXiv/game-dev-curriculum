@@ -64,8 +64,11 @@ static void TestSnapshotRoundTripAndBounds() {
 // 자체를 자극하려면 본문까지 개수에 맞춰 채워야 한다.
 static net::Bytes ForgeSnapshot(size_t towers, size_t enemies, size_t projectiles) {
     Writer writer(PacketType::Snapshot);
+    writer.U8(kSnapshotFull);         // 전체/차분 플래그(v3)
     writer.U32(1);                    // tick
     writer.U32(0);                    // acknowledgedCommand
+    writer.U32(0);                    // avatarFrame(v4)
+    writer.U32(0);                    // avatarChecksum(v4)
     writer.U32(100);                  // gold
     writer.U16(EncodeHp(50.0f));      // coreHp
     writer.U16(EncodeHp(100.0f));     // coreMaxHp
@@ -104,7 +107,7 @@ static void TestEntityCaps() {
     CHECK(GameWorld::kMaxTowers == static_cast<size_t>(16));   // 게임플레이 상한
     CHECK(kSnapshotMaxTowers == static_cast<size_t>(16));      // 프로토콜 상한
     CHECK(kSnapshotMaxEnemies == static_cast<size_t>(64));
-    CHECK(kSnapshotMaxProjectiles == static_cast<size_t>(20));
+    CHECK(kSnapshotMaxProjectiles == static_cast<size_t>(18));
 
     // 게임플레이 상한이 실제로 작동한다: 골드도 빈 셀도 남았는데 17번째가 안 선다.
     const DefenseMap map = DefenseMap::CreateDefault();
@@ -135,15 +138,15 @@ static void TestEntityCaps() {
     // 디코더의 상한이 인코더의 상한과 정확히 같은 자리에 있는가. 세 컬렉션을
     // 가득 채운 패킷은 예산 안에 들어가고 받아들여져야 하며, 어느 하나라도
     // 한 개 초과하면 거부돼야 한다.
-    const net::Bytes atCap = ForgeSnapshot(16, 64, 20);
+    const net::Bytes atCap = ForgeSnapshot(16, 64, 18);
     CHECK(atCap.size() <= kMaxPacketBytes);
     CHECK(ReadSnapshot(atCap, decoded));
     CHECK_EQ(decoded.towers.size(), static_cast<size_t>(16));
     CHECK_EQ(decoded.enemies.size(), static_cast<size_t>(64));
-    CHECK_EQ(decoded.projectiles.size(), static_cast<size_t>(20));
-    CHECK(!ReadSnapshot(ForgeSnapshot(17, 64, 20), decoded));
-    CHECK(!ReadSnapshot(ForgeSnapshot(16, 65, 20), decoded));
-    CHECK(!ReadSnapshot(ForgeSnapshot(16, 64, 21), decoded));
+    CHECK_EQ(decoded.projectiles.size(), static_cast<size_t>(18));
+    CHECK(!ReadSnapshot(ForgeSnapshot(17, 64, 18), decoded));
+    CHECK(!ReadSnapshot(ForgeSnapshot(16, 65, 18), decoded));
+    CHECK(!ReadSnapshot(ForgeSnapshot(16, 64, 19), decoded));
 }
 
 // 상한을 넘는 월드는 조용히 잘리면 안 된다 — 잘렸다는 사실이 보내는 쪽과 받는 쪽
@@ -197,7 +200,11 @@ static void TestSnapshotTruncationSignalsLoss() {
 // 자극조차 되지 않는다 — 기존 pop_back() 변형이 정확히 그 상태였고, 그래서
 // Reader::Done() 은 이 파일에서 한 번도 검증된 적이 없었다.
 static void ResealPayloadLength(net::Bytes& bytes) {
-    const uint16_t payload = static_cast<uint16_t>(bytes.size() - 8);
+    // 8 이 아니라 16 이다. 합류 헤더(seq·ack·ackBits 8바이트)가 들어오면서 게임
+    // 헤더가 16바이트가 됐다. 이 수가 옛 값으로 남으면 아래 '길이는 맞지만 남는
+    // 바이트가 있다' 쪽 단언이 헤더 길이 검사에 먼저 걸려, 통과는 하지만
+    // Reader::Done() 은 다시 한 번도 검증되지 않는다.
+    const uint16_t payload = static_cast<uint16_t>(bytes.size() - 16);
     bytes[6] = static_cast<uint8_t>(payload);
     bytes[7] = static_cast<uint8_t>(payload >> 8);
 }
@@ -373,6 +380,130 @@ static void TestHelloValidation() {
     CHECK(WriteAdmissionHello("").empty());
 }
 
+// 와이어 포맷을 바꾸는 변경에는 반드시 짝이 있어야 한다: 옛 바이트가 거부되는가.
+// 그리고 새로 실린 필드가 **실제로 왕복하는가** — 자리만 잡고 값이 버려지면
+// ack 비트필드는 언제나 0 이고, 그 상태는 "아무것도 못 받았다"와 구분되지 않는다.
+static void TestVersionAndFramingRejected() {
+    net::PacketHeader framing;
+    framing.seq = 7; framing.ack = 5; framing.ackBits = 0x3;
+    net::Bytes hello = WriteHello(framing);
+    net::PacketHeader decoded;
+    CHECK(ReadHello(hello, &decoded));
+    CHECK_EQ(decoded.seq, static_cast<uint16_t>(7));
+    CHECK_EQ(decoded.ack, static_cast<uint16_t>(5));
+    CHECK_EQ(decoded.ackBits, 0x3u);
+
+    hello[4] = kVersion - 1;                 // 옛 버전
+    CHECK(!ReadHello(hello, &decoded));
+    hello[4] = kVersion + 1;                 // 미래 버전
+    CHECK(!ReadHello(hello, &decoded));
+    hello[4] = kVersion;
+    CHECK(ReadHello(hello, &decoded));
+
+    net::Bytes shortPacket(15, 0);           // 합류 헤더보다 짧다
+    CHECK(!ReadHello(shortPacket, &decoded));
+
+    // 프레이밍은 모든 패킷 종류를 지난다. 하나라도 자리를 안 잡으면 그 종류만
+    // 시퀀스 공간 밖에 남는다.
+    Command command;
+    command.sequence = 11;
+    command.type = CommandType::Upgrade;
+    command.x = EncodePosition(30.0f);
+    command.y = EncodePosition(30.0f);
+    net::PacketHeader other;
+    other.seq = 4242; other.ack = 4200; other.ackBits = 0xF0F0F0F0u;
+    Command back;
+    net::PacketHeader gotten;
+    CHECK(ReadCommand(WriteCommand(command, other), back, &gotten));
+    CHECK_EQ(gotten.seq, static_cast<uint16_t>(4242));
+    CHECK_EQ(gotten.ackBits, 0xF0F0F0F0u);
+
+    std::vector<uint16_t> cells{3, 9, 27}, out;
+    gotten = net::PacketHeader{};
+    CHECK(ReadTerrain(WriteTerrain(cells, other), out, &gotten));
+    CHECK_EQ(out.size(), static_cast<size_t>(3));
+    CHECK_EQ(gotten.ack, static_cast<uint16_t>(4200));
+}
+
+// 입장 승인 패킷. 서버가 승인과 함께 내려보내는 넷(콘텐츠 정체성 · 서버 플랫폼 ·
+// 매치 시작 시각 · 확정된 플래그 배정)이 왕복하고, 상한 밖은 거부되는가.
+static void TestAdmissionGrantRoundTrip() {
+    AdmissionGrant grant;
+    grant.contentVersion = 102;
+    grant.contentHash = 0x0123456789ABCDEFull;
+    grant.serverOs = static_cast<uint8_t>(mega::platform::OS::Linux);
+    grant.serverArch = static_cast<uint8_t>(mega::platform::Arch::ARM64);
+    grant.matchStartUnix = 1767398400;
+    grant.flags = "entity_store=soa;pathing=flowfield";
+
+    net::PacketHeader framing;
+    framing.seq = 900; framing.ack = 899; framing.ackBits = 0xFFu;
+    const net::Bytes bytes = WriteAdmissionGrant(grant, framing);
+    CHECK(!bytes.empty());
+    CHECK(bytes.size() <= kAdmissionGrantMaxBytes);
+
+    AdmissionGrant decoded;
+    net::PacketHeader arrived;
+    CHECK(ReadAdmissionGrant(bytes, decoded, &arrived));
+    CHECK_EQ(decoded.contentVersion, 102u);
+    CHECK_EQ(decoded.contentHash, 0x0123456789ABCDEFull);
+    CHECK_EQ(decoded.serverOs, static_cast<uint8_t>(mega::platform::OS::Linux));
+    CHECK_EQ(decoded.serverArch, static_cast<uint8_t>(mega::platform::Arch::ARM64));
+    CHECK_EQ(decoded.matchStartUnix, (int64_t)1767398400);
+    CHECK_EQ(decoded.flags, grant.flags);
+    CHECK_EQ(arrived.seq, (uint16_t)900);
+
+    // 빈 배정도 정상이다. 정의가 하나도 없는 서버가 정상 상태이기 때문이다.
+    AdmissionGrant empty;
+    empty.contentVersion = 1;
+    AdmissionGrant back;
+    CHECK(ReadAdmissionGrant(WriteAdmissionGrant(empty), back));
+    CHECK(back.flags.empty());
+
+    // 상한 초과 배정은 인코더가 만들지 않는다.
+    AdmissionGrant oversized = grant;
+    oversized.flags.assign(mega::live::kFlagWireMax + 1, 'a');
+    CHECK(WriteAdmissionGrant(oversized).empty());
+
+    // 문법이 깨진 배정은 **디코더**가 막는다. 여기서 통과시키면 잘못된 문자열이
+    // 스위치 표까지 흘러가 "모르는 이름"과 구분되지 않는다.
+    AdmissionGrant malformed = grant;
+    malformed.flags = "entity_store==soa";
+    AdmissionGrant sink;
+    CHECK(!ReadAdmissionGrant(WriteAdmissionGrant(malformed), sink));
+
+    // 잘라내기 거부.
+    net::Bytes truncated = bytes;
+    truncated.pop_back();
+    CHECK(!ReadAdmissionGrant(truncated, sink));
+}
+
+// 입장 인사가 실어 오는 콘텐츠 해시와 플랫폼 코드. 헬로 페이로드가 10바이트
+// 늘었으므로 잘라내기 케이스도 새 길이 위에서 다시 성립해야 한다.
+static void TestAdmissionHelloCarriesIdentity() {
+    const std::string token = "header.signature";
+    const net::Bytes bytes = WriteAdmissionHello(
+        token, {}, 0xFEEDFACECAFEBEEFull,
+        static_cast<uint8_t>(mega::platform::OS::Windows),
+        static_cast<uint8_t>(mega::platform::Arch::X86_64));
+    std::string decodedToken;
+    AdmissionHelloDetail detail;
+    CHECK(ReadAdmissionHello(bytes, decodedToken, nullptr, &detail));
+    CHECK_EQ(decodedToken, token);
+    CHECK_EQ(detail.contentHash, 0xFEEDFACECAFEBEEFull);
+    CHECK_EQ(detail.osCode, static_cast<uint8_t>(mega::platform::OS::Windows));
+    CHECK_EQ(detail.archCode, static_cast<uint8_t>(mega::platform::Arch::X86_64));
+
+    // 옛 클라이언트(정체성 없이 보내는 쪽)의 바이트는 10바이트 짧다 — 그 길이는
+    // 이제 유효하지 않다. 버전 바이트가 이미 막지만, 길이도 함께 막아야
+    // 같은 버전 안에서의 절단이 통과하지 못한다.
+    net::Bytes shortened(bytes.begin(), bytes.end() - 10);
+    shortened[6] = static_cast<uint8_t>(shortened.size() - 16);
+    shortened[7] = static_cast<uint8_t>((shortened.size() - 16) >> 8);
+    std::string sink;
+    CHECK(!ReadAdmissionHello(shortened, sink));
+}
+
 static void TestSequenceWrapComparison() {
     constexpr uint32_t max = std::numeric_limits<uint32_t>::max();
     CHECK(net::SequenceMoreRecent(0, max));
@@ -392,6 +523,9 @@ static void RunTests() {
     TestOutOfRangeCommandCannotBurnSequence();
     TestSurplusBytesRejected();
     TestHelloValidation();
+    TestVersionAndFramingRejected();
+    TestAdmissionGrantRoundTrip();
+    TestAdmissionHelloCarriesIdentity();
     TestSequenceWrapComparison();
 }
 
