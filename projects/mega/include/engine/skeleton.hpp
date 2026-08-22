@@ -19,11 +19,21 @@ using Pose = std::vector<math::Transform>;   // 본별 로컬 변환
 class Skeleton {
 public:
     // 본 추가. parent=-1 이면 루트. 바인드 포즈 로컬 변환을 함께 준다.
+    //
+    // 부모는 **자기보다 앞선 인덱스**여야 한다. ComputeWorld 가 한 번의 전방
+    // 순회로 world[p] 를 읽기 때문이고, 그 전제가 깨지면 아직 계산되지 않은
+    // (기본 구성인) 부모 변환으로 자식이 합성돼 조용히 틀린 포즈가 나온다.
+    // 위상 정렬을 "가정"으로 두는 대신 여기서 거절한다 — 거절된 본은 추가되지
+    // 않고 -1 이 돌아온다.
+    // snippet-begin: add-bone
     int AddBone(int parent, const math::Transform& bindLocal) {
+        if (parent >= (int)parents_.size()) return -1;   // 아직 없는 본을 부모로
+        if (parent < -1) return -1;
         parents_.push_back(parent);
         bind_.push_back(bindLocal);
         return (int)parents_.size() - 1;
     }
+    // snippet-end: add-bone
 
     int  BoneCount() const { return (int)parents_.size(); }
     int  Parent(int i) const { return parents_[i]; }

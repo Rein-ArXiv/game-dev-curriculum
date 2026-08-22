@@ -1,0 +1,14 @@
+selector
+  sequence
+    condition hurt
+    action arm_retreat
+    action retreat
+    action heal
+  end
+  sequence
+    condition slam_ready
+    action arm_slam
+    action slam
+  end
+  action advance
+end

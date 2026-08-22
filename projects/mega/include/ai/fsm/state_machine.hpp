@@ -37,6 +37,17 @@ public:
         if (Valid() && states_[current_].onEnter) states_[current_].onEnter(ctx);
     }
 
+    // 상태를 **onEnter 없이** 되돌려 놓는다. 기계 하나를 여러 개체가 돌려 쓰기
+    // 위한 것이다(flyweight): 상태·전이는 개체 수와 무관하게 한 벌이면 되지만
+    // `current_` 는 개체마다 다르다. 개체가 자기 상태를 들고 있다가 Update 직전에
+    // 여기로 밀어 넣고, Update 뒤에 Current() 를 도로 가져간다.
+    //
+    // Start 로는 대신할 수 없다 — Start 는 onEnter 를 부르므로, 매 틱 밀어 넣으면
+    // 진입 효과가 매 틱 재실행돼 "전이할 때 정확히 한 번"이라는 계약이 깨진다.
+    // snippet-begin: fsm-resume
+    void Resume(int state) { current_ = state; }
+    // snippet-end: fsm-resume
+
     void Update(Ctx& ctx) {
         for (const Transition& t : transitions_) {
             if ((t.from == -1 || t.from == current_) && t.to != current_) {

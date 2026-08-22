@@ -246,7 +246,7 @@ $\vec m = \vec c_A - \vec c_B$ 로 두면 $\lVert \vec m + t\vec\Delta \rVert = 
 
 ### 3.4 쓸고 간 볼륨의 지원 함수
 
-교차 *여부* 만 필요하다면 시간을 빼고 볼 수도 있다. $A$ 가 $[0,1]$ 동안 쓸고 간 영역은 $A$ 와 선분 $\{t\vec\Delta : t \in [0,1]\}$ 의 Minkowski 합이고, 합의 지원 함수는 지원 함수의 합이다. 선분의 지원 함수가 $\max(0, \vec d \cdot \vec\Delta)$ 이므로
+교차 *여부* 만 필요하다면 시간을 빼고 볼 수도 있다. $A$ 가 $[0,1]$ 동안 쓸고 간 영역은 $A$ 와 선분 $\{t\vec\Delta : t \in [0,1]\}$ 의 Minkowski 합이고, 합의 지원점은 지원점의 합이다. 선분의 지원점이 $\vec d \cdot \vec\Delta > 0$ 이면 $\vec\Delta$, 아니면 $\vec 0$ 이므로
 
 ```cpp
 // A 가 변위 delta 를 따라 쓸고 간 볼륨의 지원 함수.
@@ -365,11 +365,11 @@ $$
 | 접근각 | $\cos\theta$ | $\tau=0.25$mm | $\tau=0.025$mm | $\tau=0.0025$mm | 10배당 증가(예측) |
 |---:|---:|---:|---:|---:|---:|
 | 0° | 1.000 | 2 | 2 | 2 | — |
-| 30° | 0.866 | 5 | 6 | 7 | 1.2 |
+| 30° | 0.866 | 5 | 6 | 7 | 1.1 |
 | 60° | 0.500 | 10 | 14 | 17 | 3.3 |
 | 84.3° | 0.100 | 34 | 56 | 78 | 21.9 |
-| 89.4° | 0.010 | 60 | 173 | 370 | 230.3 |
-| 89.9° | 0.001 | 61 | 197 | 619 | 2197.7 |
+| 89.4° | 0.010 | 60 | 173 | 370 | 229.1 |
+| 89.9° | 0.001 | 61 | 197 | 619 | 2301.4 |
 
 84.3° 행의 실측 증가분(22, 22)이 예측 21.9 와 맞는다. 극단 각에서 실측이 예측보다 작은 것은 초기 단계가 아직 등비 구간에 들어가지 않았기 때문이다 — 멀리 있을 때는 접근이 거의 정면이라 $q$ 가 작고, 접촉이 가까워질수록 각이 벌어져 $q$ 가 커진다. 등비 법칙은 *꼬리* 를 지배한다.
 
@@ -415,7 +415,7 @@ ShapeCastHit ConservativeAdvance(const Motion& a, const Motion& b,
     DistanceResult dr = d0;
     for (int iter = 0; iter < cfg.maxIter; ++iter) {
         if (dr.distance <= cfg.target + cfg.tolerance) {
-            return {CastStatus::Hit, t, dr.pointOnB, dr.normal, dr.distance};
+            return {CastStatus::Hit, t, dr.pointOnB, -dr.normal, dr.distance};
         }
         t += (dr.distance - cfg.target) / mu;    // 항상 tau/mu 이상 전진한다
         if (t >= 1.0f) return {CastStatus::Miss, 1.0f};
@@ -568,6 +568,11 @@ bool ConvexRayCast(const Convex& C, vec3 delta, float& tOut, vec3& normalOut) {
         W.ReduceToSupporting();
     }
     tOut = std::clamp(t, 0.0f, 1.0f);
+    if (length_squared(n) < kEpsSq) {       // 전진이 한 번도 없었다 = 원점이 처음부터 C 안
+        tOut = 0.0f;
+        normalOut = vec3(0.0f);
+        return true;                        // 호출부가 2.4절 정책(InitialOverlap)으로 처리
+    }
     normalOut = normalize(n);
     return true;
 }

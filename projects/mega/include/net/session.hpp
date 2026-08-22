@@ -73,6 +73,7 @@ public:
     // 실시간 경과분(틱 단위)만큼 시계를 전진시키고 보간 가능한 창으로 클램프한다.
     // 위쪽(최신에 너무 붙음)을 먼저 막고, 아래쪽(버퍼에서 밀려남)을 나중에 막는다 —
     // 버퍼에 스냅샷이 하나뿐이면 아래쪽이 이겨 그 하나를 그대로 보게 된다.
+    // snippet-begin: interp-advance
     void Advance(double ticks) {
         if (buf_.Empty()) return;
         renderTick_ += ticks;
@@ -81,6 +82,7 @@ public:
         const double floor = static_cast<double>(buf_.OldestTick());
         if (renderTick_ < floor) renderTick_ = floor;
     }
+    // snippet-end: interp-advance
 
     bool     Ready() const { return !buf_.Empty(); }
     uint32_t NewestTick() const { return buf_.NewestTick(); }

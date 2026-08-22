@@ -18,6 +18,12 @@ struct RigidBody2D {
     math::Vec2 velocity{0, 0};
     float      angularVel = 0;
 
+    // Explicit Euler 팔이 쓰는 "갱신 전 속도". Symplectic 팔은 읽지 않는다.
+    // 두 적분기를 같은 파이프라인 자리(힘→솔버→위치)에 꽂으려면 위치 갱신이
+    // *어느 시점의 속도*를 쓰는지가 유일한 차이여야 하고, 그 시점을 여기 남긴다.
+    math::Vec2 prevVelocity{0, 0};
+    float      prevAngularVel = 0;
+
     float invMass    = 0;        // 0 = 정적
     float invInertia = 0;
     float restitution = 0.2f;    // 반발 계수 e

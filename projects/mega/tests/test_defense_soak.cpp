@@ -32,17 +32,18 @@ void CheckWorldInvariants(const GameWorld& world, uint32_t tick) {
         CHECK(Finite(tower.pos));
         CHECK(tower.tier >= 1 && tower.tier <= 3);
     }
-    for (const Enemy& enemy : world.Enemies()) {
-        CHECK(ids.insert(enemy.id).second);
-        CHECK(Finite(enemy.pos));
-        CHECK(std::isfinite(enemy.hp) && std::isfinite(enemy.maxHp));
-        CHECK(enemy.hp > 0.0f && enemy.hp <= enemy.maxHp);
+    const EnemyStore& enemies = world.Enemies();
+    for (size_t i = 0; i < enemies.Size(); ++i) {
+        CHECK(ids.insert(enemies.Id(i)).second);
+        CHECK(Finite(enemies.Pos(i)));
+        CHECK(std::isfinite(enemies.Hp(i)) && std::isfinite(enemies.MaxHp(i)));
+        CHECK(enemies.Hp(i) > 0.0f && enemies.Hp(i) <= enemies.MaxHp(i));
     }
-    for (const Projectile& projectile : world.Projectiles()) {
+    world.Projectiles().ForEach([&](const Projectile& projectile) {
         CHECK(ids.insert(projectile.id).second);
         CHECK(Finite(projectile.pos));
         CHECK(Finite(projectile.target));
-    }
+    });
 
     const net::Bytes packet = wire::WriteSnapshot(world, tick, 0);
     CHECK(!packet.empty());

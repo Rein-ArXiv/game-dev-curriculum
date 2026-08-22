@@ -48,9 +48,11 @@ inline bool ReadPpmToken(std::istream& input, std::string& token) {
 // 디스크 접근은 io 계층을 통한다(<fstream> 직접 사용 금지) — 파일을 여는 코드가
 // 렌더·게임·툴로 흩어지면 그 지점을 교체할 수도, 계층 규칙을 강제할 수도 없다.
 // 256x256 상한이 있으므로 전체를 메모리에 올려 파싱해도 안전하다.
-inline bool LoadPpmP3(const std::string& path, Sprite& out) {
-    std::string text;
-    if (!io::ReadTextFile(path, text, 4 * 1024 * 1024)) return false;
+//
+// 디코드와 읽기를 나눠 둔 이유: 비동기 로드는 바이트를 워커 스레드에서 받아
+// 오고, 그 바이트를 스프라이트로 바꾸는 일은 프레임 스레드에서 한다. 디코더가
+// 파일 경로만 받으면 그 분리를 표현할 방법이 없다.
+inline bool DecodePpmP3(const std::string& text, Sprite& out) {
     std::istringstream input(text);
     std::string token;
     if (!ReadPpmToken(input, token) || token != "P3") return false;
@@ -92,6 +94,12 @@ inline bool LoadPpmP3(const std::string& path, Sprite& out) {
     if (ReadPpmToken(input, token)) return false;
     out = std::move(decoded);
     return true;
+}
+
+inline bool LoadPpmP3(const std::string& path, Sprite& out) {
+    std::string text;
+    if (!io::ReadTextFile(path, text, 4 * 1024 * 1024)) return false;
+    return DecodePpmP3(text, out);
 }
 
 // 스프라이트를 (dx,dy) 좌상단 기준으로 정수배 확대해 블릿. scale<1 은 1 로 클램프.

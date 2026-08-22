@@ -73,6 +73,7 @@ public:
     }
 
 private:
+    // snippet-begin: pool-freelist
     void BuildFreeList() {
         free_ = nullptr;
         if (!base_) return;
@@ -83,6 +84,7 @@ private:
             free_ = block;
         }
     }
+    // snippet-end: pool-freelist
 
     uint8_t* base_       = nullptr;
     void*    free_       = nullptr;

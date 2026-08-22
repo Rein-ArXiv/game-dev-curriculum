@@ -45,6 +45,7 @@ DEFAULT_TARGETS = [
     "projects/mini/*/articles/*.md",
     "projects/mini/*/README.md",
     "projects/mini/README.md",
+    "projects/mega/articles/*.md",
     "projects/mega/docs/*.md",
     "projects/mega/README.md",
 ]

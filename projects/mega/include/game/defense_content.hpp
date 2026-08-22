@@ -10,6 +10,7 @@
 #pragma once
 
 #include "game/game.hpp"
+#include "game/map_gen.hpp"
 #include "io/read_file.hpp"
 #include "tools/script.hpp"
 
@@ -123,6 +124,31 @@ inline BalanceConfig LoadBalanceScript(const std::string& path,
     return loaded;
 }
 
+// assets/boss.pose 도 재빌드 없이 교체할 수 있는 파일 = 신뢰 경계 밖 입력이다.
+// balance.script 와 같은 규칙을 그대로 따른다: 없으면 조용히 내장 클립, 거부되면
+// 내장 클립 + 진단. **부분 반영은 없다** — 걷기만 파일이고 공격은 내장인 포즈는
+// 아무도 저작한 적이 없는 조합이라, 그 상태로 도는 것이 오히려 진단을 어렵게 한다.
+inline game::BossPoses LoadBossPoses(const std::string& path,
+                                     bool* loadedExternal = nullptr,
+                                     std::string* diagnostic = nullptr) {
+    game::BossPoses fallback;
+    if (diagnostic) diagnostic->clear();
+    std::string text;
+    if (!io::ReadTextFile(path, text, 64 * 1024)) {
+        if (loadedExternal) *loadedExternal = false;
+        return fallback;
+    }
+    game::BossPoses loaded;
+    std::string why;
+    if (!game::ParseBossPoses(text, loaded, &why)) {
+        if (loadedExternal) *loadedExternal = false;
+        if (diagnostic) *diagnostic = path + ": " + why;
+        return fallback;
+    }
+    if (loadedExternal) *loadedExternal = true;
+    return loaded;
+}
+
 inline std::vector<game::WaveDef> ApplyBalance(
         std::vector<game::WaveDef> waves, const BalanceConfig& balance) {
     for (game::WaveDef& wave : waves) {
@@ -131,6 +157,32 @@ inline std::vector<game::WaveDef> ApplyBalance(
         wave.reward = static_cast<int>(
             std::lround(static_cast<double>(wave.reward) * balance.rewardMultiplier));
     }
+    return waves;
+}
+
+// 정예 행동 트리의 저작 파일. balance.script · boss.pose 와 **같은 계약**이다 —
+// 없으면 조용히 내장 트리, 있으면 그대로 쓰되 거부되면 내장 트리 + 진단.
+// 여기서 검증하지 않는 이유는 검증기가 조립기 안에 있기 때문이다(알 수 없는
+// 노드 이름 · 짝이 안 맞는 end). 이 함수는 바이트를 읽어 넘기기만 한다.
+inline std::string LoadEliteTree(const std::string& path, bool* found = nullptr) {
+    std::string text;
+    const bool ok = io::ReadTextFile(path, text, 16 * 1024);
+    if (found) *found = ok;
+    return ok ? text : std::string{};
+}
+
+// 은신 규칙이 켜지면 Fast 웨이브가 Stalker 웨이브가 된다. 콘텐츠 파일을 두
+// 벌 두지 않기 위한 변환이다 — waves.txt 는 `stalker` 를 직접 쓸 수도 있고,
+// 그때 이 변환은 아무것도 바꾸지 않는다(이미 Stalker 다).
+//
+// 왜 스위치가 웨이브를 건드리는가. 은신은 **규칙**이지만 은신하는 적이 하나도
+// 없으면 그 규칙은 관측되지 않는다. 규칙만 켜고 콘텐츠를 그대로 두면
+// `stealth=1` 과 `stealth=0` 이 같은 게임이 되고, A/B 는 비교할 것을 잃는다.
+inline std::vector<game::WaveDef> ApplyStealth(std::vector<game::WaveDef> waves,
+                                               const game::Switches& switches) {
+    if (!switches.stealth) return waves;
+    for (game::WaveDef& wave : waves)
+        if (wave.type == game::EnemyType::Fast) wave.type = game::EnemyType::Stalker;
     return waves;
 }
 
@@ -149,9 +201,30 @@ inline game::DefenseMap LoadMapFile(const std::string& path,
     return valid ? loaded : game::DefenseMap::CreateDefault();
 }
 
+// 맵의 출처를 한 곳에서 고른다. classic 은 파일(없으면 내장 기본 맵), procgen 은
+// 시드 하나에서 생성한 격자다. 생성이 검증에 실패하면 classic 으로 떨어진다 —
+// 플레이할 수 없는 맵으로 매치를 시작하는 것보다 나은 실패는 없다.
+// snippet-begin: choose-map
+inline game::DefenseMap ChooseMap(const game::Switches& switches, const std::string& path,
+                                  bool* loadedExternal = nullptr,
+                                  game::mapgen::TerrainStats* statsOut = nullptr) {
+    if (switches.map == game::MapSource::Procgen) {
+        game::mapgen::TerrainParams params;
+        params.seed = static_cast<uint32_t>(switches.mapSeed);
+        game::DefenseMap generated;
+        if (game::mapgen::Generate(params, generated, statsOut)) {
+            if (loadedExternal) *loadedExternal = true;
+            return generated;
+        }
+    }
+    return LoadMapFile(path, loadedExternal);
+}
+// snippet-end: choose-map
+
 inline bool ParseEnemyType(const std::string& text, game::EnemyType& type) {
+    // 이름 순서가 곧 열거 값이다. 새 종류는 **뒤에만** 붙는다.
     static constexpr const char* names[] = {
-        "normal", "fast", "tank", "swarm", "boss",
+        "normal", "fast", "tank", "swarm", "boss", "stalker",
     };
     for (size_t i = 0; i < std::size(names); ++i) {
         if (text == names[i]) {

@@ -287,7 +287,7 @@ $$
 \Omega_{\text{cone}} = \int_0^{2\pi}\!\!\int_0^{\theta}\sin\theta'\,d\theta'\,d\phi = 2\pi\,(1-\cos\theta)
 $$
 
-에 $\theta = 0.265° = 4.65\times10^{-3}$ rad을 넣으면 $\Omega_{\odot} \approx 6.7\times10^{-5}$ sr이다. 반구 전체가 $2\pi \approx 6.28$ sr이니 하늘의 약 $0.001\%$다.
+에 $\theta = 0.265° = 4.63\times10^{-3}$ rad을 넣으면 $\Omega_{\odot} \approx 6.7\times10^{-5}$ sr이다. 반구 전체가 $2\pi \approx 6.28$ sr이니 하늘의 약 $0.001\%$다.
 
 맑은 정오의 직사 조도를 $E_\perp \approx 100{,}000$ lx라 하면, 태양을 *유한한* 광원으로 볼 때의 원반 휘도는
 

@@ -69,6 +69,24 @@ public:
         return false;   // 도달 불가
     }
 
+    // 셀 인덱스 열의 이동 비용 합. 대각 한 칸이 sqrt(2), 직교 한 칸이 1 이다 —
+    // FindPath 가 g 를 쌓을 때 쓴 것과 **같은 두 상수**여야 한다. 이 함수가 있는
+    // 이유는 A* 를 Flow Field 의 오라클로 쓰기 위해서다: 두 팔이 서로 다른
+    // 최단 경로를 고를 수는 있어도 **비용은 같아야** 한다는 것이 유일하게
+    // 성립하는 대조이고, 그 대조를 하려면 경로에서 비용을 다시 뽑을 수 있어야 한다.
+    // snippet-begin: path-cost
+    static float PathCost(const std::vector<int>& cells, int width) {
+        const float kSqrt2 = 1.41421356f;
+        float cost = 0;
+        for (size_t i = 1; i < cells.size(); ++i) {
+            const int px = cells[i - 1] % width, py = cells[i - 1] / width;
+            const int cx = cells[i] % width,     cy = cells[i] / width;
+            cost += (px != cx && py != cy) ? kSqrt2 : 1.0f;
+        }
+        return cost;
+    }
+    // snippet-end: path-cost
+
 private:
     static constexpr float kInf = 1e30f;
 

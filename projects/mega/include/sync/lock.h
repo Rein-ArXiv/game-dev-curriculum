@@ -98,6 +98,16 @@ public:
         FutexWait(&seq_, s);
         m.Lock();
     }
+    // 시한 대기. std::condition_variable::wait_for 와 같은 역할이고, 같은
+    // 이유로 필요하다 — 술어를 확인한 뒤 잠들기까지의 틈에 들어온 통지를 놓쳐도
+    // 시한이 그 스레드를 되살린다. seq 비교가 그 틈을 대부분 닫지만, 술어를 보는
+    // 자리가 mutex 밖이면(작업 큐가 그렇다) 완전히 닫히지는 않는다.
+    void WaitFor(Mutex& m, uint32_t milliseconds) {
+        uint32_t s = seq_.load(std::memory_order_acquire);
+        m.Unlock();
+        FutexWaitFor(&seq_, s, milliseconds);
+        m.Lock();
+    }
     void NotifyOne() {
         seq_.fetch_add(1, std::memory_order_release);
         FutexWakeOne(&seq_);

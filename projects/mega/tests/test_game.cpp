@@ -75,10 +75,10 @@ static void TestEnemyAdvances() {
     g.Init(Vec2{200, 200}, Vec2{200, 40}, {WaveDef{1, 10, 20, 5, 0.1f}}, 0, 1000);
     g.Step(1.0f / 60.0f);           // 1마리 스폰
     CHECK_EQ(g.AliveEnemies(), 1);
-    float y0 = g.Enemies()[0].pos.y;
+    float y0 = g.Enemies().Pos(0).y;
     for (int i = 0; i < 60; ++i) g.Step(1.0f / 60.0f);
     // 1초 후 코어(y=200) 쪽으로 y 증가.
-    CHECK(g.Enemies().empty() || g.Enemies()[0].pos.y > y0);
+    CHECK(g.Enemies().Size() == 0 || g.Enemies().Pos(0).y > y0);
 }
 
 static void TestValidatedTileMapAndPlacement() {

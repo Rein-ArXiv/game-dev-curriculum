@@ -18,13 +18,16 @@
 
 #pragma once
 
+#include "containers/hash_map.h"
 #include "engine/input.hpp"
 #include "engine/particles.hpp"
+#include "game/asset_reload.hpp"
 #include "game/defense_content.hpp"
 #include "game/defense_progression.hpp"
 #include "game/defense_protocol.hpp"
 #include "game/defense_view.hpp"
 #include "game/game.hpp"
+#include "game/sfx_bus.hpp"
 #include "live/analytics.hpp"
 #include "net/reliable_channel.hpp"
 #include "net/session.hpp"
@@ -34,6 +37,7 @@
 #include "platform/vfs.hpp"
 #include "platform/vk_present.hpp"
 #include "platform/window.hpp"
+#include "profiler/trace.h"
 #include "render/framebuffer.hpp"
 
 #include <algorithm>
@@ -45,7 +49,6 @@
 #include <cstring>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 
 namespace mega {
@@ -74,6 +77,8 @@ struct DefenseOptions {
     std::string address = "127.0.0.1";
     std::string admissionToken;
     std::string profilePath;              // 비면 platform::UserDataDirectory 기본값
+    std::string traceOut;                 // 비면 트레이스를 덤프하지 않는다
+    Switches    switches;                 // A/B 스위치(game/switches.hpp)
     uint16_t    port = kDefenseDefaultPort;
     bool        vulkan = false;
     bool        gpuSelftest = false;
@@ -81,7 +86,16 @@ struct DefenseOptions {
 
 inline const char* DefenseUsage() {
     return "usage: mega_defense [--selftest [ticks] | --gpu-selftest | --host [port] | "
-           "--join <ipv4> [port] [--token TOKEN]] [--profile PATH] [--vulkan]\n";
+           "--join <ipv4> [port] [--token TOKEN]] [--profile PATH] [--vulkan]\n"
+           "                    [--ab name=value]... [--trace-out PATH]\n"
+           "  --ab   entity_store=aos|soa|ecs  id_map=linear|hash  frame_alloc=malloc|arena\n"
+           "         blob_alloc=malloc|slab  body_alloc=vector|pool  worker_lock=std|futex\n"
+           "         asset_io=sync|async  scale=small|large  jobs=0|1|2|4|8  affinity=0|1\n"
+           "         map=classic|procgen  map_seed=1..8  camera=ortho2d|tilted3d\n"
+           "         target_index=linear|grid|quadtree  static_query=naive|bvh\n"
+           "         broadphase=naive|grid  integrator=symplectic|explicit  solver_iters=4|8|16\n"
+           "         boss_render=sprite|rig\n"
+           "         (환경 변수 MEGA_AB=\"name=value,...\" 도 같은 이름을 받는다)\n";
 }
 
 inline bool ParseUint16(const char* text, uint16_t& value) {
@@ -93,7 +107,26 @@ inline bool ParseUint16(const char* text, uint16_t& value) {
 }
 
 inline bool ParseDefenseOptions(int argc, char** argv, DefenseOptions& options) {
+    // 순서가 규약이다: 기본값 → 환경 변수 → 명령줄. 뒤가 앞을 덮는다.
+    std::string switchError;
+    if (!options.switches.LoadEnvironment(&switchError)) {
+        std::fprintf(stderr, "MEGA_AB: %s\n", switchError.c_str());
+        return false;
+    }
     for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--ab") == 0) {
+            if (i + 1 >= argc) return false;
+            if (!options.switches.Parse(argv[++i], &switchError)) {
+                std::fprintf(stderr, "--ab %s\n", switchError.c_str());
+                return false;
+            }
+            continue;
+        }
+        if (std::strcmp(argv[i], "--trace-out") == 0) {
+            if (i + 1 >= argc) return false;
+            options.traceOut = argv[++i];
+            continue;
+        }
         if (std::strcmp(argv[i], "--selftest") == 0) {
             options.selftest = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') {
@@ -135,8 +168,8 @@ inline bool ParseDefenseOptions(int argc, char** argv, DefenseOptions& options) 
 // ── 프레임 입력 ────────────────────────────────────────────────────
 // 창이든 스크립트든 프레임 루프에 들어가는 것은 이 구조체 하나다. 이것이
 // "헤드리스가 제품의 진짜 루프를 돌린다"를 가능하게 하는 이음매다.
-inline constexpr std::array<int, 9> kDefenseActionKeys{
-    '1', '2', '3', '4', 'P', 'U', 'X', 'T', 'R'};
+inline constexpr std::array<int, 13> kDefenseActionKeys{
+    '1', '2', '3', '4', '5', '6', 'P', 'U', 'X', 'T', 'R', 'L', 'B'};
 
 struct FrameInput {
     std::array<bool, kDefenseActionKeys.size()> keyDown{};
@@ -162,11 +195,27 @@ public:
     bool Init(const DefenseOptions& options) {
         options_ = options;
 
+        // 워커 풀은 스위치가 요구할 때만 존재한다. jobs=0 이면 스레드가 하나도
+        // 생기지 않고 시뮬은 예전과 똑같이 직렬로 돈다 — 기본값이 스위치 이전의
+        // 동작이어야 한다는 규약이 여기서도 그대로다.
+        if (options_.switches.jobs > 0) {
+            Scheduler::Config config;
+            config.workers = options_.switches.jobs;
+            config.lock = options_.switches.workerLock == WorkerLockKind::Futex
+                ? WorkerLock::Futex : WorkerLock::Std;
+            config.pinToCores = options_.switches.affinity;
+            scheduler_.Start(config);
+        }
+        world_.Configure(options_.switches, options_.switches.jobs > 0 ? &scheduler_ : nullptr);
+        interpolator_.SetMode(options_.switches.idMap);
+        frameScratch_.Init(options_.switches.frameAlloc, 256 * 1024);
+
         const std::string executableDirectory = platform::ExecutableDirectory();
         vfs_.Mount("assets", executableDirectory + "/assets");
         const std::string assetRoot = vfs_.Resolve("assets");
 
-        map_ = defense::LoadMapFile(vfs_.Resolve("assets/level.txt"), &externalMap_);
+        map_ = defense::ChooseMap(options_.switches, vfs_.Resolve("assets/level.txt"),
+                                  &externalMap_, &terrain_);
         // 밸런스 스크립트가 거부되면 기본 구성으로 계속 진행한다(멈추지 않는다).
         // 다만 그 사실을 말한다 — 실행 예산 초과·구문 오류가 조용히 지나가면
         // 파일을 교체한 사람은 자기 값이 적용된 줄로 안다.
@@ -176,10 +225,31 @@ public:
         if (!balanceError.empty())
             std::fprintf(stderr, "[content] balance.script 거부, 기본 구성으로 진행: %s\n",
                          balanceError.c_str());
-        waves_ = defense::ApplyBalance(
-            defense::LoadWaveFile(vfs_.Resolve("assets/waves.txt"),
-                                  defense::DefaultWaves(), &externalWaves_),
-            balance_);
+        waves_ = defense::ApplyStealth(
+            defense::ApplyBalance(
+                defense::LoadWaveFile(vfs_.Resolve("assets/waves.txt"),
+                                      defense::DefaultWaves(), &externalWaves_),
+                balance_),
+            options_.switches);
+        // 보스의 저작 포즈. 이것은 표시 데이터가 아니라 **시뮬 입력**이다 —
+        // 클립이 정한 고관절 회전이 IK 목표를 돌리고, 그 IK 가 푼 발이 스톰프의
+        // 원점이 된다. 그래서 월드가 사본을 들고, 표시도 같은 사본을 본다.
+        std::string poseError;
+        poses_ = defense::LoadBossPoses(vfs_.Resolve("assets/boss.pose"),
+                                        &externalPoses_, &poseError);
+        if (!poseError.empty())
+            std::fprintf(stderr, "[content] boss.pose 거부, 내장 클립으로 진행: %s\n",
+                         poseError.c_str());
+        world_.SetPoses(poses_);
+        // 정예 행동 트리도 재빌드 없이 갈아 끼우는 파일이다. Configure 가 트리를
+        // 조립하므로 Init 보다 먼저 넣어야 하고, 거부되면 내장 트리로 계속 간다.
+        bool eliteFileFound = false;
+        world_.SetEliteTree(
+            defense::LoadEliteTree(vfs_.Resolve("assets/elite.bt"), &eliteFileFound));
+        world_.Configure(options_.switches, options_.switches.jobs > 0 ? &scheduler_ : nullptr);
+        externalEliteTree_ = world_.ExternalEliteTree();
+        if (eliteFileFound && !externalEliteTree_)
+            std::fprintf(stderr, "[content] elite.bt 거부, 내장 트리로 진행\n");
         world_.Init(map_, waves_, balance_.startGold, balance_.coreHp);
 
         if (options_.mode == RunMode::Host && !network_.OpenHost(options_.port)) {
@@ -193,7 +263,13 @@ public:
         }
 
         framebuffer_.Init(kViewWidth, kViewHeight);
+        // 카메라는 맵을 알아야 프레이밍을 잡는다. ortho2d 팔에서는 이 두 줄이
+        // 아무 행렬도 만들지 않는다 — 항등이 곧 기본값이다.
+        camera_.Configure(options_.switches.camera, kViewWidth, kViewHeight);
+        camera_.Frame(map_);
         skin_.Load(assetRoot);
+        reloader_.Init(options_.switches.jobs > 0 ? &scheduler_ : nullptr,
+                       options_.switches.assetIo, assetRoot);
 
         for (int key : kDefenseActionKeys) input_.Bind(key, ActionForKey(key));
 
@@ -209,10 +285,24 @@ public:
 
         std::printf("[assets] loaded %d/10 external sprites from %s\n",
                     skin_.externalAssets, assetRoot.c_str());
-        std::printf("[content] map=%s waves=%s (%zu) balance=%s\n",
+        std::printf("[content] elite_tree=%s\n", externalEliteTree_ ? "external" : "builtin");
+        std::printf("[content] map=%s waves=%s (%zu) balance=%s pose=%s(%zu키)\n",
                     externalMap_ ? "external" : "fallback",
                     externalWaves_ ? "external" : "fallback", waves_.size(),
-                    externalBalance_ ? "script" : "fallback");
+                    externalBalance_ ? "script" : "fallback",
+                    externalPoses_ ? "external" : "fallback", poses_.walk.KeyCount());
+        if (map_.Generated())
+            std::printf("[terrain] seed=%d %dx%d maze=%d carved=%d rock=%d veins=%d route=%d "
+                        "bvh_prims=%zu/nodes=%zu\n",
+                        options_.switches.mapSeed, map_.Columns(), map_.Rows(),
+                        terrain_.maze, terrain_.carved, terrain_.rock, terrain_.veins,
+                        terrain_.route, world_.Geometry().PrimCount(),
+                        world_.Geometry().NodeCount());
+        // 어느 팔로 돌았는지가 로그에 남지 않으면 뒤에 찍히는 모든 수치가 출처
+        // 없는 숫자가 된다.
+        std::printf("[switches] %s workers=%d lock=%s\n",
+                    options_.switches.Describe().c_str(), scheduler_.WorkerCount(),
+                    scheduler_.LockKind() == WorkerLock::Futex ? "futex" : "std");
         if (options_.mode == RunMode::Host)
             std::printf("[network] hosting UDP port %u\n", network_.LocalPort());
         if (options_.mode == RunMode::Client)
@@ -233,6 +323,9 @@ public:
     // 창 프런트엔드와 헤드리스 셀프테스트가 부르는 유일한 함수. 표시(Present)와
     // 프레임 페이싱만 바깥에 있다.
     void Step(const FrameInput& frame, double frameSeconds) {
+        MEGA_PROFILE_SCOPE("frame");
+        frameScratch_.Begin();
+        // snippet-begin: frame-seam
         input_.BeginFrame();
         for (size_t i = 0; i < kDefenseActionKeys.size(); ++i)
             input_.OnKey(kDefenseActionKeys[i], frame.keyDown[i]);
@@ -241,22 +334,48 @@ public:
         frameSeconds = std::clamp(frameSeconds, 0.0, 0.25);
         accumulator_ += frameSeconds;
 
-        if (options_.mode == RunMode::Host) PumpHost();
-        else if (options_.mode == RunMode::Client) PumpClient(now, frameSeconds);
+        {
+            MEGA_PROFILE_SCOPE("net.pump");
+            if (options_.mode == RunMode::Host) PumpHost();
+            else if (options_.mode == RunMode::Client) PumpClient(now, frameSeconds);
+        }
+        // snippet-end: frame-seam
+
+        // 에셋 리로드. 'L' 이 요청을 걸고, 완료 확인은 매 프레임 폴링이다 —
+        // 동기 팔에서는 Request 안에서 이미 끝나 있고 Poll 이 할 일이 없다.
+        if (input_.WasPressed("reload")) reloader_.Request(skin_);
+        reloader_.Poll(skin_);
 
         if (input_.WasPressed("tower_cannon")) selectedType_ = TowerType::Cannon;
         if (input_.WasPressed("tower_gatling")) selectedType_ = TowerType::Gatling;
         if (input_.WasPressed("tower_splash")) selectedType_ = TowerType::Splash;
         if (input_.WasPressed("tower_sniper")) selectedType_ = TowerType::Sniper;
+        if (input_.WasPressed("tower_frost")) selectedType_ = TowerType::Frost;
+        if (input_.WasPressed("tower_radar")) selectedType_ = TowerType::Radar;
         if (options_.mode == RunMode::Solo && input_.WasPressed("pause"))
             paused_ = !paused_;
 
-        view_ = options_.mode == RunMode::Client ? replicas_.Render(wire::Lerp)
-                                                 : CaptureView(world_, hostTick_);
-        const math::Vec2 mouse{static_cast<float>(frame.mouseX),
-                               static_cast<float>(frame.mouseY)};
+        view_ = options_.mode == RunMode::Client
+            ? replicas_.Render([this](const wire::Snapshot& a, const wire::Snapshot& b, float t) {
+                  return interpolator_.Blend(a, b, t);
+              })
+            : CaptureView(world_, hostTick_);
 
-        if (frame.mouseClicked && frame.mouseY >= map_.OriginY()) {
+        // 화면 좌표를 지면 좌표로 되돌린다. ortho2d 팔에서 Pick 은 입력을 그대로
+        // 돌려주므로 이 줄이 생기기 전과 같은 값이 나온다.
+        // snippet-begin: mouse-pick
+        math::Vec2 mouse{-100.0f, -100.0f};
+        const bool onGround =
+            frame.mouseY >= map_.OriginY() &&
+            camera_.Pick(static_cast<float>(frame.mouseX),
+                         static_cast<float>(frame.mouseY), mouse);
+        // snippet-end: mouse-pick
+
+        if (onGround && input_.WasPressed("blast"))
+            Submit(wire::CommandType::Blast, mouse, 0);
+
+        // snippet-begin: click-routing
+        if (frame.mouseClicked && onGround) {
             if (const auto* tower = TowerAt(view_, mouse, map_.CellSize() * 0.45f)) {
                 selectedTower_ = tower->id;
             } else {
@@ -279,7 +398,9 @@ public:
         } else {
             selectedTower_ = 0;
         }
+        // snippet-end: click-routing
 
+        // snippet-begin: fixed-step
         if (options_.mode != RunMode::Client) {
             if ((world_.Won() || world_.Lost()) && input_.WasPressed("restart")) Restart();
             int catchUpSteps = 0;
@@ -289,12 +410,15 @@ public:
                 ++hostTick_;
                 accumulator_ -= kDefenseFixedDt;
                 ++catchUpSteps;
-                if (options_.mode == RunMode::Host && network_.PeerKnown() && hostTick_ % 3 == 0)
+                if (options_.mode == RunMode::Host && network_.PeerKnown() && hostTick_ % 3 == 0) {
                     SendSnapshot();
+                    MaybeSendTerrain();
+                }
             }
             if (catchUpSteps == 5 && accumulator_ >= kDefenseFixedDt) accumulator_ = 0.0;
             view_ = CaptureView(world_, hostTick_);
         }
+        // snippet-end: fixed-step
 
         connected_ = options_.mode == RunMode::Solo ||
                      (options_.mode == RunMode::Host && network_.PeerKnown()) ||
@@ -318,15 +442,42 @@ public:
         }
 
         UpdateImpactParticles(view_, previousProjectiles_, particles_,
-                              static_cast<float>(frameSeconds));
+                              static_cast<float>(frameSeconds), frameScratch_);
+
+        // 웨이브가 바뀌면 카메라가 경로를 훑고 돌아온다. 표시 전용이라 시뮬은
+        // 이 코드가 있는지도 모른다.
+        // snippet-begin: wave-rail
+        if (camera_.Tilted() && view_.wave != previousWave_) {
+            previousWave_ = view_.wave;
+            camera_.BeginRail(RailControls(), 1.5f);
+        }
+        camera_.UpdateRail(static_cast<float>(frameSeconds));
+        // snippet-end: wave-rail
+
+        // 시뮬이 낸 소리를 지금 카메라 기준으로 옮긴다. 카메라가 먼저 갱신돼야
+        // 하는 이유는 레일이 도는 프레임에서 청취자가 한 프레임 뒤처지기 때문이다.
+        // snippet-begin: frame-audio
+        sfx_.Collect(world_.Sounds(), camera_, sound_.Tones());
+        sfx_.Submit(sound_);
+        world_.ClearSounds();
+        // snippet-end: frame-audio
+
         HudState hud;
         hud.selectedType = selectedType_;
         hud.selectedTower = selectedTower_;
         hud.mouseX = frame.mouseX;
         hud.mouseY = frame.mouseY;
+        hud.mouseWorld = mouse;
+        hud.mouseOnGround = onGround;
         hud.modeLabel = ModeLabel();
         hud.paused = paused_;
-        DrawGame(framebuffer_, map_, view_, skin_, hud, connected_, &particles_);
+        hud.bossRender = options_.switches.bossRender;
+        hud.poses = &poses_;
+        {
+            MEGA_PROFILE_SCOPE("render.draw");
+            DrawGame(framebuffer_, map_, view_, skin_, hud, connected_, &particles_, camera_);
+        }
+        frameScratch_.End();
     }
 
     // 히스토그램의 이름·버킷 설정은 여기 한 번만 적는다. 기록하는 곳과 읽는 곳에
@@ -373,6 +524,10 @@ public:
     const DefenseMap& Map() const { return map_; }
     const wire::Snapshot& View() const { return view_; }
     const DefenseSkin& Skin() const { return skin_; }
+    const DefenseCamera& Camera() const { return camera_; }
+    const mapgen::TerrainStats& Terrain() const { return terrain_; }
+    uint64_t TerrainPacketsSent() const { return terrainPacketsSent_; }
+    uint64_t TerrainPacketsReceived() const { return terrainPacketsReceived_; }
     const defense::BalanceConfig& Balance() const { return balance_; }
     uint32_t HostTick() const { return hostTick_; }
     bool Connected() const { return connected_; }
@@ -380,8 +535,52 @@ public:
     bool ExternalMap() const { return externalMap_; }
     bool ExternalWaves() const { return externalWaves_; }
     bool ExternalBalance() const { return externalBalance_; }
+    bool ExternalPoses() const { return externalPoses_; }
+    bool ExternalEliteTree() const { return externalEliteTree_; }
+    const BossPoses& Poses() const { return poses_; }
+    // 이번 프레임에 카메라 기준으로 계산된 보이스. 장치가 열려 있든 아니든
+    // 같은 값이라, 헤드리스에서 배선을 관측할 수 있다.
+    const SfxBus& Sfx() const { return sfx_; }
     const DefenseOptions& Options() const { return options_; }
     live::Registry& Metrics() { return metrics_; }
+    Scheduler& Jobs() { return scheduler_; }
+    const FrameScratch& RenderScratch() const { return frameScratch_; }
+    AssetReloader& Reloader() { return reloader_; }
+    // 창 없는 호출자(테스트·셀프테스트)가 리로드를 거는 입구. 창 실행에서는
+    // 'L' 키가 같은 자리로 들어간다.
+    void RequestAssetReload() { reloader_.Request(skin_); }
+
+    // ── 계측 출력 ──────────────────────────────────────────────────
+    // live::Histogram 의 frame_ms 는 "프레임이 몇 ms 였나"까지만 답한다. 느려진
+    // 프레임 안에서 **무엇이** 오래 걸렸는지는 답하지 못한다. 아래 줄이 그 질문의
+    // 답이고, 출처는 프레임 루프와 시뮬 시스템에 박은 ScopeTimer 다.
+    void PrintProfile() {
+        std::vector<profiler::AggEntry> aggregate =
+            profiler::AggregateByName(profiler::Profiler::Get().Snapshot());
+        std::sort(aggregate.begin(), aggregate.end(),
+                  [](const profiler::AggEntry& a, const profiler::AggEntry& b) {
+                      return a.totalMs > b.totalMs;
+                  });
+        std::printf("[profile] recorded=%llu",
+                    static_cast<unsigned long long>(profiler::Profiler::Get().TotalRecorded()));
+        for (size_t i = 0; i < aggregate.size() && i < 8; ++i)
+            std::printf(" %s=%.2f/%.3fms(n=%llu)", aggregate[i].name.c_str(),
+                        aggregate[i].totalMs, aggregate[i].maxMs,
+                        static_cast<unsigned long long>(aggregate[i].count));
+        std::printf("\n");
+        std::fflush(stdout);
+    }
+
+    // --trace-out 이 있으면 집계를 파일로 남긴다. asset_io=async 면 이 쓰기도
+    // 워커가 한다(io::File::WriteAt 의 제품 호출자는 이 경로 하나뿐이다).
+    bool DumpTrace() {
+        if (options_.traceOut.empty()) return false;
+        const bool ok = WriteTraceReport(options_.traceOut, options_.switches.assetIo,
+                                         scheduler_.WorkerCount() > 0 ? &scheduler_ : nullptr);
+        std::printf("[trace] %s %s\n", ok ? "wrote" : "FAILED", options_.traceOut.c_str());
+        std::fflush(stdout);
+        return ok;
+    }
 
     // ── 클라이언트 배선 관측 ────────────────────────────────────────
     // 호스트 쪽은 remote_commands · snapshots_sent 카운터로 이미 관측 가능했고,
@@ -403,10 +602,14 @@ private:
             case '2': return "tower_gatling";
             case '3': return "tower_splash";
             case '4': return "tower_sniper";
+            case '5': return "tower_frost";
+            case '6': return "tower_radar";
             case 'P': return "pause";
             case 'U': return "upgrade";
             case 'X': return "sell";
             case 'T': return "target_mode";
+            case 'L': return "reload";
+            case 'B': return "blast";
             default:  return "restart";
         }
     }
@@ -424,7 +627,7 @@ private:
         recordedMatch_ = false;
         paused_ = false;
         particles_.Clear();
-        previousProjectiles_.clear();
+        previousProjectiles_.Clear();
     }
 
     void Submit(wire::CommandType type, const math::Vec2& position, uint8_t argument) {
@@ -482,7 +685,12 @@ private:
             lastResend_ = now;
         }
         net::Bytes packet;
+        std::vector<uint16_t> terrainCells;
         while (network_.Receive(packet)) {
+            if (wire::ReadTerrain(packet, terrainCells)) {
+                ApplyTerrain(terrainCells);
+                continue;
+            }
             wire::Snapshot snapshot;
             if (!wire::ReadSnapshot(packet, snapshot)) continue;
             // 와이어 flags 의 truncated 를 읽는 유일한 제품 코드다. 켜져 있으면
@@ -500,6 +708,50 @@ private:
             acknowledgedCommand_ = newest->acknowledgedCommand;
         localCommands_.AckThrough(newest ? newest->acknowledgedCommand : 0);
         replicas_.Advance(frameSeconds * 60.0);
+    }
+
+    // 발파로 열린 칸 목록은 **누적 전체**라 멱등이다. 목록이 자란 순간 한 번,
+    // 그 뒤로는 3초마다 한 번 다시 보낸다 — 유실된 패킷을 신뢰 채널 없이
+    // 메우는 가장 싼 방법이 반복 전송이다.
+    // snippet-begin: send-terrain
+    void MaybeSendTerrain() {
+        const std::vector<uint16_t>& cells = world_.OpenedCells();
+        if (cells.empty()) return;
+        const bool grew = cells.size() != sentTerrainCells_;
+        if (!grew && hostTick_ - lastTerrainTick_ < 180) return;
+        network_.Send(wire::WriteTerrain(cells));
+        sentTerrainCells_ = cells.size();
+        lastTerrainTick_ = hostTick_;
+        ++terrainPacketsSent_;
+    }
+    // snippet-end: send-terrain
+
+    // 클라이언트 쪽 적용. 맵 사본을 같은 상태로 만들고 경로를 다시 푼다 —
+    // 클라이언트는 권위 시뮬을 돌리지 않지만 **그리기 위해** 경로가 필요하다.
+    void ApplyTerrain(const std::vector<uint16_t>& cells) {
+        ++terrainPacketsReceived_;
+        bool changed = false;
+        for (uint16_t packed : cells) {
+            const int x = packed % map_.Columns();
+            const int y = packed / map_.Columns();
+            if (map_.OpenCell(x, y)) changed = true;
+        }
+        if (changed) map_.RecomputeRoute();
+    }
+
+    // 웨이브 시작 레일의 제어점. 경로를 성기게 뽑아 스플라인 마디로 쓴다.
+    std::vector<math::Vec2> RailControls() const {
+        std::vector<math::Vec2> controls;
+        const size_t length = map_.RouteLength();
+        if (length < 2) return controls;
+        const size_t stride = length > 12 ? length / 6 : 1;
+        for (size_t i = 0; i < length; i += stride) {
+            const DefenseMap::Cell cell = map_.RouteCell(i);
+            controls.push_back(map_.CellCenter(cell.x, cell.y));
+        }
+        const DefenseMap::Cell last = map_.RouteCell(length - 1);
+        controls.push_back(map_.CellCenter(last.x, last.y));
+        return controls;
     }
 
     void SendSnapshot() {
@@ -542,7 +794,13 @@ private:
     // 시계는 최신에 2틱보다 가까이 붙지 않는다(호스트는 3틱마다 보낸다).
     wire::SnapshotView replicas_{net::InterpolationClock{3.0, 2.0, 8}};
 
-    std::unordered_map<uint32_t, math::Vec2> previousProjectiles_;
+    DefenseCamera             camera_;
+    mapgen::TerrainStats      terrain_;
+    OpenAddressingHashMap<uint32_t, math::Vec2> previousProjectiles_;
+    wire::SnapshotInterpolator interpolator_;
+    Scheduler          scheduler_;
+    FrameScratch       frameScratch_;
+    AssetReloader      reloader_;
     wire::Snapshot     view_;
     Clock::time_point  lastHello_{};
     Clock::time_point  lastResend_{};
@@ -552,6 +810,11 @@ private:
     uint64_t           commandPacketsSent_ = 0;
     uint64_t           commandsQueued_ = 0;
     uint64_t           snapshotsReceived_ = 0;
+    uint64_t           terrainPacketsSent_ = 0;
+    uint64_t           terrainPacketsReceived_ = 0;
+    size_t             sentTerrainCells_ = 0;
+    uint32_t           lastTerrainTick_ = 0;
+    uint16_t           previousWave_ = 0;
     uint32_t           acknowledgedCommand_ = 0;
     uint32_t           hostTick_ = 0;
     uint32_t           selectedTower_ = 0;
@@ -564,6 +827,10 @@ private:
     bool               externalMap_ = false;
     bool               externalWaves_ = false;
     bool               externalBalance_ = false;
+    bool               externalPoses_ = false;
+    bool               externalEliteTree_ = false;
+    BossPoses          poses_;
+    SfxBus             sfx_;
 };
 
 // ── 창 실행 ────────────────────────────────────────────────────────
@@ -663,6 +930,8 @@ inline int RunDefenseWindowed(DefenseApp& app, const DefenseOptions& options) {
     if (options.vulkan) presenter.Destroy();
 #endif
     app.PrintMetrics();
+    app.PrintProfile();
+    app.DumpTrace();
     return 0;
 }
 
@@ -704,36 +973,107 @@ inline bool ClientRoundTripProven(const DefenseApp& app) {
            app.CommandPacketsSent() > 0 && app.AcknowledgedCommand() > 0;
 }
 
-inline SelftestReport RunDefenseHeadless(DefenseApp& app, int maxTicks) {
-    static constexpr std::array<DefenseMap::Cell, 12> kPlan{{
+// 셀프테스트가 클릭할 셀 목록. Classic 맵은 손으로 고른 열두 자리를 쓰고,
+// 절차 맵은 시드마다 지형이 다르므로 **경로 옆의 건설 가능한 칸**을 훑어 만든다.
+// 하드코딩한 좌표를 절차 맵에 쓰면 그 좌표가 바위일 때 스크립트가 영원히 헛돈다.
+// snippet-begin: selftest-plan
+inline std::vector<DefenseMap::Cell> SelftestPlan(const DefenseMap& map) {
+    static constexpr std::array<DefenseMap::Cell, 12> kClassicPlan{{
         {6, 1}, {8, 2}, {10, 2}, {11, 4}, {13, 5}, {10, 6},
         {8, 8}, {5, 8}, {3, 9}, {5, 10}, {6, 12}, {9, 13},
     }};
+    if (!map.Generated())
+        return std::vector<DefenseMap::Cell>(kClassicPlan.begin(), kClassicPlan.end());
 
+    std::vector<DefenseMap::Cell> plan;
+    const size_t length = map.RouteLength();
+    static const int dx[4] = {1, -1, 0, 0}, dy[4] = {0, 0, 1, -1};
+    for (size_t i = 1; i + 1 < length && plan.size() < GameWorld::kMaxTowers; i += 2) {
+        const DefenseMap::Cell on = map.RouteCell(i);
+        for (int d = 0; d < 4; ++d) {
+            const int nx = on.x + dx[d], ny = on.y + dy[d];
+            if (map.Tile(nx, ny) != TileType::Buildable || map.Occupied(nx, ny)) continue;
+            bool taken = false;
+            for (const DefenseMap::Cell& c : plan)
+                if (c.x == nx && c.y == ny) { taken = true; break; }
+            if (taken) continue;
+            plan.push_back({nx, ny});
+            break;
+        }
+    }
+    return plan;
+}
+// 발파할 바위. 경로 옆에 붙은 벽만 고른다 — 아레나 구석의 바위를 뚫어 봐야
+// 통행 격자에도 사격선에도 아무 영향이 없어 배선을 확인하지 못한다.
+inline std::vector<DefenseMap::Cell> SelftestRockPlan(const DefenseMap& map) {
+    std::vector<DefenseMap::Cell> rocks;
+    if (!map.Generated()) return rocks;
+    static const int dx[4] = {1, -1, 0, 0}, dy[4] = {0, 0, 1, -1};
+    for (size_t i = 2; i + 2 < map.RouteLength() && rocks.size() < 6; i += 5) {
+        const DefenseMap::Cell on = map.RouteCell(i);
+        for (int d = 0; d < 4; ++d) {
+            const int nx = on.x + dx[d], ny = on.y + dy[d];
+            if (!map.Rock(nx, ny)) continue;
+            if (nx <= 0 || ny <= 0 || nx >= map.Columns() - 1 || ny >= map.Rows() - 1) continue;
+            rocks.push_back({nx, ny});
+            break;
+        }
+    }
+    return rocks;
+}
+// snippet-end: selftest-plan
+
+// 스크립트가 이 자리에 세울 타워의 숫자 키. 기본은 넷을 돌려 쓰는 예전 규칙
+// 그대로이고, AI 팔이 켜졌을 때만 지원 타워가 끼어든다.
+//
+// 레이더를 **셋** 세우는 이유는 은신 규칙의 구조 때문이다. 은신 개체만 나오는
+// 웨이브에서는 아무 타워도 쏘지 않으므로 청각이 발동하지 않고, 오직 시야만
+// 남는다. 레이더 하나로는 79칸짜리 경로의 한 토막만 덮어 나머지가 그대로 샌다.
+// snippet-begin: selftest-tower-key
+inline int SelftestTowerKey(size_t cursor, const Switches& switches) {
+    if (switches.stealth && (cursor == 3 || cursor == 7 || cursor == 11)) return '6';
+    if (switches.pathing != PathingKind::Polyline && cursor == 5) return '5';
+    return static_cast<int>('1' + (cursor % 4));
+}
+// snippet-end: selftest-tower-key
+
+inline SelftestReport RunDefenseHeadless(DefenseApp& app, int maxTicks) {
     SelftestReport report;
     const DefenseMap& map = app.Map();
+    const std::vector<DefenseMap::Cell> plan = SelftestPlan(map);
+    const std::vector<DefenseMap::Cell> rocks = SelftestRockPlan(map);
+    size_t blastCursor = 0;
     size_t planCursor = 0;
     int    placedTowers = 0;
+    int    stallTicks = 0;
     size_t upgradeCursor = 0;
     bool   selecting = true;
+
+    // 스크립트는 사람 대신 **화면을** 클릭한다. 월드 좌표를 그대로 마우스에
+    // 넣으면 기울인 카메라에서 엉뚱한 칸이 눌린다 — 카메라가 생겼다는 사실이
+    // 여기서 드러난다. ortho2d 팔에서 Project 는 항등이라 값이 바뀌지 않는다.
+    // snippet-begin: selftest-click
+    auto clickAt = [&app](FrameInput& input, const math::Vec2& world) {
+        const math::Vec2 screen = app.Camera().Project(world);
+        input.mouseX = static_cast<int>(std::lround(screen.x));
+        input.mouseY = static_cast<int>(std::lround(screen.y));
+    };
+    // snippet-end: selftest-click
 
     for (report.ticks = 0; report.ticks < maxTicks; ++report.ticks) {
         FrameInput frame;
 
-        if (planCursor < kPlan.size()) {
+        if (planCursor < plan.size()) {
             // 계획한 종류를 고르고(숫자 키) 그 셀을 클릭한다. 골드가 모자라면
             // 호스트가 명령을 거절하고 타워 수가 늘지 않으므로 다음 틱에 다시 시도한다.
-            frame.Press(static_cast<int>('1' + (planCursor % 4)));
-            const math::Vec2 target = map.CellCenter(kPlan[planCursor].x, kPlan[planCursor].y);
-            frame.mouseX = static_cast<int>(target.x);
-            frame.mouseY = static_cast<int>(target.y);
+            frame.Press(SelftestTowerKey(planCursor, app.Options().switches));
+            clickAt(frame, map.CellCenter(plan[planCursor].x, plan[planCursor].y));
             frame.mouseClicked = true;
         } else if (!app.View().towers.empty()) {
             // 남는 골드는 강화에 쓴다. 한 틱은 선택(클릭), 다음 틱은 'U'.
             const auto& towers = app.View().towers;
             const auto& tower = towers[upgradeCursor % towers.size()];
-            frame.mouseX = static_cast<int>(tower.pos.x);
-            frame.mouseY = static_cast<int>(tower.pos.y);
+            clickAt(frame, tower.pos);
             if (selecting) {
                 frame.mouseClicked = true;
             } else {
@@ -743,12 +1083,41 @@ inline SelftestReport RunDefenseHeadless(DefenseApp& app, int maxTicks) {
             selecting = !selecting;
         }
 
+        // 절차 지형에서는 발파와 철거도 스크립트가 실제로 돌린다. 돌지 않는
+        // 경로는 배선이 끊겨도 아무 검사가 알아채지 못한다.
+        // snippet-begin: selftest-terrain-script
+        if (map.Generated() && report.ticks > 600) {
+            if (blastCursor < rocks.size() && report.ticks % 300 == 150) {
+                const math::Vec2 target = map.CellCenter(rocks[blastCursor].x, rocks[blastCursor].y);
+                ++blastCursor;
+                frame = FrameInput{};
+                clickAt(frame, target);
+                frame.Press('B');
+            } else if (report.ticks == 1801 && !app.View().towers.empty()) {
+                frame = FrameInput{};                       // 한 틱: 선택
+                clickAt(frame, app.View().towers.front().pos);
+                frame.mouseClicked = true;
+            } else if (report.ticks == 1802) {
+                frame = FrameInput{};                       // 다음 틱: 철거 → 잔해
+                frame.Press('X');
+            }
+        }
+        // snippet-end: selftest-terrain-script
+
         app.Step(frame, static_cast<double>(kDefenseFixedDt));
 
         const int towers = app.World().TowerCount();
-        if (planCursor < kPlan.size() && towers > placedTowers) {
-            placedTowers = towers;
-            ++planCursor;
+        if (planCursor < plan.size()) {
+            if (towers > placedTowers) {
+                placedTowers = towers;
+                ++planCursor;
+                stallTicks = 0;
+            } else if (++stallTicks > 900) {
+                // 15초를 눌러도 서지 않는 칸은 골드 부족이 아니라 규칙이 막은
+                // 자리다(잔해가 눌러앉았거나 연결성 검사가 거절한다). 다음 칸으로.
+                ++planCursor;
+                stallTicks = 0;
+            }
         }
         if (app.Connected()) report.connected = true;
         if (app.Finished()) { ++report.ticks; break; }
@@ -800,8 +1169,12 @@ inline SelftestReport RunDefenseHeadless(DefenseApp& app, int maxTicks) {
 
 inline int RunDefenseSelftest(DefenseApp& app, const DefenseOptions& options) {
     const SelftestReport report = RunDefenseHeadless(app, options.selftestTicks);
-    const bool contentOk = app.Skin().externalAssets == 10 && app.ExternalMap() &&
-                           app.ExternalWaves() && app.ExternalBalance();
+    // 절차 맵은 파일에서 오지 않는다. "외부 콘텐츠를 읽었다"는 판정은 맵을 빼고
+    // 웨이브·밸런스·스프라이트로만 묻는다 — 그러지 않으면 map=procgen 은 언제나
+    // 콘텐츠 실패로 보고된다.
+    const bool contentOk = app.Skin().externalAssets == 10 && app.ExternalWaves() &&
+                           app.ExternalBalance() && app.ExternalPoses() &&
+                           (app.ExternalMap() || app.Map().Generated());
     const char* content = (app.ExternalMap() && app.ExternalWaves() &&
                            app.ExternalBalance()) ? "external" : "fallback";
 
@@ -823,6 +1196,8 @@ inline int RunDefenseSelftest(DefenseApp& app, const DefenseOptions& options) {
                     report.renderedPixels ? "OK" : "BLANK",
                     app.Skin().externalAssets, content);
         app.PrintMetrics();
+        app.PrintProfile();
+        app.DumpTrace();
 
         const bool ok = report.connected && report.snapshotsReceived > 0 &&
                         report.commandPacketsSent > 0 && report.commandAck > 0 &&
@@ -831,13 +1206,22 @@ inline int RunDefenseSelftest(DefenseApp& app, const DefenseOptions& options) {
     }
 
     std::printf("[selftest] result=%s ticks=%d towers=%d wave=%d packet=%zu "
-                "protocol=%s render=%s assets=%d/10 content=%s\n",
+                "protocol=%s render=%s assets=%d/10 content=%s stomps=%u\n",
                 report.won ? "CLEAR" : (report.lost ? "LOST" : "TIMEOUT"),
                 report.ticks, report.towers, report.wave, report.packetBytes,
                 report.protocolOk ? "OK" : "FAIL",
                 report.renderedPixels ? "OK" : "BLANK",
-                app.Skin().externalAssets, content);
+                app.Skin().externalAssets, content, app.World().Stomps());
+    if (app.Map().Generated())
+        std::printf("[selftest] terrain route=%zu opened=%zu debris_live=%zu debris_settled=%zu "
+                    "target_rebuilds=%zu\n",
+                    app.World().RouteLength(), app.World().OpenedCells().size(),
+                    app.World().Debris().Live(),
+                    static_cast<size_t>(app.World().DebrisSettled()),
+                    app.World().Targets().Rebuilds());
     app.PrintMetrics();
+    app.PrintProfile();
+    app.DumpTrace();
 
     // 이 단언들은 전부 "제품의 진짜 프레임 루프가 돌았는가"를 묻는다.
     const bool ok = report.won && report.protocolOk && report.renderedPixels &&

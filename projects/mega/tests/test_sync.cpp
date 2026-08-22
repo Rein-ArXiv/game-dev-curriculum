@@ -2,6 +2,8 @@
 #include "sync/lock.h"
 #include "test_util.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <thread>
@@ -128,6 +130,78 @@ void TestOnceFlag() {
     for (int t = 0; t < T; ++t) CHECK_EQ(seen[t], 42);
 }
 
+
+// ── 스핀 → 대기 전이와 깨우기 대상 ─────────────────────────────────
+// 잡 스케줄러가 futex 팔로 돌 때 여기 있는 세 성질에 목숨이 걸린다.
+//   1. FutexWait 는 값이 이미 다르면 **자지 않는다**(lost-wakeup 을 닫는 비교).
+//   2. WakeOne 은 정확히 하나만, WakeAll 은 전부 깨운다.
+//   3. FutexWaitFor 는 아무도 깨우지 않아도 시한이 지나면 돌아온다 — 큐가 비었다고
+//      판정한 순간과 잠드는 순간 사이에 들어온 작업이 워커를 영영 재우지 못하게
+//      막는 마지막 방어선이다.
+void TestFutexWaitCompare() {
+    std::atomic<uint32_t> word{7};
+    // 기대값이 다르면 즉시 반환한다. 여기서 매달리면 이 테스트는 타임아웃으로 죽는다.
+    FutexWait(&word, 1);
+    CHECK_EQ(word.load(), 7u);
+}
+
+void TestFutexTimedWaitReturns() {
+    std::atomic<uint32_t> word{0};
+    const auto begin = std::chrono::steady_clock::now();
+    FutexWaitFor(&word, 0, 30);            // 아무도 깨우지 않는다
+    const double elapsed =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+    CHECK(elapsed >= 1.0);                 // 정말 잤다(즉시 반환이 아니다)
+    CHECK(elapsed < 5000.0);               // 그리고 돌아왔다
+}
+
+void TestWakeOneWakesExactlyOne() {
+    std::atomic<uint32_t> word{0};
+    std::atomic<int> awake{0};
+    const int T = 4;
+    std::vector<std::thread> ts;
+    for (int t = 0; t < T; ++t)
+        ts.emplace_back([&] {
+            while (word.load(std::memory_order_acquire) == 0)
+                FutexWaitFor(&word, 0, 5);
+            awake.fetch_add(1, std::memory_order_relaxed);
+        });
+
+    // 값을 바꾸지 않은 채 하나만 깨운다. 값이 그대로라 깨어난 스레드는 다시 잔다.
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_EQ(awake.load(), 0);
+    FutexWakeOne(&word);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_EQ(awake.load(), 0);             // 술어가 거짓이라 아무도 빠져나가지 못한다
+
+    word.store(1, std::memory_order_release);
+    FutexWakeAll(&word);
+    for (auto& th : ts) th.join();
+    CHECK_EQ(awake.load(), T);             // 전부 깨어났다
+}
+
+// CondVar::WaitFor: 통지를 놓쳐도 시한이 스레드를 되살린다.
+void TestCondVarTimedWait() {
+    Mutex m;
+    CondVar cv;
+    std::atomic<bool> ready{false};
+    std::atomic<int> wakeups{0};
+    std::thread waiter([&] {
+        m.Lock();
+        while (!ready.load(std::memory_order_acquire)) {
+            cv.WaitFor(m, 2);
+            wakeups.fetch_add(1, std::memory_order_relaxed);
+        }
+        m.Unlock();
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    // 통지를 한 번도 보내지 않았는데도 대기자가 여러 번 깨어나 술어를 다시 봤다.
+    CHECK(wakeups.load() > 0);
+    ready.store(true, std::memory_order_release);
+    cv.NotifyAll();
+    waiter.join();
+}
+
 }  // namespace
 
 static void RunTests() {
@@ -136,6 +210,10 @@ static void RunTests() {
     TestRWLock();
     TestCondVar();
     TestOnceFlag();
+    TestFutexWaitCompare();
+    TestFutexTimedWaitReturns();
+    TestWakeOneWakesExactlyOne();
+    TestCondVarTimedWait();
 }
 
 TEST_MAIN("sync")

@@ -37,6 +37,7 @@ namespace net {
 
 // 보내는 쪽 코어: 시퀀스 부여 + 미확인 보관 + 누적 ack 로 정리.
 // 전송은 하지 않는다 — 호출자가 ForEachUnacked 로 자기 형식에 맞게 내보낸다.
+// snippet-begin: reliable-sender
 template <class Payload = Bytes>
 class ReliableOrderedSender {
 public:
@@ -79,6 +80,7 @@ private:
     uint32_t                    nextSend_ = 0;   // 다음 부여할 시퀀스
     std::map<uint32_t, Payload> unacked_;        // 미확인(재전송 대상)
 };
+// snippet-end: reliable-sender
 
 // 받는 쪽 코어: 순서 복원 + 중복 제거. 역시 프레이밍을 모른다.
 template <class Payload = Bytes>

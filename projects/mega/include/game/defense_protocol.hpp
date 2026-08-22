@@ -39,6 +39,7 @@ static constexpr size_t kSnapshotMaxProjectiles = 20;
 // 상한이 어디서 왔는지는 산수다. 가득 찬 스냅샷 한 장이 1200바이트 예산 안에
 // 들어가야 하고, 각 개수는 U8 한 바이트에 실린다. 상한을 올리면 둘 중 하나가
 // 먼저 깨지므로 컴파일 시간에 센다.
+// snippet-begin: snapshot-budget
 static constexpr size_t kSnapshotFixedBytes = 8 + 4 + 4 + 4 + 2 + 2 + 2 + 1 + 3;
 static constexpr size_t kSnapshotTowerBytes = 4 + 2 + 2 + 1 + 1 + 1;
 static constexpr size_t kSnapshotEnemyBytes = 4 + 2 + 2 + 2 + 2 + 1;
@@ -61,14 +62,25 @@ static_assert(kSnapshotMaxTowers <= 255 && kSnapshotMaxEnemies <= 255 &&
 static_assert(GameWorld::kMaxTowers <= kSnapshotMaxTowers,
               "게임플레이 타워 상한이 스냅샷 상한을 넘으면 초과 타워가 모든 "
               "클라이언트에서 사라진다");
+// snippet-end: snapshot-budget
 
 enum class PacketType : uint8_t {
     Hello = 1,
     Command = 2,
     Snapshot = 3,
     AdmissionHello = 4,
+    Terrain = 5,
 };
-enum class CommandType : uint8_t { Place = 1, Upgrade = 2, Sell = 3, Target = 4 };
+enum class CommandType : uint8_t { Place = 1, Upgrade = 2, Sell = 3, Target = 4, Blast = 5 };
+
+// ── 지형 델타 ──────────────────────────────────────────────────────
+// 절차 맵은 시드에서 나오므로 맵 자체는 와이어를 건너지 않는다. 하지만 발파는
+// 매치 중에 그 격자를 바꾼다 — 클라이언트가 그 사실을 모르면 뚫린 벽을 계속
+// 그린다. 스냅샷에 실을 수는 없다: 가득 찬 스냅샷이 이미 1198바이트라
+// (kSnapshotMaxBytes) 여기에 칸 목록을 얹으면 예산 단언이 컴파일 시간에 깨진다.
+// 그래서 별도 패킷으로 낸다. 내용은 **누적 전체 목록**이라 멱등이고, 유실은
+// 다음 전송으로 저절로 메워진다 — 신뢰 채널이 필요 없는 이유가 그것이다.
+static constexpr size_t kMaxTerrainCells = 96;
 
 struct Command {
     uint32_t sequence = 0;
@@ -92,7 +104,17 @@ struct EnemyState {
     float hp = 0;
     float maxHp = 0;
     EnemyType type = EnemyType::Normal;
+    // 은신 개체가 지금 드러나 있는가. **바이트를 하나도 늘리지 않는다** —
+    // 적 하나가 13바이트이고 스냅샷 예산이 1200바이트인데 지금 1198바이트를
+    // 쓴다(kSnapshotMaxBytes). 적마다 1바이트를 더하면 64바이트가 늘어
+    // static_assert 가 컴파일 시간에 빌드를 멈춘다. 그래서 type 바이트의
+    // 빈 비트를 쓴다 — EnemyType 은 여섯 값이라 하위 3비트면 충분하다.
+    bool revealed = true;
 };
+
+// type 바이트의 최상위 비트가 노출 플래그다.
+inline constexpr uint8_t kEnemyRevealedBit = 0x80;
+inline constexpr uint8_t kEnemyTypeMask = 0x7F;
 
 struct ProjectileState {
     uint32_t id = 0;
@@ -249,6 +271,29 @@ inline net::Bytes WriteCommand(const Command& command) {
     return writer.Finish();
 }
 
+// snippet-begin: terrain-packet
+inline net::Bytes WriteTerrain(const std::vector<uint16_t>& cells) {
+    Writer writer(PacketType::Terrain);
+    const size_t count = std::min(cells.size(), kMaxTerrainCells);
+    writer.U8(static_cast<uint8_t>(count));
+    for (size_t i = 0; i < count; ++i) writer.U16(cells[i]);
+    return writer.Finish();
+}
+
+inline bool ReadTerrain(const net::Bytes& bytes, std::vector<uint16_t>& cells) {
+    Reader reader(bytes);
+    if (!reader.Header(PacketType::Terrain)) return false;
+    const uint8_t count = reader.U8();
+    if (static_cast<size_t>(count) > kMaxTerrainCells) return false;
+    std::vector<uint16_t> decoded;
+    decoded.reserve(count);
+    for (uint8_t i = 0; i < count; ++i) decoded.push_back(reader.U16());
+    if (!reader.Done()) return false;
+    cells = std::move(decoded);
+    return true;
+}
+// snippet-end: terrain-packet
+
 // argument 의 의미는 type 이 정하지만, 그 도메인은 전부 와이어 포맷이 이미 아는
 // 것이다 — TowerType 집합도 TargetMode 집합도 월드를 봐야 알 수 있는 값이 아니다.
 // 그래서 이 검사는 디코더의 몫이고, 월드가 있어야 답할 수 있는 질문(그 칸이
@@ -265,6 +310,7 @@ inline bool CommandArgumentInRange(CommandType type, uint8_t argument) {
             return argument < static_cast<uint8_t>(TowerType::Count);
         case CommandType::Target:
             return argument <= static_cast<uint8_t>(TargetMode::Strongest);
+        case CommandType::Blast:
         case CommandType::Upgrade:
         case CommandType::Sell:
             // 이 둘은 argument 를 읽지 않는다. 읽지 않는 필드는 0 이어야 한다 —
@@ -288,7 +334,7 @@ inline bool ReadCommand(const net::Bytes& bytes, Command& command) {
     decoded.y = reader.U16();
     decoded.argument = reader.U8();
     if (!reader.Done()) return false;
-    if (decoded.type < CommandType::Place || decoded.type > CommandType::Target) return false;
+    if (decoded.type < CommandType::Place || decoded.type > CommandType::Blast) return false;
     if (!CommandArgumentInRange(decoded.type, decoded.argument)) return false;
     command = decoded;
     return true;
@@ -302,12 +348,20 @@ inline bool ReadCommand(const net::Bytes& bytes, Command& command) {
 inline net::Bytes WriteSnapshot(const GameWorld& world, uint32_t tick,
                                 uint32_t acknowledgedCommand,
                                 bool* truncatedOut = nullptr) {
+    // 저장이 AoS 든 SoA 든 이 인코더는 같은 바이트를 낸다 — 여기서 읽는 것은
+    // 배치가 아니라 행 번호별 필드다. 살아 있는 개체만 세는 것도 저장과 무관하다.
+    size_t aliveEnemies = 0;
+    const size_t enemyRows = world.Enemies().Size();
+    for (size_t i = 0; i < enemyRows; ++i)
+        if (world.Enemies().Alive(i)) ++aliveEnemies;
+    const size_t liveProjectiles = world.Projectiles().Size();
+
     size_t towerCount = std::min(world.Towers().size(), kSnapshotMaxTowers);
-    size_t enemyCount = std::min(world.Enemies().size(), kSnapshotMaxEnemies);
-    size_t projectileCount = std::min(world.Projectiles().size(), kSnapshotMaxProjectiles);
+    size_t enemyCount = std::min(aliveEnemies, kSnapshotMaxEnemies);
+    size_t projectileCount = std::min(liveProjectiles, kSnapshotMaxProjectiles);
     bool truncated = towerCount != world.Towers().size() ||
-                     enemyCount != world.Enemies().size() ||
-                     projectileCount != world.Projectiles().size();
+                     enemyCount != aliveEnemies ||
+                     projectileCount != liveProjectiles;
     if (truncatedOut) *truncatedOut = truncated;
 
     Writer writer(PacketType::Snapshot);
@@ -334,21 +388,27 @@ inline net::Bytes WriteSnapshot(const GameWorld& world, uint32_t tick,
         writer.U8(static_cast<uint8_t>(tower.tier));
         writer.U8(static_cast<uint8_t>(tower.targetMode));
     }
-    for (size_t i = 0; i < enemyCount; ++i) {
-        const Enemy& enemy = world.Enemies()[i];
-        writer.U32(enemy.id);
-        writer.U16(EncodePosition(enemy.pos.x));
-        writer.U16(EncodePosition(enemy.pos.y));
-        writer.U16(EncodeHp(enemy.hp));
-        writer.U16(EncodeHp(enemy.maxHp));
-        writer.U8(static_cast<uint8_t>(enemy.type));
+    size_t written = 0;
+    for (size_t i = 0; i < enemyRows && written < enemyCount; ++i) {
+        if (!world.Enemies().Alive(i)) continue;
+        writer.U32(world.Enemies().Id(i));
+        writer.U16(EncodePosition(world.Enemies().Pos(i).x));
+        writer.U16(EncodePosition(world.Enemies().Pos(i).y));
+        writer.U16(EncodeHp(world.Enemies().Hp(i)));
+        writer.U16(EncodeHp(world.Enemies().MaxHp(i)));
+        writer.U8(static_cast<uint8_t>(
+            static_cast<uint8_t>(world.Enemies().Type(i)) |
+            (world.Revealed(i) ? kEnemyRevealedBit : 0)));
+        ++written;
     }
-    for (size_t i = 0; i < projectileCount; ++i) {
-        const Projectile& projectile = world.Projectiles()[i];
+    written = 0;
+    world.Projectiles().ForEach([&](const Projectile& projectile) {
+        if (written >= projectileCount) return;
         writer.U32(projectile.id);
         writer.U16(EncodePosition(projectile.pos.x));
         writer.U16(EncodePosition(projectile.pos.y));
-    }
+        ++written;
+    });
     net::Bytes bytes = writer.Finish();
     // 이 비교는 방어선이 아니라 마지막 자물쇠다. 실제 상한 보장은 위의
     // `static_assert(kSnapshotMaxBytes <= kMaxPacketBytes)` 가 컴파일 시간에 한다 —
@@ -402,7 +462,9 @@ inline bool ReadSnapshot(const net::Bytes& bytes, Snapshot& snapshot) {
         enemy.pos = {DecodePosition(reader.U16()), DecodePosition(reader.U16())};
         enemy.hp = DecodeHp(reader.U16());
         enemy.maxHp = DecodeHp(reader.U16());
-        enemy.type = static_cast<EnemyType>(reader.U8());
+        const uint8_t packedType = reader.U8();
+        enemy.type = static_cast<EnemyType>(packedType & kEnemyTypeMask);
+        enemy.revealed = (packedType & kEnemyRevealedBit) != 0;
         if (enemy.type >= EnemyType::Count || enemy.hp > enemy.maxHp + 0.25f) return false;
         decoded.enemies.push_back(enemy);
     }
@@ -449,6 +511,54 @@ inline Snapshot Lerp(const Snapshot& a, const Snapshot& b, float t) {
     return out;
 }
 
+// 같은 보간을 id → 인덱스 맵 위에서. Lerp 는 b 의 개체 하나마다 a 를 전수
+// 스캔하므로 개체 n 에서 O(n^2) 이다 — 적 64에서는 보이지 않고 2048에서는 프레임
+// 예산을 넘는다. 두 팔은 **같은 스냅샷**을 내야 하고(그것이 판정 조건이다),
+// 다른 것은 대응을 찾는 비용뿐이다.
+//
+// 맵을 멤버로 들고 있는 이유: 매 프레임 새로 만들면 그 할당이 절약분을 먹는다.
+// OpenAddressingHashMap::Clear 는 용량을 유지하므로 두 번째 프레임부터 할당이 0이다.
+// snippet-begin: snapshot-interpolator
+class SnapshotInterpolator {
+public:
+    void SetMode(IdMapKind mode) { mode_ = mode; }
+    IdMapKind Mode() const { return mode_; }
+
+    Snapshot Blend(const Snapshot& a, const Snapshot& b, float t) {
+        if (mode_ == IdMapKind::Linear) return Lerp(a, b, t);
+
+        enemyIndex_.Clear();
+        for (uint32_t i = 0; i < static_cast<uint32_t>(a.enemies.size()); ++i)
+            enemyIndex_.Insert(a.enemies[i].id, i);
+        projectileIndex_.Clear();
+        for (uint32_t i = 0; i < static_cast<uint32_t>(a.projectiles.size()); ++i)
+            projectileIndex_.Insert(a.projectiles[i].id, i);
+
+        Snapshot out = b;
+        out.coreHp = a.coreHp + (b.coreHp - a.coreHp) * t;
+        for (EnemyState& enemy : out.enemies) {
+            const uint32_t* row = enemyIndex_.Find(enemy.id);
+            if (!row) continue;
+            const EnemyState& previous = a.enemies[*row];
+            enemy.pos = previous.pos + (enemy.pos - previous.pos) * t;
+            enemy.hp = previous.hp + (enemy.hp - previous.hp) * t;
+        }
+        for (ProjectileState& projectile : out.projectiles) {
+            const uint32_t* row = projectileIndex_.Find(projectile.id);
+            if (!row) continue;
+            const ProjectileState& previous = a.projectiles[*row];
+            projectile.pos = previous.pos + (projectile.pos - previous.pos) * t;
+        }
+        return out;
+    }
+
+private:
+    OpenAddressingHashMap<uint32_t, uint32_t> enemyIndex_;
+    OpenAddressingHashMap<uint32_t, uint32_t> projectileIndex_;
+    IdMapKind mode_ = IdMapKind::Linear;
+};
+// snippet-end: snapshot-interpolator
+
 // 클라이언트가 그리는 복제 뷰. 버퍼·렌더 시계는 전부 net/ 것이고, 이 별칭은
 // 스냅샷 타입만 이 프로토콜의 것으로 고정한다.
 using SnapshotView = net::InterpolatedView<Snapshot>;
@@ -475,6 +585,8 @@ inline bool ApplyCommand(GameWorld& world, const Command& command) {
             if (index < 0 || command.argument > static_cast<uint8_t>(TargetMode::Strongest)) return false;
             return world.SetTowerTarget(index, static_cast<TargetMode>(command.argument));
         }
+        case CommandType::Blast:
+            return world.Blast(position) > 0;
     }
     return false;
 }

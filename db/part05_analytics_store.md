@@ -295,13 +295,14 @@ SELECT COUNT(*) AS late_duplicates
   JOIN dedup_log d USING (event_id)
  WHERE e.ingest_time > d.first_seen + INTERVAL '7' DAY;
 
--- (4) 재계산 가능성: 원시 보존 창보다 오래된 정제 파티션이 있는가
+-- (4) 재계산 가능성: 선언된 재처리 창(예: 90일) 안의 정제 파티션에 원시 근거가 없는가
 SELECT partition_day
   FROM curated_partitions
- WHERE partition_day < (SELECT MIN(partition_day) FROM raw_partitions);
+ WHERE partition_day >= CURRENT_DATE - INTERVAL '90' DAY
+   AND partition_day < (SELECT MIN(partition_day) FROM raw_partitions);
 ```
 
-네 번째 질의가 특히 조용한 사고를 잡는다. 원시 보존 정책과 정제 보존 정책을 각각 따로 정한 뒤 아무도 둘의 관계를 확인하지 않으면, 어느 날 정제 영역에 원시로 되돌릴 수 없는 파티션이 생긴다. 그날 그 파티션은 파생 데이터에서 원본으로 승격된다 — 아무 경보 없이, 아무도 그런 결정을 내린 적 없이.
+네 번째 질의가 특히 조용한 사고를 잡는다. 재처리 창은 선언해 두고 원시 수명주기를 따로 만지다가 원시가 선언된 창보다 일찍 만료되면, 재처리를 약속한 구간 안에 원시로 되돌릴 수 없는 정제 파티션이 생긴다. 그날 그 파티션은 파생 데이터에서 원본으로 승격된다 — 아무 경보 없이, 아무도 그런 결정을 내린 적 없이.
 
 운영 원장과의 대조(9절)도 같은 형태로 배치 잡에 넣는다. 결과가 0행이어야 하는 질의를 정기 실행하고, 1행이라도 나오면 지표 공표를 멈추는 것이 분석 저장소의 runbook이다.
 

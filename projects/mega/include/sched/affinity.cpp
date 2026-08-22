@@ -100,6 +100,7 @@ int NumaNodeOfCore(int core) {
 #endif
 }
 
+// snippet-begin: scoped-affinity
 ScopedAffinity::ScopedAffinity(int core) {
 #if defined(_WIN32)
     if (core >= 0 && core < 64) {
@@ -123,6 +124,7 @@ ScopedAffinity::ScopedAffinity(int core) {
 ScopedAffinity::~ScopedAffinity() {
     if (ok_) SetAffinityMask(prevMask_);   // 이전 마스크 복원
 }
+// snippet-end: scoped-affinity
 
 }  // namespace sched
 }  // namespace mega

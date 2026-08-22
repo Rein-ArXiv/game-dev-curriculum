@@ -44,6 +44,15 @@ public:
         SwapRemoveImpl(Indices{}, i, last);
     }
 
+    // 모든 컬럼에 같은 연산을 적용한다: fn(std::vector<Ti>&).
+    //
+    // 순서를 보존하는 압축(살아남은 행만 앞으로 당기기)은 컬럼 수만큼 같은
+    // 코드를 반복해야 한다. 컬럼 목록을 아는 것은 이 클래스뿐이므로 그 반복을
+    // 여기서 한 번 접는다. SwapRemove 로 대신할 수 없는 이유는 순서다 — 두
+    // 저장이 같은 결과를 내려면 남은 행의 상대 순서가 같아야 한다.
+    template <class Fn>
+    void ForEachColumn(Fn&& fn) { ForEachColImpl(static_cast<Fn&&>(fn), Indices{}); }
+
 private:
     template <size_t... Is>
     void PushImpl(std::index_sequence<Is...>, const Ts&... vals) {

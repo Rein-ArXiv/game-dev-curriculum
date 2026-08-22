@@ -80,7 +80,7 @@ static void TestTankWaveStats() {
            {WaveDef{1, 20.0f, 30.0f, 5, 0.1f, EnemyType::Tank}}, 0, 100000);
     g.Step(1.0f / 60.0f);                      // 1마리 스폰
     CHECK_EQ(g.AliveEnemies(), 1);
-    const Enemy& e = g.Enemies()[0];
+    const Enemy e = g.Enemies().Row(0);
     CHECK(e.type == EnemyType::Tank);
     CHECK(Near(e.maxHp, 60.0f, 0.5f));         // 20 * 3.0 = 60
     CHECK(e.speed < 30.0f);                    // 느림(0.6배)
@@ -110,7 +110,7 @@ static void TestBossEnemy() {
            {WaveDef{1, 50.0f, 30.0f, 20, 0.1f, EnemyType::Boss}}, 0, 100000);
     g.Step(1.0f / 60.0f);
     CHECK_EQ(g.AliveEnemies(), 1);
-    const Enemy& e = g.Enemies()[0];
+    const Enemy e = g.Enemies().Row(0);
     CHECK(e.type == EnemyType::Boss);
     CHECK(Near(e.maxHp, 600.0f, 1.0f));      // 50 * 12 = 600
 }

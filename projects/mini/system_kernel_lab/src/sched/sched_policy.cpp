@@ -138,10 +138,13 @@ void CaptureOriginalCgroupWeight(const std::string& dir) {
     auto& state = CgroupState();
     if (state.captured && state.dir == dir) return;
 
-    state.captured = true;
     state.modified = false;
     state.dir = dir;
     state.originalWeight = ReadFirstLine(dir + "/cpu.weight");
+    // 읽기에 *성공했을 때만* captured 로 굳힌다. 실패를 캐시로 굳히면 일시적
+    // 실패(또는 테스트의 cgroup_read 주입) 한 번이 같은 dir 의 이후 모든 쓰기
+    // 경로를 영구히 막는다 — 다음 호출이 다시 읽도록 남겨 둔다.
+    state.captured = !state.originalWeight.empty();
 }
 
 bool ApplyCgroupCpuWeight(int weight) {

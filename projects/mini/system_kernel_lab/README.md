@@ -285,8 +285,12 @@ SKL_FAULT=io_uring_queue_init:0:ENOSYS:1 ./build/system_core_tests  # 폴백 강
 
 주입 설정이 없으면 seam의 비용은 relaxed atomic load 하나이고 동작은
 바뀌지 않는다. `SCHED_FIFO` 성공, cgroup `cpu.weight` 쓰기 성공처럼 권한이
-필요한 경로는 테스트가 강제하지 않는다 — 실패했을 때 기본 정책으로
-폴백하는지만 검사한다.
+필요한 경로는 기본 실행에서는 강제하지 않는다 — 실패했을 때 기본 정책으로
+폴백하는지를 검사하고, 성공하면 실제 적용 여부까지 단언한다(FIFO 는
+`pthread_getschedparam`, cgroup 은 `SKL_CGROUP_DIR` 로 승인된 일회용 cgroup 의
+실제 쓰기+복구). 권한을 붙인 기기에서는 `SKL_REQUIRE_SCHED=fifo,cgroup` 이
+그 성공 경로를 요구로 바꾼다 — 조용한 폴백이 실패가 된다
+(`docs/LINUX_HANDOFF.md` §3-1·§3-2).
 
 `system_kernel_bench`는 **성능**을 판정하지 않는다 — 환경마다 달라 회귀 기준이
 될 수 없다. 대신 러너 자신의 정합성을 판정하고, 그 넷이 `add_test` 네 개다.

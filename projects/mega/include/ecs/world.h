@@ -8,9 +8,17 @@
 //
 // 컴포넌트는 trivially copyable 만 허용한다 — archetype 간 이동이 memcpy 이고
 // 소멸자를 호출하지 않기 때문이다(게임 컴포넌트는 대부분 POD).
+//
+// 순회 순서에 대하여. `archetypes_` 는 **어느 조합이 먼저 나타났는가** 순으로
+// 늘어난다. 같은 엔티티 집합이라도 도달 경로가 다르면(스폰 순서가 다르면)
+// 배열 순서가 달라지므로, 그 순서로 부동소수를 누적하면 결과가 실행마다 갈린다.
+// 그래서 시뮬 갱신 경로는 `ForEachChunk`(생성 순서)가 아니라
+// `ForEachChunkOrdered`(조합 마스크 오름차순)만 쓴다. 마스크는 컴포넌트 집합의
+// 순수 함수라 도달 경로에 의존하지 않는다.
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <type_traits>
@@ -135,6 +143,32 @@ public:
         }
     }
 
+    // 순서를 고정한 청크 쿼리. 시뮬 갱신 경로가 쓰는 쪽이다.
+    //
+    // 위 ForEachChunk 와 다른 것은 방문 순서 하나뿐이다. archetype 을 조합
+    // 마스크 오름차순으로 방문하므로, 같은 엔티티 집합이면 그 집합에 어떤
+    // 순서로 도달했든 같은 순서로 돌아온다. 정렬 대상은 archetype 개수(수십)라
+    // 청크 하나의 원소 수(수천)에 비하면 무시할 만하다.
+    // snippet-begin: archetype-order
+    template <class... Ts, class Fn>
+    void ForEachChunkOrdered(Fn&& fn) {
+        uint64_t qmask = (Bit(ComponentTypeId<Ts>()) | ...);
+        visit_.clear();
+        for (uint32_t i = 0; i < (uint32_t)archetypes_.size(); ++i) {
+            const Archetype& a = archetypes_[i];
+            if ((a.mask & qmask) != qmask || a.entities.empty()) continue;
+            visit_.push_back(i);
+        }
+        std::sort(visit_.begin(), visit_.end(), [this](uint32_t l, uint32_t r) {
+            return archetypes_[l].mask < archetypes_[r].mask;
+        });
+        for (uint32_t i : visit_) {
+            Archetype& a = archetypes_[i];
+            fn(a.entities.size(), ColPtr<Ts>(a)...);
+        }
+    }
+    // snippet-end: archetype-order
+
     // 엔티티 단위 쿼리: fn(EntityId, Ts&...).
     template <class... Ts, class Fn>
     void ForEach(Fn&& fn) {
@@ -252,6 +286,7 @@ private:
 
     std::vector<ComponentInfo>            infos_;
     std::vector<Archetype>                archetypes_;
+    std::vector<uint32_t>                 visit_;   // 정렬된 방문 목록(재사용)
     std::unordered_map<uint64_t, uint32_t> archByMask_;
     std::vector<Record>                   records_;
     std::vector<uint32_t>                 freeList_;

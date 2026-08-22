@@ -34,6 +34,7 @@ struct ContactConstraint {
     float        tangentMass = 0;
     float        restitutionBias = 0;   // 반발에 의한 목표 분리 속도
     float        biasPos     = 0;       // Baumgarte 위치 보정
+    float        penetration = 0;       // 제약 생성 시점의 관통 깊이(판정·계측용)
     float        friction    = 0;
     float        normalImpulse  = 0;    // 누적(클램프용)
     float        tangentImpulse = 0;
@@ -62,6 +63,7 @@ inline ContactConstraint MakeConstraint(RigidBody2D& a, RigidBody2D& b, const Co
     float vn = math::Dot(rv, k.normal);
     k.restitutionBias = (vn < -1.0f) ? -e * vn : 0.0f;
 
+    k.penetration = c.penetration;
     float pen = c.penetration - p.slop;
     k.biasPos = pen > 0.0f ? p.baumgarte * (1.0f / dt) * pen : 0.0f;
     return k;

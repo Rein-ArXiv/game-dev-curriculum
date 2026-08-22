@@ -35,6 +35,7 @@ public:
     size_t Capacity() const { return cap_; }
 
     // 가득 차면 가장 오래된 항목을 덮어쓴다(슬라이딩 윈도우 의미론).
+    // snippet-begin: ring-push
     void Push(const T& v) {
         if (Full()) ++head_;          // 오래된 것 버림
         buf_[tail_ & mask_] = v;
@@ -45,6 +46,7 @@ public:
         buf_[tail_ & mask_] = std::move(v);
         ++tail_;
     }
+    // snippet-end: ring-push
 
     // 가장 오래된 항목 제거. 비었으면 false.
     bool Pop(T& out) {

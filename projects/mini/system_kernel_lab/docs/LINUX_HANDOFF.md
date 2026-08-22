@@ -242,14 +242,15 @@ ctest --test-dir ~/build-skl -LE strict    # 폴백 허용 (이식성 모드)
 
 ### 2.5 환경변수
 
-**코드에서 직접 확인한 것만 적었다.** 이 lab 이 읽는 환경변수는 전부 아래 넷이다
-(`grep -rn getenv src tests tools` 결과와 일치).
+**코드에서 직접 확인한 것만 적었다.** 이 lab 이 읽는 환경변수는 전부 아래 다섯이다
+(`grep -rn getenv src tests tools` 결과와 일치. 2026-08-22 에 `SKL_REQUIRE_SCHED` 추가).
 
 | 변수 | 읽는 곳 | 문법 | 기본 | 하는 일 |
 |---|---|---|---|---|
 | `SKL_FAULT` | `src/fault/fault_inject.cpp:174` (프로세스 시작 시 1회) | `op[:skip[:ERRNO[:times]]]` 를 `,` 로 나열 | 없음 | syscall seam 에 실패를 주입한다 |
 | `SKL_REQUIRE_BACKENDS` | `tests/system_core_tests.cpp:111` | backend 이름을 `,` 로 나열 | 미설정 = 폴백 허용 | 목록에 있는 backend 가 폴백하면 테스트 실패 |
-| `SKL_CGROUP_DIR` | `src/sched/sched_policy.cpp:64` | cgroup 절대 경로 하나 | 미설정 = 거부 | 이 경로가 현재 cgroup 과 **정확히 일치할 때만** `cpu.weight` 쓰기 허용 |
+| `SKL_REQUIRE_SCHED` | `tests/system_fault_tests.cpp:550` | `fifo`, `cgroup` 을 `,` 로 나열 | 미설정 = 폴백 허용 | 목록에 있는 sched 정책의 **성공 경로가 skip·폴백되면** `system_fault_tests` 실패. 모르는 이름도 실패 |
+| `SKL_CGROUP_DIR` | `src/sched/sched_policy.cpp:65` | cgroup 절대 경로 하나 | 미설정 = 거부 | 이 경로가 현재 cgroup 과 **정확히 일치할 때만** `cpu.weight` 쓰기 허용. `system_fault_tests` 의 실제 쓰기+복구 단계(§3-1)도 이 승인이 있어야 돈다 |
 | `SKL_STRESS_CYCLES` | `tests/system_core_tests.cpp:470` | 정수 | 8000 | 큐 인계 스트레스 사이클 수. **바닥이 8000이라 줄일 수 없다** (`std::max`) |
 
 #### `SKL_FAULT` 문법
@@ -329,15 +330,19 @@ backend_req,backend,sync,sched,sched_applied,ctx,workers,files,file_bytes,cycle,
 `sched_policy.cpp` 의 두 경로가 실제로 도는가.
 
 - `ApplyCgroupCpuWeight(200)` 의 성공 분기 — `WriteCgroupFile` 이 참을 돌려주고
-  `CgroupState().modified = true` 가 되는 곳 (`sched_policy.cpp:164-171`).
+  `CgroupState().modified = true` 가 되는 곳 (`sched_policy.cpp:165-176`).
 - `RestoreCgroupCpuWeightIfNeeded()` 의 `modified == true` 분기 — 원래 값을 되돌려
-  쓰는 곳 (`sched_policy.cpp:174-191`).
+  쓰는 곳 (`sched_policy.cpp:178-195`).
 
 WSL2 에서 못 한 이유는 `cpu.weight` 를 **쓸 권한이 없어서** 다(파일 자체는 있다 — §6.1).
 
+닫는 경로는 둘이고 **둘 다 한다**: (a) `system_fault_tests` 의 실제 쓰기+복구 단계
+(2026-08-22 신설 — 아래 "명령 (a)"), (b) 벤치 러너로 도는 중간값까지 관측하는 실행
+(아래 "명령 (b)"). (a) 는 단언까지 자동이고, (b) 는 실행 도중의 `during=200` 을 눈으로 본다.
+
 **`SKL_CGROUP_DIR` 이 기대하는 값**
 
-코드(`sched_policy.cpp:51-76`)가 하는 일은 정확히 이렇다.
+코드(`sched_policy.cpp:52-77`)가 하는 일은 정확히 이렇다.
 
 1. `/proc/self/cgroup` 을 읽어 `0::` 로 시작하는 줄을 찾는다.
 2. 그 줄의 `0::` 뒤 문자열이 `rel` 이면, 검출 경로는 `/sys/fs/cgroup` + `rel` 이다
@@ -371,7 +376,31 @@ export SKL_CGROUP_DIR=/sys/fs/cgroup/skl-bench
 `(4)` 의 `0::/skl-bench` 앞에 `/sys/fs/cgroup` 을 붙인 것이 `SKL_CGROUP_DIR` 이다.
 **`/proc/self/cgroup` 출력이 `0::/user.slice/...` 처럼 나오면 그 전체 경로를 써야 한다.**
 
-**명령**
+**명령 (a) — `system_fault_tests` 의 실제 쓰기+복구 단계 (2026-08-22 신설)**
+
+위임 cgroup 절차를 끝내고 `SKL_CGROUP_DIR` 이 export 된 **같은 셸** 에서:
+
+```bash
+SKL_REQUIRE_SCHED=cgroup ~/build-skl/system_fault_tests --step=6
+echo "exit=$?"
+```
+
+| 확인 | 통과 |
+|---|---|
+| stdout `cgroup write seam reached:` | `yes` |
+| stdout `cgroup real write+restore:` | `orig=<원래 값> during=200 after=<원래 값>` |
+| stdout `cgroup success path:` | `ran (delegated cgroup approved via SKL_CGROUP_DIR) [required by SKL_REQUIRE_SCHED]` |
+| `exit=` | `0` |
+
+`SKL_REQUIRE_SCHED=cgroup` 이 이 실행을 **요구 모드** 로 바꾼다 — 승인·권한이 어긋나
+실제 쓰기 단계가 skip 되면 조용한 폴백 대신 테스트가 실패한다. 테스트는 스스로
+`SKL_CGROUP_DIR` 을 세우지 않는다: 사용자가 export 한 값이 검출 경로와 **정확히 일치할
+때만** 실제 쓰기 단계를 밟는다 (일치하지 않으면 `cgroup success path: skipped
+(SKL_CGROUP_DIR does not approve this cgroup)`). 쓰기가 성공하면 `modified==true`
+복구 경로까지 밟고 원래 값이 되돌아왔는지 단언하므로, 정상 종료 후 `cpu.weight` 는
+원래 값이다. 무권한 폴백·주입 케이스들도 같은 실행 안에서 그대로 검증된다.
+
+**명령 (b) — 벤치 러너 (도는 중간값까지 관측)**
 
 ```bash
 cd ~/build-skl
@@ -396,7 +425,7 @@ head -2 /tmp/cg.csv
 캡처해** `after` 도 200 이 되어, 복구가 깨진 것처럼 보인다. 그렇게 됐다면 손으로
 `echo $ORIG > "$SKL_CGROUP_DIR/cpu.weight"` 로 되돌린 뒤 다시 시작한다.
 
-**무엇이 나오면 통과인가**
+**(b) 에서 무엇이 나오면 통과인가**
 
 | 확인 | 통과 | 실패 |
 |---|---|---|
@@ -407,7 +436,7 @@ head -2 /tmp/cg.csv
 | CSV 5번째 열 | `1` | `0` 이면 `ApplySchedProcessSetup` 이 false 를 돌려줬다 |
 
 복구 분기는 `FileIoWorkload::Shutdown()` → `ApplySchedProcessSetup(SchedType::Default)`
-경로로만 도달한다(`file_io_workload.cpp:347-355`). 그래서 **정상 종료한 실행** 이어야
+경로로만 도달한다(`file_io_workload.cpp:349-357`). 그래서 **정상 종료한 실행** 이어야
 `after` 가 의미가 있다. `kill -9` 로 죽인 실행은 복구되지 않는다(설계상 그렇고,
 README 도 그렇게 적어 두었다).
 
@@ -418,13 +447,12 @@ echo $$ | sudo tee /sys/fs/cgroup/cgroup.procs      # 셸을 루트 cgroup 으�
 sudo rmdir /sys/fs/cgroup/skl-bench
 ```
 
-**주의.** `system_fault_tests` 로는 이 항목을 확인할 수 없다. 그 테스트는 `cpu.weight` 가
-쓰기 가능하면 "실제 cgroup 을 바꿀 위험" 때문에 **통째로 건너뛴다**
-(`system_fault_tests.cpp:595-600`). 위임 cgroup 안에서 돌리면 다음 줄이 나오고 그게 정상이다.
-
-```text
-  /sys/fs/cgroup/skl-bench/cpu.weight is writable — skipping (would mutate a real cgroup)
-```
+**정정 이력 (2026-08-22).** 이 자리에는 원래 "`system_fault_tests` 로는 이 항목을 확인할 수
+없다 — `cpu.weight` 가 쓰기 가능하면 통째로 건너뛴다 (`… is writable — skipping`)" 는 주의가
+있었다. **그 서술은 이제 낡았다.** 테스트가 재설계되어(위 "명령 (a)"), 쓰기 가능한 기기에서는
+통째 skip 대신 **사용자가 `SKL_CGROUP_DIR` 로 승인한 경우에만** 실제 쓰기+복구 단계를 밟고,
+승인이 없으면 그 단계만 skip 사유와 함께 건너뛴다(무권한 폴백·주입 케이스는 어느 기기에서나
+그대로 돈다). 옛 skip 메시지는 더 이상 출력되지 않는다.
 
 ---
 
@@ -432,7 +460,7 @@ sudo rmdir /sys/fs/cgroup/skl-bench
 
 **확인하려는 것**
 
-`ApplyFifo(50)`(`sched_policy.cpp:91-104`)의 성공 분기. WSL2 에서는 `ulimit -r` 이 0 이고
+`ApplyFifo(50)`(`sched_policy.cpp:92-105`)의 성공 분기. WSL2 에서는 `ulimit -r` 이 0 이고
 `CAP_SYS_NICE` 도 없어 항상 `EPERM` 으로 떨어졌다 — 실패 폴백만 검증됐다.
 
 **권한 주기 (셋 중 하나)**
@@ -457,17 +485,22 @@ sudo ~/build-skl/system_fault_tests
 **명령과 기대 출력 (a) — 테스트 쪽**
 
 ```bash
-~/build-skl/system_fault_tests | grep 'SCHED_FIFO applied'
+SKL_REQUIRE_SCHED=fifo ~/build-skl/system_fault_tests --step=6 > /tmp/skl_fifo.txt
+echo "exit=$?"                      # 파이프 없이 — 테스트 바이너리의 종료 코드다
+grep 'SCHED_FIFO' /tmp/skl_fifo.txt
 ```
 
 | 출력 | 뜻 |
 |---|---|
 | `  SCHED_FIFO applied without injection: yes (privileged)` | **통과.** 성공 경로가 돌았다 |
-| `  SCHED_FIFO applied without injection: no (expected without CAP_SYS_NICE)` | 권한이 안 붙었다. 작성 환경이 항상 이 값이었다 |
+| `  SCHED_FIFO applied without injection: no (expected without CAP_SYS_NICE)` | 권한이 안 붙었다. 작성 환경이 항상 이 값이었다. `SKL_REQUIRE_SCHED=fifo` 를 걸었으므로 이때는 **테스트가 실패한다** (조용한 폴백 방지) |
+| `  SCHED_FIFO success path: verified via pthread_getschedparam, then restored to SCHED_OTHER` | 성공 주장 뒤 **커널에 되물어** 실제로 `SCHED_FIFO`/prio 50 이 걸렸는지, 그리고 기본 복원까지 됐는지 단언했다 (2026-08-22 신설) |
 
-이 줄 바로 위의 주입 케이스(`pthread_setschedparam:0:EPERM` → false 반환)는 권한이
-있어도 그대로 통과해야 한다. **성공 경로를 얻는 대신 실패 폴백 검증을 잃으면 안 된다** —
-둘 다 초록이어야 정상이다.
+성공 경로는 이제 "true 를 돌려줬다" 로 끝나지 않는다 — 테스트가 `pthread_getschedparam` 으로
+`policy == SCHED_FIFO && sched_priority == 50` 을 단언하고, `Default` 복원 뒤
+`SCHED_OTHER` 로 돌아왔는지도 단언한다. 이 줄 바로 위의 주입 케이스
+(`pthread_setschedparam:0:EPERM` → false 반환)는 권한이 있어도 그대로 통과해야 한다.
+**성공 경로를 얻는 대신 실패 폴백 검증을 잃으면 안 된다** — 둘 다 초록이어야 정상이다.
 
 **명령과 기대 출력 (b) — 실제 스레드 정책 확인**
 
@@ -812,52 +845,48 @@ $ SKL_CGROUP_DIR=/sys/fs/cgroup/init.scope ./system_kernel_bench --sched=cgroup 
 skl: writing /sys/fs/cgroup/init.scope/cpu.weight failed: Permission denied — keeping default
 ```
 
-**그런데도 `system_fault_tests` 는 `cgroup write seam reached: no (cpu.weight unreadable here)`
-를 찍는다.** 원인은 환경이 아니라 **테스트 순서 + 정적 상태 캐시** 다.
+**그런데도 (당시의) `system_fault_tests` 는 `cgroup write seam reached: no (cpu.weight
+unreadable here)` 를 찍었다.** 원인은 환경이 아니라 **테스트 순서 + 정적 상태 캐시** 였다.
 
-`CaptureOriginalCgroupWeight`(`sched_policy.cpp:136-144`)는 `state.captured && state.dir == dir`
-이면 즉시 반환하는데, **읽기가 실패했을 때도 `captured = true` 로 표시한다.**
+당시의 `CaptureOriginalCgroupWeight` 는 `state.captured && state.dir == dir` 이면 즉시
+반환하는데, **읽기가 실패했을 때도 `captured = true` 로 표시했다.**
 `TestSchedCgroupFallback` 은 (3)에서 `cgroup_read:0:EACCES` 를 주입해 읽기를 실패시키고,
 그 결과 `originalWeight = ""` 인 채 캐시가 굳는다. 이어지는 (4)의 `cgroup_write` 주입 케이스는
 같은 `dir` 이라 재캡처를 건너뛰고 `originalWeight.empty()` 에서 먼저 빠져나가므로
-**쓰기 seam 을 영원히 밟지 못한다.** stderr 에 "reading … failed" 가 **두 번** 찍히는 것이 증거다.
+**쓰기 seam 을 영원히 밟지 못했다.** stderr 에 "reading … failed" 가 **두 번** 찍히는 것이 증거였다.
 
 ```text
 skl: reading /sys/fs/cgroup/init.scope/cpu.weight failed — keeping default   ← (3) 주입 때문
 skl: reading /sys/fs/cgroup/init.scope/cpu.weight failed — keeping default   ← (4) 캐시 때문
 ```
 
-**따라서:**
+**정정 이력 (2026-08-22) — 위 결함은 제품 코드에서 고쳐졌다.** 이 절의 초판은 "따라서
+`cgroup_write` seam 은 어떤 환경에서도 `system_fault_tests` 로는 밟히지 않고, 리눅스
+기기에서도 이 줄은 여전히 `no` 로 나온다. 고치려면 읽기 실패 시 `captured` 를 세우지
+않아야 한다" 고 결론냈다. 그 권고대로 `CaptureOriginalCgroupWeight` 가 **읽기에 성공했을
+때만** `captured` 를 세우도록 수정됐다(`sched_policy.cpp:137-148`). 지금 동작:
 
-- `cgroup_write` seam(주입에 의한 쓰기 실패 폴백)은 **어떤 환경에서도** `system_fault_tests`
-  로는 밟히지 않는다. `cpu.weight` 가 쓰기 가능한 기기에서는 그 앞 단계에서 테스트가
-  통째로 skip 되고(§3-1 마지막), 쓰기 불가한 기기에서는 이 캐시 문제로 막힌다.
-- 리눅스 기기에서도 **이 줄은 여전히 `no` 로 나온다.** `no` 가 나왔다고 §3-1 이 실패한 게
-  아니다. §3-1 의 판정은 `cpu.weight` 값과 stderr 로 하라.
-- 고치려면 `CaptureOriginalCgroupWeight` 가 **읽기 실패 시 `captured` 를 세우지 않게** 하거나,
-  테스트가 (3)과 (4) 사이에 상태를 리셋해야 한다. 이 문서는 제품 코드를 건드리지 않았다.
+- (4)는 읽기 주입을 푼 **재시도에서 캡처가 성공** 해 쓰기 seam 까지 도달한다. `cpu.weight`
+  를 읽을 수 있는 환경에서는 도달이 CHECK 로 **보장** 된다 — 캐시 오염이 재발하면 그
+  CHECK 가 잡는다(변이 검증됨: `captured = true` 로 되돌리면
+  `CHECK failed: reachedWrite` 로 실패한다).
+- 작성 환경(WSL2)에서도 이제 `cgroup write seam reached: yes` 가 나오고, stderr 의
+  "reading … failed" 는 (3) 주입에 의한 **한 번** 만 찍힌다. 뒤이어 (4)의
+  `skl: writing … failed: Permission denied` 는 쓰기 seam 주입에 의한 기대 출력이다.
+- 쓰기 가능한 기기의 통째 skip 도 사라졌다 — §3-1 "명령 (a)" 가 새 동작이다.
 
-### 6.2 "`--sched=fifo` 는 `sched_applied=0` 으로 기록된다" — 항상 그렇지는 않다
+### 6.2 "`--sched=fifo` 는 `sched_applied=0` 으로 기록된다" — 경쟁이었고, 고쳐졌다
 
-`sched_applied` 열은 벤치 러너가 `workload.Init()` **직후** 한 번 읽어 고정한다
-(`bench_main.cpp:326`). 그런데 `SCHED_FIFO`·`nice` 의 적용은 **워커 스레드가 자기 루프
-시작 시점에** 하고(`file_io_workload.cpp:223-224`), 실패해야 `schedApplied_` 가 false 로
-내려간다. 두 시점 사이에 경쟁이 있다 — 워커가 아직 `ApplySchedToCurrentThread` 를 실행하기
-전에 메인이 값을 읽으면 **실패했는데도 1 이 기록된다.**
+**이력.** 이 열은 원래 벤치 러너가 `workload.Init()` 직후 한 번 읽어 고정했다. 그런데
+`SCHED_FIFO`·`nice` 의 적용은 **워커 스레드가 자기 루프 시작 시점에** 하므로
+(`file_io_workload.cpp:225-226`) 두 시점 사이에 경쟁이 있었고, 워커 4개가 전부 `EPERM` 으로
+실패했는데도 1 이 기록된 실행이 실측 12회 중 5회였다.
 
-작성 환경 실측. 워커 4개가 **전부 `EPERM` 으로 실패했는데도** 1 이 기록된 실행의 비율:
+**현재(2026-08-15 수정).** 읽는 시점을 **워밍업이 끝난 첫 기록 사이클**로 옮겼다
+(`bench_main.cpp:413` — 그 시점이면 모든 워커가 최소 한 사이클을 돌아 적용을 이미
+시도했다). 수정 후 무권한 `--sched=fifo` 실측 12/12 가 정확히 0 을 기록한다.
 
-```text
---cycles=1  (10회)    0 이 9,  1 이 1
---cycles=3  (12회)    0 이 7,  1 이 5
-```
-
-**사이클 수를 늘려도 해결되지 않는다.** 이 열은 측정 루프가 돌기 전에 한 번 정해지므로
-`--cycles` 와 무관하고, 값은 순전히 스레드 기동 경쟁으로 갈린다. 위 두 비율의 차이는
-경향이 아니라 표본 잡음으로 읽어야 한다 — **아무 실행에서나 1 이 나올 수 있다.**
-
-**따라서 §3-2·§3-3 에서 `sched_applied=1` 을 "FIFO 가 적용됐다" 의 증거로 쓰면 안 된다.**
-증거는 둘이다.
+**그래도 리눅스 기기에서 성공 판정의 근거는 열 하나로 두지 마라.** 증거는 둘을 함께 본다.
 
 1. stderr 에 `pthread_setschedparam(SCHED_FIFO, prio=50) failed:` 가 **없는 것**.
 2. `chrt -p <tid>` 가 워커 스레드에 대해 **`SCHED_FIFO` 를 보고하는 것**(§3-2 (b)).
@@ -873,8 +902,14 @@ skl: reading /sys/fs/cgroup/init.scope/cpu.weight failed — keeping default   �
 
 - [ ] §2.2 `ctest` **25/25 통과** (네이티브 리눅스 기준선 확보)
 - [ ] §2.4 `ctest -L strict` 통과 (io_uring·aio 가 실제로 돌았다)
-- [ ] §3-1 `during=200` · `after=<원래 값>` · CSV `sched_applied=1`
-- [ ] §3-2 `SCHED_FIFO applied without injection: yes (privileged)`
+- [ ] §3-1 (a) 위임 cgroup + `SKL_CGROUP_DIR` export 셸에서
+      `SKL_REQUIRE_SCHED=cgroup system_fault_tests --step=6` → exit 0,
+      `cgroup write seam reached: yes` · `cgroup real write+restore: orig=… during=200 after=<orig>` ·
+      `cgroup success path: ran (…)`
+- [ ] §3-1 (b) 벤치 러너로 `during=200` · `after=<원래 값>` · CSV `sched_applied=1`
+- [ ] §3-2 `SKL_REQUIRE_SCHED=fifo system_fault_tests --step=6` → exit 0,
+      `SCHED_FIFO applied without injection: yes (privileged)` ·
+      `SCHED_FIFO success path: verified via pthread_getschedparam, then restored to SCHED_OTHER`
 - [ ] §3-2 `chrt -p` 가 워커 4개에 `SCHED_FIFO` 보고
 - [ ] §3-2 권한을 준 뒤에도 주입 케이스(실패 폴백)가 그대로 통과
 - [ ] §3-3 `grep -c 'failed' /tmp/sched.err` → 0

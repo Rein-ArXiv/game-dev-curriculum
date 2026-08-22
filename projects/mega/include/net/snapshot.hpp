@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "containers/ring_buffer.h"
 #include "math/vec.hpp"
 #include "net/sequence.hpp"
 #include "serialize/archive.h"
@@ -22,7 +23,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <utility>
 #include <vector>
 
@@ -56,36 +56,44 @@ inline bool ReadSnapshot(const std::vector<uint8_t>& bytes, Snapshot& s) {
 
 // 최근 스냅샷을 보관하고, 임의의(분수) 렌더 틱에서 보간한다.
 // Snap 에 요구하는 것은 `uint32_t tick` 뿐이다.
+// 보관소는 고정 용량 링이다(containers/ring_buffer.h). 보관 개수가 처음부터
+// 상한이 정해진 값이라 가변 덱을 쓸 이유가 없었다 — 스냅샷 하나가 들어올 때마다
+// 덱은 노드 하나를 할당하고 밀려난 노드 하나를 반납했다. 링은 같은 자리를 덮어쓴다.
+//
+// 용량은 2의 거듭제곱으로 올림된다(모듈로가 비트 마스크가 되는 조건). 그래서
+// keep 은 "적어도 이만큼 보관한다"는 하한이고, 실제 보관 수는 Capacity() 다.
+// 상한을 넘긴 Push 가 가장 오래된 것을 버리는 의미론은 링이 그대로 갖고 있으므로
+// 여기서 따로 잘라 낼 것이 없다.
 template <class Snap>
 class SnapshotBufferT {
 public:
-    explicit SnapshotBufferT(size_t keep = 16) : keep_(keep ? keep : 1) {}
+    explicit SnapshotBufferT(size_t keep = 16) : snaps_(keep ? keep : 1) {}
 
     // 받아들였으면 true. 이미 지나간 틱은 false(호출자가 '살아 있는 링크'를
     // 판정할 때 이 구분이 필요하다).
     bool Add(Snap s) {
-        if (!snaps_.empty()) {
-            if (s.tick == snaps_.back().tick) {
-                snaps_.back() = std::move(s);
+        if (!snaps_.Empty()) {
+            if (s.tick == snaps_.Newest().tick) {
+                snaps_.Newest() = std::move(s);
                 return true;
             }
-            if (!SequenceMoreRecent(s.tick, snaps_.back().tick)) return false;
+            if (!SequenceMoreRecent(s.tick, snaps_.Newest().tick)) return false;
             // float render ticks cannot interpolate across uint32 wrap. Start a
             // fresh interpolation epoch when the monotonic counter wraps.
-            if (s.tick < snaps_.back().tick) snaps_.clear();
+            if (s.tick < snaps_.Newest().tick) snaps_.Clear();
         }
-        if (snaps_.empty()) ++epoch_;
-        snaps_.push_back(std::move(s));
-        while (snaps_.size() > keep_) snaps_.pop_front();
+        if (snaps_.Empty()) ++epoch_;
+        snaps_.Push(std::move(s));
         return true;
     }
 
-    bool Empty() const { return snaps_.empty(); }
-    size_t Size() const { return snaps_.size(); }
-    uint32_t NewestTick() const { return snaps_.empty() ? 0 : snaps_.back().tick; }
-    uint32_t OldestTick() const { return snaps_.empty() ? 0 : snaps_.front().tick; }
-    const Snap* Newest() const { return snaps_.empty() ? nullptr : &snaps_.back(); }
-    const Snap* Oldest() const { return snaps_.empty() ? nullptr : &snaps_.front(); }
+    bool Empty() const { return snaps_.Empty(); }
+    size_t Size() const { return snaps_.Size(); }
+    size_t Capacity() const { return snaps_.Capacity(); }
+    uint32_t NewestTick() const { return snaps_.Empty() ? 0 : snaps_.Newest().tick; }
+    uint32_t OldestTick() const { return snaps_.Empty() ? 0 : snaps_[0].tick; }
+    const Snap* Newest() const { return snaps_.Empty() ? nullptr : &snaps_.Newest(); }
+    const Snap* Oldest() const { return snaps_.Empty() ? nullptr : &snaps_[0]; }
 
     // 보간 타임라인의 세대. 버퍼가 비어 있다가 첫 스냅샷을 받거나, 카운터가 한
     // 바퀴 돌아 버퍼를 비웠을 때 증가한다 — 분수 렌더 시계를 다시 앵커링해야 하는
@@ -95,14 +103,14 @@ public:
     // renderTick(분수) 시점의 스냅샷. blend(a, b, t) 가 타입별 보간을 맡는다.
     template <class Blend>
     Snap Sample(double renderTick, Blend&& blend) const {
-        if (snaps_.empty()) return Snap{};
-        if (snaps_.size() == 1) return snaps_.back();
-        if (renderTick <= static_cast<double>(snaps_.front().tick)) return snaps_.front();
-        if (renderTick >= static_cast<double>(snaps_.back().tick)) return snaps_.back();
+        if (snaps_.Empty()) return Snap{};
+        if (snaps_.Size() == 1) return snaps_.Newest();
+        if (renderTick <= static_cast<double>(snaps_[0].tick)) return snaps_[0];
+        if (renderTick >= static_cast<double>(snaps_.Newest().tick)) return snaps_.Newest();
 
         // renderTick 를 감싸는 연속 두 스냅샷 a,b 탐색.
         size_t bi = 1;
-        for (size_t i = 1; i < snaps_.size(); ++i)
+        for (size_t i = 1; i < snaps_.Size(); ++i)
             if (static_cast<double>(snaps_[i].tick) >= renderTick) {
                 bi = i;
                 break;
@@ -117,8 +125,7 @@ public:
     }
 
 private:
-    std::deque<Snap> snaps_;
-    size_t           keep_;
+    RingBuffer<Snap> snaps_;
     uint32_t         epoch_ = 0;
 };
 

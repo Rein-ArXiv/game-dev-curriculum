@@ -58,6 +58,7 @@ set(MEGA_LAYER_CHECK_COMMAND
     --games-dir ${MEGA_GAMES_DIR}
     --entry-line-limit ${MEGA_ENTRY_LINE_LIMIT})
 
+# snippet-begin: layer-gate
 execute_process(COMMAND ${MEGA_LAYER_CHECK_COMMAND}
                 RESULT_VARIABLE MEGA_LAYER_CHECK_RESULT
                 OUTPUT_VARIABLE MEGA_LAYER_CHECK_OUTPUT
@@ -72,6 +73,7 @@ add_custom_target(mega_layer_check ALL
     COMMENT "계층 규칙 검사: games/ 에 OS API 직접 호출이 없는가"
     VERBATIM)
 add_test(NAME layer_rules COMMAND ${MEGA_LAYER_CHECK_COMMAND})
+# snippet-end: layer-gate
 
 # ══ 도달성 게이트 준비(재설계안 A2) ══════════════════════════════════
 #
@@ -158,6 +160,7 @@ endif()
 set(MEGA_CORE_UNIT_DIR ${CMAKE_CURRENT_BINARY_DIR}/mega_core_units)
 file(MAKE_DIRECTORY ${MEGA_CORE_UNIT_DIR})
 set(MEGA_CORE_UNITS "")
+# snippet-begin: core-units
 foreach(header ${MEGA_CORE_HEADERS})
     file(RELATIVE_PATH rel ${MEGA_CORE_INCLUDE_DIR} ${header})
     string(REGEX REPLACE "[^A-Za-z0-9]" "_" stem "${rel}")
@@ -172,6 +175,7 @@ foreach(header ${MEGA_CORE_HEADERS})
     endif()
     list(APPEND MEGA_CORE_UNITS ${unit})
 endforeach()
+# snippet-end: core-units
 
 # 생성 TU 를 정리하다 남은 고아 파일(헤더가 삭제·이름 변경된 경우)을 제거한다.
 file(GLOB MEGA_CORE_STALE_UNITS ${MEGA_CORE_UNIT_DIR}/unit_*.cpp)
@@ -265,6 +269,25 @@ add_custom_command(TARGET mega_defense POST_BUILD
 add_test(NAME mega_defense_selftest COMMAND mega_defense --selftest)
 set_tests_properties(mega_defense_selftest PROPERTIES TIMEOUT 120)
 
+# 같은 실행 파일, 다른 팔. G2 가 들여온 경로 — 절차 지형 · 기울인 카메라 ·
+# 조준 색인 · BVH 정적 질의 · 격자 광역 탐색 · 잔해 물리 — 는 기본 팔에서 한 줄도
+# 돌지 않는다. 이 검사가 없으면 그 전부가 "컴파일은 되는 코드"로 남는다.
+# 스크립트는 배치·강화에 더해 발파와 철거까지 실제로 눌러, 지형이 매치 중에
+# 바뀌고 잔해가 통행 격자를 막는 경로를 제품 안에서 통과시킨다.
+add_test(NAME mega_defense_selftest_procgen
+         COMMAND mega_defense --selftest 25000
+                 --ab map=procgen --ab camera=tilted3d --ab target_index=grid
+                 --ab static_query=bvh --ab broadphase=grid)
+set_tests_properties(mega_defense_selftest_procgen PROPERTIES TIMEOUT 300)
+
+# G3 가 들여온 팔들. archetype 저장 · 절차 보스 리그 · 기울인 카메라를 지나는
+# 소리가 제품 안에서 한 판을 끝까지 도는지 본다. 기본 팔에서는 셋 다 한 줄도
+# 돌지 않으므로, 이 검사가 없으면 전부 "컴파일은 되는 코드"로 남는다.
+add_test(NAME mega_defense_selftest_rig
+         COMMAND mega_defense --selftest 25000
+                 --ab entity_store=ecs --ab boss_render=rig --ab camera=tilted3d)
+set_tests_properties(mega_defense_selftest_rig PROPERTIES TIMEOUT 300)
+
 # GPU 표시 경로도 ctest 대상이다. 감사 #7·#24 는 README·docs 가 "Vulkan 스왑체인
 # 5프레임 present 를 자동 검증한다"고 적으면서 ctest 에도 CI 에도 그 항목이 없는
 # 상태를 지적했다. 여기서 등록해 그 문장을 사실로 만든다.
@@ -274,10 +297,12 @@ set_tests_properties(mega_defense_selftest PROPERTIES TIMEOUT 120)
 # 결과에 아무 흔적도 남기지 않는다. 대신 항상 등록하고, 실행할 수 없는 환경에서는
 # 실행 파일이 kDefenseSkipExitCode(77) 로 끝나 ctest 가 이 검사를 SKIP 으로 센다.
 # 실패는 오직 "장치도 창도 있는데 present 가 깨졌을 때"뿐이다.
+# snippet-begin: gpu-skip
 add_test(NAME mega_defense_gpu_selftest COMMAND mega_defense --gpu-selftest)
 set_tests_properties(mega_defense_gpu_selftest PROPERTIES
                      TIMEOUT 120
                      SKIP_RETURN_CODE 77)
+# snippet-end: gpu-skip
 
 # 도달성 게이트는 "헤더가 제품에서 도달 가능한가"만 강제한다. 도달 가능한 코드가
 # 실제로 **실행되는가**는 묻지 않으므로, 배선 결함은 무증상으로 통과할 수 있다.
@@ -294,6 +319,27 @@ set_tests_properties(mega_defense_gpu_selftest PROPERTIES
 # 콘텐츠를 보게 해 두는 편이 진단이 쉽다).
 add_dependencies(test_defense_coop_process mega_defense)
 add_dependencies(test_defense_client_loop mega_defense)
+# 아래 둘도 실행 파일 옆의 assets/ 를 읽는다(에셋 리로드와 프레임 계측은 진짜
+# 스프라이트가 있어야 성립한다). 그 디렉터리를 만드는 것은 mega_defense 의
+# POST_BUILD 다.
+add_dependencies(test_async_reload mega_defense)
+add_dependencies(test_frame_trace mega_defense)
+# 보스의 저작 포즈도 실행 파일 옆의 assets/ 에서 온다. 이 테스트는 **배포되는
+# 그 파일**을 읽어 내장 클립과 다르다는 것까지 확인하므로, 인라인 문자열만으로는
+# "로더가 제품에서도 쓰이는가"에 답할 수 없다.
+add_dependencies(test_pose_content mega_defense)
+# 핸들 소유 검사도 실행 파일 옆의 assets/ 로 한 프레임을 실제로 그린다.
+add_dependencies(test_asset_handles mega_defense)
+# 규모를 올린 A/B 는 실제로 오래 돈다. 매달리지는 않게 상한을 둔다.
+set_tests_properties(test_entity_store_ab PROPERTIES TIMEOUT 180)
+set_tests_properties(test_id_map_ab PROPERTIES TIMEOUT 180)
+set_tests_properties(test_jobs_determinism PROPERTIES TIMEOUT 300)
+set_tests_properties(test_frame_alloc_budget PROPERTIES TIMEOUT 180)
+set_tests_properties(test_deferred_free PROPERTIES TIMEOUT 120)
+# 잠금 A/B 와 시작·정지 반복은 "깨우기가 죽으면 실패가 아니라 매달린다" 부류다.
+# 그 상태를 실패로 바꿔 주는 것은 타임아웃뿐이다.
+set_tests_properties(test_scheduler_lock_ab PROPERTIES TIMEOUT 120)
+set_tests_properties(test_async_reload PROPERTIES TIMEOUT 120)
 
 # Headless authoritative process. It reuses the same game rules and wire
 # format, but owns a multi-endpoint UDP socket and validates live-service
@@ -361,6 +407,7 @@ set(MEGA_REACHABILITY_COMMAND
     --readme-tree ${CMAKE_CURRENT_SOURCE_DIR}/README.md
     ${MEGA_REACHABILITY_ARGS})
 
+# snippet-begin: reach-gate
 add_custom_target(mega_reachability ALL
     COMMAND ${MEGA_REACHABILITY_COMMAND}
     COMMENT "도달성 게이트: include/ 의 모든 헤더가 제품 도달 또는 LAB_ONLY 등재인가"
@@ -368,3 +415,4 @@ add_custom_target(mega_reachability ALL
 add_dependencies(mega_reachability mega_defense mega_defense_server)
 
 add_test(NAME reachability_gate COMMAND ${MEGA_REACHABILITY_COMMAND})
+# snippet-end: reach-gate

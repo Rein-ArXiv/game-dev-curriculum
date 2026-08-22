@@ -11,6 +11,10 @@ change or rebuild is required.
 - `waves.txt`: `count hp speed reward interval enemy_type` per line.
 - `balance.script`: `start_gold`, `core_hp`, `enemy_hp_multiplier`,
   `enemy_speed_multiplier`, and `reward_multiplier`.
+- `boss.pose`: keyframes for the boss walk and slam clips. Each `key` line
+  authors six degrees of freedom (body lift, body roll, four hip yaws); bone
+  lengths and the parent chain belong to the code. Rejected files fall back to
+  the built-in clips as one atomic unit.
 
 The loader accepts at most 256x256 pixels and validates every channel. Missing
 or malformed files fall back to built-in procedural sprites. A level is

@@ -559,8 +559,9 @@ sudo setcap cap_sys_nice+ep ./build/system_kernel_lab
 // tests/system_fault_tests.cpp
 
 void TestSchedThreadPolicyFallback() {
+    const bool requireFifo = SchedRequired("fifo");
     // 이 스레드의 nice 를 바꾸므로 메인 스레드가 아니라 전용 스레드에서.
-    std::thread worker([] {
+    std::thread worker([requireFifo] {
         CHECK(skl::ApplySchedToCurrentThread(skl::SchedType::Default));
 
         {
@@ -576,9 +577,31 @@ void TestSchedThreadPolicyFallback() {
             CHECK(!skl::ApplySchedToCurrentThread(skl::SchedType::Fifo));
             CHECK(skl::FaultInjectionCount("pthread_setschedparam") == 1);
         }
+        const bool fifoOk = skl::ApplySchedToCurrentThread(skl::SchedType::Fifo);
         // ...
+        if (fifoOk) {
+            // 성공을 주장했으면 커널에 되물어 실제로 걸렸는지 확인한다 —
+            // true 를 돌려주고 정책을 안 바꾸는 구현이 여기서 잡힌다.
+            int         policy = -1;
+            sched_param param{};
+            CHECK(::pthread_getschedparam(::pthread_self(), &policy, &param)
+                  == 0);
+            CHECK(policy == SCHED_FIFO);
+            CHECK(param.sched_priority == 50);
+        // ... (else: SKL_REQUIRE_SCHED=fifo 가 걸려 있으면 폴백을 실패로 센다)
+        }
         // 실패했든 성공했든 스레드는 살아 있고 기본으로 돌아갈 수 있어야 한다.
         CHECK(skl::ApplySchedToCurrentThread(skl::SchedType::Default));
+        {
+            // 원상 복원 확인 — FIFO 가 성공했던 경우에도 SCHED_OTHER 로
+            // 돌아와야 뒤의 검사가 실시간 우선순위를 물려받지 않는다.
+            int         policy = -1;
+            sched_param param{};
+            CHECK(::pthread_getschedparam(::pthread_self(), &policy, &param)
+                  == 0);
+            CHECK(policy == SCHED_OTHER);
+        }
+        // ...
     });
     worker.join();
 }
@@ -586,7 +609,9 @@ void TestSchedThreadPolicyFallback() {
 
 `무주입: nice 를 올리는 것은 권한이 필요 없다` 줄이 대조군이다. 실패만 확인하면 *항상 `false` 를 돌려주는* 구현도 통과한다. `nice` 를 올리는 쪽은 일반 사용자도 되므로, 같은 함수가 조건에 따라 두 답을 낸다는 것을 여기서 보인다.
 
-cgroup 쪽은 검사가 실제 cgroup을 바꿀 위험이 있어 순서를 뒤집는다. 먼저 승인 환경변수 없이 부르면 거부하는지, 승인 경로가 현재 cgroup과 다르면 거부하는지를 확인하고, `cpu.weight` 에 쓰기 권한이 *없음을 확인한 뒤에만* 읽기·쓰기 실패 경로로 들어간다. 쓰기가 가능한 환경에서는 그 검사를 건너뛴다고 stdout에 남긴다 — 조용히 건너뛰면 "검사했다"가 거짓이 된다.
+권한이 *있는* 기기에서는 성공 경로도 성공 주장으로 끝나지 않는다. 무주입 `SCHED_FIFO` 적용이 `true` 를 돌려주면 `pthread_getschedparam` 으로 정책과 우선순위가 실제로 걸렸는지 커널에 되물어 단언하고, `Default` 복원 뒤 `SCHED_OTHER` 로 돌아왔는지도 단언한다. 환경변수 `SKL_REQUIRE_SCHED=fifo`(`,` 로 `cgroup` 병기 가능)는 이 성공 경로를 *요구* 로 바꾼다 — 권한을 붙였는데 조용히 폴백으로 새면 실패다. `SKL_REQUIRE_BACKENDS` 와 같은 패턴이다.
+
+cgroup 쪽은 검사가 실제 cgroup을 바꿀 위험이 있어 접근을 나눈다. 먼저 승인 환경변수 없이 부르면 거부하는지, 승인 경로가 현재 cgroup과 다르면 거부하는지를 확인한다. 읽기·쓰기 실패 주입 케이스는 어느 기기에서든 안전하다 — `cgroup_write` seam 은 주입 시 파일을 아예 열지 않는다. 읽기 주입을 푼 재시도에서는 캡처가 성공해 쓰기 seam 까지 도달해야 한다(`cpu.weight` 를 읽을 수 있는 환경에서는 도달을 CHECK 로 보장한다 — 읽기 실패가 `captured` 로 캐시되는 회귀를 이 단언이 잡는다). 실제 쓰기+복구 단계는 사용자가 `SKL_CGROUP_DIR` 로 위임된 일회용 cgroup 을 명시 승인했을 때만 돌고, 승인이 없으면 그 단계만 skip 사유와 함께 stdout에 남긴다 — 조용히 건너뛰면 "검사했다"가 거짓이 된다.
 
 ```bash
 cmake --build build -j
@@ -601,29 +626,38 @@ ctest --test-dir build -R skl_step06 --output-on-failure
 ```
 
 ```bash
-./build/system_fault_tests --step=06
+./build/system_fault_tests --step=06 >/tmp/out.txt 2>/tmp/err.txt; echo exit=$?
 ```
+
+stdout (`/tmp/out.txt`):
 
 ```text
 [ run  ] step06  sched thread policy fallback
-skl: setpriority(nice=10) failed: Permission denied — keeping default
-skl: pthread_setschedparam(SCHED_FIFO, prio=50) failed: Operation not permitted — keeping default. Check ulimit -r and CAP_SYS_NICE.
-skl: pthread_setschedparam(SCHED_FIFO, prio=50) failed: Operation not permitted — keeping default. Check ulimit -r and CAP_SYS_NICE.
   SCHED_FIFO applied without injection: no (expected without CAP_SYS_NICE)
+  SCHED_FIFO success path: skipped (no privilege; fallback verified)
 [  ok  ] step06  sched thread policy fallback
 [ run  ] step06  sched cgroup fallback
-skl: refusing to modify the current cgroup. Set SKL_CGROUP_DIR exactly to '/sys/fs/cgroup/init.scope' only for a delegated, disposable benchmark cgroup.
-skl: cgroup v2 not detected — keeping default
-skl: refusing to modify the current cgroup. Set SKL_CGROUP_DIR exactly to '/sys/fs/cgroup/init.scope' only for a delegated, disposable benchmark cgroup.
-skl: cgroup v2 not detected — keeping default
-skl: reading /sys/fs/cgroup/init.scope/cpu.weight failed — keeping default
-skl: reading /sys/fs/cgroup/init.scope/cpu.weight failed — keeping default
-  cgroup write seam reached: no (cpu.weight unreadable here)
+  cgroup write seam reached: yes
+  cgroup success path: skipped (cpu.weight not writable) — see docs/LINUX_HANDOFF.md §3-1
 [  ok  ] step06  sched cgroup fallback
 system_fault_tests --step=6: 2/17 check(s) run, 0 failed
 ```
 
-stderr에 실패 안내가 잔뜩 나오는데도 케이스가 통과한다는 것이 이 절의 요점이다. 안내는 *기대된 출력* 이고, 그 뒤에도 스레드가 살아 있고 기본 정책으로 돌아갈 수 있다는 것이 검사 대상이다. `SCHED_FIFO applied without injection: no` 와 `cgroup write seam reached: no` 두 줄은 이 머신의 권한 상태를 그대로 적은 것 — 권한이 있는 머신에서는 `yes` 로 바뀌고 그때는 쓰기 seam까지 검사된다.
+stderr (`/tmp/err.txt`):
+
+```text
+skl: setpriority(nice=10) failed: Permission denied — keeping default
+skl: pthread_setschedparam(SCHED_FIFO, prio=50) failed: Operation not permitted — keeping default. Check ulimit -r and CAP_SYS_NICE.
+skl: pthread_setschedparam(SCHED_FIFO, prio=50) failed: Operation not permitted — keeping default. Check ulimit -r and CAP_SYS_NICE.
+skl: refusing to modify the current cgroup. Set SKL_CGROUP_DIR exactly to '/sys/fs/cgroup/init.scope' only for a delegated, disposable benchmark cgroup.
+skl: cgroup v2 not detected — keeping default
+skl: refusing to modify the current cgroup. Set SKL_CGROUP_DIR exactly to '/sys/fs/cgroup/init.scope' only for a delegated, disposable benchmark cgroup.
+skl: cgroup v2 not detected — keeping default
+skl: reading /sys/fs/cgroup/init.scope/cpu.weight failed — keeping default
+skl: writing /sys/fs/cgroup/init.scope/cpu.weight failed: Permission denied — keeping default
+```
+
+stderr에 실패 안내가 잔뜩 나오는데도 케이스가 통과한다는 것이 이 절의 요점이다. 안내는 *기대된 출력* 이고, 그 뒤에도 스레드가 살아 있고 기본 정책으로 돌아갈 수 있다는 것이 검사 대상이다. `reading … failed` 는 읽기 실패 주입이 만든 한 줄이고, 바로 뒤의 `writing … failed: Permission denied` 는 읽기 주입을 푼 재시도가 캡처에 성공해 쓰기 seam 까지 도달했다는 뜻이다 — 그래서 `cgroup write seam reached: yes` 가 이 무권한 머신에서도 나온다(읽기 실패를 `captured` 로 캐시하던 시절에는 이 줄이 `no` 였고, `reading … failed` 가 두 번 찍혔다). `SCHED_FIFO applied without injection: no` 와 두 `success path: skipped` 줄은 이 머신의 권한 상태를 그대로 적은 것 — 권한이 있는 머신에서는 FIFO 가 `yes (privileged)` + `pthread_getschedparam` 검증으로, cgroup 은 `SKL_CGROUP_DIR` 승인 시 실제 쓰기+복구 단언으로 바뀐다. 그 절차와 `SKL_REQUIRE_SCHED` 요구 모드는 `docs/LINUX_HANDOFF.md` §3-1·§3-2 에 있다.
 
 ---
 

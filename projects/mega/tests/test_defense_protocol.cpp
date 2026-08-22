@@ -53,7 +53,7 @@ static void TestSnapshotRoundTripAndBounds() {
     CHECK_EQ(decoded.acknowledgedCommand, 9u);
     CHECK_EQ(decoded.gold, world.Gold());
     CHECK_EQ(decoded.towers.size(), world.Towers().size());
-    CHECK_EQ(decoded.enemies.size(), world.Enemies().size());
+    CHECK_EQ(decoded.enemies.size(), world.Enemies().Size());
 
     bytes.pop_back();
     CHECK(!ReadSnapshot(bytes, decoded));
@@ -156,10 +156,16 @@ static void TestEntityCaps() {
 // 만들 수 없다는 것이 곧 "제품에서는 이 플래그가 항상 0" 이라는 뜻이다.
 static void TestSnapshotTruncationSignalsLoss() {
     GameWorld world;
+    // 동시 생존 상한을 large 로 올려야 100마리가 한 스텝에 다 선다. small(64)에서는
+    // 스폰이 상한에 막혀 스냅샷 상한(64)을 넘길 수 없고, 그래서 이 시나리오 자체가
+    // 만들어지지 않는다 — 그 사실이 곧 "제품 규모에서는 잘림이 없다"의 근거다.
+    Switches switches;
+    switches.scale = ScaleKind::Large;
+    world.Configure(switches);
     world.Init(math::Vec2{400, 400}, math::Vec2{40, 40},
                {WaveDef{100, 1000.0f, 0.0f, 1, 0.0f, EnemyType::Normal}}, 0, 10000.0f);
     world.Step(1.0f / 60.0f);
-    CHECK_EQ(world.Enemies().size(), static_cast<size_t>(100));
+    CHECK_EQ(world.Enemies().Size(), static_cast<size_t>(100));
 
     bool truncated = false;
     const net::Bytes bytes = WriteSnapshot(world, 9, 0, &truncated);
@@ -241,7 +247,9 @@ static void TestCommandArgumentRange() {
 
     // 알려지지 않은 type 은 계속 거부된다(기존 검사의 회귀 방지).
     CHECK(!CommandDecodes(static_cast<CommandType>(0), 0));
-    CHECK(!CommandDecodes(static_cast<CommandType>(5), 0));
+    CHECK(CommandDecodes(CommandType::Blast, 0));            // 5 = 발파(G2 에서 생겼다)
+    CHECK(!CommandDecodes(CommandType::Blast, 1));           // argument 를 읽지 않는다
+    CHECK(!CommandDecodes(static_cast<CommandType>(6), 0));
     CHECK(!CommandDecodes(static_cast<CommandType>(255), 0));
 
     // 거부된 패킷은 출력 인자를 건드리지 않는다. 반환값을 무시하는 호출자가

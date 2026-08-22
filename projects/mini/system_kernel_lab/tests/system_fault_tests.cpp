@@ -19,7 +19,9 @@
 #include "sync/sync_factory.h"
 #include "workload/file_io_workload.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -34,6 +36,8 @@
 #include <thread>
 #include <vector>
 
+#include <pthread.h>
+#include <sched.h>
 #include <unistd.h>
 
 #include "step_filter.h"
@@ -527,11 +531,52 @@ void TestFactoryUringRuntimeFallback() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. 스케줄링 정책의 실패 폴백.
-//    성공 경로(SCHED_FIFO, cgroup 쓰기)는 CAP_SYS_NICE / 위임된 cgroup 이
-//    필요해 여기서 강제하지 않는다. 검증 대상은 "권한이 없을 때 false 를
-//    돌려주고 스레드는 계속 동작한다" 쪽이다.
+// 7. 스케줄링 정책 — 실패 폴백과 (권한이 있으면) 성공 경로.
+//    무권한 기기: "권한이 없을 때 false 를 돌려주고 스레드는 계속 동작한다"
+//    를 검증하고, 성공 경로는 skip 사유를 stdout 에 남긴다.
+//    유권한 기기: SCHED_FIFO 는 실제 적용을 커널에 되물어 확인하고, cgroup 은
+//    SKL_CGROUP_DIR 로 승인된 일회용 cgroup 에 실제 쓰기 + 복구까지 밟는다.
+//    SKL_REQUIRE_SCHED 가 성공 경로를 *요구* 로 바꾼다 — 권한을 붙였는데
+//    조용히 폴백으로 새면 실패다 (SKL_REQUIRE_BACKENDS 와 같은 패턴).
 // ---------------------------------------------------------------------------
+
+// SKL_REQUIRE_SCHED — "fifo", "cgroup" 을 ',' 로 나열. 목록에 있는 정책의
+// 성공 경로가 skip 되거나 폴백하면 테스트가 실패한다. 미설정 = 폴백 허용
+// (이식성 모드). 오타를 조용히 넘기면 요구 모드가 아무것도 강제하지 않은 채
+// 초록이 되므로, 모르는 이름은 실패로 센다.
+bool SchedRequired(const char* name) {
+    static const std::vector<std::string> tokens = [] {
+        std::vector<std::string> out;
+        const char* env = std::getenv("SKL_REQUIRE_SCHED");
+        if (env == nullptr) return out;
+        const std::string spec(env);
+        std::size_t pos = 0;
+        while (pos <= spec.size()) {
+            const std::size_t comma = spec.find(',', pos);
+            const std::size_t end =
+                (comma == std::string::npos) ? spec.size() : comma;
+            std::string token = spec.substr(pos, end - pos);
+            token.erase(std::remove_if(token.begin(), token.end(),
+                                       [](unsigned char c) {
+                                           return std::isspace(c) != 0;
+                                       }),
+                        token.end());
+            if (!token.empty()) {
+                if (token == "fifo" || token == "cgroup") {
+                    out.push_back(token);
+                } else {
+                    std::cerr << "CHECK failed: unknown sched name in "
+                                 "SKL_REQUIRE_SCHED: '" << token << "'\n";
+                    failures.fetch_add(1);
+                }
+            }
+            if (comma == std::string::npos) break;
+            pos = comma + 1;
+        }
+        return out;
+    }();
+    return std::find(tokens.begin(), tokens.end(), name) != tokens.end();
+}
 
 std::string DetectCgroupV2Path() {
     std::ifstream f("/proc/self/cgroup");
@@ -547,8 +592,9 @@ std::string DetectCgroupV2Path() {
 }
 
 void TestSchedThreadPolicyFallback() {
+    const bool requireFifo = SchedRequired("fifo");
     // 이 스레드의 nice 를 바꾸므로 메인 스레드가 아니라 전용 스레드에서.
-    std::thread worker([] {
+    std::thread worker([requireFifo] {
         CHECK(skl::ApplySchedToCurrentThread(skl::SchedType::Default));
 
         {
@@ -568,14 +614,64 @@ void TestSchedThreadPolicyFallback() {
         std::cout << "  SCHED_FIFO applied without injection: "
                   << (fifoOk ? "yes (privileged)" : "no (expected without CAP_SYS_NICE)")
                   << '\n';
+        if (fifoOk) {
+            // 성공을 주장했으면 커널에 되물어 실제로 걸렸는지 확인한다 —
+            // true 를 돌려주고 정책을 안 바꾸는 구현이 여기서 잡힌다.
+            int         policy = -1;
+            sched_param param{};
+            CHECK(::pthread_getschedparam(::pthread_self(), &policy, &param)
+                  == 0);
+            CHECK(policy == SCHED_FIFO);
+            CHECK(param.sched_priority == 50);
+        } else if (requireFifo) {
+            // 권한을 붙인 기기에서 조용히 폴백으로 새는 것을 막는다.
+            std::cerr << "CHECK failed: SKL_REQUIRE_SCHED demands fifo but "
+                         "SCHED_FIFO was not applied (check CAP_SYS_NICE / "
+                         "ulimit -r >= 50)\n";
+            failures.fetch_add(1);
+        }
 
         // 실패했든 성공했든 스레드는 살아 있고 기본으로 돌아갈 수 있어야 한다.
         CHECK(skl::ApplySchedToCurrentThread(skl::SchedType::Default));
+        {
+            // 원상 복원 확인 — FIFO 가 성공했던 경우에도 SCHED_OTHER 로
+            // 돌아와야 뒤의 검사가 실시간 우선순위를 물려받지 않는다.
+            int         policy = -1;
+            sched_param param{};
+            CHECK(::pthread_getschedparam(::pthread_self(), &policy, &param)
+                  == 0);
+            CHECK(policy == SCHED_OTHER);
+        }
+        std::cout << "  SCHED_FIFO success path: "
+                  << (fifoOk ? "verified via pthread_getschedparam, then "
+                               "restored to SCHED_OTHER"
+                             : "skipped (no privilege; fallback verified)")
+                  << (requireFifo ? " [required by SKL_REQUIRE_SCHED]" : "")
+                  << '\n';
     });
     worker.join();
 }
 
+// cpu.weight 파일의 첫 줄. 제품 코드의 ReadFirstLine 과 달리 seam 을 지나지
+// 않는다 — 테스트가 "파일의 진짜 값" 을 볼 때 쓴다.
+std::string ReadWeightLine(const std::string& path) {
+    std::ifstream f(path);
+    std::string line;
+    if (f && std::getline(f, line)) return line;
+    return {};
+}
+
 void TestSchedCgroupFallback() {
+    const bool requireCgroup = SchedRequired("cgroup");
+
+    // 사용자가 export 해 둔 승인 경로를 먼저 복사해 둔다 — (1)(2)가 env 를
+    // 밀어 버린다. 실제 쓰기 단계 (6) 은 이 값이 검출 경로와 일치할 때만 돈다.
+    // 테스트가 스스로 승인하지 않는다 — 공유 cgroup 을 실수로 바꾸지 않기 위한
+    // opt-in 계약(sched_policy.cpp 의 SKL_CGROUP_DIR 게이트)을 그대로 따른다.
+    const char*       userDirEnv = std::getenv("SKL_CGROUP_DIR");
+    const bool        hadUserDir = userDirEnv != nullptr;
+    const std::string userDir    = hadUserDir ? userDirEnv : "";
+
     // (1) 승인 환경변수가 없으면 현재 cgroup 을 건드리지 않고 거부한다.
     ::unsetenv("SKL_CGROUP_DIR");
     CHECK(!skl::ApplySchedProcessSetup(skl::SchedType::Cgroup));
@@ -590,17 +686,21 @@ void TestSchedCgroupFallback() {
                                                 : dir + "/cpu.weight";
     if (dir.empty()) {
         std::cout << "  cgroup v2 path not detected — read/write fallback skipped\n";
-        return;
-    }
-    if (::access(weightPath.c_str(), W_OK) == 0) {
-        // 쓰기 권한이 있으면 이 테스트가 실제 cgroup 을 바꿀 위험이 있다.
-        std::cout << "  " << weightPath
-                  << " is writable — skipping (would mutate a real cgroup)\n";
+        std::cout << "  cgroup success path: skipped (no cgroup v2 path)\n";
+        if (requireCgroup) {
+            std::cerr << "CHECK failed: SKL_REQUIRE_SCHED demands cgroup but "
+                         "no cgroup v2 path was detected\n";
+            failures.fetch_add(1);
+        }
         return;
     }
 
-    // 여기부터는 cpu.weight 가 쓰기 불가임을 확인했으므로 승인 경로를 넣어도
-    // 실제 값이 바뀔 수 없다.
+    const std::string original = ReadWeightLine(weightPath);
+    const bool        readable = !original.empty();
+    const bool        writable = ::access(weightPath.c_str(), W_OK) == 0;
+
+    // (3)(4)의 주입 케이스는 쓰기 가능한 기기에서도 안전하다 — cgroup_write
+    // seam 은 주입 시 파일을 아예 열지 않으므로 실제 값이 바뀔 수 없다.
     ::setenv("SKL_CGROUP_DIR", dir.c_str(), 1);
     {
         // (3) 원래 값 읽기 실패 → 아무것도 쓰지 않고 기본 유지.
@@ -610,19 +710,78 @@ void TestSchedCgroupFallback() {
         CHECK(skl::FaultCallCount("cgroup_write") == 0);
     }
     {
-        // (4) 쓰기 실패 → 기본 유지. cpu.weight 를 읽을 수 있는 환경에서만
-        //     쓰기 seam 까지 도달한다.
+        // (4) 읽기 주입을 푼 재시도 — 이번에는 캡처가 성공해 cgroup_write
+        //     seam 까지 도달해야 하고, 쓰기 주입 실패 → 기본 유지 폴백이 돈다.
+        //     CaptureOriginalCgroupWeight 가 (3)의 읽기 실패를 captured 로
+        //     캐시하면 재캡처를 건너뛰어 여기 절대 도달하지 못한다 — 그 회귀
+        //     (정적 캐시 오염)를 아래의 reachedWrite CHECK 가 잡는다.
         ScopedFault fault("cgroup_write:0:EACCES");
         CHECK(!skl::ApplySchedProcessSetup(skl::SchedType::Cgroup));
         const bool reachedWrite = skl::FaultCallCount("cgroup_write") > 0;
         std::cout << "  cgroup write seam reached: "
                   << (reachedWrite ? "yes" : "no (cpu.weight unreadable here)")
                   << '\n';
+        if (readable) {
+            // cpu.weight 를 읽을 수 있는 환경에서는 도달이 *보장* 되어야 한다.
+            CHECK(reachedWrite);
+        }
         if (reachedWrite) CHECK(skl::FaultInjectionCount("cgroup_write") >= 1);
     }
     // (5) 쓰기가 한 번도 성공하지 않았으므로 복구는 no-op 으로 성공해야 한다.
     CHECK(skl::ApplySchedProcessSetup(skl::SchedType::Default));
     ::unsetenv("SKL_CGROUP_DIR");
+
+    // (6) 실제 쓰기 성공 + modified==true 복구. 위임된 일회용 cgroup 을
+    //     사용자가 SKL_CGROUP_DIR 로 명시 승인했을 때만 돈다
+    //     (docs/LINUX_HANDOFF.md §3-1). 승인 없이 쓰기 가능한 상황에서는
+    //     실제 cgroup 을 바꿀 위험이 있으므로 여기서도 건드리지 않는다.
+    const bool approved = hadUserDir && userDir == dir;
+    if (writable && approved && readable) {
+        ::setenv("SKL_CGROUP_DIR", dir.c_str(), 1);
+        {
+            // 관측 모드(skip 을 아주 크게 잡은 규칙): 아무것도 주입하지 않고
+            // 쓰기 seam 방문 횟수만 센다 — 원래 값이 우연히 200 이어도 실제
+            // 쓰기가 일어났음을 값 비교와 독립적으로 확인한다.
+            ScopedFault observe("cgroup_write:100000000");
+            CHECK(skl::ApplySchedProcessSetup(skl::SchedType::Cgroup));
+            CHECK(skl::FaultCallCount("cgroup_write") == 1);
+            CHECK(skl::FaultInjectionCount("cgroup_write") == 0);
+            const std::string during = ReadWeightLine(weightPath);
+            CHECK(during == "200");
+
+            // modified==true 복구 경로 — 원래 값이 되돌아와야 한다.
+            CHECK(skl::ApplySchedProcessSetup(skl::SchedType::Default));
+            CHECK(skl::FaultCallCount("cgroup_write") == 2);
+            const std::string after = ReadWeightLine(weightPath);
+            CHECK(after == original);
+            std::cout << "  cgroup real write+restore: orig=" << original
+                      << " during=" << during << " after=" << after << '\n';
+        }
+        // 복구 뒤 재복구는 no-op 으로 성공한다 (modified 가 내려갔다).
+        CHECK(skl::ApplySchedProcessSetup(skl::SchedType::Default));
+        ::unsetenv("SKL_CGROUP_DIR");
+        std::cout << "  cgroup success path: ran (delegated cgroup approved "
+                     "via SKL_CGROUP_DIR)"
+                  << (requireCgroup ? " [required by SKL_REQUIRE_SCHED]" : "")
+                  << '\n';
+    } else {
+        std::cout << "  cgroup success path: skipped ("
+                  << (!writable
+                          ? "cpu.weight not writable"
+                          : !approved
+                                ? "SKL_CGROUP_DIR does not approve this cgroup"
+                                : "cpu.weight unreadable")
+                  << ") — see docs/LINUX_HANDOFF.md §3-1\n";
+        if (requireCgroup) {
+            std::cerr << "CHECK failed: SKL_REQUIRE_SCHED demands cgroup but "
+                         "the real write+restore path was skipped\n";
+            failures.fetch_add(1);
+        }
+    }
+
+    // 사용자 export 를 되돌려 놓는다 — 이 테스트가 env 를 소비한 채 끝나지
+    // 않는다.
+    if (hadUserDir) ::setenv("SKL_CGROUP_DIR", userDir.c_str(), 1);
 }
 
 // ---------------------------------------------------------------------------
