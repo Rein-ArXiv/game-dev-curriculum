@@ -237,11 +237,12 @@ inline std::string ReplayProfilePath(const std::string& replayPath) {
 inline bool DecodeReplay(const std::vector<uint8_t>& bytes, Replay& out,
                          std::string* error = nullptr) {
     size_t cursor = 0;
+    const std::vector<uint8_t>* source = &bytes;
     auto fail = [&](const char* why) {
         if (error) *error = why;
         return false;
     };
-    auto need = [&](size_t n) { return bytes.size() - cursor >= n; };
+    auto need = [&](size_t n) { return source->size() - cursor >= n; };
 ```
 
 디코더가 거절하는 것은 여덟 가지다 — 매직 불일치, 버전 불일치, 헤더 절단, 스위치 문자열 상한 초과, 프레임/자취/마크 절단, 인원 수 범위 밖, **잉여 바이트**, 그리고 봉인되지 않은 체인.

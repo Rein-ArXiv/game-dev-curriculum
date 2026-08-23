@@ -98,6 +98,9 @@ struct DefenseOptions {
     // 0 이면 상점을 거치지 않는다(기존 동작). 양수면 시작 골드 티어를 그 값까지
     // 살 수 있을 만큼 산다 — 매치 밖 소비(sink)의 유일한 제품 경로다.
     int         buyStartGoldTier = 0;
+    // -1 = 아무것도 사지 않는다(기본). 그 밖의 값이면 상점 순서를 따라 그 종류까지
+    // 산다 — 순서를 따르므로 선행이 언제나 먼저 결제된다.
+    int         unlockUpTo = -1;
     std::string profilePath;              // 비면 platform::UserDataDirectory 기본값
     // 거짓이면 프로필을 **이어서** 연다(기존 동작이자 제품 동작 — 지갑이 판을
     // 넘어 남는 것이 이 게임의 기능이다). 참이면 열기 전에 그 파일을 비운다.
@@ -133,7 +136,7 @@ struct DefenseOptions {
 
 inline const char* DefenseUsage() {
     return "usage: mega_defense [--selftest [ticks] | --gpu-selftest | --host [port] | "
-           "--join <ipv4> [port] [--token TOKEN] [--queue PLAYER_ID]] [--profile PATH] [--buy-tier N] [--vulkan]\n"
+           "--join <ipv4> [port] [--token TOKEN] [--queue PLAYER_ID]] [--profile PATH] [--buy-tier N] [--unlock N] [--vulkan]\n"
            "                    [--fresh-profile] [--ab name=value]... [--trace-out PATH]\n"
            "                    [--record PATH [stride]] [--verify-replay PATH]\n"
            "  --profile        진행도·지갑 저장소의 경로. 검사는 반드시 여기를 자기 것으로 잡는다\n"
@@ -230,6 +233,13 @@ inline bool ParseDefenseOptions(int argc, char** argv, DefenseOptions& options) 
             const long tier = std::strtol(argv[++i], &end, 10);
             if (!end || *end != '\0' || tier < 0 || tier > 5) return false;
             options.buyStartGoldTier = static_cast<int>(tier);
+        } else if (std::strcmp(argv[i], "--unlock") == 0) {
+            if (i + 1 >= argc) return false;
+            char* end = nullptr;
+            const long type = std::strtol(argv[++i], &end, 10);
+            if (!end || *end != '\0' || type < 0 ||
+                type > static_cast<long>(live::kMaxUnlockType)) return false;
+            options.unlockUpTo = static_cast<int>(type);
         } else if (std::strcmp(argv[i], "--queue") == 0) {
             if (i + 1 >= argc) return false;
             options.queuePlayerId = argv[++i];
@@ -313,6 +323,18 @@ public:
         const std::string executableDirectory0 = platform::ExecutableDirectory();
         const std::string assetRoot0 = executableDirectory0 + "/assets";
 
+        // ── 해금 선행 그래프 ───────────────────────────────────────
+        // 저장소를 열기 **전**에 들어와야 한다. 지갑을 받아들일 때 해금 집합이
+        // 선행 폐포인지 묻는 검사가 이 그래프를 읽기 때문이다 — 순서가 뒤집히면
+        // 변조된 지갑이 검사 없이 통과한 뒤에 그래프가 도착한다.
+        std::string unlockError;
+        unlockGraph_ = defense::LoadUnlockGraph(assetRoot0 + "/unlocks.txt",
+                                                &externalUnlocks_, &unlockError);
+        if (!unlockError.empty())
+            std::fprintf(stderr, "[content] unlocks.txt 거부, 선행 없이 진행: %s\n",
+                         unlockError.c_str());
+        economy_.SetUnlockGraph(unlockGraph_);
+
         // ── 진행도와 지갑 ──────────────────────────────────────────
         // 밸런스보다 **먼저** 연다. 지갑의 시작 골드 티어가 balance_.startGold 에
         // 더해지므로, 나중에 열면 첫 판은 언제나 티어 0으로 돈다.
@@ -345,6 +367,7 @@ public:
             std::fprintf(stderr, "[content] events.txt 거부, 이벤트 없이 진행: %s\n",
                          eventError.c_str());
 
+
         // 스위치의 출처 교체. 클라이언트는 여기서 적용하지 않는다 — 서버가
         // 내려보낸 배정을 입장 승인 패킷에서 받는다(그래야 한 매치의 두 사람이
         // 같은 권위 팔을 돈다).
@@ -368,6 +391,19 @@ public:
                         static_cast<long long>(
                             live::Economy::StartGoldTierCost(wallet_.startGoldTier - 1)),
                         static_cast<long long>(economy_.Balance(kMetaAccount)));
+        }
+
+        // 해금은 **상점 순서대로** 산다. 위상 순서라 선행이 언제나 먼저 결제되고,
+        // 그래서 이 반복문에는 "선행을 먼저 사라"는 분기가 없다 — 순서가 그 규칙을
+        // 이미 담고 있다. 잔액이 모자라 하나가 실패하면 거기서 멈춘다.
+        if (options_.unlockUpTo >= 0) {
+            for (uint32_t type : unlockGraph_.ShopOrder()) {
+                if (!UnlockTower(type)) break;
+                std::printf("[meta] unlock tower=%u cost=%lld balance=%lld\n", type,
+                            static_cast<long long>(live::Economy::TowerUnlockCost(type)),
+                            static_cast<long long>(economy_.Balance(kMetaAccount)));
+                if (type == static_cast<uint32_t>(options_.unlockUpTo)) break;
+            }
         }
 
 
@@ -494,6 +530,18 @@ public:
                     wallet_.startGoldTier,
                     balance_.startGold - live::Economy::StartGoldBonus(wallet_.startGoldTier),
                     live::Economy::StartGoldBonus(wallet_.startGoldTier));
+        // 상점의 표시 순서. 이 줄이 실행마다 같아야 스크린샷도 검사도 재현된다 —
+        // 그 요구가 위상 정렬의 동점 처리를 최소 힙으로 못박은 이유다.
+        {
+            std::string order;
+            for (uint32_t type : unlockGraph_.ShopOrder()) {
+                if (!order.empty()) order += ">";
+                order += std::to_string(type);
+            }
+            std::printf("[unlocks] source=%s nodes=%zu order=%s owned=%zu\n",
+                        externalUnlocks_ ? "file" : "none", unlockGraph_.Size(),
+                        order.empty() ? "(none)" : order.c_str(), wallet_.unlocks.size());
+        }
         std::printf("[flags] source=%s applied=%d meta_shop=%d scrap_event=%d assignment=%s\n",
                     flagSource_, flagsApplied_, metaShop_ ? 1 : 0, scrapEventEnabled_ ? 1 : 0,
                     flagAssignment_.empty() ? "(none)" : flagAssignment_.c_str());
@@ -979,6 +1027,20 @@ public:
         profile_ = ignored;
         return true;
     }
+    // 두 번째 매치 밖 소비. 선행이 없으면 스크랩을 태우지 않고 거절한다 —
+    // 그 순서가 뒤집히면 살 수 없는 것을 사려다 돈만 잃는다.
+    bool UnlockTower(uint32_t towerType) {
+        if (!metaShop_) return false;
+        if (!economy_.UnlockTower(kMetaAccount, towerType)) return false;
+        wallet_ = economy_.Export(kMetaAccount);
+        defense::Profile ignored = profile_;
+        progression_.Record(profile_.bestWave, profile_.bestScore, false, 0, ignored, &wallet_);
+        profile_ = ignored;
+        return true;
+    }
+    const live::UnlockGraph& Unlocks() const { return unlockGraph_; }
+    bool     ExternalUnlocks() const { return externalUnlocks_; }
+    const std::vector<uint32_t>& OwnedUnlocks() const { return wallet_.unlocks; }
     uint64_t QueuePacketsSent() const { return queuePacketsSent_; }
     int      QueueRatingSent() const { return QueueRating(); }
 
@@ -1577,6 +1639,8 @@ private:
     int64_t                   matchStartUnix_ = 0;
     bool                      externalEvents_ = false;
     bool                      externalFlags_ = false;
+    live::UnlockGraph         unlockGraph_;
+    bool                      externalUnlocks_ = false;
     int                       flagsApplied_ = 0;
     std::string               flagAssignment_;
     const char*               flagSource_ = "default";
@@ -2120,8 +2184,13 @@ inline int RunDefenseRecord(DefenseApp& app, const DefenseOptions& options) {
                 static_cast<unsigned long long>(replay.chain.Chain()), app.AvatarFrame(),
                 static_cast<unsigned>(replay.mode), static_cast<unsigned>(replay.players),
                 static_cast<unsigned>(replay.prediction));
-    std::printf("[record] wave=%d towers=%d bytes=%zu switches=%s\n", report.wave,
-                report.towers, fileBytes, replay.switches.c_str());
+    // 압축 전후를 함께 적는다. 비율만 적으면 어느 쪽이 줄었는지 알 수 없고,
+    // 절대값만 적으면 압축이 도는지 안 도는지 알 수 없다.
+    const size_t rawBody = EncodeReplayBody(replay).size();
+    std::printf("[record] wave=%d towers=%d bytes=%zu raw_body=%zu ratio=%.1f%% switches=%s\n",
+                report.wave, report.towers, fileBytes, rawBody,
+                100.0 * static_cast<double>(fileBytes) / static_cast<double>(rawBody),
+                replay.switches.c_str());
     app.PrintMetrics();
     return 0;
 }

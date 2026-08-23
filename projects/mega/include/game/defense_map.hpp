@@ -17,8 +17,21 @@
 // 두 모델이 공유하는 것은 `pathCells_` 라는 출력 하나다. 규칙(game/game.hpp)은
 // 그 배열만 읽으므로 맵 종류를 몰라도 된다.
 
+// ── 배치 판정을 칸 질의에서 격자 전수로 ──────────────────────────
+// `WouldRemainConnected` 는 오랫동안 칸 하나짜리 질문이었다. 후보 격자를 통째로
+// 짓고(41x41 char 할당 + 복사) flood fill 을 한 번 돈다. 답은 옳지만 **한 칸에
+// 대해서만** 옳다.
+//
+// 그래서 화면이 말할 수 있는 것도 한 칸뿐이었다 — 커서 아래가 되는지 안 되는지.
+// low-link DFS 는 격자 하나에 한 번 돌아 **모든 칸**을 미리 표시하므로, 화면이
+// "막으면 안 되는 칸"을 격자 전체에 칠할 수 있다. 그것이 이 팔이 들여온 기능이고,
+// 질의가 O(1) 이 되는 것은 그 부산물이다.
+//
+// 두 팔의 판정은 **같아야 한다.** 다르면 최적화가 아니라 규칙 변경이다.
+
 #pragma once
 
+#include "algo/articulation.hpp"
 #include "game/allocators.hpp"
 #include "math/vec.hpp"
 #include "tools/level_editor.hpp"
@@ -215,11 +228,13 @@ public:
     // 경로 계산에 그대로 반영된다.
     void ClearOccupancy() {
         if (!occupied_.Empty()) occupied_.Assign(static_cast<size_t>(columns_ * rows_), uint8_t{0});
+        ++gridVersion_;
     }
     void SetOccupied(int x, int y, bool value) {
         if (!InBounds(x, y)) return;
         if (occupied_.Empty()) occupied_.Assign(static_cast<size_t>(columns_ * rows_), uint8_t{0});
         occupied_[static_cast<size_t>(y * columns_ + x)] = value ? uint8_t{1} : uint8_t{0};
+        ++gridVersion_;
     }
     bool Passable(int x, int y) const {
         if (!InBounds(x, y)) return false;
@@ -256,10 +271,47 @@ public:
     }
 
     // 이 칸을 막아도 스폰→코어가 살아 있는가. 메이즈 디펜스의 배치 규칙이다.
+    // 팔이 둘이고 **두 팔은 언제나 같은 답을 내야 한다**.
     bool WouldRemainConnected(int blockX, int blockY) const {
+        if (buildCheck_ == BuildCheckKind::Articulation) return ArticConnected(blockX, blockY);
         return ToLevel(blockX, blockY).Validate().Valid();
     }
     // snippet-end: to-level
+
+    // ── 전수 판정 ──────────────────────────────────────────────────
+    void SetBuildCheck(BuildCheckKind kind) {
+        if (buildCheck_ == kind) return;
+        buildCheck_ = kind;
+        chokeVersion_ = kNoVersion;
+    }
+    BuildCheckKind BuildCheck() const { return buildCheck_; }
+    // 통행 격자가 바뀔 때마다 오른다. 판정 캐시의 무효화 기준이고, 항법 격자가
+    // 이미 같은 기준을 쓰고 있다(NavGrid::Version).
+    uint32_t GridVersion() const { return gridVersion_; }
+
+    // snippet-begin: choke-mask
+    // 막으면 스폰↔코어가 끊기는 칸에 1. artic 팔에서만 채워지고, floodfill 팔에서는
+    // 빈 배열이다 — 그 팔에서 이 표를 채우려면 칸마다 flood fill 을 돌아야 하고
+    // 그것이 바로 이 팔이 대신하는 일이기 때문이다.
+    //
+    // 이 표가 곧 화면 기능이다. 커서 아래 한 칸의 가부 대신 격자 전체를 칠할 수
+    // 있게 되는 것이 low-link 를 들인 이유다.
+    const std::vector<uint8_t>& ChokeMask() const {
+        EnsureChoke();
+        return chokeMask_;
+    }
+    bool Choke(int x, int y) const {
+        if (buildCheck_ != BuildCheckKind::Articulation || !InBounds(x, y)) return false;
+        EnsureChoke();
+        return !chokeMask_.empty() && chokeMask_[static_cast<size_t>(y * columns_ + x)] != 0;
+    }
+    size_t ChokeCount() const {
+        EnsureChoke();
+        size_t total = 0;
+        for (uint8_t flag : chokeMask_) total += flag ? 1u : 0u;
+        return total;
+    }
+    // snippet-end: choke-mask
 
     // 스폰→코어 최단 경로를 다시 계산한다. Classic 맵은 저작된 회랑을 그대로
     // 두고 참을 반환한다. 도달 불가면 경로를 건드리지 않고 거짓이다 — 호출자가
@@ -310,14 +362,62 @@ public:
         spawn_ = spawn;
         core_  = core;
         source_ = MapSource::Procgen;
+        ++gridVersion_;
     }
 
     void SetTile(int x, int y, TileType type) {
         if (InBounds(x, y)) tiles_[static_cast<size_t>(y * columns_ + x)] = type;
+        ++gridVersion_;
     }
 
 private:
-    static constexpr int32_t kUnvisited = -2;
+    static constexpr int32_t  kUnvisited = -2;
+    static constexpr uint32_t kNoVersion = 0xFFFFFFFFu;
+
+    // snippet-begin: artic-connected
+    // artic 팔의 판정. flood fill 팔과 **같은 답**을 내야 하므로 그 팔이 암묵적으로
+    // 갖고 있던 네 규칙을 여기서 명시한다.
+    //
+    //   격자 밖을 막는다      후보 격자가 그대로다 → 지금 통해 있는가가 곧 답이다.
+    //   스폰·코어를 막는다    ToLevel 이 그 두 칸을 'S'/'G' 로 덮어써 막기가 무효다.
+    //   이미 못 가는 칸       막아도 아무것도 바뀌지 않는다.
+    //   그 밖의 통행 칸       지금 통해 있고 그 칸이 분리 정점이 아니면 참.
+    bool ArticConnected(int blockX, int blockY) const {
+        EnsureChoke();
+        if (!articConnected_) return false;
+        if (!InBounds(blockX, blockY)) return true;
+        if ((blockX == spawn_.x && blockY == spawn_.y) ||
+            (blockX == core_.x && blockY == core_.y)) return true;
+        if (!Passable(blockX, blockY)) return true;
+        return chokeMask_[static_cast<size_t>(blockY * columns_ + blockX)] == 0;
+    }
+
+    void EnsureChoke() const {
+        if (buildCheck_ != BuildCheckKind::Articulation) {
+            chokeMask_.clear();
+            articConnected_ = false;
+            chokeVersion_ = kNoVersion;
+            return;
+        }
+        if (chokeVersion_ == gridVersion_) return;
+        const size_t count = static_cast<size_t>(columns_) * static_cast<size_t>(rows_);
+        passableScratch_.assign(count, 0);
+        for (int y = 0; y < rows_; ++y)
+            for (int x = 0; x < columns_; ++x)
+                passableScratch_[static_cast<size_t>(y * columns_ + x)] =
+                    Passable(x, y) ? uint8_t{1} : uint8_t{0};
+        articConnected_ = separators_.Build(passableScratch_.data(), columns_, rows_,
+                                            spawn_.x, spawn_.y, core_.x, core_.y);
+        chokeMask_.assign(count, 0);
+        if (articConnected_) {
+            for (int y = 0; y < rows_; ++y)
+                for (int x = 0; x < columns_; ++x)
+                    if (separators_.Separates(x, y))
+                        chokeMask_[static_cast<size_t>(y * columns_ + x)] = 1;
+        }
+        chokeVersion_ = gridVersion_;
+    }
+    // snippet-end: artic-connected
 
     int columns_ = 0, rows_ = 0, cellSize_ = 0, originY_ = 0;
     MapSource             source_ = MapSource::Classic;
@@ -327,6 +427,16 @@ private:
     BlobArray<uint8_t>    occupied_;
     BlobArray<uint8_t>    vein_;
     BlobArray<uint8_t>    shade_;
+
+    BuildCheckKind        buildCheck_ = BuildCheckKind::FloodFill;
+    uint32_t              gridVersion_ = 1;
+    // 캐시. 판정은 논리적으로 const 이므로 저장만 mutable 이다 — 호출부가
+    // `const DefenseMap&` 를 들고 묻는다는 사실이 이 팔 때문에 바뀌면 안 된다.
+    mutable uint32_t              chokeVersion_ = kNoVersion;
+    mutable bool                  articConnected_ = false;
+    mutable std::vector<uint8_t>  chokeMask_;
+    mutable std::vector<uint8_t>  passableScratch_;
+    mutable algo::GridSeparators  separators_;
 };
 
 }  // namespace game

@@ -2,9 +2,11 @@
 //
 // 세 조각이 순서대로 돈다.
 //
-//   1. tools/procgen.hpp   재귀 백트래커가 완전 미로(신장 트리)를 판다. 트리라서
+//   1. tools/procgen.hpp   골격 생성기가 완전 미로(신장 트리)를 판다. 트리라서
 //                          스폰↔코어 사이에 단순 경로가 정확히 하나 있고, 모든
 //                          칸이 도달 가능하다 — 연결성이 구조적으로 보장된다.
+//                          팔이 둘이고(재귀 백트래커 · Kruskal + 서로소 집합)
+//                          둘 다 신장 트리를 내되 분기 수가 다르다.
 //   2. math/noise.hpp      그 위에 밀도장을 얹어 임계 이상인 벽을 깎는다. 순수
 //                          미로는 1칸 회랑이라 타워를 세울 자리가 없다. 깎아야
 //                          방과 회랑이 생기고, 그때 비로소 "어디에 세울까"라는
@@ -34,6 +36,8 @@ struct TerrainParams {
     int      mazeCellsX = 20;      // 타일 폭 = 2*mazeCellsX + 1 = 41
     int      mazeCellsY = 20;
     uint32_t seed       = 7;
+    // 골격 팔. 기본값은 스위치가 생기기 전의 동작(재귀 백트래커)이다.
+    MazeKind maze       = MazeKind::Dfs;
     float    frequency  = 0.17f;   // 밀도장 샘플 주기(칸당)
     int      octaves    = 4;
     float    carve      = 0.02f;   // 밀도가 이보다 크면 벽을 깎는다
@@ -68,7 +72,8 @@ inline float Density(const math::Noise& noise, int x, int y, const TerrainParams
 // 절차 맵 하나. 실패는 검증 실패뿐이고, 그때는 out 을 건드리지 않는다.
 // snippet-begin: generate-map
 inline bool Generate(const TerrainParams& p, DefenseMap& out, TerrainStats* statsOut = nullptr) {
-    tools::Level level = tools::MazeGen::Generate(p.mazeCellsX, p.mazeCellsY, p.seed);
+    tools::Level level = tools::MazeGen::GenerateWith(
+        p.maze == MazeKind::Kruskal, p.mazeCellsX, p.mazeCellsY, p.seed);
     const int width = level.Width(), height = level.Height();
 
     TerrainStats stats;

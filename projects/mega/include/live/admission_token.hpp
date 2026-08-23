@@ -3,10 +3,29 @@
 // The control plane signs `base64url(json).base64url(hmac_sha256)` with a
 // shared deployment secret. A game server verifies the signature, audience,
 // and expiry before binding the token ID to a UDP endpoint.
+//
+// ── 여섯 번 훑던 것을 한 번으로 ───────────────────────────────────
+// 페이로드에서 여섯 개의 필드를 뽑을 때, 예전에는 필드마다 `json.find(prefix)` 를
+// 한 번씩 — 같은 비신뢰 문자열을 처음부터 여섯 번 — 훑었다. 속도가 문제였던 적은
+// 없다. 페이로드는 수백 바이트다.
+//
+// 문제는 **첫 일치만 채택한다**는 것이었다. 같은 최상위 필드가 두 번 적힌
+// 페이로드에서 앞의 것이 조용히 이긴다. 서명이 유효한 토큰 안에서 필드가 두 번
+// 나오는 상태는 발급기의 결함이거나 주입이고, 둘 다 승인 대상이 아니다.
+//
+// 다중 패턴 자동자는 첫 일치가 아니라 **모든 일치**를 낸다. 그래서 세는 것이
+// 가능해지고, 세는 것이 가능해지면 조용한 정책을 명시적 거부로 바꿀 수 있다.
+// 여섯 패턴은 고정이므로 자동자는 프로세스당 한 번만 짓는다.
+//
+// 순서 불변 하나가 이 파일에서 바뀌지 않는다: **서명 검증이 필드 스캔보다 먼저
+// 온다.** 서명이 깨진 입력에서는 자동자가 아예 돌지 않는다.
 
 #pragma once
 
+#include "algo/aho_corasick.hpp"
+
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <charconv>
 #include <cstdint>
@@ -17,6 +36,10 @@
 #include <vector>
 
 namespace mega::live {
+
+// 페이로드 상한. 서명이 맞더라도 무한정 긴 JSON 을 훑지 않는다 — 자동자는 한 번
+// 훑지만 그 한 번의 길이에도 예산이 있어야 한다.
+inline constexpr size_t kMaxAdmissionPayloadBytes = 4096;
 
 struct GameAdmission {
     std::string playerId;
@@ -205,12 +228,10 @@ inline std::optional<std::vector<uint8_t>> DecodeBase64(
     return output;
 }
 
-inline std::optional<std::string> JsonString(
-    std::string_view json, std::string_view name) {
-    const std::string prefix = "\"" + std::string(name) + "\":\"";
-    size_t cursor = json.find(prefix);
-    if (cursor == std::string_view::npos) return std::nullopt;
-    cursor += prefix.size();
+// 값 파싱은 **시작 자리를 받는다**. 어디서 시작할지는 자동자가 정하고, 여기서는
+// 그 자리부터의 문법만 본다 — 찾기와 읽기를 갈라 두면 "첫 일치"라는 정책이
+// 파서 안에 숨지 못한다.
+inline std::optional<std::string> JsonStringAt(std::string_view json, size_t cursor) {
     std::string result;
     while (cursor < json.size()) {
         const char value = json[cursor++];
@@ -234,12 +255,7 @@ inline std::optional<std::string> JsonString(
     return std::nullopt;
 }
 
-inline std::optional<int64_t> JsonInteger(
-    std::string_view json, std::string_view name) {
-    const std::string prefix = "\"" + std::string(name) + "\":";
-    size_t begin = json.find(prefix);
-    if (begin == std::string_view::npos) return std::nullopt;
-    begin += prefix.size();
+inline std::optional<int64_t> JsonIntegerAt(std::string_view json, size_t begin) {
     size_t end = begin;
     while (end < json.size() &&
            (json[end] == '-' || (json[end] >= '0' && json[end] <= '9'))) ++end;
@@ -248,6 +264,72 @@ inline std::optional<int64_t> JsonInteger(
     if (result.ec != std::errc{} || result.ptr != json.data() + end) return std::nullopt;
     return value;
 }
+
+// ── 필드 스캔 ─────────────────────────────────────────────────────
+// 여섯 패턴 고정. 순서가 곧 id 이고, id 가 곧 아래 배열의 첨자다.
+enum AdmissionField : uint32_t {
+    kFieldKind = 0,
+    kFieldPlayerId,
+    kFieldMatchId,
+    kFieldServerId,
+    kFieldTokenId,
+    kFieldExpiresAt,
+    kFieldCount,
+};
+
+inline const char* AdmissionPattern(uint32_t field) {
+    switch (field) {
+        case kFieldKind:      return "\"Kind\":\"";
+        case kFieldPlayerId:  return "\"PlayerId\":\"";
+        case kFieldMatchId:   return "\"MatchId\":\"";
+        case kFieldServerId:  return "\"ServerId\":\"";
+        case kFieldTokenId:   return "\"TokenId\":\"";
+        default:              return "\"ExpiresAt\":";
+    }
+}
+
+// snippet-begin: admission-automaton
+// 프로세스당 한 번. 패턴 집합이 고정이므로 토큰마다 다시 짓는 것은 순수한 낭비다.
+inline const algo::AhoCorasick& AdmissionAutomaton() {
+    static const algo::AhoCorasick automaton = [] {
+        algo::AhoCorasick built;
+        for (uint32_t field = 0; field < kFieldCount; ++field)
+            built.Add(AdmissionPattern(field), field);
+        built.Build();
+        return built;
+    }();
+    return automaton;
+}
+
+// 페이로드를 한 번 훑어 필드별 (등장 횟수, 값이 시작하는 자리)를 채운다.
+// **중복이 곧 거부**다 — 세지 않으면 앞의 것이 조용히 이긴다.
+struct AdmissionFields {
+    uint32_t count[kFieldCount]{};
+    size_t   valueAt[kFieldCount]{};
+};
+
+// 이 페이로드를 몇 번 훑었는가. 두 가지를 관측 가능하게 만드는 계측이다 —
+// 토큰 하나에 훑기가 정확히 한 번이라는 것, 그리고 **서명이 깨진 입력에서는
+// 아예 돌지 않는다**는 순서 불변. 순서 불변은 코드를 읽어서는 확인되지만
+// 검사로는 확인되지 않던 성질이었다.
+inline std::atomic<uint64_t>& AdmissionScanCounter() {
+    static std::atomic<uint64_t> scans{0};
+    return scans;
+}
+
+inline AdmissionFields ScanAdmissionFields(std::string_view json) {
+    AdmissionScanCounter().fetch_add(1, std::memory_order_relaxed);
+    AdmissionFields fields;
+    std::vector<algo::AhoCorasick::Match> matches;
+    AdmissionAutomaton().Scan(json, matches);
+    for (const algo::AhoCorasick::Match& match : matches) {
+        if (match.id >= kFieldCount) continue;
+        ++fields.count[match.id];
+        if (fields.count[match.id] == 1) fields.valueAt[match.id] = match.end;
+    }
+    return fields;
+}
+// snippet-end: admission-automaton
 
 }  // namespace detail
 
@@ -283,13 +365,24 @@ inline bool VerifyGameAdmission(
         std::span(reinterpret_cast<const uint8_t*>(body.data()), body.size()));
     if (!detail::ConstantTimeEqual(*signature, expected)) return false;
 
+    // 여기까지 오면 서명이 맞다. 페이로드 훑기는 그 뒤에만 일어난다.
+    if (jsonBytes->size() > kMaxAdmissionPayloadBytes) return false;
     const std::string json(jsonBytes->begin(), jsonBytes->end());
-    const auto kind = detail::JsonString(json, "Kind");
-    const auto playerId = detail::JsonString(json, "PlayerId");
-    const auto matchId = detail::JsonString(json, "MatchId");
-    const auto serverId = detail::JsonString(json, "ServerId");
-    const auto tokenId = detail::JsonString(json, "TokenId");
-    const auto expiresAt = detail::JsonInteger(json, "ExpiresAt");
+
+    // snippet-begin: admission-scan
+    const detail::AdmissionFields fields = detail::ScanAdmissionFields(json);
+    for (uint32_t field = 0; field < detail::kFieldCount; ++field) {
+        // 없으면 불완전한 토큰이고, 둘 이상이면 발급기 결함이거나 주입이다.
+        // 예전 코드는 후자를 통과시켰다 — 앞의 값을 조용히 골랐기 때문이다.
+        if (fields.count[field] != 1) return false;
+    }
+    const auto kind = detail::JsonStringAt(json, fields.valueAt[detail::kFieldKind]);
+    const auto playerId = detail::JsonStringAt(json, fields.valueAt[detail::kFieldPlayerId]);
+    const auto matchId = detail::JsonStringAt(json, fields.valueAt[detail::kFieldMatchId]);
+    const auto serverId = detail::JsonStringAt(json, fields.valueAt[detail::kFieldServerId]);
+    const auto tokenId = detail::JsonStringAt(json, fields.valueAt[detail::kFieldTokenId]);
+    const auto expiresAt = detail::JsonIntegerAt(json, fields.valueAt[detail::kFieldExpiresAt]);
+    // snippet-end: admission-scan
     if (!kind || *kind != "game" || !playerId || playerId->empty() ||
         !matchId || matchId->empty() || !serverId || *serverId != expectedServerId ||
         !tokenId || tokenId->empty() || !expiresAt || *expiresAt <= nowUnixSeconds) {

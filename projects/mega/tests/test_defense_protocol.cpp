@@ -1,8 +1,13 @@
+#include "algo/quickselect.hpp"
 #include "game/defense_protocol.hpp"
 #include "net/reliable_channel.hpp"
 #include "test_util.h"
 
+#include <algorithm>
+#include <cstdio>
 #include <limits>
+#include <utility>
+#include <vector>
 
 using namespace mega;
 using namespace mega::game;
@@ -514,7 +519,250 @@ static void TestSequenceWrapComparison() {
     CHECK(!net::SequenceAtOrBefore(1, 0));
 }
 
+// ══ 스냅샷의 64자리를 무엇으로 채우는가 ═══════════════════════════
+//
+// 규모 팔에서 살아 있는 적은 2048까지 오른다. 스냅샷 한 장이 실을 수 있는 것은
+// 64뿐이므로, **어느 64를 싣는가**가 곧 클라이언트가 보는 세계다.
+//
+// 기본 팔(rows)은 저장 행 순서 앞에서부터 64개를 싣는다. 코어 앞에 도착한 적이
+// 뒷 행이면 화면에 나타나지 않는다. relevance 팔은 전순서의 상위 64를 고른다.
+
+// 살아 있는 적을 64보다 많이 만든다. 코어 체력을 크게 잡아 판이 끝나지 않게 한다.
+// GameWorld 는 복사도 이동도 하지 않는다(소유하는 자원이 많다). 그래서 값으로
+// 돌려주지 않고 자리에 채운다.
+static void FillCrowdedWorld(GameWorld& world, SnapshotPickKind pick, int ticks) {
+    Switches switches;
+    switches.scale = ScaleKind::Large;
+    switches.snapshotPick = pick;
+
+    DefenseMap map = DefenseMap::CreateDefault();
+    world.Configure(switches);
+    world.Init(map, {WaveDef{900, 900.0f, 34.0f, 1, 0.004f, EnemyType::Swarm}},
+               200000, 1.0e9f);
+    // 타워 몇 개를 세워 실제로 적이 죽게 한다. 죽은 행은 swap-remove 로 메워지고,
+    // 그러면 **저장 행 순서가 스폰 순서와 갈라진다** — 그 갈라짐이 없으면 두 팔은
+    // 우연히 같은 답을 내고 이 A/B 는 비교할 것을 갖지 못한다.
+    world.PlaceTowerType(map.CellCenter(6, 2), TowerType::Gatling);
+    world.PlaceTowerType(map.CellCenter(11, 4), TowerType::Splash);
+    world.PlaceTowerType(map.CellCenter(5, 8), TowerType::Gatling);
+    for (int tick = 0; tick < ticks; ++tick) world.Step(1.0f / 60.0f);
+}
+
+static std::vector<uint32_t> SnapshotEnemyIds(const net::Bytes& bytes) {
+    Snapshot decoded;
+    std::vector<uint32_t> ids;
+    if (!ReadSnapshot(bytes, decoded)) return ids;
+    for (const EnemyState& enemy : decoded.enemies) ids.push_back(enemy.id);
+    return ids;
+}
+
+// (1) 전수 정렬 오라클의 앞 64 집합과 선택 집합이 같은가.
+static void TestRelevanceMatchesFullSortOracle() {
+    GameWorld world;
+    FillCrowdedWorld(world, SnapshotPickKind::Relevance, 400);
+    CHECK(world.AliveEnemies() > static_cast<int>(kSnapshotMaxEnemies));
+
+    std::vector<EnemyPick> all;
+    CollectEnemyPicks(world, all);
+    std::vector<EnemyPick> sorted = all;
+    std::sort(sorted.begin(), sorted.end(), MoreRelevant);
+    std::vector<uint32_t> expected;
+    for (size_t i = 0; i < kSnapshotMaxEnemies && i < sorted.size(); ++i)
+        expected.push_back(sorted[i].id);
+
+    bool truncated = false;
+    const net::Bytes bytes = WriteSnapshot(world, 9, 0, &truncated);
+    CHECK(truncated);
+    std::vector<uint32_t> actual = SnapshotEnemyIds(bytes);
+    CHECK_EQ(actual.size(), kSnapshotMaxEnemies);
+    std::sort(expected.begin(), expected.end());
+    std::vector<uint32_t> actualSorted = actual;
+    std::sort(actualSorted.begin(), actualSorted.end());
+    CHECK(expected == actualSorted);
+    std::printf("  적 %d마리 중 상위 %zu를 전수 정렬 오라클과 동일하게 골랐다\n",
+                world.AliveEnemies(), actual.size());
+}
+
+// (2) 치환 불변. 행 순서를 섞어도 같은 집합이 나오는가. 저장 배치를 바꾸는 A/B
+// 팔에서 행 순서는 실제로 달라지므로 이것은 가정이 아니다.
+//
+// **기본 팔은 이 성질을 갖지 못한다** — 그것이 이 흡수가 고치는 결함이다.
+static void TestSelectionIsPermutationInvariant() {
+    GameWorld world;
+    FillCrowdedWorld(world, SnapshotPickKind::Relevance, 400);
+    std::vector<EnemyPick> base;
+    CollectEnemyPicks(world, base);
+    CHECK(base.size() > kSnapshotMaxEnemies);
+
+    auto chosenSet = [](std::vector<EnemyPick> rows) {
+        algo::SelectTopK(rows.data(), rows.size(), kSnapshotMaxEnemies, MoreRelevant);
+        rows.resize(kSnapshotMaxEnemies);
+        std::vector<uint32_t> ids;
+        for (const EnemyPick& pick : rows) ids.push_back(pick.id);
+        std::sort(ids.begin(), ids.end());
+        return ids;
+    };
+    auto firstRows = [](const std::vector<EnemyPick>& rows) {
+        std::vector<uint32_t> ids;
+        for (size_t i = 0; i < kSnapshotMaxEnemies && i < rows.size(); ++i)
+            ids.push_back(rows[i].id);
+        std::sort(ids.begin(), ids.end());
+        return ids;
+    };
+
+    const std::vector<uint32_t> reference = chosenSet(base);
+    const std::vector<uint32_t> rowsReference = firstRows(base);
+    int rowsDiffered = 0;
+    uint32_t rng = 0xA5A5A5u;
+    for (int trial = 0; trial < 12; ++trial) {
+        std::vector<EnemyPick> shuffled = base;
+        for (size_t i = shuffled.size(); i > 1; --i) {
+            rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+            std::swap(shuffled[i - 1], shuffled[rng % i]);
+        }
+        CHECK(chosenSet(shuffled) == reference);
+        if (firstRows(shuffled) != rowsReference) ++rowsDiffered;
+    }
+    // 음성 대조. 같은 치환에서 "앞 64행" 정책은 다른 집합을 낸다 — 그러지 않으면
+    // 위 단언은 아무것도 구분하지 못한다.
+    CHECK_EQ(rowsDiffered, 12);
+    std::printf("  치환 12회: relevance 집합 불변, rows 집합은 12회 모두 달라졌다\n");
+}
+
+// (2b) 실린 순서가 전순서를 따르는가.
+//
+// quickselect 가 남기는 앞 k 개의 **내부 순서**는 입력 배열 순서에 좌우된다.
+// 고른 뒤 다시 정렬하지 않으면 행 순서를 섞은 같은 월드가 다른 바이트를 낸다 —
+// 즉 패킷이 집합의 함수가 아니게 된다. 그 재정렬이 살아 있는지는 실린 순서를
+// 직접 보는 것으로만 확인된다.
+static void TestSnapshotOrderFollowsTotalOrder() {
+    GameWorld world;
+    FillCrowdedWorld(world, SnapshotPickKind::Relevance, 400);
+    std::vector<EnemyPick> all;
+    CollectEnemyPicks(world, all);
+
+    const std::vector<uint32_t> ids = SnapshotEnemyIds(WriteSnapshot(world, 13, 0));
+    CHECK_EQ(ids.size(), kSnapshotMaxEnemies);
+    auto pickOf = [&all](uint32_t id) {
+        for (const EnemyPick& pick : all)
+            if (pick.id == id) return pick;
+        return EnemyPick{};
+    };
+    int outOfOrder = 0;
+    for (size_t i = 1; i < ids.size(); ++i)
+        if (!MoreRelevant(pickOf(ids[i - 1]), pickOf(ids[i]))) ++outOfOrder;
+    CHECK_EQ(outOfOrder, 0);
+
+    // 음성 대조. 기본 팔이 싣는 순서는 전순서를 따르지 않는다 — 따랐다면 위
+    // 단언은 두 팔을 구분하지 못한다.
+    GameWorld rows;
+    FillCrowdedWorld(rows, SnapshotPickKind::Rows, 400);
+    const std::vector<uint32_t> rowIds = SnapshotEnemyIds(WriteSnapshot(rows, 13, 0));
+    std::vector<EnemyPick> rowPicks;
+    CollectEnemyPicks(rows, rowPicks);
+    auto rowPickOf = [&rowPicks](uint32_t id) {
+        for (const EnemyPick& pick : rowPicks)
+            if (pick.id == id) return pick;
+        return EnemyPick{};
+    };
+    int rowsOutOfOrder = 0;
+    for (size_t i = 1; i < rowIds.size(); ++i)
+        if (!MoreRelevant(rowPickOf(rowIds[i - 1]), rowPickOf(rowIds[i]))) ++rowsOutOfOrder;
+    CHECK(rowsOutOfOrder > 0);
+    std::printf("  실린 순서가 전순서를 따른다 (기본 팔의 역전 %d건)\n", rowsOutOfOrder);
+}
+
+// (3) 같은 월드를 두 번 인코드하면 바이트 동일. 두 팔 모두.
+static void TestSnapshotBytesAreStable() {
+    for (SnapshotPickKind pick : {SnapshotPickKind::Rows, SnapshotPickKind::Relevance}) {
+        GameWorld world;
+        FillCrowdedWorld(world, pick, 400);
+        const net::Bytes a = WriteSnapshot(world, 11, 0);
+        const net::Bytes b = WriteSnapshot(world, 11, 0);
+        CHECK(a == b);
+        CHECK(!a.empty());
+        // (5) 가득 찬 스냅샷이 예산 안이다.
+        CHECK(a.size() <= kMaxPacketBytes);
+        CHECK(a.size() <= kSnapshotMaxBytes);
+    }
+}
+
+// (4) 살아 있는 적이 상한 이하면 두 팔이 같은 전체 집합을 싣고 truncated=false.
+static void TestSmallWorldsAgree() {
+    for (SnapshotPickKind pick : {SnapshotPickKind::Rows, SnapshotPickKind::Relevance}) {
+        Switches switches;
+        switches.snapshotPick = pick;
+        DefenseMap map = DefenseMap::CreateDefault();
+        GameWorld world;
+        world.Configure(switches);
+        world.Init(map, {WaveDef{8, 4000.0f, 14.0f, 1, 0.05f, EnemyType::Normal}},
+                   200, 1.0e9f);
+        for (int tick = 0; tick < 120; ++tick) world.Step(1.0f / 60.0f);
+        CHECK(world.AliveEnemies() > 0);
+        CHECK(world.AliveEnemies() <= static_cast<int>(kSnapshotMaxEnemies));
+
+        bool truncated = true;
+        const net::Bytes bytes = WriteSnapshot(world, 3, 0, &truncated);
+        CHECK(!truncated);
+        std::vector<uint32_t> ids = SnapshotEnemyIds(bytes);
+        CHECK_EQ(static_cast<int>(ids.size()), world.AliveEnemies());
+    }
+}
+
+// (6) 게임에서 무엇이 달라지는가. 코어에 가장 가까운 적이 두 팔에서 실리는가.
+static void TestNearestEnemyIsCarried() {
+    GameWorld rows, relevance;
+    FillCrowdedWorld(rows, SnapshotPickKind::Rows, 400);
+    FillCrowdedWorld(relevance, SnapshotPickKind::Relevance, 400);
+
+    // 두 팔은 같은 시뮬을 돌았으므로 월드가 같다. 스냅샷 선택만 다르다.
+    CHECK_EQ(rows.StateHash(), relevance.StateHash());
+
+    std::vector<EnemyPick> picks;
+    CollectEnemyPicks(relevance, picks);
+    std::sort(picks.begin(), picks.end(), MoreRelevant);
+    const uint32_t nearest = picks.front().id;
+
+    const std::vector<uint32_t> rowIds = SnapshotEnemyIds(WriteSnapshot(rows, 5, 0));
+    const std::vector<uint32_t> relIds = SnapshotEnemyIds(WriteSnapshot(relevance, 5, 0));
+    const bool inRows = std::find(rowIds.begin(), rowIds.end(), nearest) != rowIds.end();
+    const bool inRelevance = std::find(relIds.begin(), relIds.end(), nearest) != relIds.end();
+    CHECK(inRelevance);
+    // 두 팔이 같은 집합을 실으면 이 스위치는 아무것도 바꾸지 않은 것이다.
+    std::vector<uint32_t> a = rowIds, b = relIds;
+    std::sort(a.begin(), a.end());
+    std::sort(b.begin(), b.end());
+    CHECK(a != b);
+    size_t onlyInRelevance = 0;
+    for (uint32_t id : b)
+        if (std::find(a.begin(), a.end(), id) == a.end()) ++onlyInRelevance;
+    CHECK(onlyInRelevance > 0);
+    std::printf("  코어 최근접 적 id=%u — rows 팔에 %s / relevance 만 싣는 적 %zu마리\n",
+                nearest, inRows ? "실림" : "빠짐", onlyInRelevance);
+
+    // 두 팔이 실은 적의 코어까지 평균 거리. relevance 쪽이 더 가까워야 한다.
+    auto meanDistance = [&picks](const std::vector<uint32_t>& ids) {
+        double total = 0;
+        int counted = 0;
+        for (uint32_t id : ids)
+            for (const EnemyPick& pick : picks)
+                if (pick.id == id) { total += pick.distance; ++counted; break; }
+        return counted > 0 ? total / counted : 0.0;
+    };
+    const double rowsMean = meanDistance(rowIds);
+    const double relMean = meanDistance(relIds);
+    CHECK(relMean < rowsMean);
+    std::printf("  실린 적의 평균 코어 거리 — rows %.1f칸, relevance %.1f칸\n",
+                rowsMean, relMean);
+}
+
 static void RunTests() {
+    TestRelevanceMatchesFullSortOracle();
+    TestSelectionIsPermutationInvariant();
+    TestSnapshotOrderFollowsTotalOrder();
+    TestSnapshotBytesAreStable();
+    TestSmallWorldsAgree();
+    TestNearestEnemyIsCarried();
     TestCommandRoundTripAndAuthority();
     TestSnapshotRoundTripAndBounds();
     TestEntityCaps();

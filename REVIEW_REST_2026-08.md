@@ -214,8 +214,8 @@ python scripts/check_snippets.py --fix-ranges   # 밀린 줄번호 앵커 자동
 - **`projects/mega` P1~P9 — 폐기.** 재설계안이 제안한 새 게임(`games/strata/`)은 만들지
   않기로 결정됐다. 대신 기존 디펜스 하나를 규모·지형·개체·운영 네 축으로 키웠고, 그
   경로로 재설계안의 목표(모든 축이 측정 근거를 갖고 제품에 들어간다)에 이미 도달했다 —
-  `include/` 헤더 **114개 전부 제품 도달**, 랩 전용 등재 **0행**, ctest **119**, 구축 서사
-  `articles/` **32편**. 폐기 판정은 그 재설계안 문서 머리에 적혀 있다.
+  `include/` 헤더 **121개 전부 제품 도달**, 랩 전용 등재 **0행**, ctest **127**, 구축 서사
+  `articles/` **33편**. 폐기 판정은 그 재설계안 문서 머리에 적혀 있다.
 
 **라이브 운영 배선 3건 — 닫힘(2026-08-23).** 이 자리에는 "아직 검증되지 않은 것"이 적혀
 있었다. `live::FeatureFlags` 의 배정이 `Switches` 에 얹히는 경로, `ApplyEventModifiers` 가
@@ -248,6 +248,35 @@ mini에 대응 lab조차 없어 **소유자 결정이 선행**"이라고 적은 
 languages 7 · mega **121**), 배터리 출력 3회 바이트 동일, 무력화 변이 4건 전부 사망·복원 SHA 동일.
 **part02~part10의 공백은 그대로 열려 있다** — 감사 #6이 세는 huffman·fenwick·aho·union-find·
 kruskal·bellman 0건은 이 항목이 건드리지 않는다.
+
+**`algorithms` 소유 공백 — part02~10도 닫힘(2026-08-24).** 위 문단이 열어 둔 나머지가 닫혔다.
+소유자는 신설 **`projects/mini/algorithms_lab`** 이고, mega 는 그중 게임이 실제로 요구하는
+여섯만 흡수했다.
+
+- **lab(소유자).** 외부 의존성 0. 고정 사례 45개(520,876 CHECK)가 느린 **독립** 오라클과
+  대조한다 — 오라클은 제품 구현을 다시 부르지 않고 전수 열거·정의 그대로의 재계산으로
+  짜여 있다(절단점은 정점을 실제로 지우고 BFS 재실행, MST 는 간선 부분집합 열거, 배낭·LCS·
+  LIS 는 마스크 전수). property 11종이 6,950 표본을 돌고, 반례는 축소 뒤 재현 명령 한 줄로
+  나온다. CTest 11개(전체 1 + step별 8 + property 1 + bench smoke 1).
+- **mega(흡수).** `include/algo/` 여섯 헤더가 전부 제품 도달이다(LAB_ONLY 등재 0). 리플레이
+  본문 canonical Huffman(포맷 v1 → v2), 미로 생성 Kruskal + DSU, 건설 금지 칸 절단점,
+  해금 그래프 위상 정렬 + SCC, 입장 토큰 Aho-Corasick 스캔, 스냅샷 상위 K quickselect.
+  ctest 121 → **127**.
+- 소재 지도는 [`algorithms/README.md`의 part02~10 실행 자산 표](algorithms/README.md#part0210의-실행-자산--어느-lab에서-도는가),
+  축 판정은 [`projects/mega/docs/AXIS_OWNERSHIP.md`](projects/mega/docs/AXIS_OWNERSHIP.md)에 있다.
+
+독립 재검증(2026-08-24): 두 트리 캐시 없는 클린 빌드(경고 0), lab ctest 11/11 연속 3회 전수
+통과·property 출력 3회 바이트 동일(md5 동일), mega ctest **127/127**, 게이트 2종 통과
+(`layer_rules` · `reachability_gate` — 제품 도달 121 / 랩 전용 0 / 근거 없는 미도달 0),
+selftest 13종 전부 `result=CLEAR` desync=0/0, coop `result=LINKED`, 골든·리플레이 10/10.
+무력화 변이 4건 직접 재주입해 **전부 사망** — lab 절단점 low-link(3 테스트) · lab Fenwick
+갱신 상한 off-by-one(4 테스트) · mega 압축 무력화(6 단언) · mega 연결성 판정 무력화(3 테스트,
+그중 둘이 종단 selftest). 전부 복원 확인.
+
+미달로 남는 것 하나: 무력화 변이 15건 중 **1건은 생존**한다(canonical Huffman 의 Kraft 등식
+검사). 그 검사가 없어도 checksum 이 같은 손상을 잡기 때문이며, Kraft 의 값은 "잡는 것"이
+아니라 표를 읽자마자 **더 일찍·더 싸게 거부하는 것**이다. 검사가 잡지 못하는 성질을 잡는
+척하지 않기 위해 생존으로 기록했다 — `algorithms_lab/articles/step08_lossless_compression.md`.
 
 **그리고 그 복원이 다른 결함 하나를 드러냈다.** `ApplyEventModifiers` 변이를 되돌리자
 `mega_defense_selftest_ai_astar` 가 `result=LOST` 로 죽었다. 원인은 코드가 아니라

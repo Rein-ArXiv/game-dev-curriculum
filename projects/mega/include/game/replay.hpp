@@ -31,8 +31,31 @@
 // 멈춘다. **확정 입력이 같으면 결과도 같아야 한다**는 것이 rollback 정확성의
 // 정의이므로, 이 대조는 그 정의를 실행 가능한 단언으로 바꾼다.
 
+// ── 파일이 작아야 하는 이유 ──────────────────────────────────────
+// 한 틱이 32바이트를 쓴다 — 프레임 8, 아바타 자취 12, 마크 12. 그런데 그 32바이트는
+// 성질이 정반대인 두 덩어리다.
+//
+//   조작 쪽(틱당 16바이트)   17개 액션 키 비트는 대부분 0 이고, 마우스 좌표는
+//                            프레임 사이 근접 반복이며, 전진 플래그는 사실상
+//                            상수다. 바이트당 1비트에 못 미치는 자리가 많다.
+//   해시 쪽(틱당 16바이트)   아바타 체크섬 8 + 체인 8. 해시 출력이므로 **구성상
+//                            압축되지 않는다.** 압축되면 그 해시가 나쁜 해시다.
+//
+// 그래서 파일 전체의 이득은 절반 쪽에서만 나오고, 그것이 이 포맷의 천장이다.
+// 천장을 아는 것과 모르는 것의 차이는 크다 — 모르면 80% 라는 수를 보고 압축이
+// 고장났다고 판단하게 된다.
+//
+// 접는 자리는 **파일 계층 하나**다. 시뮬은 압축을 모르고, 골든 체인은 파일
+// 바이트가 아니라 체인 값이라 결정성 판정은 압축과 무관하다. 그 무관함이
+// 기록·재생 짝이 확인하는 성질이다.
+//
+// 압축이 신뢰 경계에 더하는 검사는 셋이다. 코드 길이표가 Kraft 등식을 만족하는가,
+// 선언된 본문 크기가 예산 안인가, 복호 결과가 그 크기와 정확히 같은가. 셋 중
+// 하나라도 빠지면 임의의 256바이트가 유효한 길이표 행세를 한다.
+
 #pragma once
 
+#include "algo/huffman.hpp"
 #include "io/file.h"
 #include "io/read_file.hpp"
 #include "mp/golden.hpp"
@@ -52,11 +75,20 @@ namespace game {
 inline constexpr uint32_t kReplayMagic = 0x5052474Du;
 // 프레이밍이 바뀔 때마다 한 단계씩 오른다. 낡은 파일은 재생하지 않고 거절한다 —
 // 낡은 파일을 새 디코더로 억지로 읽으면 갈림이 아닌 것을 갈림으로 보고한다.
-inline constexpr uint16_t kReplayVersion = 1;
+// 2 는 본문 압축 블록이 들어온 단계다.
+inline constexpr uint16_t kReplayVersion = 2;
 // 상한. 신뢰 경계 밖 입력이므로 크기와 개수에 예산을 건다.
 inline constexpr uint32_t kReplayMaxTicks = 2000000u;
 inline constexpr size_t   kReplayMaxBytes = 64u * 1024u * 1024u;
 inline constexpr size_t   kReplayMaxSwitchBytes = 4096;
+
+// 본문 블록의 방식 바이트. 압축이 이득이 아니면(아주 짧은 기록) 그대로 싣는다 —
+// 그 경우에도 길이표 256바이트를 붙이면 파일이 오히려 커진다.
+inline constexpr uint8_t kReplayStored  = 0;
+inline constexpr uint8_t kReplayHuffman = 1;
+// 길이표는 심볼 하나당 1바이트 고정이다. 표를 다시 압축하면 디코더가 두 겹이
+// 되고, 두 겹째의 실패 모드를 검사할 자리가 또 필요해진다.
+inline constexpr size_t kReplayCodeTableBytes = 256;
 
 // 한 프레임의 조작. `FrameInput` 의 와이어 형태다 — 17개 액션 키의 비트, 화면
 // 좌표 마우스, 이번 프레임의 누름 엣지.
@@ -97,25 +129,25 @@ struct Replay {
     mp::GoldenChain               chain;
 };
 
-// snippet-begin: replay-encode
-inline std::vector<uint8_t> EncodeReplay(const Replay& replay) {
+// 본문 해시. 압축 페이로드의 비트 하나가 뒤집히면 복호 결과가 통째로 달라지는데,
+// 그 달라진 바이트가 우연히 문법에 맞는 본문일 수 있다. 그때 재생기는 손상된
+// 입력으로 시뮬을 돌려 "결정성이 깨졌다"고 보고한다 — 거짓 실패다. 원본을 접은
+// 수 하나가 그 자리를 닫는다.
+inline uint64_t ReplayBodyHash(const std::vector<uint8_t>& body) {
+    uint64_t hash = 1469598103934665603ull;
+    for (uint8_t byte : body) {
+        hash ^= byte;
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+// snippet-begin: replay-body
+// 프레임 · 아바타 자취 · 마크 · 체인 꼬리. 압축이 들어오기 전 이 바이트들은
+// 헤더 뒤에 그대로 붙어 있었고, 지금은 한 덩어리로 접힌 뒤 붙는다. 내용과
+// 순서는 하나도 바뀌지 않았다 — 그래서 본문 파서에는 손댈 것이 없다.
+inline std::vector<uint8_t> EncodeReplayBody(const Replay& replay) {
     std::vector<uint8_t> out;
-    platform::AppendLE32(out, kReplayMagic);
-    // 언제나 **지금** 버전을 찍는다. `replay.version` 은 디코더가 읽은 값을
-    // 담는 자리이고, 그것을 그대로 다시 쓰면 낡은 파일을 읽어 새 프레이밍으로
-    // 다시 쓴 순간 버전이 내용과 어긋난다.
-    platform::AppendLE16(out, kReplayVersion);
-    platform::AppendLE8(out, replay.mode);
-    platform::AppendLE8(out, replay.players);
-    platform::AppendLE8(out, replay.localPlayer);
-    platform::AppendLE8(out, replay.prediction);
-    platform::AppendLE32(out, replay.stride);
-    platform::AppendLE64(out, static_cast<uint64_t>(replay.matchUnix));
-    platform::AppendLE64(out, replay.contentHash);
-
-    platform::AppendLE16(out, static_cast<uint16_t>(replay.switches.size()));
-    for (char c : replay.switches) platform::AppendLE8(out, static_cast<uint8_t>(c));
-
     platform::AppendLE32(out, static_cast<uint32_t>(replay.frames.size()));
     for (const ReplayFrame& frame : replay.frames) {
         platform::AppendLE8(out, static_cast<uint8_t>(frame.keys));
@@ -145,6 +177,52 @@ inline std::vector<uint8_t> EncodeReplay(const Replay& replay) {
     platform::AppendLE64(out, replay.chain.Chain());
     return out;
 }
+// snippet-end: replay-body
+
+// snippet-begin: replay-encode
+inline std::vector<uint8_t> EncodeReplay(const Replay& replay) {
+    std::vector<uint8_t> out;
+    platform::AppendLE32(out, kReplayMagic);
+    // 언제나 **지금** 버전을 찍는다. `replay.version` 은 디코더가 읽은 값을
+    // 담는 자리이고, 그것을 그대로 다시 쓰면 낡은 파일을 읽어 새 프레이밍으로
+    // 다시 쓴 순간 버전이 내용과 어긋난다.
+    platform::AppendLE16(out, kReplayVersion);
+    platform::AppendLE8(out, replay.mode);
+    platform::AppendLE8(out, replay.players);
+    platform::AppendLE8(out, replay.localPlayer);
+    platform::AppendLE8(out, replay.prediction);
+    platform::AppendLE32(out, replay.stride);
+    platform::AppendLE64(out, static_cast<uint64_t>(replay.matchUnix));
+    platform::AppendLE64(out, replay.contentHash);
+
+    platform::AppendLE16(out, static_cast<uint16_t>(replay.switches.size()));
+    for (char c : replay.switches) platform::AppendLE8(out, static_cast<uint8_t>(c));
+
+    const std::vector<uint8_t> body = EncodeReplayBody(replay);
+    platform::AppendLE32(out, static_cast<uint32_t>(body.size()));
+    platform::AppendLE64(out, ReplayBodyHash(body));
+
+    uint8_t lengths[algo::kHuffmanSymbols]{};
+    std::vector<uint8_t> coded;
+    // 길이표 256바이트를 **포함해서** 이득일 때만 압축을 채택한다. 짧은 기록에서
+    // 표가 페이로드보다 큰 경우가 실제로 있고, 그때 압축을 고르면 "압축했더니
+    // 커졌다"가 된다.
+    const bool useHuffman =
+        !body.empty() &&
+        algo::HuffmanEncode(body.data(), body.size(), lengths, coded) &&
+        coded.size() + kReplayCodeTableBytes < body.size();
+    if (useHuffman) {
+        platform::AppendLE8(out, kReplayHuffman);
+        for (size_t i = 0; i < algo::kHuffmanSymbols; ++i) platform::AppendLE8(out, lengths[i]);
+        platform::AppendLE32(out, static_cast<uint32_t>(coded.size()));
+        out.insert(out.end(), coded.begin(), coded.end());
+    } else {
+        platform::AppendLE8(out, kReplayStored);
+        platform::AppendLE32(out, static_cast<uint32_t>(body.size()));
+        out.insert(out.end(), body.begin(), body.end());
+    }
+    return out;
+}
 // snippet-end: replay-encode
 
 // 커서 하나로 정확히 소비한다. 남는 바이트도 모자란 바이트도 거절이다 —
@@ -154,24 +232,28 @@ inline std::vector<uint8_t> EncodeReplay(const Replay& replay) {
 inline bool DecodeReplay(const std::vector<uint8_t>& bytes, Replay& out,
                          std::string* error = nullptr) {
     size_t cursor = 0;
+    // 커서가 도는 대상은 둘이다 — 먼저 파일, 압축을 푼 뒤에는 본문. 두 벌의
+    // 읽기 헬퍼를 쓰지 않고 **가리키는 곳만 바꾼다**. 두 벌이 되면 한쪽에만
+    // 경계 검사를 고치는 날이 온다.
+    const std::vector<uint8_t>* source = &bytes;
     auto fail = [&](const char* why) {
         if (error) *error = why;
         return false;
     };
-    auto need = [&](size_t n) { return bytes.size() - cursor >= n; };
-    auto u8 = [&]() { return bytes[cursor++]; };
+    auto need = [&](size_t n) { return source->size() - cursor >= n; };
+    auto u8 = [&]() { return (*source)[cursor++]; };
     auto u16 = [&]() {
-        const uint16_t v = platform::ReadLE16(bytes.data() + cursor);
+        const uint16_t v = platform::ReadLE16(source->data() + cursor);
         cursor += 2;
         return v;
     };
     auto u32 = [&]() {
-        const uint32_t v = platform::ReadLE32(bytes.data() + cursor);
+        const uint32_t v = platform::ReadLE32(source->data() + cursor);
         cursor += 4;
         return v;
     };
     auto u64 = [&]() {
-        const uint64_t v = platform::ReadLE64(bytes.data() + cursor);
+        const uint64_t v = platform::ReadLE64(source->data() + cursor);
         cursor += 8;
         return v;
     };
@@ -196,8 +278,50 @@ inline bool DecodeReplay(const std::vector<uint8_t>& bytes, Replay& out,
     const uint16_t switchBytes = u16();
     if (switchBytes > kReplayMaxSwitchBytes) return fail("스위치 문자열이 상한을 넘는다");
     if (!need(switchBytes)) return fail("스위치 문자열이 잘렸다");
-    decoded.switches.assign(reinterpret_cast<const char*>(bytes.data() + cursor), switchBytes);
+    decoded.switches.assign(reinterpret_cast<const char*>(source->data() + cursor), switchBytes);
     cursor += switchBytes;
+
+    // ── 압축 블록을 풀어 본문 바이트를 되찾는다 ──────────────────────
+    // 여기부터 아래 파서는 압축이 들어오기 전과 **한 글자도 다르지 않다**. 그것이
+    // 압축을 파일 계층에 둔 값이다 — 시뮬도 체인도 이 층을 보지 않는다.
+    if (!need(4 + 8 + 1)) return fail("본문 헤더가 잘렸다");
+    const uint32_t bodySize = u32();
+    if (bodySize > kReplayMaxBytes) return fail("본문 크기가 상한을 넘는다");
+    const uint64_t bodyHash = u64();
+    const uint8_t method = u8();
+    std::vector<uint8_t> body;
+    if (method == kReplayHuffman) {
+        if (!need(kReplayCodeTableBytes + 4)) return fail("코드 길이표가 잘렸다");
+        uint8_t lengths[algo::kHuffmanSymbols]{};
+        for (size_t i = 0; i < algo::kHuffmanSymbols; ++i) lengths[i] = u8();
+        algo::HuffmanDecoder decoder;
+        // Kraft 등식을 어기는 표는 여기서 죽는다. 이 한 줄을 지우면 임의의
+        // 256바이트가 길이표 행세를 하고, 복호기는 크래시하는 대신 **조용히 다른
+        // 바이트를 낸다**.
+        if (!decoder.Build(lengths)) return fail("코드 길이표가 Kraft 등식을 어긴다");
+        const uint32_t codedBytes = u32();
+        if (!need(codedBytes)) return fail("압축 페이로드가 잘렸다");
+        if (!decoder.Decode(bytes.data() + cursor, codedBytes, bodySize, body))
+            return fail("압축 페이로드를 복호할 수 없다");
+        cursor += codedBytes;
+    } else if (method == kReplayStored) {
+        if (!need(4)) return fail("본문 길이가 잘렸다");
+        const uint32_t storedBytes = u32();
+        if (storedBytes != bodySize) return fail("무압축 길이가 선언과 다르다");
+        if (!need(storedBytes)) return fail("본문이 잘렸다");
+        body.assign(bytes.begin() + static_cast<ptrdiff_t>(cursor),
+                    bytes.begin() + static_cast<ptrdiff_t>(cursor + storedBytes));
+        cursor += storedBytes;
+    } else {
+        return fail("모르는 본문 압축 방식이다");
+    }
+    if (cursor != bytes.size()) return fail("파일 끝에 남는 바이트가 있다");
+    if (body.size() != bodySize) return fail("복호 크기가 선언과 다르다");
+    if (ReplayBodyHash(body) != bodyHash) return fail("본문 해시가 다르다");
+
+    // 본문도 커서 하나로 정확히 소비한다. 바깥 파일과 같은 규율이고 이유도 같다.
+    cursor = 0;
+    source = &body;
 
     if (!need(4)) return fail("프레임 수가 잘렸다");
     const uint32_t frameCount = u32();
@@ -247,7 +371,7 @@ inline bool DecodeReplay(const std::vector<uint8_t>& bytes, Replay& out,
     if (!need(12)) return fail("체인 꼬리가 잘렸다");
     const uint32_t ticks = u32();
     const uint64_t chain = u64();
-    if (cursor != bytes.size()) return fail("파일 끝에 남는 바이트가 있다");
+    if (cursor != body.size()) return fail("본문 끝에 남는 바이트가 있다");
     // 마크의 마지막은 Seal 이 남긴 것이라 반드시 총 틱 수와 같다. 어긋나면
     // 그 파일은 봉인되지 않았거나 손상된 것이고, 둘 다 재생 대상이 아니다.
     if (markCount == 0 || marks.back().tick != ticks) return fail("체인이 봉인되지 않았다");

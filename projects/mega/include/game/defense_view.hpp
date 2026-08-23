@@ -407,6 +407,10 @@ inline render::Color TileColor(const DefenseMap& map, int x, int y) {
     color = {clamp8(color.r + shade), clamp8(color.g + shade), clamp8(color.b + shade), color.a};
     if (map.Vein(x, y)) color = {clamp8(color.r + 55), clamp8(color.g + 40), clamp8(color.b - 10), color.a};
     if (map.Occupied(x, y)) color = {clamp8(color.r + 18), clamp8(color.g + 14), clamp8(color.b + 10), color.a};
+    // 막으면 스폰↔코어가 끊기는 칸. 전수 판정을 가진 팔에서만 칠할 수 있다 —
+    // 칸마다 flood fill 을 도는 팔에서 이 색을 채우려면 한 프레임에 격자 수만큼
+    // 검증을 돌아야 한다. 그래서 이것은 표시가 아니라 **다른 계산이 만든 기능**이다.
+    if (map.Choke(x, y)) color = {clamp8(color.r + 46), clamp8(color.g - 12), clamp8(color.b - 14), color.a};
     return color;
 }
 

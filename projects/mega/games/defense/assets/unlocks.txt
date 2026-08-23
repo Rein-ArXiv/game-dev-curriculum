@@ -1,0 +1,14 @@
+# 영구 해금의 선행 관계. 한 줄이라도 거부되면 파일 전체가 폐기되고
+# 선행 없음(파일이 없던 시절의 동작)으로 돈다.
+#
+#   unlock <종류> [requires=<종류>,...]
+#
+# 종류 번호는 TowerType 의 열거 값이다.
+#   0 Cannon   1 Gatling   2 Splash   3 Sniper
+#
+# 대포는 시작 장비라 선행이 없다. 개틀링과 스플래시는 둘 다 대포에서 갈리고,
+# 저격은 그 둘을 모두 지나야 열린다 — 사거리 손잡이가 마지막에 온다.
+unlock 0
+unlock 1 requires=0
+unlock 2 requires=0
+unlock 3 requires=1,2

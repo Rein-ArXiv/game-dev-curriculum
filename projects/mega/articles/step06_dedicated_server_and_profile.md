@@ -267,9 +267,10 @@ inline bool VerifyGameAdmission(
         std::span(reinterpret_cast<const uint8_t*>(body.data()), body.size()));
     if (!detail::ConstantTimeEqual(*signature, expected)) return false;
 
+    // 여기까지 오면 서명이 맞다. 페이로드 훑기는 그 뒤에만 일어난다.
+    if (jsonBytes->size() > kMaxAdmissionPayloadBytes) return false;
     const std::string json(jsonBytes->begin(), jsonBytes->end());
-    const auto kind = detail::JsonString(json, "Kind");
-    // ... PlayerId · MatchId · ServerId · TokenId · ExpiresAt 을 같은 방식으로 읽는다
+    // ... Kind · PlayerId · MatchId · ServerId · TokenId · ExpiresAt 을 한 번에 훑는다
     if (!kind || *kind != "game" || !playerId || playerId->empty() ||
         !matchId || matchId->empty() || !serverId || *serverId != expectedServerId ||
         !tokenId || tokenId->empty() || !expiresAt || *expiresAt <= nowUnixSeconds) {

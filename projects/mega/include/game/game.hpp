@@ -444,6 +444,10 @@ public:
     void Init(const DefenseMap& map, const std::vector<WaveDef>& waves,
               int startGold = 100, float coreHp = 100) {
         DefenseMap fresh = map;
+        // 배치 판정 팔은 맵이 아니라 스위치가 소유한다. 여기서 다시 심지 않으면
+        // 파일에서 온 맵(classic)이나 테스트가 손으로 지은 맵은 언제나 기본 팔로
+        // 돌아, 팔을 골라도 아무 일이 일어나지 않는다.
+        fresh.SetBuildCheck(switches_.buildCheck);
         // 매치가 다시 시작되면 타워도 잔해도 없다. 점유가 남아 있으면 유령 벽이
         // 경로 계산에 그대로 반영돼, 다시 시작한 판이 앞 판의 미로를 물려받는다.
         fresh.ClearOccupancy();

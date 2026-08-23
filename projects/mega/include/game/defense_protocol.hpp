@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "algo/quickselect.hpp"
 #include "game/game.hpp"
 #include "live/feature_flag.hpp"
 #include "mp/det_sim.hpp"
@@ -30,7 +31,13 @@ namespace game {
 namespace wire {
 
 static constexpr uint32_t kMagic = 0x3146444du;  // "MDF1" in little endian
-static constexpr uint8_t kVersion = 6;
+// 7 은 스냅샷의 적 64자리가 **저장 행 순서**가 아니라 relevancy 로 채워질 수 있게
+// 된 단계다. 프레이밍 바이트는 하나도 바뀌지 않았지만 같은 월드가 다른 64를 실을
+// 수 있으므로, 버전을 올리지 않으면 두 빌드가 "같은 프로토콜"이라고 주장하면서
+// 서로 다른 세계를 그린다. 기본 팔은 그대로 rows 다 — 팔이 결과를 바꾼다면
+// 그것은 스위치가 아니라 변경이라는 규약이 여기서도 유효하고, 그래서 팔을
+// 바꾸는 쪽이 옵트인이다.
+static constexpr uint8_t kVersion = 7;
 static constexpr size_t kMaxPacketBytes = 1200;
 
 // ── 스냅샷 컬렉션 상한 ─────────────────────────────────────────────
@@ -622,6 +629,61 @@ inline bool ReadCommand(const net::Bytes& bytes, Command& command,
 // 붙어 있을 때만 관측된다. 잘림은 호스트에서 일어나는 손실이므로 호스트도 셀 수 있어야
 // 한다 — 감사 #31 이 지적한 "생산만 되고 소비되지 않는 플래그"의 생산 쪽 출구다.
 // 기본값 nullptr 이라 관심 없는 호출자는 그대로 둔다.
+// ── 어느 64를 싣는가 ──────────────────────────────────────────────
+// 스냅샷 한 장에 실을 수 있는 적은 64자리다. 규모 팔에서 살아 있는 적은 2048까지
+// 오르므로 그 자리를 무엇으로 채우는가가 곧 클라이언트가 보는 세계다.
+//
+// 저장 행 순서로 채우면(기본 팔) 코어 앞에 도착한 적이 뒷 행이라는 이유만으로
+// 화면에서 사라진다. 그리고 그 행 순서는 저장 배치를 바꾸는 A/B 팔에서 실제로
+// 달라진다 — 같은 월드가 팔에 따라 다른 적을 싣는다.
+//
+// relevancy 팔은 전순서를 정하고 상위 64를 고른다. 순서는 네 겹이다.
+//
+//   1. 노출된 개체 먼저   은신 중인 개체는 클라이언트가 그리지도 못한다.
+//   2. 코어에 가까운 순   격자 맨해튼 거리. 정수라 부동소수 비교가 섞이지 않는다.
+//   3. 체력이 많은 순     같은 자리라면 더 오래 버티는 쪽이 더 오래 보여야 한다.
+//   4. id 오름차순        **동점을 남기지 않는 마지막 겹**. 이것이 없으면 분할이
+//                         동점 둘을 어느 쪽에 두는지가 행 순서에 좌우된다.
+// snippet-begin: snapshot-relevance
+struct EnemyPick {
+    uint32_t hidden = 0;     // 0 = 노출됨
+    uint32_t distance = 0;   // 코어까지 격자 맨해튼 거리
+    uint32_t strength = 0;   // 인코드된 체력의 보수 — 작을수록 강하다
+    uint32_t id = 0;
+    size_t   row = 0;
+};
+
+inline bool MoreRelevant(const EnemyPick& a, const EnemyPick& b) {
+    if (a.hidden != b.hidden) return a.hidden < b.hidden;
+    if (a.distance != b.distance) return a.distance < b.distance;
+    if (a.strength != b.strength) return a.strength < b.strength;
+    return a.id < b.id;    // 전순서를 닫는 겹. id 는 월드 안에서 유일하다.
+}
+
+inline void CollectEnemyPicks(const GameWorld& world, std::vector<EnemyPick>& out) {
+    out.clear();
+    const DefenseMap* map = world.Map();
+    const size_t rows = world.Enemies().Size();
+    out.reserve(rows);
+    for (size_t i = 0; i < rows; ++i) {
+        if (!world.Enemies().Alive(i)) continue;
+        EnemyPick pick;
+        pick.row = i;
+        pick.id = world.Enemies().Id(i);
+        pick.hidden = world.Revealed(i) ? 0u : 1u;
+        if (map) {
+            const DefenseMap::Cell core = map->CoreCell();
+            const DefenseMap::Cell at = map->WorldToCell(world.Enemies().Pos(i));
+            const int dx = at.x > core.x ? at.x - core.x : core.x - at.x;
+            const int dy = at.y > core.y ? at.y - core.y : core.y - at.y;
+            pick.distance = static_cast<uint32_t>(dx + dy);
+        }
+        pick.strength = 0xFFFFu - EncodeHp(world.Enemies().Hp(i));
+        out.push_back(pick);
+    }
+}
+// snippet-end: snapshot-relevance
+
 inline net::Bytes WriteSnapshot(const GameWorld& world, uint32_t tick,
                                 uint32_t acknowledgedCommand,
                                 bool* truncatedOut = nullptr,
@@ -671,9 +733,7 @@ inline net::Bytes WriteSnapshot(const GameWorld& world, uint32_t tick,
         writer.U8(static_cast<uint8_t>(tower.tier));
         writer.U8(static_cast<uint8_t>(tower.targetMode));
     }
-    size_t written = 0;
-    for (size_t i = 0; i < enemyRows && written < enemyCount; ++i) {
-        if (!world.Enemies().Alive(i)) continue;
+    auto writeEnemy = [&writer, &world](size_t i) {
         writer.U32(world.Enemies().Id(i));
         writer.U16(EncodePosition(world.Enemies().Pos(i).x));
         writer.U16(EncodePosition(world.Enemies().Pos(i).y));
@@ -682,7 +742,31 @@ inline net::Bytes WriteSnapshot(const GameWorld& world, uint32_t tick,
         writer.U8(static_cast<uint8_t>(
             static_cast<uint8_t>(world.Enemies().Type(i)) |
             (world.Revealed(i) ? kEnemyRevealedBit : 0)));
-        ++written;
+    };
+    size_t written = 0;
+    if (world.SwitchState().snapshotPick == SnapshotPickKind::Relevance) {
+        // 상위 64를 고르고(선형) 그 64만 정렬한다(k log k). 전수 정렬은 같은 답을
+        // 내지만 n log n 을 치른다 — 그 차이가 이 팔의 값이다.
+        //
+        // 고른 뒤 다시 정렬하는 이유는 비용이 아니라 **정합성**이다. quickselect 가
+        // 남기는 앞 k 개의 내부 순서는 입력 배열 순서에 좌우되므로, 정렬하지 않으면
+        // 행 순서를 섞은 같은 월드가 다른 바이트를 낸다. 정렬하면 패킷이 집합의
+        // 함수가 된다.
+        std::vector<EnemyPick> picks;
+        CollectEnemyPicks(world, picks);
+        algo::SelectTopK(picks.data(), picks.size(), enemyCount, MoreRelevant);
+        if (picks.size() > enemyCount) picks.resize(enemyCount);
+        std::sort(picks.begin(), picks.end(), MoreRelevant);
+        for (const EnemyPick& pick : picks) {
+            writeEnemy(pick.row);
+            ++written;
+        }
+    } else {
+        for (size_t i = 0; i < enemyRows && written < enemyCount; ++i) {
+            if (!world.Enemies().Alive(i)) continue;
+            writeEnemy(i);
+            ++written;
+        }
     }
     written = 0;
     world.Projectiles().ForEach([&](const Projectile& projectile) {

@@ -10,8 +10,8 @@
 
 | 항목 | 수 |
 |---|---|
-| `include/` 헤더 전체 | 114 |
-| 제품 도달 | 114 |
+| `include/` 헤더 전체 | 121 |
+| 제품 도달 | 121 |
 | 랩 전용(`docs/LAB_ONLY.md` 등재) | 0 |
 | 근거 없는 미도달 | 0 (있으면 빌드가 실패한다) |
 
@@ -19,14 +19,15 @@
 
 | 제품 타깃 | 도달 헤더 |
 |---|---|
-| `mega_defense` | 110 |
-| `mega_defense_server` | 85 |
+| `mega_defense` | 116 |
+| `mega_defense_server` | 91 |
 
 ## 계층별 도달 현황
 
 | 계층 | 도달 / 전체 |
 |---|---|
 | `ai/` | 9 / 9 |
+| `algo/` | 6 / 6 |
 | `containers/` | 4 / 4 |
 | `db/` | 3 / 3 |
 | `ecs/` | 1 / 1 |
@@ -34,7 +35,7 @@
 | `game/` | 21 / 21 |
 | `io/` | 3 / 3 |
 | `jobs/` | 1 / 1 |
-| `live/` | 6 / 6 |
+| `live/` | 7 / 7 |
 | `math/` | 12 / 12 |
 | `memory/` | 3 / 3 |
 | `mp/` | 6 / 6 |
@@ -61,6 +62,12 @@
 | `ai/pathfinding/grid_map.hpp` | O | O |
 | `ai/perception/perception.hpp` | O | O |
 | `ai/steering/steering.hpp` | O | O |
+| `algo/aho_corasick.hpp` | - | O |
+| `algo/articulation.hpp` | O | O |
+| `algo/dsu.hpp` | O | O |
+| `algo/huffman.hpp` | O | - |
+| `algo/quickselect.hpp` | O | O |
+| `algo/topo_sort.hpp` | O | O |
 | `containers/hash_map.h` | O | O |
 | `containers/intrusive_list.h` | O | O |
 | `containers/ring_buffer.h` | O | O |
@@ -107,6 +114,7 @@
 | `live/event_schedule.hpp` | O | O |
 | `live/feature_flag.hpp` | O | O |
 | `live/patch.hpp` | O | O |
+| `live/unlock_graph.hpp` | O | O |
 | `math/interp.hpp` | O | O |
 | `math/mat.hpp` | O | O |
 | `math/noise.hpp` | O | O |

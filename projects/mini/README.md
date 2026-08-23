@@ -27,6 +27,7 @@
 | [`parts_perf_lab`](parts_perf_lab/) | AoS/SoA/Archetype, scalar/SSE/AVX2, predication, malloc/Arena/Pool/Slab, vector/list/intrusive | 할당 정렬·slab 소유권·레이아웃 결과 동등성·SIMD 오차 테스트 |
 | [`system_kernel_lab`](system_kernel_lab/) | Linux read/pread/mmap/POSIX AIO/io_uring, mutex/spin/futex/CAS, pthread/ucontext, scheduler 정책 | Linux 전용 CTest 포함, Linux 실행 환경 필요 |
 | [`languages_lab`](languages_lab/) | 위치 보존 lexer, 우선순위 parser, 바이트코드 compiler·verifier·VM, 제한 host binding | 구문·제어 흐름·스택 깊이·실행 예산·오류 진단 계약 테스트 |
+| [`algorithms_lab`](algorithms_lab/) | 정렬·선택 5팔, 구간 질의(Fenwick·lazy segment tree), 해시 표 4팔, 문자열 탐색 5팔+Aho-Corasick, 그래프 구조(SCC 2팔·절단점·DSU 4조합·MST 2팔), 최단 경로 4팔+A\*, 탐욕·DP, 유량 3팔·매칭 3팔·CSP, 무손실 압축 4팔 | 고정 사례 45개가 느린 독립 오라클(전수 열거·정의 그대로의 재계산)과 대조하고, 시드 무작위 property 11종이 같은 계약을 6,950 표본에서 확인한다. 계약은 multiset 보존·안정성·lazy tag 대수·조회 종료 불변식·condensation DAG·max-flow==min-cut certificate·Apply/Undo 상태 해시·Kraft·H<=L<H+1. 무력화 변이 15건 중 14건 검출(생존 1건은 사유와 함께 등재) |
 | [`math_lab`](math_lab/) | 회전, 보간·곡선, 노이즈, SAT/GJK, SDF, BVH, 투영·수치 오차 시각화 | 쿼터니언·곡선 경계·충돌·SDF·BVH·noise 고정 사례에 더해 시드 무작위 property 층 13종(`tests/property.h` — 생성기·축소기·반례 보고). 쿼터니언 항등식과 이중 덮개, Perlin/Simplex 범위 상계(그라디언트 조합 256 가지를 세는 독립 오라클), SAT⇔GJK 일치와 분리면 실증·강체 불변, 행렬 역행렬 왕복(조건수 규칙)과 합성 일치 |
 | [`physics_lab`](physics_lab/) | 적분기, 힘, broad/narrow phase, 충돌 응답, 거리 제약, 에너지·반복성 관찰 | 적분기 오차 차수·normal impulse·퇴화 법선 테스트. broad phase 는 brute 와의 쌍 집합 대조, narrow phase 와 접촉 솔버는 고정 사례에 더해 불변식 property 배터리(무작위 볼록쌍의 깊이 일치와 `(normal, depth)` 계약, 무작위 강체 장면의 에너지 비증가·관통 상계·bit 결정성) |
 | [`ai_lab`](ai_lab/) | A*/Dijkstra/Greedy/JPS, flow field, steering, boids, influence map | 최단 경로·도달 불가·휴리스틱 계약 테스트. 나머지 장면 테스트 보강 필요 |
@@ -55,6 +56,16 @@
 - 동일한 파일과 checksum 작업을 I/O backend만 바꿔 실행한다.
 - 처리량과 함께 context switch, page fault, 권한 실패를 관찰한다.
 - `SCHED_FIFO`, cgroup, `io_uring`은 환경 지원 여부를 결과와 구분한다.
+
+### algorithms
+
+- 같은 문제에 서로 다른 팔을 붙이고, 통제 변수를 "같은 입력 복사본"으로 고정해 비교한다.
+  게임이 밀도 n/k를 2⁻¹⁰부터 2¹⁰까지 스윕해 주지 않으므로 워크로드를 직접 만든다.
+- 시간만 재지 않는다. 비교 횟수·이동 바이트·방문 노드·probe 길이는 기계 독립이므로 그것을
+  먼저 세고, 시간은 그 위에 얹는다. 결과 checksum을 소비해 최적화기가 측정 대상을 지우지
+  못하게 한다.
+- 검사로 잡히지 않는 결함이 있다는 것을 표에 남긴다. BFS의 표시 시점, Dijkstra의 stale
+  항목 처리, DSU의 union by size는 답을 바꾸지 않고 계측기로만 드러난다.
 
 ### math·physics·AI
 

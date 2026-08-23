@@ -57,9 +57,31 @@ CLRS의 분석·증명 체계와 *The Algorithm Design Manual*의 문제 모델�
 
 코딩 테스트 준비가 목적이라면 02~09의 구현을 제한 시간 안에 빈 파일에서 다시 작성한다. 커리큘럼의 완료 조건은 암기한 template이 아니라, 조건이 바뀌었을 때 기존 증명의 어느 단계가 깨지는지 설명하는 것이다.
 
+## part02~10의 실행 자산 — 어느 lab에서 도는가
+
+이 축의 소유 lab은 `projects/mini/algorithms_lab`이다. 알고리즘을 직접 구현하고 **느린 독립 오라클과 대조해** 검증하는 자리이며, 오라클은 제품 구현을 다시 부르지 않고 전수 열거·정의 그대로의 재계산 같은 *다른 골격*으로 짜여 있다. 같은 아이디어로 짠 오라클은 같은 오해를 공유해 둘 다 같은 답을 틀리게 내기 때문이다.
+
+각 step은 하나의 알고리즘이 아니라 **A/B 팔**을 갖는다. 두 팔이 같은 계약을 만족하면서 비용만 다를 때, 그 차이가 곧 측정 대상이다.
+
+| part | lab step | 무엇이 도는가 |
+|---|---|---|
+| 02 순서·선택 | `articles/step01_ordering_and_selection.md` | 비교 정렬 ⇔ radix, 이진 탐색 경계 4종, quickselect ⇔ 전체 정렬. 계약은 multiset 보존·비내림차순·안정성 |
+| 03 온라인·구간·스트림 | `articles/step02_online_range_stream.md` | Fenwick ⇔ 접두합 ⇔ 직접 합산, lazy segment tree의 tag 대수, 단조 덱 슬라이딩 최대, 이진 힙 ⇔ 정렬 배열 |
+| 04 사전·문자열 | `articles/step03_dictionary_and_string_search.md` | chaining ⇔ open addressing(선형·이중 해시), Bloom 필터의 거짓 양성률, KMP ⇔ rolling hash ⇔ 직접 비교, Aho-Corasick ⇔ 패턴별 개별 탐색 |
+| 05 그래프 구조 | `articles/step04_graph_structure.md` | SCC 두 팔(Tarjan ⇔ Kosaraju), 절단점·다리의 low-link ⇔ **정점을 실제로 지우고 BFS 재실행**, DSU 4조합(경로 압축 × 랭크), Kruskal ⇔ Prim ⇔ 간선 부분집합 전수 열거 |
+| 06 최단 경로 | `articles/step05_shortest_path_and_heuristics.md` | Dijkstra 두 팔 ⇔ Bellman-Ford ⇔ Floyd-Warshall, 음수 간선이 Dijkstra를 깨는 자리, A\*의 휴리스틱·가중·재개방 토글이 최적성과 확장 수를 바꾸는 교환 |
+| 07 탐욕 | `articles/step06_greedy_and_dynamic_programming.md` | 교환 논증이 서는 동전계 ⇔ 무너지는 동전계, 집합 덮개의 탐욕 근사비를 전수 최적과 대조 |
+| 08 동적 계획 | 같은 step | 0/1 배낭 ⇔ 전수 열거, 상태 정의 방향이 문제를 바꾸는 사례, LCS·편집 거리·LIS, metamorphic 관계 |
+| 09 조합 탐색·flow·matching | `articles/step07_flow_matching_and_search.md` | 최대 유량 3팔과 **max-flow == min-cut certificate**, 이분 매칭 ⇔ 부분집합 전수, 헝가리안 ⇔ 모든 순열, CSP의 Apply/Undo 상태 해시와 대칭 파괴 |
+| 10 무손실 압축 | `articles/step08_lossless_compression.md` | canonical Huffman의 Kraft 등식과 H ≤ L < H+1, LZ round-trip과 겹침 복사, 적대적 입력에 대한 복호기 거부, range coder |
+
+검증 규모는 고정 사례 45개(520,876 CHECK) + 시드 무작위 property 11종(6,950 표본)이고, CTest는 전체 1개 + step별 8개 + property 1개 + bench smoke 1개로 11개다. 무력화 변이는 15건 주입해 14건이 검출됐고, 생존한 1건은 `step08`에 사유와 함께 기록돼 있다 — Kraft 검사가 잡지 못하는 손상을 checksum이 어차피 잡으므로, 그 변이는 "검사가 잡는 척"하지 않고 생존으로 남겼다.
+
+**mega가 흡수한 것.** 위 알고리즘 중 게임에 실제 이유가 있는 여섯 개는 `projects/mega`의 제품 경로에 들어가 있다(`include/algo/`). 리플레이 본문의 canonical Huffman, 미로 생성의 Kruskal + DSU, 건설 가능 칸 판정의 절단점, 해금 그래프의 위상 정렬 + SCC, 입장 토큰 스캔의 Aho-Corasick, 스냅샷 관련도 상위 K의 quickselect다. 흡수의 기준은 "알고리즘이 멋있는가"가 아니라 **임시 구현을 교체하거나 없던 기능을 만드는가**이며, 그 이유를 만들지 못한 알고리즘은 lab에만 둔다.
+
 ## part11의 실행 자산 — 어느 lab에서 도는가
 
-`algorithms/`에는 대응 lab이 없다. 다만 **part11(속성·퍼징 검증)만은 예외로 실행 자산을 갖는다** — 그 기법은 특정 자료구조가 아니라 *검증 방식*이라서, 다른 축의 lab이 자기 알고리즘을 검증하는 자리에 그대로 얹히기 때문이다. 아래가 그 소재다. 세 lab 모두 외부 라이브러리 없이 시드 루프 + 생성기 + 축소기 + 반례 출력으로 되어 있다.
+**part11(속성·퍼징 검증)은 소유 lab이 따로 없다** — 그 기법은 특정 자료구조가 아니라 *검증 방식*이라서, 다른 축의 lab이 자기 알고리즘을 검증하는 자리에 그대로 얹히기 때문이다. 아래가 그 소재다. 세 lab 모두 외부 라이브러리 없이 시드 루프 + 생성기 + 축소기 + 반례 출력으로 되어 있다.
 
 | part11 절 | 실행 자산 | 무엇이 도는가 |
 |---|---|---|

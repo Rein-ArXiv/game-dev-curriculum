@@ -31,6 +31,8 @@
 빌드 성공은 완료 조건이 아니다. 렌더링과 UI에서 계산 코어를 분리하고 최소한 다음 자동 검증을 둔다.
 
 - `parts_perf_lab`: 할당 정렬·크기 클래스·해제, scalar/SIMD 허용 오차, 자료구조 결과 동등성
+- `algorithms_lab`: 순서·구간·사전·그래프·최단 경로·탐욕·DP·flow·압축의 계약을 느린 독립
+  오라클(전수 열거·정의 그대로의 재계산)과 대조. 오라클은 제품 구현을 다시 부르지 않는다
 - `languages_lab`: 토큰 위치·우선순위, 바이트코드 제어 흐름·스택 검증, 실행 예산, 호스트 바인딩
 - `system_kernel_lab`: I/O 결과 동등성, 부분 읽기·EINTR·취소, 동기화 불변식
 - `math_lab`: 행렬·쿼터니언 항등식, 교차 판정, 퇴화 기하, 수치 오차
@@ -159,15 +161,15 @@ server allocation·짧은 수명의 game token·멱등 result를 HTTP 제어 경
 
 ### 「코어」 행의 property test — 충족(2026-08-23)
 
-이 표의 「코어」 행이 요구하는 **property test**는 세 lab에 실제 배터리로 들어와 있다. 요구를 항목으로 갈라 현재 상태를 적는다.
+이 표의 「코어」 행이 요구하는 **property test**는 네 lab에 실제 배터리로 들어와 있다. 요구를 항목으로 갈라 현재 상태를 적는다.
 
 | 요구 | 충족 | 근거 |
 |---|---|---|
-| 무작위 입력에서 도는 property 층 | 예 | `math_lab` property 13개(표본 42,300) · `physics_lab` property 5개 · `languages_lab` fuzz 4개(표본 80,000) |
-| 반례의 축소와 재현 | 예 | 세 하네스 모두 shrink 뒤 시드와 **재현 명령 한 줄**을 출력한다. 그 명령을 그대로 붙여 넣으면 같은 반례가 다시 나온다(실측 확인) |
-| 결정성 — 벽시계·프로세스 시간 금지 | 예 | 입력은 고정 master seed에서만 나온다. 세 배터리 모두 3회 반복 출력이 바이트 동일. mega의 시각 의존은 `--match-unix` 주입으로 제거 |
-| ctest 등재 | 예 | `math_property_layer` 1개, physics `step05/06/08.property` 3개 + `physics_property_tests`, languages는 step 타깃 안에 포함(정지 실패는 CMake `TIMEOUT`이 잡는다) |
-| sanitizer | 부분 | mega만 `MEGA_SANITIZE=address`로 ASan 구성이 있다. 세 lab에는 sanitizer 구성이 없다 |
+| 무작위 입력에서 도는 property 층 | 예 | `math_lab` property 13개(표본 42,300) · `physics_lab` property 5개 · `languages_lab` fuzz 4개(표본 80,000) · `algorithms_lab` property 11개(표본 6,950) |
+| 반례의 축소와 재현 | 예 | 네 하네스 모두 shrink 뒤 시드와 **재현 명령 한 줄**을 출력한다. 그 명령을 그대로 붙여 넣으면 같은 반례가 다시 나온다(실측 확인) |
+| 결정성 — 벽시계·프로세스 시간 금지 | 예 | 입력은 고정 master seed에서만 나온다. 네 배터리 모두 3회 반복 출력이 바이트 동일. mega의 시각 의존은 `--match-unix` 주입으로 제거 |
+| ctest 등재 | 예 | `math_property_layer` 1개, physics `step05/06/08.property` 3개 + `physics_property_tests`, `algo_properties` 1개, languages는 step 타깃 안에 포함(정지 실패는 CMake `TIMEOUT`이 잡는다) |
+| sanitizer | 부분 | mega만 `MEGA_SANITIZE=address`로 ASan 구성이 있다. 네 lab에는 sanitizer 구성이 없다 |
 | coverage-guided fuzzing | 아니오 | 어느 lab도 libFuzzer·coverage 되먹임을 쓰지 않는다. 「property test」 요구의 범위 밖이며, 대응 없음을 그대로 적는다 |
 
 기법 자체의 소유는 `algorithms/part11_property_fuzz_verification.md`이고, 어느 절이 어느 lab에서 도는지는 [`algorithms/README.md`의 실행 자산 표](algorithms/README.md#part11의-실행-자산--어느-lab에서-도는가)에 있다.

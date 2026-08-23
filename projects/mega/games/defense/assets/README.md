@@ -11,6 +11,15 @@ change or rebuild is required.
 - `waves.txt`: `count hp speed reward interval enemy_type` per line.
 - `balance.script`: `start_gold`, `core_hp`, `enemy_hp_multiplier`,
   `enemy_speed_multiplier`, and `reward_multiplier`.
+- `unlocks.txt`: `unlock <towerType> [requires=<towerType>,...]`. Authors the
+  permanent-unlock prerequisite DAG. The file is loaded as one atomic unit: a
+  cycle, an undeclared prerequisite, a duplicate declaration, or a malformed
+  line rejects the whole file and the game runs with no prerequisites at all
+  (the behaviour from before the file existed). A rejected cycle names the
+  strongly connected component so the author can see which entries hold each
+  other. The shop order is the topological order with ties broken by ascending
+  tower type, so the same graph always prints the same line regardless of how
+  the lines were ordered in the file.
 - `boss.pose`: keyframes for the boss walk and slam clips. Each `key` line
   authors six degrees of freedom (body lift, body roll, four hip yaws); bone
   lengths and the parent chain belong to the code. Rejected files fall back to

@@ -22,6 +22,11 @@ static void TestDefaultsAreThePreSwitchBehaviour() {
     CHECK(s.assetIo == AssetIoKind::Sync);
     CHECK(s.scale == ScaleKind::Small);
     CHECK(s.map == MapSource::Classic);
+    // 골격 생성기는 재귀 백트래커, 배치 판정은 후보 격자 flood fill, 스냅샷의
+    // 64자리는 저장 행 순서 앞에서부터 — 셋 다 스위치가 생기기 전의 동작이다.
+    CHECK(s.mapMaze == MazeKind::Dfs);
+    CHECK(s.buildCheck == BuildCheckKind::FloodFill);
+    CHECK(s.snapshotPick == SnapshotPickKind::Rows);
     CHECK(s.camera == CameraKind::Ortho2d);
     CHECK(s.targetIndex == TargetIndexKind::Linear);
     CHECK(s.staticQuery == StaticQueryKind::Naive);
@@ -60,6 +65,9 @@ static void TestEveryNameParses() {
     CHECK(s.Parse("scale=large", &error));
     CHECK(s.Parse("map=procgen", &error));
     CHECK(s.Parse("map_seed=3", &error));
+    CHECK(s.Parse("map_maze=kruskal", &error));
+    CHECK(s.Parse("build_check=artic", &error));
+    CHECK(s.Parse("snapshot_pick=relevance", &error));
     CHECK(s.Parse("camera=tilted3d", &error));
     CHECK(s.Parse("target_index=quadtree", &error));
     CHECK(s.Parse("static_query=bvh", &error));
@@ -87,6 +95,9 @@ static void TestEveryNameParses() {
     CHECK(s.scale == ScaleKind::Large);
     CHECK(s.map == MapSource::Procgen);
     CHECK_EQ(s.mapSeed, 3);
+    CHECK(s.mapMaze == MazeKind::Kruskal);
+    CHECK(s.buildCheck == BuildCheckKind::Articulation);
+    CHECK(s.snapshotPick == SnapshotPickKind::Relevance);
     CHECK(s.camera == CameraKind::Tilted3d);
     CHECK(s.targetIndex == TargetIndexKind::Quadtree);
     CHECK(s.staticQuery == StaticQueryKind::Bvh);
@@ -182,6 +193,13 @@ static void TestUnknownIsRejected() {
     CHECK(!s.Parse("avatar_predict=on", &error));
     CHECK(!s.Parse("avatar_gate=2", &error));
     CHECK(!s.Parse("snapshotmode=full", &error));      // 오타 난 이름
+    // 세 이름의 범위 밖 값. 골격 팔·판정 팔·선택 팔.
+    CHECK(!s.Parse("map_maze=prim", &error));
+    CHECK(error.find("dfs|kruskal") != std::string::npos);
+    CHECK(!s.Parse("build_check=bfs", &error));
+    CHECK(error.find("floodfill|artic") != std::string::npos);
+    CHECK(!s.Parse("snapshot_pick=nearest", &error));
+    CHECK(error.find("rows|relevance") != std::string::npos);
     CHECK(!s.Parse("entity_store", &error));  // 형식 위반
     CHECK(!s.Parse("=soa", &error));
     CHECK(!s.Parse("entity_store=", &error));
@@ -192,6 +210,32 @@ static void TestUnknownIsRejected() {
     CHECK(s.eliteBrain == EliteBrainKind::Plain);
     CHECK(!s.steering);
     CHECK(!s.stealth);
+    CHECK(s.mapMaze == MazeKind::Dfs);
+    CHECK(s.buildCheck == BuildCheckKind::FloodFill);
+    CHECK(s.snapshotPick == SnapshotPickKind::Rows);
+}
+
+// 리플레이가 되먹일 수 있는 형태로 **전부** 적히는가. 새 스위치가 표에 들어오고도
+// 이 문자열에서 빠지면, 그 팔만 재생 시점의 롤아웃에 좌우돼 리플레이가 갈린다.
+static void TestAssignmentsRoundTrip() {
+    Switches source;
+    std::string error;
+    CHECK(source.ParseList(
+        "map=procgen,map_seed=5,map_maze=kruskal,build_check=artic,"
+        "snapshot_pick=relevance,pathing=astar,scale=large",
+        &error));
+    const std::string assignments = source.Assignments();
+    CHECK(assignments.find("map_maze=kruskal") != std::string::npos);
+    CHECK(assignments.find("build_check=artic") != std::string::npos);
+    CHECK(assignments.find("snapshot_pick=relevance") != std::string::npos);
+
+    Switches restored;
+    CHECK(restored.ParseList(assignments, &error));
+    CHECK(restored.mapMaze == MazeKind::Kruskal);
+    CHECK(restored.buildCheck == BuildCheckKind::Articulation);
+    CHECK(restored.snapshotPick == SnapshotPickKind::Relevance);
+    // 되먹인 결과가 다시 같은 문자열을 낸다 — 왕복이 닫힌다.
+    CHECK_EQ(restored.Assignments(), assignments);
 }
 
 static void TestListAndOverride() {
@@ -211,6 +255,7 @@ static void TestListAndOverride() {
 }
 
 static void RunTests() {
+    TestAssignmentsRoundTrip();
     TestDefaultsAreThePreSwitchBehaviour();
     TestEveryNameParses();
     TestUnknownIsRejected();

@@ -50,6 +50,17 @@ enum class AssetIoKind : uint8_t { Sync, Async };
 enum class ScaleKind : uint8_t { Small, Large };
 // 맵의 출처. Classic = assets/level.txt 의 무분기 회랑, Procgen = 미로 + 밀도장.
 enum class MapSource : uint8_t { Classic, Procgen };
+// 절차 맵의 골격 생성기. Dfs = 재귀 백트래커(스위치 이전의 동작), Kruskal =
+// 셀 사이 간선을 가중치 순으로 훑으며 서로소 집합으로 사이클을 막는 신장 트리.
+// **둘 다 신장 트리인데 형질이 다르다** — DFS 미로는 구조적으로 긴 단일 회랑이고,
+// Kruskal 미로는 분기가 많고 막다른 길이 짧다. 메이즈 디펜스에서 "어디를 막을까"의
+// 선택지 수가 골격의 분기 수에 직접 걸리므로 이것은 밸런스 손잡이다.
+enum class MazeKind : uint8_t { Dfs, Kruskal };
+// 배치 가능 판정의 계산 방식. FloodFill = 칸마다 후보 격자를 지어 flood fill
+// (스위치 이전의 동작), Articulation = 격자 버전당 low-link DFS 한 번으로 전 칸을
+// 미리 표시하고 질의는 O(1). **판정 결과는 두 팔에서 같아야 한다** — 다르면 그것은
+// 최적화가 아니라 규칙 변경이다.
+enum class BuildCheckKind : uint8_t { FloodFill, Articulation };
 // 시점. Ortho2d = 화면 좌표 = 월드 좌표(항등), Tilted3d = 원근 + 기울기 + 픽킹.
 enum class CameraKind : uint8_t { Ortho2d, Tilted3d };
 // 사거리 안 적 질의. Linear = 전수 스캔, Grid = 균일 격자, Quadtree = 쿼드트리.
@@ -77,6 +88,11 @@ enum class SnapshotMode : uint8_t { Full, Delta };
 // 보간 지연·재전송 주기의 출처. Fixed = 상수 3.0틱/100ms(스위치 이전의 동작),
 // Rtt = net::RttSampler 가 잰 왕복·지터에서 net::AdaptiveTiming 이 계산한 값.
 enum class InterpDelayKind : uint8_t { Fixed, Rtt };
+// 스냅샷의 64자리를 무엇으로 채우는가. Rows = 저장 행 순서 앞에서부터(스위치
+// 이전의 동작), Relevance = (코어까지 남은 거리 · 체력 · 노출 · id) 전순서의 상위
+// 64를 quickselect 로 고른다. 규모 팔에서 적이 2048까지 오르면 앞 행 64개만 싣는
+// 것은 코어 앞에 도착한 적을 화면에서 지우는 일이 된다.
+enum class SnapshotPickKind : uint8_t { Rows, Relevance };
 
 // snippet-begin: switch-table
 struct Switches {
@@ -89,6 +105,8 @@ struct Switches {
     AssetIoKind     assetIo     = AssetIoKind::Sync;
     ScaleKind       scale       = ScaleKind::Small;
     MapSource       map         = MapSource::Classic;
+    MazeKind        mapMaze     = MazeKind::Dfs;
+    BuildCheckKind  buildCheck  = BuildCheckKind::FloodFill;
     CameraKind      camera      = CameraKind::Ortho2d;
     TargetIndexKind targetIndex = TargetIndexKind::Linear;
     StaticQueryKind staticQuery = StaticQueryKind::Naive;
@@ -98,6 +116,7 @@ struct Switches {
     PathingKind     pathing     = PathingKind::Polyline;
     EliteBrainKind  eliteBrain  = EliteBrainKind::Plain;
     SnapshotMode    snapshotMode = SnapshotMode::Full;
+    SnapshotPickKind snapshotPick = SnapshotPickKind::Rows;
     InterpDelayKind interpDelay  = InterpDelayKind::Fixed;
     bool            steering    = false;  // 격자 방향에 조향을 얹는가
     bool            stealth     = false;  // 은신 규칙(Stalker + 레이더)을 켜는가
@@ -119,7 +138,7 @@ struct Switches {
     // 반환값은 실제로 적용된 개수, rejected 에는 모르는 이름·값의 사유가 쌓인다.
     int ApplyFlags(const live::FlagSet& flags, std::string* rejected = nullptr);
 
-    // 27개 스위치 **전부**를 `ParseList` 가 그대로 되먹일 수 있는 형태로 적는다.
+    // 30개 스위치 **전부**를 `ParseList` 가 그대로 되먹일 수 있는 형태로 적는다.
     // Describe 와 셋이 다르다 — 구분자가 쉼표이고, `map_seed` 가 독립 항목이며,
     // `explicit=` 꼬리가 없다.
     //
@@ -202,6 +221,24 @@ inline bool Switches::Set(std::string_view name, std::string_view value, std::st
         if (value == "classic") map = MapSource::Classic;
         else if (value == "procgen") map = MapSource::Procgen;
         else return fail("classic|procgen 만 허용");
+        return true;
+    }
+    if (name == "map_maze") {
+        if (value == "dfs") mapMaze = MazeKind::Dfs;
+        else if (value == "kruskal") mapMaze = MazeKind::Kruskal;
+        else return fail("dfs|kruskal 만 허용");
+        return true;
+    }
+    if (name == "build_check") {
+        if (value == "floodfill") buildCheck = BuildCheckKind::FloodFill;
+        else if (value == "artic") buildCheck = BuildCheckKind::Articulation;
+        else return fail("floodfill|artic 만 허용");
+        return true;
+    }
+    if (name == "snapshot_pick") {
+        if (value == "rows") snapshotPick = SnapshotPickKind::Rows;
+        else if (value == "relevance") snapshotPick = SnapshotPickKind::Relevance;
+        else return fail("rows|relevance 만 허용");
         return true;
     }
     if (name == "camera") {
@@ -420,6 +457,10 @@ inline std::string Switches::Describe() const {
     out += " map=";
     out += map == MapSource::Procgen ? "procgen" : "classic";
     if (map == MapSource::Procgen) out += "/" + std::to_string(mapSeed);
+    out += " map_maze=";
+    out += mapMaze == MazeKind::Kruskal ? "kruskal" : "dfs";
+    out += " build_check=";
+    out += buildCheck == BuildCheckKind::Articulation ? "artic" : "floodfill";
     out += " camera=";
     out += camera == CameraKind::Tilted3d ? "tilted3d" : "ortho2d";
     out += " target_index=";
@@ -441,6 +482,8 @@ inline std::string Switches::Describe() const {
          : eliteBrain == EliteBrainKind::Fsm ? "fsm" : "plain";
     out += " snapshot_mode=";
     out += snapshotMode == SnapshotMode::Delta ? "delta" : "full";
+    out += " snapshot_pick=";
+    out += snapshotPick == SnapshotPickKind::Relevance ? "relevance" : "rows";
     out += " interp_delay=";
     out += interpDelay == InterpDelayKind::Rtt ? "rtt" : "fixed";
     out += " avatar_predict=";
@@ -480,6 +523,8 @@ inline std::string Switches::Assignments() const {
     put("scale", scale == ScaleKind::Large ? "large" : "small");
     put("map", map == MapSource::Procgen ? "procgen" : "classic");
     put("map_seed", std::to_string(mapSeed));
+    put("map_maze", mapMaze == MazeKind::Kruskal ? "kruskal" : "dfs");
+    put("build_check", buildCheck == BuildCheckKind::Articulation ? "artic" : "floodfill");
     put("camera", camera == CameraKind::Tilted3d ? "tilted3d" : "ortho2d");
     put("target_index", targetIndex == TargetIndexKind::Quadtree ? "quadtree"
                       : targetIndex == TargetIndexKind::Grid     ? "grid" : "linear");
@@ -493,6 +538,7 @@ inline std::string Switches::Assignments() const {
     put("elite_brain", eliteBrain == EliteBrainKind::Bt ? "bt"
                      : eliteBrain == EliteBrainKind::Fsm ? "fsm" : "plain");
     put("snapshot_mode", snapshotMode == SnapshotMode::Delta ? "delta" : "full");
+    put("snapshot_pick", snapshotPick == SnapshotPickKind::Relevance ? "relevance" : "rows");
     put("interp_delay", interpDelay == InterpDelayKind::Rtt ? "rtt" : "fixed");
     put("steering", steering ? "1" : "0");
     put("stealth", stealth ? "1" : "0");

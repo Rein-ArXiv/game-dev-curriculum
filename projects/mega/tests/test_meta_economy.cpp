@@ -250,7 +250,169 @@ static void TestCorruptWalletRejected() {
     CheckInvariants(economy, "reject");
 }
 
+// ── 해금 선행 그래프 ───────────────────────────────────────────────
+//
+// 파일 한 장이 "A 를 열어야 B 를 살 수 있다"를 정한다. 이 절이 묻는 것은 다섯이다.
+//   (1) 순환이 있는 파일은 거부되고, 진단에 순환 구성요소의 id 가 나온다.
+//   (2) 정상 파일의 위상 순서에서 모든 간선이 pos[u] < pos[v] 를 만족한다.
+//   (3) 선행이 없는 상태의 해금 시도는 거절되고 **스크랩이 소각되지 않는다**.
+//   (4) 선행 폐포를 어긴 지갑은 로드가 거부된다.
+//   (5) 같은 파일은 같은 순서를 낸다.
+static void TestUnlockGraphRejectsCycles() {
+    UnlockGraph graph;
+    std::string error;
+
+    // 자기 자신을 가리키는 간선도 순환이다.
+    CHECK(!graph.Parse("unlock 0 requires=0\n", &error));
+    CHECK(error.find("순환") != std::string::npos);
+    CHECK(error.find("[0]") != std::string::npos);
+    CHECK(graph.Empty());
+
+    // 세 항목이 서로를 문다. 진단은 "순환이 있다"가 아니라 **누구인지**를 적어야
+    // 저작자가 고칠 수 있다.
+    CHECK(!graph.Parse("unlock 1 requires=3\nunlock 2 requires=1\nunlock 3 requires=2\n",
+                       &error));
+    CHECK(error.find("[1,2,3]") != std::string::npos);
+    std::printf("  순환 진단: %s\n", error.c_str());
+
+    // 순환에 걸리지 않은 항목이 함께 있어도 파일 전체가 거부된다 — 절반만 적용된
+    // 선행 그래프는 상점에 영원히 회색인 항목을 남긴다.
+    CHECK(!graph.Parse("unlock 0\nunlock 1 requires=2\nunlock 2 requires=1\n", &error));
+    CHECK(graph.Empty());
+
+    // 문법·범위·중복·미선언 선행도 전부 거부.
+    CHECK(!graph.Parse("lock 0\n", &error));
+    CHECK(!graph.Parse("unlock 99\n", &error));
+    CHECK(!graph.Parse("unlock 0\nunlock 0\n", &error));
+    CHECK(!graph.Parse("unlock 0 requires=5\n", &error));
+    CHECK(!graph.Parse("unlock 0 requires=\n", &error));
+    CHECK(!graph.Parse("unlock 1 needs=0\n", &error));
+    CHECK(!graph.Parse("# 주석뿐\n", &error));
+}
+
+static void TestUnlockOrderIsTopologicalAndStable() {
+    // 줄 순서를 일부러 뒤섞는다. 위상 순서는 줄 순서가 아니라 간선이 정한다.
+    const char* text =
+        "# 상점 선행\n"
+        "unlock 3 requires=1,2\n"
+        "unlock 2 requires=0\n"
+        "unlock 0\n"
+        "unlock 1 requires=0\n";
+    UnlockGraph graph;
+    std::string error;
+    CHECK(graph.Parse(text, &error));
+    CHECK_EQ(graph.Size(), static_cast<size_t>(4));
+
+    const std::vector<uint32_t>& order = graph.ShopOrder();
+    CHECK_EQ(order.size(), static_cast<size_t>(4));
+    auto positionOf = [&order](uint32_t type) {
+        for (size_t i = 0; i < order.size(); ++i)
+            if (order[i] == type) return static_cast<int>(i);
+        return -1;
+    };
+    // (2) 모든 간선에서 선행이 앞선다.
+    CHECK(positionOf(0) < positionOf(1));
+    CHECK(positionOf(0) < positionOf(2));
+    CHECK(positionOf(1) < positionOf(3));
+    CHECK(positionOf(2) < positionOf(3));
+    // 동점(1 과 2 는 동시에 준비된다)은 종류 번호 오름차순으로 갈린다. 삽입
+    // 순서로 갈리면 위 텍스트의 줄 순서 때문에 2 가 1 보다 앞에 온다.
+    CHECK(positionOf(1) < positionOf(2));
+
+    // (5) 줄 순서를 다르게 적은 같은 그래프가 같은 순서를 낸다.
+    const char* shuffled =
+        "unlock 0\n"
+        "unlock 2 requires=0\n"
+        "unlock 1 requires=0\n"
+        "unlock 3 requires=2,1\n";
+    UnlockGraph other;
+    CHECK(other.Parse(shuffled, &error));
+    CHECK(other.ShopOrder() == order);
+    std::printf("  상점 순서 %u>%u>%u>%u (줄 순서와 무관)\n",
+                order[0], order[1], order[2], order[3]);
+}
+
+static void TestUnlockRequiresPrerequisitesAndConservesScrap() {
+    UnlockGraph graph;
+    std::string error;
+    CHECK(graph.Parse("unlock 0\nunlock 1 requires=0\nunlock 2 requires=0\n"
+                      "unlock 3 requires=1,2\n", &error));
+
+    Economy economy;
+    economy.SetUnlockGraph(graph);
+    CHECK(economy.Grant(7, 100000, Source::MatchReward));
+    const int64_t start = economy.Balance(7);
+
+    // (3) 선행이 없으면 거절이고, 스크랩은 한 푼도 타지 않는다.
+    CHECK(!economy.UnlockTower(7, 3));
+    CHECK_EQ(economy.Balance(7), start);
+    CHECK_EQ(economy.Sunk(), static_cast<int64_t>(0));
+    CheckInvariants(economy, "unlock-rejected");
+
+    // 선행부터 순서대로 사면 전부 통과한다.
+    CHECK(economy.UnlockTower(7, 0));
+    CHECK(!economy.UnlockTower(7, 3));      // 아직 1·2 가 없다
+    CHECK(economy.UnlockTower(7, 1));
+    CHECK(!economy.UnlockTower(7, 3));      // 2 가 없다
+    CHECK(economy.UnlockTower(7, 2));
+    CHECK(economy.UnlockTower(7, 3));
+    CHECK(!economy.UnlockTower(7, 3));      // 두 번 살 수는 없다
+    CheckInvariants(economy, "unlock-ordered");
+
+    const int64_t spent = Economy::TowerUnlockCost(0) + Economy::TowerUnlockCost(1) +
+                          Economy::TowerUnlockCost(2) + Economy::TowerUnlockCost(3);
+    CHECK_EQ(economy.Balance(7), start - spent);
+    CHECK_EQ(economy.Sunk(), spent);
+
+    // 저작되지 않은 종류는 상점에 없다.
+    CHECK(!economy.UnlockTower(7, 9));
+    CHECK_EQ(economy.Balance(7), start - spent);
+
+    // 그래프가 비어 있으면(파일 없음) 선행이라는 개념이 없던 시절 그대로다.
+    Economy plain;
+    CHECK(plain.Grant(7, 100000, Source::MatchReward));
+    CHECK(plain.UnlockTower(7, 3));      // 아무 순서로나 열린다
+    CheckInvariants(plain, "no-graph");
+}
+
+static void TestWalletMustBePrerequisiteClosed() {
+    UnlockGraph graph;
+    std::string error;
+    CHECK(graph.Parse("unlock 0\nunlock 1 requires=0\nunlock 3 requires=1\n", &error));
+
+    Economy economy;
+    economy.SetUnlockGraph(graph);
+
+    // (4) 잎만 들고 있는 지갑은 이 게임에서 도달할 수 없는 상태다.
+    Wallet leaf;
+    leaf.account = 2;
+    leaf.balance = 500; leaf.sourced = 500; leaf.sunk = 0;
+    leaf.unlocks = {3u};
+    CHECK(!economy.Import(leaf, &error));
+    CHECK(error.find("선행") != std::string::npos);
+
+    // 저작되지 않은 종류를 들고 있어도 거부.
+    Wallet alien = leaf;
+    alien.unlocks = {7u};
+    CHECK(!economy.Import(alien, &error));
+
+    // 폐포면 통과.
+    Wallet closed = leaf;
+    closed.unlocks = {0u, 1u, 3u};
+    CHECK(economy.Import(closed, &error));
+    CHECK_EQ(economy.Balance(2), static_cast<int64_t>(500));
+    CheckInvariants(economy, "closure");
+
+    // 그래프가 없으면 예전처럼 통과한다.
+    Economy plain;
+    CHECK(plain.Import(leaf, &error));
+}
+
 static void RunTests() {
+    TestUnlockGraphRejectsCycles();
+    TestUnlockOrderIsTopologicalAndStable();
+    TestUnlockRequiresPrerequisitesAndConservesScrap();
+    TestWalletMustBePrerequisiteClosed();
     TestConservationOverManyMatches();
     TestSpendNeverGoesNegative();
     TestInflationRate();

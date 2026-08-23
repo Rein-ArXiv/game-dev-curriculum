@@ -72,7 +72,8 @@ Perlin 을 쓰지 않은 이유는 헤더 주석이 이미 적어 둔 것과 같
 <!-- snippet: include/game/map_gen.hpp@generate-map -->
 ```cpp
 inline bool Generate(const TerrainParams& p, DefenseMap& out, TerrainStats* statsOut = nullptr) {
-    tools::Level level = tools::MazeGen::Generate(p.mazeCellsX, p.mazeCellsY, p.seed);
+    tools::Level level = tools::MazeGen::GenerateWith(
+        p.maze == MazeKind::Kruskal, p.mazeCellsX, p.mazeCellsY, p.seed);
     const int width = level.Width(), height = level.Height();
     // ...
     // 밀도장으로 벽을 깎는다. 테두리는 건드리지 않는다 — 아레나의 틀이다.
@@ -124,8 +125,10 @@ inline game::DefenseMap ChooseMap(const game::Switches& switches, const std::str
     if (switches.map == game::MapSource::Procgen) {
         game::mapgen::TerrainParams params;
         params.seed = static_cast<uint32_t>(switches.mapSeed);
+        params.maze = switches.mapMaze;
         game::DefenseMap generated;
         if (game::mapgen::Generate(params, generated, statsOut)) {
+            generated.SetBuildCheck(switches.buildCheck);
             if (loadedExternal) *loadedExternal = true;
             return generated;
         }
@@ -239,6 +242,7 @@ tools::Level ToLevel(int blockX = -1, int blockY = -1) const {
 
 // 이 칸을 막아도 스폰→코어가 살아 있는가. 메이즈 디펜스의 배치 규칙이다.
 bool WouldRemainConnected(int blockX, int blockY) const {
+    if (buildCheck_ == BuildCheckKind::Articulation) return ArticConnected(blockX, blockY);
     return ToLevel(blockX, blockY).Validate().Valid();
 }
 ```
@@ -384,6 +388,7 @@ int Blast(const math::Vec2& at) {
 ```cpp
 void ClearOccupancy() {
     if (!occupied_.Empty()) occupied_.Assign(static_cast<size_t>(columns_ * rows_), uint8_t{0});
+    ++gridVersion_;
 }
 ```
 

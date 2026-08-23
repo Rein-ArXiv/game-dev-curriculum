@@ -14,6 +14,7 @@
 #include "io/read_file.hpp"
 #include "live/event_schedule.hpp"
 #include "live/feature_flag.hpp"
+#include "live/unlock_graph.hpp"
 #include "tools/asset_pipeline.hpp"
 #include "tools/script.hpp"
 
@@ -235,6 +236,27 @@ inline live::FeatureFlags LoadFeatureFlags(const std::string& path,
     return flags;
 }
 
+// assets/unlocks.txt. 거부되면 선언 0개 = 선행 없음(스위치 이전의 동작).
+inline live::UnlockGraph LoadUnlockGraph(const std::string& path,
+                                         bool* loadedExternal = nullptr,
+                                         std::string* diagnostic = nullptr) {
+    live::UnlockGraph graph;
+    if (diagnostic) diagnostic->clear();
+    std::string text;
+    if (!io::ReadTextFile(path, text, 64 * 1024)) {
+        if (loadedExternal) *loadedExternal = false;
+        return graph;
+    }
+    std::string error;
+    if (!graph.Parse(text, &error)) {
+        if (loadedExternal) *loadedExternal = false;
+        if (diagnostic) *diagnostic = path + ": " + error;
+        return live::UnlockGraph{};
+    }
+    if (loadedExternal) *loadedExternal = true;
+    return graph;
+}
+
 // snippet-begin: cook-assets
 // 배포되는 원본 전부를 의존 관계와 함께 등록하고 굽는다. 반환값은 콘텐츠 버전
 // 해시이고, 실패(순환·없는 의존)면 0 — 0 은 "발행할 수 없음"의 이름이다.
@@ -245,7 +267,8 @@ inline uint64_t CookAssets(const std::string& assetRoot, tools::AssetPipeline& p
     static const Source kSources[] = {
         {"level.txt", 256 * 1024}, {"waves.txt", 64 * 1024},
         {"balance.script", 64 * 1024}, {"events.txt", 64 * 1024},
-        {"flags.txt", 64 * 1024}, {"boss.pose", 64 * 1024}, {"elite.bt", 16 * 1024},
+        {"flags.txt", 64 * 1024}, {"unlocks.txt", 64 * 1024},
+        {"boss.pose", 64 * 1024}, {"elite.bt", 16 * 1024},
         {"core.ppm", 256 * 1024},
         {"tower_cannon.ppm", 256 * 1024}, {"tower_gatling.ppm", 256 * 1024},
         {"tower_splash.ppm", 256 * 1024}, {"tower_sniper.ppm", 256 * 1024},
@@ -378,8 +401,10 @@ inline game::DefenseMap ChooseMap(const game::Switches& switches, const std::str
     if (switches.map == game::MapSource::Procgen) {
         game::mapgen::TerrainParams params;
         params.seed = static_cast<uint32_t>(switches.mapSeed);
+        params.maze = switches.mapMaze;
         game::DefenseMap generated;
         if (game::mapgen::Generate(params, generated, statsOut)) {
+            generated.SetBuildCheck(switches.buildCheck);
             if (loadedExternal) *loadedExternal = true;
             return generated;
         }

@@ -17,11 +17,13 @@
 // 는 그 안에서의 재현이지 크로스 컴파일러 동치가 아니다). 프로세스 경계를 넘는
 // 대조는 `mega_defense --record` / `--verify-replay` 가 ctest 에서 한다.
 
+#include "algo/huffman.hpp"
 #include "game/defense_app.hpp"
 #include "game/replay.hpp"
 #include "mp/det_sim.hpp"
 #include "mp/golden.hpp"
 #include "mp/lockstep.hpp"
+#include "platform/byteorder.hpp"
 #include "test_util.h"
 
 #include <cstdio>
@@ -272,14 +274,31 @@ Replay MakeSyntheticReplay() {
     return replay;
 }
 
+// 본문(압축 대상)의 무압축 크기. 파일 크기가 아니라 이 수가 예전 프레이밍의
+// 파일 크기와 같다 — 압축은 이 덩어리 위에 얹힌 층이다.
+size_t UncompressedBodyBytes(const Replay& replay) {
+    return 4 + replay.frames.size() * kReplayFrameBytes +
+           4 + replay.avatar.size() * kReplayAvatarTickBytes +
+           4 + replay.chain.Marks().size() * 12 + 12;
+}
+
+// 파일 헤더(압축 블록 앞까지)의 크기. 매직·버전·모드 넷·stride·시각·해시·스위치.
+size_t ReplayHeaderBytes(const Replay& replay) {
+    return static_cast<size_t>(4 + 2 + 4 + 4 + 8 + 8 + 2) + replay.switches.size();
+}
+
 void ReplayRoundTrips() {
     const Replay original = MakeSyntheticReplay();
     const std::vector<uint8_t> bytes = EncodeReplay(original);
-    CHECK_EQ(bytes.size(),
-             static_cast<size_t>(4 + 2 + 4 + 4 + 8 + 8 + 2) + original.switches.size() +
-                 4 + original.frames.size() * kReplayFrameBytes + 4 +
-                 original.avatar.size() * kReplayAvatarTickBytes + 4 +
-                 original.chain.Marks().size() * 12 + 12);
+    // 본문 헤더는 [크기 4][해시 8][방식 1][표 256 또는 없음][길이 4] 다.
+    const size_t header = ReplayHeaderBytes(original);
+    CHECK(bytes.size() > header + 4 + 8 + 1 + 4);
+    const uint8_t method = bytes[header + 4 + 8];
+    CHECK(method == kReplayStored || method == kReplayHuffman);
+    // 어느 방식이든 파일은 예전 프레이밍보다 크지 않아야 한다. 64프레임짜리
+    // 합성 기록에서는 길이표 256바이트가 이득을 먹을 수 있어 무압축이 골라질 수
+    // 있고, 그 선택 자체가 "압축했더니 커졌다"를 막는 장치다.
+    CHECK(bytes.size() <= header + 4 + 8 + 1 + 4 + UncompressedBodyBytes(original));
 
     Replay decoded;
     std::string error;
@@ -344,6 +363,281 @@ void ReplayRejectsMalformed() {
     Replay unsealed = original;
     unsealed.chain.MutableMarks().pop_back();
     CHECK(!DecodeReplay(EncodeReplay(unsealed), out, &error));
+}
+
+// ── 4b. 압축 블록 ──────────────────────────────────────────────────
+//
+// 압축이 파일 계층에 얹혔다는 것을 확인하는 자리다. 시뮬도 체인도 이 층을 보지
+// 않으므로, 여기서 묻는 것은 셋뿐이다: 작아졌는가, 정확히 되돌아오는가, 손상을
+// 거부하는가.
+
+// 치우친 분포의 큰 기록. 실제 기록의 형질을 흉내낸다 — 액션 키 비트는 대부분 0,
+// 마우스는 근접 반복, 그리고 체크섬만 고엔트로피다.
+//
+// keys 를 (i+1) 의 후행 0 개수로 두면 값 0 이 절반, 1 이 4분의 1, 2 가 8분의 1 …
+// 인 기하 분포가 나온다. 기하 분포의 Huffman 깊이는 심볼 번호를 따라가므로
+// **lookup 표의 폭(9비트)을 넘는 코드가 반드시 생긴다.** 긴 코드 fallback 이
+// 실제로 도는지를 우연이 아니라 구성으로 보장하는 자리다.
+Replay MakeSkewedReplay(size_t frames) {
+    Replay replay;
+    replay.mode = 0;
+    replay.players = 1;
+    replay.localPlayer = 0;
+    replay.prediction = 0;
+    replay.stride = 1;
+    replay.matchUnix = 1767398400;
+    replay.contentHash = 0xFEEDFACECAFEBEEFull;
+    replay.switches = "entity_store=aos,pathing=poly";
+    replay.chain.Reset(1);
+
+    uint64_t rng = 0x9E3779B97F4A7C15ull;
+    auto next = [&rng]() {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        return rng;
+    };
+    for (size_t i = 0; i < frames; ++i) {
+        uint32_t zeros = 0;
+        for (uint64_t v = i + 1; (v & 1u) == 0; v >>= 1) ++zeros;
+        ReplayFrame frame;
+        frame.keys = zeros;
+        frame.mouseX = static_cast<int16_t>(200 + (i % 3));
+        frame.mouseY = static_cast<int16_t>(140 + (i % 2));
+        frame.flags = 0;
+        replay.frames.push_back(frame);
+
+        ReplayAvatarTick tick;
+        tick.local.moveX = static_cast<int8_t>(static_cast<int>(i % 3u) - 1);
+        tick.local.moveY = 0;
+        tick.local.buttons = 0;
+        tick.advanced = 1;
+        tick.checksum = next();
+        replay.avatar.push_back(tick);
+        replay.chain.Append(next(), tick.checksum, static_cast<uint32_t>(i + 1));
+    }
+    replay.chain.Seal();
+    return replay;
+}
+
+// 압축 블록의 세 자리를 파일에서 되짚는다.
+struct BlockLayout {
+    size_t   headerBytes = 0;
+    uint32_t bodySize = 0;
+    uint8_t  method = 0;
+    size_t   tableAt = 0;      // 코드 길이표의 첫 바이트(huffman 일 때만 유효)
+    uint32_t codedBytes = 0;
+    size_t   payloadAt = 0;
+};
+
+BlockLayout ReadBlockLayout(const Replay& replay, const std::vector<uint8_t>& bytes) {
+    BlockLayout layout;
+    layout.headerBytes = ReplayHeaderBytes(replay);
+    layout.bodySize = platform::ReadLE32(bytes.data() + layout.headerBytes);
+    layout.method = bytes[layout.headerBytes + 12];
+    layout.tableAt = layout.headerBytes + 13;
+    const size_t lengthAt =
+        layout.method == kReplayHuffman ? layout.tableAt + kReplayCodeTableBytes : layout.tableAt;
+    layout.codedBytes = platform::ReadLE32(bytes.data() + lengthAt);
+    layout.payloadAt = lengthAt + 4;
+    return layout;
+}
+
+void ReplayCompressionShrinksAndRestores() {
+    const Replay original = MakeSkewedReplay(60000);
+    const std::vector<uint8_t> bytes = EncodeReplay(original);
+    const BlockLayout layout = ReadBlockLayout(original, bytes);
+
+    CHECK_EQ(layout.method, kReplayHuffman);
+    CHECK_EQ(static_cast<size_t>(layout.bodySize), UncompressedBodyBytes(original));
+
+    // 실측 비율. 압축 전 파일 크기는 헤더 + 본문이었다.
+    const size_t before = layout.headerBytes + UncompressedBodyBytes(original);
+    CHECK(bytes.size() < before);
+    // 본문의 절반은 해시 출력이다(아바타 체크섬 8 + 체인 8). 그 절반은 구성상
+    // 압축되지 않으므로 파일 전체의 이득에는 천장이 있다. 그 천장을 함께 적는다 —
+    // 적지 않으면 80% 라는 수를 보고 압축이 고장났다고 읽게 된다.
+    const size_t hashBytes = original.avatar.size() * 8 + original.chain.Marks().size() * 8;
+    std::printf("  리플레이 압축 %zu -> %zu 바이트 (%.1f%%, 프레임 %zu)\n",
+                before, bytes.size(),
+                100.0 * static_cast<double>(bytes.size()) / static_cast<double>(before),
+                original.frames.size());
+    std::printf("  그중 압축 불가(해시) %zu바이트 = 본문의 %.1f%% — 이론 하한 %.1f%%\n",
+                hashBytes,
+                100.0 * static_cast<double>(hashBytes) / static_cast<double>(layout.bodySize),
+                100.0 * static_cast<double>(hashBytes) / static_cast<double>(before));
+    CHECK(bytes.size() > hashBytes);   // 해시 아래로는 내려갈 수 없다
+
+    // 이 기록에서 가장 긴 코드가 몇 비트인가. 체크섬과 체인이 고엔트로피라
+    // 히스토그램이 평평해져 lookup 폭 안에 들어온다 — 그래서 긴 코드 fallback 은
+    // **이 검사로는 돌지 않는다.** 그 경로를 도는 자리는 아래 따로 있다.
+    uint8_t longest = 0;
+    for (size_t i = 0; i < kReplayCodeTableBytes; ++i)
+        if (bytes[layout.tableAt + i] > longest) longest = bytes[layout.tableAt + i];
+    std::printf("  코드 길이표 최장 %u비트 (lookup 폭 %d비트)\n",
+                longest, algo::kHuffmanLookupBits);
+
+    // 그리고 정확히 되돌아온다.
+    Replay decoded;
+    std::string error;
+    CHECK(DecodeReplay(bytes, decoded, &error));
+    CHECK_EQ(decoded.frames.size(), original.frames.size());
+    CHECK_EQ(decoded.avatar.size(), original.avatar.size());
+    size_t mismatch = 0;
+    for (size_t i = 0; i < original.frames.size(); ++i) {
+        if (decoded.frames[i].keys != original.frames[i].keys ||
+            decoded.frames[i].mouseX != original.frames[i].mouseX ||
+            decoded.frames[i].mouseY != original.frames[i].mouseY ||
+            decoded.frames[i].flags != original.frames[i].flags) ++mismatch;
+    }
+    for (size_t i = 0; i < original.avatar.size(); ++i)
+        if (decoded.avatar[i].checksum != original.avatar[i].checksum) ++mismatch;
+    CHECK_EQ(mismatch, static_cast<size_t>(0));
+    CHECK_EQ(decoded.chain.Chain(), original.chain.Chain());
+}
+
+// lookup 표에 들어가지 못하는 긴 코드를 쓰는 파일. 리플레이 파일은 신뢰 경계
+// **밖**에 있으므로 이런 히스토그램의 파일이 도착하는 것은 가정이 아니라 언제든
+// 일어나는 일이고, 그때 복호기가 조용히 다른 바이트를 내면 안 된다.
+//
+// 프레임만 남기고 체크섬·체인을 최소로 두면 본문 히스토그램이 기하 분포가 된다.
+// 기하 분포의 Huffman 깊이는 심볼 번호를 따라가므로 9비트를 반드시 넘는다.
+Replay MakeDeepCodeReplay(size_t frames) {
+    Replay replay;
+    replay.mode = 0;
+    replay.players = 1;
+    replay.localPlayer = 0;
+    replay.prediction = 0;
+    replay.stride = 1;
+    replay.matchUnix = 1767398400;
+    replay.contentHash = 0;
+    replay.switches = "pathing=poly";
+    replay.chain.Reset(1);
+    for (size_t i = 0; i < frames; ++i) {
+        uint32_t zeros = 0;
+        for (uint64_t v = i + 1; (v & 1u) == 0; v >>= 1) ++zeros;
+        ReplayFrame frame;
+        frame.keys = zeros;      // 0 이 절반, 1 이 4분의 1, 2 가 8분의 1 …
+        frame.mouseX = 0;
+        frame.mouseY = 0;
+        frame.flags = 0;
+        replay.frames.push_back(frame);
+    }
+    replay.chain.Append(1, 1, 1);
+    replay.chain.Seal();
+    return replay;
+}
+
+void ReplayRestoresLongCodes() {
+    const Replay original = MakeDeepCodeReplay(100000);
+    const std::vector<uint8_t> bytes = EncodeReplay(original);
+    const BlockLayout layout = ReadBlockLayout(original, bytes);
+    CHECK_EQ(layout.method, kReplayHuffman);
+
+    uint8_t longest = 0;
+    for (size_t i = 0; i < kReplayCodeTableBytes; ++i)
+        if (bytes[layout.tableAt + i] > longest) longest = bytes[layout.tableAt + i];
+    CHECK(longest > algo::kHuffmanLookupBits);
+
+    Replay decoded;
+    std::string error;
+    CHECK(DecodeReplay(bytes, decoded, &error));
+    CHECK_EQ(decoded.frames.size(), original.frames.size());
+    size_t mismatch = 0;
+    for (size_t i = 0; i < original.frames.size(); ++i)
+        if (decoded.frames[i].keys != original.frames[i].keys) ++mismatch;
+    CHECK_EQ(mismatch, static_cast<size_t>(0));
+    const size_t before = layout.headerBytes + UncompressedBodyBytes(original);
+    std::printf("  긴 코드 파일 최장 %u비트, %zu -> %zu 바이트 (%.1f%%)\n",
+                longest, before, bytes.size(),
+                100.0 * static_cast<double>(bytes.size()) / static_cast<double>(before));
+}
+
+// 파일 전 범위의 표본 위치에서 잘라 전부 거절되는가. 압축이 들어오면서 "잘린
+// 파일"의 실패 모드가 늘었다 — 표가 잘릴 수도, 페이로드가 잘릴 수도 있다.
+void ReplayRejectsTruncationEverywhere() {
+    const Replay original = MakeSkewedReplay(4000);
+    const std::vector<uint8_t> good = EncodeReplay(original);
+    Replay out;
+    std::string error;
+    int accepted = 0, tried = 0;
+    const size_t step = good.size() / 200 + 1;
+    for (size_t cut = 0; cut < good.size(); cut += step) {
+        std::vector<uint8_t> truncated(good.begin(),
+                                       good.begin() + static_cast<ptrdiff_t>(cut));
+        ++tried;
+        if (DecodeReplay(truncated, out, &error)) ++accepted;
+    }
+    CHECK_EQ(accepted, 0);
+    std::printf("  절단 표본 %d곳 전부 거절\n", tried);
+}
+
+// 비트 하나를 뒤집으면 거절되는가. 복호 결과가 우연히 문법에 맞는 본문이 될 수
+// 있으므로, 원본을 접은 수 하나가 그 자리를 닫는다.
+void ReplayRejectsBitDamage() {
+    const Replay original = MakeSkewedReplay(4000);
+    const std::vector<uint8_t> good = EncodeReplay(original);
+    Replay out;
+    std::string error;
+    int accepted = 0, tried = 0;
+    const size_t step = good.size() / 200 + 1;
+    for (size_t at = 0; at < good.size(); at += step) {
+        std::vector<uint8_t> damaged = good;
+        damaged[at] ^= static_cast<uint8_t>(1u << (at % 8));
+        ++tried;
+        if (DecodeReplay(damaged, out, &error)) ++accepted;
+    }
+    CHECK_EQ(accepted, 0);
+    std::printf("  비트 손상 표본 %d곳 전부 거절\n", tried);
+}
+
+// Kraft 등식을 어기는 코드 길이표는 파일 전체를 거절시킨다. 이 검사가 없으면
+// 임의의 256바이트가 길이표 행세를 하고, 복호기는 크래시하는 대신 **조용히 다른
+// 바이트를 낸다**.
+void ReplayRejectsKraftViolation() {
+    const Replay original = MakeSkewedReplay(4000);
+    const std::vector<uint8_t> good = EncodeReplay(original);
+    const BlockLayout layout = ReadBlockLayout(original, good);
+    CHECK_EQ(layout.method, kReplayHuffman);
+
+    Replay out;
+    std::string error;
+
+    // (a) 합이 1보다 작아지는 표 — 어떤 비트열에서도 심볼을 못 찾는 구멍이 생긴다.
+    std::vector<uint8_t> hole = good;
+    for (size_t i = 0; i < kReplayCodeTableBytes; ++i) {
+        if (hole[layout.tableAt + i] == 0) continue;
+        hole[layout.tableAt + i] = 0;      // 심볼 하나를 표에서 지운다
+        break;
+    }
+    CHECK(!DecodeReplay(hole, out, &error));
+    CHECK(error.find("Kraft") != std::string::npos);
+
+    // (b) 합이 1보다 커지는 표 — 코드가 겹친다.
+    std::vector<uint8_t> overlap = good;
+    for (size_t i = 0; i < kReplayCodeTableBytes; ++i) {
+        if (overlap[layout.tableAt + i] < 2) continue;
+        overlap[layout.tableAt + i] = 1;   // 짧게 만들어 자리를 넓힌다
+        break;
+    }
+    CHECK(!DecodeReplay(overlap, out, &error));
+    CHECK(error.find("Kraft") != std::string::npos);
+
+    // (c) 상한을 넘는 길이. 8비트에 적히지만 15를 넘으면 유효한 표가 아니다.
+    std::vector<uint8_t> tooLong = good;
+    tooLong[layout.tableAt] = 200;
+    CHECK(!DecodeReplay(tooLong, out, &error));
+
+    // (d) 모르는 압축 방식.
+    std::vector<uint8_t> alien = good;
+    alien[layout.headerBytes + 12] = 9;
+    CHECK(!DecodeReplay(alien, out, &error));
+
+    // (e) 선언된 본문 크기가 복호 결과와 다르다.
+    std::vector<uint8_t> wrongSize = good;
+    platform::WriteLE32(wrongSize.data() + layout.headerBytes, layout.bodySize + 1);
+    CHECK(!DecodeReplay(wrongSize, out, &error));
+    std::printf("  코드 길이표·방식·크기 거부 5종 확인\n");
 }
 
 // ── 5. 두 번째 재생기가 실제로 갈림을 잡는가 ───────────────────────
@@ -532,6 +826,11 @@ void RunTests() {
     LockstepWaitsForEveryPeer();
     ReplayRoundTrips();
     ReplayRejectsMalformed();
+    ReplayCompressionShrinksAndRestores();
+    ReplayRestoresLongCodes();
+    ReplayRejectsTruncationEverywhere();
+    ReplayRejectsBitDamage();
+    ReplayRejectsKraftViolation();
     LockstepReplayCatchesFaults();
     ProductRunReplaysBitIdentically();
 }

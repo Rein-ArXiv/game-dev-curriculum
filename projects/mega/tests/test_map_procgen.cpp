@@ -7,13 +7,16 @@
 //       읽고 있다는 것을 그 단조성이 증명한다.
 //   (3) 채택된 맵은 언제나 스폰→코어가 연결돼 있다(tools::Level 의 flood fill).
 //   (4) 경로는 개방 칸만 지나고 스폰에서 시작해 코어에서 끝난다.
+#include "algo/dsu.hpp"
 #include "game/defense_content.hpp"
 #include "game/game.hpp"
 #include "game/map_gen.hpp"
 #include "math/noise.hpp"
 #include "test_util.h"
+#include "tools/procgen.hpp"
 
 #include <cmath>
+#include <cstdio>
 #include <vector>
 
 using namespace mega;
@@ -225,8 +228,121 @@ static void TestWorldRejectsSealingPlacement() {
     CHECK(world.Gold() >= 100000 - TowerSpecFor(TowerType::Cannon).cost);
 }
 
+// ── 골격 팔 둘 ─────────────────────────────────────────────────────
+//
+// 두 팔이 지켜야 하는 것은 같다: 신장 트리다. 다른 것은 형질이다.
+//
+// 채택된 간선 수를 세는 방법. 셀은 홀수 좌표에 있고, 셀 사이 벽은 (짝수, 홀수)
+// 또는 (홀수, 짝수) 자리다. 그 자리가 열려 있으면 간선 하나가 채택된 것이다.
+static int CarvedEdges(const tools::Level& level) {
+    int edges = 0;
+    for (int y = 1; y < level.Height() - 1; ++y)
+        for (int x = 1; x < level.Width() - 1; ++x) {
+            const bool wallSlot = ((x & 1) == 0) != ((y & 1) == 0);
+            if (wallSlot && level.At(x, y) != '#') ++edges;
+        }
+    return edges;
+}
+
+// 격자 위 개방 칸을 서로소 집합으로 묶어 성분 수를 센다. flood fill 과 **다른
+// 구조**로 같은 질문에 답하므로 두 판정이 같은 버그를 공유하지 않는다.
+static size_t OpenComponents(const tools::Level& level) {
+    const size_t count = static_cast<size_t>(level.Width()) * static_cast<size_t>(level.Height());
+    algo::DisjointSet dsu(count);
+    size_t open = 0;
+    for (int y = 0; y < level.Height(); ++y)
+        for (int x = 0; x < level.Width(); ++x) {
+            if (level.At(x, y) == '#') continue;
+            ++open;
+            const size_t here = static_cast<size_t>(y * level.Width() + x);
+            if (x + 1 < level.Width() && level.At(x + 1, y) != '#') dsu.Union(here, here + 1);
+            if (y + 1 < level.Height() && level.At(x, y + 1) != '#')
+                dsu.Union(here, here + static_cast<size_t>(level.Width()));
+        }
+    // 벽 칸은 각자 홀로 남으므로 성분 수에서 빼 준다.
+    return dsu.Components() - (count - open);
+}
+
+// (1)(2)(3)(4) 두 팔 모두 신장 트리이고, 같은 시드는 같은 격자다.
+static void TestMazeArmsAreSpanningTrees() {
+    const int cw = 20, ch = 20;
+    const int cells = cw * ch;
+    for (uint32_t seed = 1; seed <= 8; ++seed) {
+        for (int arm = 0; arm < 2; ++arm) {
+            const bool kruskal = arm == 1;
+            const tools::Level level = tools::MazeGen::GenerateWith(kruskal, cw, ch, seed);
+            // (1) 채택 간선 수 == 셀 수 - 1.
+            CHECK_EQ(CarvedEdges(level), cells - 1);
+            // (2) 사이클 0 — 간선 수 + 성분 수 == 정점 수. 성분이 1개이므로
+            //     이 등식은 곧 (1) 과 같은 말이지만, 성분 수를 **DSU 로 따로
+            //     세어** 확인하는 것이 요점이다.
+            CHECK_EQ(OpenComponents(level), static_cast<size_t>(1));
+            // (3) DSU 판정과 flood fill 판정이 일치한다.
+            CHECK(level.Validate().Valid());
+            // (4) 같은 시드 → 같은 격자.
+            const tools::Level again = tools::MazeGen::GenerateWith(kruskal, cw, ch, seed);
+            bool identical = true;
+            for (int y = 0; y < level.Height(); ++y)
+                for (int x = 0; x < level.Width(); ++x)
+                    if (level.At(x, y) != again.At(x, y)) identical = false;
+            CHECK(identical);
+        }
+    }
+}
+
+// 형질이 실제로 다른가. 분기 셀(개방 이웃이 3 이상인 셀)의 수를 센다 — 이것이
+// "어디를 막을까"의 선택지 수이고, 그래서 밸런스 손잡이다.
+static void TestMazeArmsDifferInShape() {
+    const int cw = 20, ch = 20;
+    int dfsBranches = 0, kruskalBranches = 0, dfsDeadEnds = 0, kruskalDeadEnds = 0;
+    for (uint32_t seed = 1; seed <= 8; ++seed) {
+        for (int arm = 0; arm < 2; ++arm) {
+            const tools::Level level = tools::MazeGen::GenerateWith(arm == 1, cw, ch, seed);
+            int branches = 0, deadEnds = 0;
+            for (int cy = 0; cy < ch; ++cy)
+                for (int cx = 0; cx < cw; ++cx) {
+                    const int x = 2 * cx + 1, y = 2 * cy + 1;
+                    int degree = 0;
+                    if (level.At(x + 1, y) != '#') ++degree;
+                    if (level.At(x - 1, y) != '#') ++degree;
+                    if (level.At(x, y + 1) != '#') ++degree;
+                    if (level.At(x, y - 1) != '#') ++degree;
+                    if (degree >= 3) ++branches;
+                    if (degree == 1) ++deadEnds;
+                }
+            if (arm == 0) { dfsBranches += branches; dfsDeadEnds += deadEnds; }
+            else          { kruskalBranches += branches; kruskalDeadEnds += deadEnds; }
+        }
+    }
+    // 두 팔의 분기 수는 같지 않다. 같다면 스위치가 아무것도 바꾸지 않은 것이다.
+    CHECK(dfsBranches != kruskalBranches);
+    std::printf("  골격 형질 8시드 합계 — dfs 분기 %d 막다른길 %d / "
+                "kruskal 분기 %d 막다른길 %d\n",
+                dfsBranches, dfsDeadEnds, kruskalBranches, kruskalDeadEnds);
+}
+
+// 두 팔 모두 절차 생성 전 과정을 통과하는가 — 밀도장 감산 · flood fill 검증 ·
+// 경로 재계산. 골격만 바꿨을 뿐 뒤의 파이프라인이 그대로 돈다는 것이 흡수의 조건이다.
+static void TestKruskalArmSurvivesPipeline() {
+    for (uint32_t seed = 1; seed <= 8; ++seed) {
+        mapgen::TerrainParams params;
+        params.seed = seed;
+        params.maze = MazeKind::Kruskal;
+        DefenseMap map;
+        mapgen::TerrainStats stats;
+        CHECK(mapgen::Generate(params, map, &stats));
+        CHECK(stats.valid);
+        CHECK(map.RouteLength() >= 2);
+        CHECK(map.ToLevel().Validate().Valid());
+        CHECK(map.RecomputeRoute());
+    }
+}
+
 static void RunTests() {
     TestWorldRejectsSealingPlacement();
+    TestMazeArmsAreSpanningTrees();
+    TestMazeArmsDifferInShape();
+    TestKruskalArmSurvivesPipeline();
     TestSeedReproducible();
     TestCarveMonotonic();
     TestDensityNotAxisAligned();

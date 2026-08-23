@@ -36,6 +36,7 @@
 #include "live/economy.hpp"
 #include "live/event_schedule.hpp"
 #include "live/feature_flag.hpp"
+#include "live/unlock_graph.hpp"
 #include "test_util.h"
 
 #include <algorithm>
@@ -439,6 +440,63 @@ static void TestSettleAppliesScrapMultiplier(const EventTimes& times) {
                 plain.ticks, plain.wave, plain.won ? 1 : 0);
 }
 
+// ══ 4. 해금 선행 그래프 → 상점과 지갑 ═══════════════════════════════
+//
+// `assets/unlocks.txt` 가 배포되고 있고, 제품이 그것을 실제로 읽어 상점 순서와
+// 지갑 검사에 얹는가. 앞의 세 자리와 같은 종류의 배선이다 — 서브시스템 테스트는
+// `test_meta_economy` 가 갖고 있고, 여기서는 **제품 안에서** 묻는다.
+static void TestUnlockGraphReachesProduct(const EventTimes& times) {
+    bool externalUnlocks = false;
+    std::string unlockError;
+    const live::UnlockGraph shipped =
+        defense::LoadUnlockGraph(AssetRoot() + "/unlocks.txt", &externalUnlocks, &unlockError);
+    // 파일이 폴백이면 아래 단언은 아무것도 증명하지 않는다 — 선행 0개인 상태와
+    // 배선이 죽은 상태가 같은 값을 내기 때문이다.
+    CHECK(externalUnlocks);
+    CHECK(unlockError.empty());
+    CHECK(shipped.Size() > 1);
+
+    static const char* kUnlockProfile = "live_ops_unlock.wal";
+    std::remove(kUnlockProfile);
+    DefenseApp app;
+    if (!app.Init(HeadlessOptions(kUnlockProfile, times.quiet))) {
+        ++megatest::g_failures;
+        std::printf("  FAIL TestUnlockGraphReachesProduct: Init 실패\n");
+        return;
+    }
+    ++megatest::g_checks;
+
+    // 앱이 파일에서 온 그래프를 들고 있다.
+    CHECK(app.ExternalUnlocks());
+    CHECK_EQ(app.Unlocks().Size(), shipped.Size());
+    CHECK(app.Unlocks().ShopOrder() == shipped.ShopOrder());
+
+    // 상점 순서에서 모든 간선의 선행이 앞선다.
+    const std::vector<uint32_t>& order = app.Unlocks().ShopOrder();
+    for (size_t i = 0; i < order.size(); ++i) {
+        for (uint32_t need : app.Unlocks().Prerequisites(order[i])) {
+            bool earlier = false;
+            for (size_t j = 0; j < i; ++j)
+                if (order[j] == need) earlier = true;
+            CHECK(earlier);
+        }
+    }
+
+    // 선행을 건너뛴 해금은 제품 경로에서도 거절된다. 잔액은 넉넉히 준다 —
+    // 거절의 이유가 돈이 아니라 선행이라는 것.
+    const uint32_t leaf = order.back();
+    CHECK(!app.Unlocks().Prerequisites(leaf).empty());
+    CHECK(!app.UnlockTower(leaf));
+    CHECK(app.OwnedUnlocks().empty());
+    std::string violation;
+    CHECK(app.EconomyConserved(&violation));
+
+    std::string text;
+    for (uint32_t type : order) text += std::to_string(type) + " ";
+    std::printf("  제품 상점 순서: %s(파일 %zu노드)\n", text.c_str(), shipped.Size());
+    std::remove(kUnlockProfile);
+}
+
 static void RunTests() {
     bool externalEvents = false;
     std::string eventError;
@@ -460,6 +518,7 @@ static void RunTests() {
     TestFlagAssignmentReachesSwitches(times);
     TestEventModifiersReachContent(times);
     TestSettleAppliesScrapMultiplier(times);
+    TestUnlockGraphReachesProduct(times);
 }
 
 TEST_MAIN("live_ops_wiring")

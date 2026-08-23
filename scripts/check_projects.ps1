@@ -39,6 +39,7 @@ if ($LASTEXITCODE -ne 0) {
 $windowsLabs = @(
     "parts_perf_lab",
     "languages_lab",
+    "algorithms_lab",
     "math_lab",
     "physics_lab",
     "ai_lab",

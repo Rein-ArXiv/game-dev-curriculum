@@ -21,6 +21,8 @@
 
 #pragma once
 
+#include "live/unlock_graph.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <string>
@@ -184,14 +186,28 @@ public:
         ++Slot(account).startGoldTier;
         return true;
     }
+    // ── 선행 관계 ──────────────────────────────────────────────────
+    // 저작 파일이 정한 해금 DAG. 비어 있으면(파일 없음·거부됨) 선행이라는 개념이
+    // 없던 시절의 동작이 그대로 남는다 — 기본값이 스위치 이전의 동작이어야 한다는
+    // 이 저장소의 규약이 저작 파일에도 그대로 적용된다.
+    void SetUnlockGraph(const UnlockGraph& graph) { unlocks_ = graph; }
+    const UnlockGraph& Unlocks() const { return unlocks_; }
+
+    // snippet-begin: economy-unlock
+    // 선행 검사는 **소각보다 먼저** 온다. 순서가 뒤집히면 거절된 해금이 스크랩을
+    // 태우고, 그때 보존 불변식은 여전히 참이면서 플레이어는 돈만 잃는다.
     bool UnlockTower(uint32_t account, uint32_t towerType) {
         if (HasUnlock(account, towerType)) return false;
+        const Entry* existing = Find(account);
+        static const std::vector<uint32_t> kNone;
+        if (!unlocks_.Satisfied(towerType, existing ? existing->unlocks : kNone)) return false;
         if (!Spend(account, TowerUnlockCost(towerType), Sink::TowerUnlock)) return false;
         Entry& entry = Slot(account);
         entry.unlocks.insert(
             std::lower_bound(entry.unlocks.begin(), entry.unlocks.end(), towerType), towerType);
         return true;
     }
+    // snippet-end: economy-unlock
     bool HasUnlock(uint32_t account, uint32_t towerType) const {
         const Entry* entry = Find(account);
         if (!entry) return false;
@@ -230,6 +246,14 @@ public:
         if (wallet.startGoldTier > kMaxStartGoldTier) return fail("시작 골드 티어가 상한 초과");
         for (size_t i = 1; i < wallet.unlocks.size(); ++i)
             if (wallet.unlocks[i] <= wallet.unlocks[i - 1]) return fail("해금 목록이 오름차순이 아니다");
+        // 해금 집합이 선행 폐포인가. 잎만 들고 있는 지갑은 이 게임에서 도달할 수
+        // 없는 상태다 — 저장 파일이 신뢰 경계 밖이라는 사실의 두 번째 소비자다.
+        uint32_t offender = 0;
+        if (!unlocks_.ClosedUnder(wallet.unlocks, &offender)) {
+            if (error)
+                *error = "wallet: 해금 " + std::to_string(offender) + " 의 선행이 없다";
+            return false;
+        }
         Entry& entry = Slot(wallet.account);
         supply_  += wallet.balance - entry.balance;
         sourced_ += wallet.sourced - entry.sourced;
@@ -273,6 +297,7 @@ private:
         return const_cast<Entry*>(static_cast<const Economy*>(this)->Find(account));
     }
 
+    UnlockGraph        unlocks_;       // 비어 있으면 선행 없음(기본 동작)
     std::vector<Entry> accounts_;      // 계정 id 오름차순
     int64_t supply_  = 0;
     int64_t sourced_ = 0;

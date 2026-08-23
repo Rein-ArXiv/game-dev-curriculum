@@ -449,6 +449,48 @@ mega_add_selftest(mega_defense_selftest_ai_astar 25000 ${MEGA_SELFTEST_UNIX_QUIE
 mega_add_selftest(mega_defense_selftest_poly 25000 ${MEGA_SELFTEST_UNIX_QUIET} 300
                   --ab pathing=poly)
 
+# G8 이 들여온 팔들. 셋 다 기본 팔에서는 한 줄도 돌지 않는다.
+#
+#   map_maze=kruskal    골격 생성기의 두 번째 팔. 셀 사이 간선을 가중치 순으로
+#                       훑으며 서로소 집합으로 사이클을 막는다. 기본 팔(재귀
+#                       백트래커)과 형질이 다른 미로가 나오므로, 이 한 줄이 없으면
+#                       그 지형 위에서 도는 경로·인지·잔해가 제품 안에서 한 번도
+#                       검사되지 않는다.
+#   build_check=artic   배치 판정을 칸 질의에서 격자 전수 판정으로 바꾼 팔.
+#                       판정 결과가 같아야 하므로 이 검사의 result 는 기본 팔과
+#                       같아야 한다 — 그것이 곧 "규칙 변경이 아니다"의 제품 증거다.
+#   snapshot_pick=relevance
+#                       스냅샷의 적 64자리를 relevancy 로 채우는 팔. 호스트 모드가
+#                       아니면 스냅샷을 만들지 않으므로 아래 협동 기록 팔에 함께 건다.
+#
+# `--unlock 3` 은 해금 선행 그래프를 제품 안에서 실제로 소비시킨다. 상점 순서대로
+# 사므로 선행이 언제나 먼저 결제되고, 잔액이 모자라면 거기서 멈춘다.
+mega_add_selftest(mega_defense_selftest_maze 25000 ${MEGA_SELFTEST_UNIX_QUIET} 300
+                  --ab map=procgen --ab map_maze=kruskal --ab build_check=artic
+                  --ab pathing=flowfield)
+
+# ── 해금 선행 그래프를 제품 안에서 실제로 소비한다 ──────────────────
+#
+# `--unlock N` 은 상점 순서를 따라 그 종류까지 산다. 냉각 프로필의 잔액은 0이고
+# 첫 해금이 300스크랩이므로, 격리만 하면 이 검사는 **한 번도 사지 못하고** 조용히
+# 지나간다 — `--buy-tier` 가 겪었던 것과 정확히 같은 함정이다.
+#
+# 그래서 데우기를 한 단계로 만든다. warm 이 프로필을 비우고 이벤트 창(스크랩 x2)
+# 에서 한 판을 돌려 528스크랩을 남기고, unlock 이 그 위에서 산다 — 대포(300)를
+# 사고 잔액 228 로 개틀링(450) 앞에서 멈춘다. 성공과 잔액 부족 정지가 **한 실행에
+# 둘 다** 도는 자리다. fixture 가 순서를 강제하므로 -j 에서도 뒤집히지 않는다.
+mega_add_selftest(mega_defense_selftest_unlock_warm 25000 ${MEGA_SELFTEST_UNIX_EVENT} 300)
+set_tests_properties(mega_defense_selftest_unlock_warm PROPERTIES
+                     FIXTURES_SETUP unlock_profile)
+
+add_test(NAME mega_defense_selftest_unlock
+         COMMAND mega_defense --selftest 25000 --unlock 3
+                 --match-unix ${MEGA_SELFTEST_UNIX_QUIET}
+                 --profile ${MEGA_PROFILE_DIR}/mega_defense_selftest_unlock_warm.wal
+                 --ab map=procgen --ab map_maze=kruskal --ab build_check=artic)
+set_tests_properties(mega_defense_selftest_unlock PROPERTIES
+                     TIMEOUT 300 FIXTURES_REQUIRED unlock_profile)
+
 mega_add_selftest(mega_defense_selftest_avatar_gate 25000 ${MEGA_SELFTEST_UNIX_QUIET} 300
                   --ab avatar_gate=1)
 
@@ -534,6 +576,12 @@ mega_add_replay_pair(solo 4000 0)
 # 겹치지 않는다.
 mega_add_replay_pair(host 4000 47821)
 mega_add_replay_pair(avatar 4000 47822 --ab avatar_predict=1 --ab avatar_gate=1)
+# 네 번째 팔. 호스트 모드라 스냅샷을 실제로 만들고, 그 스냅샷의 64자리를
+# relevancy 로 채운다. 절차 지형 · Kruskal 골격 · 전수 배치 판정도 함께 돈다 —
+# 그 넷을 지나는 한 판이 기록되고, **다른 프로세스가 그 조작만으로 같은 체인을
+# 다시 만든다**. 선택 정책이 시뮬을 건드리면 여기서 갈린다.
+mega_add_replay_pair(relevance 4000 47823 --ab snapshot_pick=relevance
+                     --ab map=procgen --ab map_maze=kruskal --ab build_check=artic)
 
 # 체인·포맷·lockstep 재생의 단위 검사. 제품 프레임 루프를 두 번 돌리므로 실행
 # 파일 옆의 assets/ 가 필요하다(그 디렉터리를 만드는 것은 mega_defense 의 POST_BUILD).

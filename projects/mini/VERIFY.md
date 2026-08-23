@@ -6,7 +6,7 @@
 
 ## 반복 검증
 
-Windows에서 다음 명령으로 Windows 대상 lab 11개를 configure, Release build, CTest 순서로 검사한다.
+Windows에서 다음 명령으로 Windows 대상 lab 12개를 configure, Release build, CTest 순서로 검사한다.
 
 ```powershell
 pwsh -File scripts/check_projects.ps1
@@ -40,6 +40,7 @@ io_uring -ECANCELED 경로뿐이며 인수인계 문서에 정리돼 있다.
 |---|---|---|---:|
 | `parts_perf_lab` | 통과 | CTest 9개. 전체 1개 + step별 8개(실행 파일이 첫 인자를 step 필터로 받는다) | 8 |
 | `languages_lab` | 통과 | CTest 7개. 전체 1개 + 계약별 6개(step 라벨로 등록표를 거른다). 사례 19개 중 4개가 문법 유도 fuzz 배터리(기본 8만 표본, 고정 시드, 반례 축소) | 6 |
+| `algorithms_lab` | 통과 | CTest 11개. 전체 1개 + step별 8개(`algo_tests --step=NN`) + property 층 1개 + bench smoke 1개. 고정 사례 45개(52만 CHECK)가 느린 독립 오라클과 대조하고, property 11종이 6,950 표본을 돈다. 무력화 변이 15건 중 14건 검출 | 8 |
 | `math_lab` | 통과 | CTest 10개. 전체 1개 + step별 8개(실행 파일이 첫 인자를 step 필터로 받는다) + property 층 1개. 사례 26개 중 13개가 시드 무작위 property(기본 42,300 표본, 고정 시드, 반례 축소) | 8 |
 | `physics_lab` | 통과 | CTest 23개. 실행 파일 전체 9개 + step별 14개(실행 파일이 첫 인자를 step 필터로 받는다). 아홉 번째는 불변식 property 층 — 사례 5개(볼록쌍 1500 표본 · 에너지 소산 · 침투 상계 · Measure⇔Response 프레임 동일 · bit 결정성)를 고정 시드에서 돌리고, 실패하면 입력을 shrink 해 시드·재현 명령과 함께 찍는다 | 8 |
 | `ai_lab` | 통과 | CTest 9개. 전체 2개(pathfinder·model) + step별 7개 | 6 |
@@ -68,11 +69,32 @@ io_uring -ECANCELED 경로뿐이며 인수인계 문서에 정리돼 있다.
 | 무력화 변이 | physics EPA 깊이 ×1.02 → `step05.property` 사망 · math SAT 후보축 4→3 → `collision/sat-gjk-agree` 사망 · languages 실행 예산 ×1000 → `step04` 정지 실패로 CMake `TIMEOUT`이 사망 판정. 셋 다 복원 뒤 SHA-256 동일 |
 | 반례 재현 | 출력된 재현 명령(`physics_property_tests convex_pair <seed>` · `math_core_tests step05 --only=... --seed=... --sample=...`)을 그대로 실행해 같은 반례·같은 축소 입력·종료 코드 1 확인 |
 
+### algorithms_lab 검증 근거 (2026-08-24 신설)
+
+이 lab은 자체 property 하네스(`tests/property.h`)를 가진다. 위 세 lab의 규약(고정 시드 ·
+생성기 · 축소기 · 재현 명령)을 그대로 따르되 파라미터가 이산이라 정수 domain을 쓴다.
+
+| 확인 | 결과 |
+|---|---|
+| 클린 빌드(MSVC Release `/W4 /permissive- /utf-8`) | 제품·테스트 소스 경고 **0**. 서드파티 의존 없음 |
+| ctest 전수 · 연속 3회 | 11/11 — 3회 모두 동일, 총 2.5초 안팎 |
+| 배터리 출력 반복 동일 | `algo_tests` · `algo_tests --properties` 3회 실행 출력이 **바이트 동일**. `algo_bench --smoke`는 벽시계 수치를 찍으므로 바이트 동일일 수 없다 — 실수 칸(ms·MB/s)을 마스킹하면 3회 출력이 일치하고, 정수 카운터(비교·이동 바이트·방문·probe·증가 횟수)와 `checksum` 줄은 3회 모두 같다 |
+| 무력화 변이 | 15건 주입 → **14건 검출**. 생존 1건은 `HuffmanDecompress`의 Kraft 호출 제거로, 같은 손상을 Adler-32가 잡기 때문이다(Kraft는 거부를 만드는 것이 아니라 더 싸게 만든다). 15건 전부 복원 뒤 SHA-256 동일 |
+| 검사가 잡지 못하는 것 | DSU의 union by size 제거, Dijkstra의 lazy deletion 처리 제거는 정확성 검사를 죽이지 않는다. 최적화는 답을 바꾸지 않기 때문이고, `algo_bench`의 평균 find 깊이(1.00 대 9,999.50)와 확장 수(1,200 대 3,322)가 대신 드러낸다 |
+| 벤치의 자체 검사 | 각 팔이 답 대조·불변식 확인을 통과하지 못하면 표에 오르기 전에 프로세스가 죽는다(`algo_bench_smoke`가 그 경로를 매 ctest 실행에서 지나간다) |
+
 ## 남은 완료 조건
 
 GUI lab은 장면을 직접 실행해 화면과 상호작용을 확인해야 한다. 현재 headless
 CTest는 다음 핵심 계약을 검사한다.
 
+- `algorithms_lab`: 정렬의 순서·multiset 보존·안정성 세 계약, 순서 보존 실수 키의 단조성,
+  lazy tag의 apply/compose 대수와 결합법칙, open addressing의 조회 종료 불변식(삭제 정책 3종),
+  Aho-Corasick의 일치 multiset, condensation이 DAG임, 절단점·다리를 정점/간선 제거 후 BFS
+  재실행과 대조, DSU 연결 판정 대 BFS 성분, Dijkstra·Bellman-Ford 대 Floyd-Warshall,
+  전수 열거 최적값 대 DP·분기 한정, max-flow == min-cut certificate와 유량 보존,
+  CSP의 Apply/Undo 상태 해시와 가지치기 해 집합 보존, Kraft 부등식과 H<=L<H+1,
+  왕복·절단·손상·자원 상한에 대한 복호기 거부
 - `parts_perf_lab`: allocator 정렬·해제와 simulation 모드 계약
 - `languages_lab`: 토큰 위치, 우선순위·결합, 바이트코드 검증기, 실행 예산·스택 상한,
   호스트 바인딩. 여기에 더해 문법 유도 생성기와 토큰·명령 변형기로 도는 property 배터리가
