@@ -1,5 +1,14 @@
 # 리눅스 기기 인수인계 — WSL2 에서 닫지 못한 검증
 
+> **[2026-08-24 갱신] 권한 항목(§3-1·§3-2)은 WSL2 에서 검증 완료됐다 — 별도 기기가 필요 없었다.**
+> `wsl -d Ubuntu-26.04 -u root` 는 비밀번호 없이 루트로 진입하며(cap_sys_nice 보유), 그 상태에서
+> `SKL_CGROUP_DIR=/sys/fs/cgroup/init.scope SKL_REQUIRE_SCHED=fifo,cgroup system_fault_tests --step=6`
+> 이 **EXIT=0** — `SCHED_FIFO success path: verified via pthread_getschedparam, then restored` /
+> `cgroup real write+restore: orig=100 during=200 after=100` / `cgroup success path: ran`.
+> 실행 후 cpu.weight 원값 복구·무권한 ctest 25/25 유지 확인. 이 문서에서 **아직 별도 환경이 필요한 것은
+> §5 베어메탈 대조 수치(선택 — VM 수치 단서는 이미 본문에 있다)와 io_uring -ECANCELED 경로(§4)뿐**이다.
+
+
 이 문서는 **step 문서가 아니다.** `articles/step01~08` 은 lab 을 만드는 과정이고, 이 문서는
 **이미 만들어진 lab 을 다른 리눅스 기기에서 한 번 더 돌리기 위한 실행 지시서** 다.
 이것 하나만 보고 그대로 따라 할 수 있게 적었다.

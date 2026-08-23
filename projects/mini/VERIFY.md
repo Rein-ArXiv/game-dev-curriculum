@@ -29,8 +29,10 @@ pwsh -File scripts/check_projects.ps1 -SkipConfigure
 `system_kernel_lab`은 Linux 전용이므로 이 스크립트에서 제외한다. WSL2 배포판 또는 별도 Linux 환경에서
 README의 빌드 절차를 실행한다. 2026-08-15 WSL2 Ubuntu 26.04(커널 6.18.33.2)에서 빌드·CTest 25개 통과를 확인했다.
 
-권한이 필요해 WSL2에서 검증하지 못한 항목(cgroup 쓰기 성공 경로, `SCHED_FIFO` 적용 성공 경로)과
-커널·하드웨어 제약으로 밟히지 않는 경로는 이 lab의 `docs/` 아래 인수인계 문서에 절차와 통과 조건이 정리돼 있다.
+권한 항목(cgroup 쓰기 성공 경로, `SCHED_FIFO` 적용 성공 경로)은 2026-08-24 `wsl -u root`(무비밀번호
+루트 진입)로 WSL2 안에서 검증 완료 — 강제 모드(`SKL_REQUIRE_SCHED=fifo,cgroup`) EXIT=0, cpu.weight
+100→200→100 복구, 무권한 ctest 25/25 유지. 남은 별도 환경 항목은 베어메탈 대조 수치(선택)와
+io_uring -ECANCELED 경로뿐이며 인수인계 문서에 정리돼 있다.
 
 ## 현재 결과
 

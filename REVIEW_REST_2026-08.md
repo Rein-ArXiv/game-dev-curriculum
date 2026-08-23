@@ -192,13 +192,19 @@ python scripts/check_snippets.py --fix-ranges   # 밀린 줄번호 앵커 자동
   API 단서, `parts` → `platform`/`tools` 이동, `db` 편 분할.
 - **D** — 신설 2편. `graphics` 광원 모델(§7~§9 확장), `math/part21_sweep_and_toi`.
 
-### 남은 것 — 하나
+### 남은 것 — 선택 1건
 
-**2026-08-23 갱신.** 이 표에 있던 셋 중 **둘이 사라졌다.** 하나는 닫혀서, 하나는 폐기돼서다.
+**2026-08-24 갱신.** 마지막 필수 항목이 닫혔다. `system_kernel_lab` 권한 경로(cgroup 쓰기
+성공 경로 · `SCHED_FIFO` 적용 성공 경로)는 별도 기기가 필요 없었다 — `wsl -u root` 가
+비밀번호 없이 루트로 진입한다(cap_sys_nice 보유). 그 상태에서 인수인계 문서 §3 명령
+그대로(`SKL_CGROUP_DIR=/sys/fs/cgroup/init.scope SKL_REQUIRE_SCHED=fifo,cgroup`) **EXIT=0**:
+`SCHED_FIFO success path: verified via pthread_getschedparam, then restored` ·
+`cgroup real write+restore: orig=100 during=200 after=100`. 실행 후 cpu.weight 원값 복구와
+무권한 ctest 25/25 유지까지 확인했다.
 
 | # | 대상 | 남은 일 | 성격 |
 |---|---|---|---|
-| 1 | `system_kernel_lab` — 권한·하드웨어 | cgroup 쓰기 성공 경로, `SCHED_FIFO` 적용 성공 경로, 베어메탈 대조 수치. **테스트 쪽 준비는 끝났다**(2026-08-22) — `access(W_OK)` 통째 skip 은 제거됐고 유권한이면 실쓰기→복구까지 밟으며, `SKL_REQUIRE_SCHED=fifo,cgroup` 강제 모드가 조용한 폴백을 막는다. 남은 것은 **실행뿐**: 권한 있는 리눅스 기기에서 그 lab 의 인수인계 문서 §3 명령을 그대로 | 별도 Linux 기기 |
+| 1 | `system_kernel_lab` — 베어메탈 대조 수치 | **선택.** 통과/실패 판정이 아니라 수치 채집이다 — VM(WSL2)과 베어메탈의 스케줄링·I/O 수치 대조. VM 수치 단서는 인수인계 문서 §5에 이미 있다. io_uring `-ECANCELED` 수확 경로(§4)도 타이밍 의존이라 같은 부류 | 선택 (별도 기기) |
 
 **사라진 둘.**
 
