@@ -220,6 +220,25 @@ inline bool ParseDefenseOptions(int argc, char** argv, DefenseOptions& options) 
         } else if (std::strcmp(argv[i], "--profile") == 0) {
             if (i + 1 >= argc) return false;
             options.profilePath = argv[++i];
+        } else if (std::strcmp(argv[i], "--match-unix") == 0) {
+            // 이번 판의 벽시계를 못박는다. 0 은 "진짜 시계"의 이름이고 그것이
+            // 기본값이므로, 이 인자를 주지 않은 실행은 예전과 한 줄도 다르지 않다.
+            //
+            // 왜 필요한가. 이벤트 창은 주 단위로 **반복**한다(events.txt 의
+            // period). 그래서 `--selftest` 의 승패는 그 판을 돌린 요일에 좌우된다 —
+            // 일요일에는 boss_rush 가 열려 적 체력 x1.2 에 보스 3배가 걸리고,
+            // A* 팔은 그 편성에서 진다. 실제로 2026-08-23(일)에
+            // `mega_defense_selftest_ai_astar` 가 그 이유로 죽었다. 코드는 그 주에
+            // 한 줄도 바뀌지 않았다.
+            //
+            // 달력에 좌우되는 검사는 검사가 아니다. 그래서 ctest 의 셀프테스트는
+            // 전부 시각을 못박고, 이벤트가 걸린 판은 **의도한 창을 명시해** 따로
+            // 돈다(CMakeLists 의 MEGA_SELFTEST_UNIX_QUIET · _EVENT).
+            if (i + 1 >= argc) return false;
+            char* end = nullptr;
+            const long long seconds = std::strtoll(argv[++i], &end, 10);
+            if (!end || *end != '\0' || seconds < 0) return false;
+            options.matchUnixOverride = static_cast<int64_t>(seconds);
         } else {
             return false;
         }
@@ -814,6 +833,12 @@ public:
     uint64_t TerrainPacketsSent() const { return terrainPacketsSent_; }
     uint64_t TerrainPacketsReceived() const { return terrainPacketsReceived_; }
     const defense::BalanceConfig& Balance() const { return balance_; }
+    // 이번 판이 실제로 굴리는 웨이브 표. 파일에서 읽은 값에 밸런스 스크립트와
+    // 활성 이벤트의 수정자가 이미 곱해져 있다 — 즉 "이벤트가 콘텐츠 수치까지
+    // 내려갔는가"를 밖에서 물을 수 있는 유일한 자리다. Balance() 하나만으로는
+    // 그 질문에 답할 수 없다: 수정자가 밸런스에 얹혔는데 웨이브에 곱해지지
+    // 않는 상태와 정상 상태가 밖에서 구분되지 않는다.
+    const std::vector<WaveDef>& Waves() const { return waves_; }
     uint32_t HostTick() const { return hostTick_; }
     bool Connected() const { return connected_; }
     bool Finished() const { return view_.won || view_.lost; }

@@ -7,6 +7,13 @@
 //
 // C 가 이 파일의 변이 표적이다. Spend 의 잔액 검사를 지우면 A 와 B 는 산수라
 // 그대로 참인 채로 잔액만 음수가 되고, InflationRate 는 계속 그럴듯한 수를 낸다.
+//
+// 이 파일이 **묻지 않는 것**: 매치 종료 정산이 **얼마를** 발행하는가. 여기
+// 발행되는 금액은 이 파일이 지어낸 수이고, 제품의 `@settle-scrap` — 점수에서
+// 기본액을 내고 활성 이벤트의 스크랩 배율을 곱하는 그 열 줄 — 은 지나지 않는다.
+// 배율을 상수 1.0 으로 바꿔도 세 불변식은 그대로 참이다(반토막 난 발행도 보존은
+// 지킨다). 그 자리는 `tests/test_live_ops_wiring.cpp` 가 같은 매치를 두 번 돌려
+// 잰다.
 #include "db/kv_store.hpp"
 #include "db/repository.hpp"
 #include "live/economy.hpp"

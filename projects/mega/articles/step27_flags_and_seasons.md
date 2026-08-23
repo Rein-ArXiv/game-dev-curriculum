@@ -525,7 +525,84 @@ flags.txt: variant 5개 toggle 3개
 
 `flags.txt` 의 `pathing` 행은 `rollout=100 force=flowfield` 다. 즉 이 파일이 켜져 있는 한 **제품의 기본 실행은 더 이상 폴리라인 팔이 아니다.** 그래서 ctest 에 `mega_defense_selftest_poly` 한 줄을 더했다 — 명령줄이 이긴다는 것과 폴리라인 팔이 여전히 제품 안에서 돈다는 것을 같은 검사가 함께 지킨다.
 
-CTest 는 111개 대상을 전수 통과한다. 이 편이 들여온 검사는 `test_flag_rollout`(버킷 안정성 · 롤아웃 수렴 · 팔 독립성)과 `test_event_window`(경계 시각 · 합성 순서)이고, `test_live_ops` 가 그 위에 얹혀 있다.
+**(4) 로그가 찍힌다는 것과 배선이 산다는 것은 다르다.**
+
+(1)~(3) 이 보여 준 것은 전부 로그 한 줄이다. `[flags] applied=5` 가 찍힌다는 것과 그 다섯이 실제로 `Switches` 표에 반영됐다는 것 사이에는 함수 하나가 있고 — `Switches::ApplyFlags` — 이 편을 쓸 당시 그 함수를 부르는 테스트는 **하나도 없었다**(`grep -rn ApplyFlags tests/` 가 0행이었다). 같은 공백이 `defense::ApplyEventModifiers` 와 정산의 스크랩 배율에도 있었다.
+
+세 자리를 각각 무력화해 봤다. 제품 동작은 셋 다 확실히 달라진다.
+
+```
+ApplyFlags → return 0
+  [flags] source=default applied=0 …          (source=file applied=5 였다)
+  [switches] … pathing=poly …                 (flowfield 였다 — 다른 탐색 코드가 돈다)
+
+ApplyEventModifiers 본문 건너뜀
+  보스 러시 창에서 적 체력 x1.2 · 보상 x1.5 가 웨이브 표에 도달하지 않는다
+
+@settle-scrap 의 배율 → 상수 1.0
+  [meta] settle scrap=+208 …                  (+416 이었다 — 정확히 반토막)
+```
+
+그런데 그 상태에서 ctest 117개가 **전부 통과했다.** 무증상이 아니라 아무도 안 보고 있었던 것이다. `test_flag_rollout` 과 `test_event_window` 는 `live/` 헤더만 겨냥하고(각각 이 문서 11절과 12절이 그 범위를 적고 있다), 셀프테스트들은 팔을 `--ab` 로 못박아 두어 파일 배정에 애초에 무감각하다.
+
+`tests/test_live_ops_wiring.cpp` 가 그 세 자리를 잇는다. 흉내가 아니라 **제품 `DefenseApp`** 을 헤드리스로 세우고, 실행 파일 옆의 진짜 `flags.txt` · `events.txt` · `balance.script` · `waves.txt` 를 읽게 한 뒤 결과를 묻는다. 시각은 `DefenseOptions::matchUnixOverride` 로 **주입한다** — 벽시계로 판정하면 `weekend_scrap` 이 주 단위로 반복하므로 주말에만 초록인 검사가 된다. 리플레이 재생을 위해 이미 뚫려 있던 주입점이 그대로 검증 가능성이 됐다.
+
+창의 좌표도 손으로 적지 않는다. 일정을 읽어 (a) 아무 이벤트도 없는 시각 (b) 스크랩 배율만 걸리는 시각 (c) 적 체력·보상이 함께 걸리는 시각 셋을 뽑는다. 운영자가 시즌을 옮겨도 검사가 "배선이 죽었다"고 거짓 보고하지 않는다.
+
+```
+> build\bin\Release\test_live_ops_wiring.exe
+[test] live_ops_wiring
+  창: quiet=1767312000 scrap_only=1767398400 content=1767484800 (이벤트 3개)
+  flags: source=file applied=5/5 pathing=flowfield meta_shop=1 scrap_event=1
+  flags: --ab pathing=poly 가 파일 배정을 이긴다 (applied=4)
+  events: t=1767484800 enemy_hp=x1.20 reward=x1.50 boss_rush=1 wave0 hp 12.0->14.4 reward 5->8
+  settle: score=1588 base=208  x1.00 -> +208  x2.00 -> +416  (ticks=1377 wave=6 won=1)
+[test] live_ops_wiring: 126 checks, 0 failures
+```
+
+같은 변이를 다시 걸면 이번에는 죽는다.
+
+```
+ApplyFlags → return 0                  16 failures
+  FAIL …test_live_ops_wiring.cpp:155  CHECK_EQ(app.Options().switches.Assignments(), expected.Assignments())
+  FAIL …test_live_ops_wiring.cpp:162  CHECK_EQ(std::string(app.FlagSource()), std::string("file"))
+  flags: source=default applied=0/5 pathing=poly …
+
+ApplyEventModifiers 본문 건너뜀        12 failures
+  FAIL …test_live_ops_wiring.cpp:302  CHECK(Near(got.hp, file[i].hp * hpMul))
+  events: … wave0 hp 12.0->12.0 reward 5->5
+```
+
+두 번째 줄이 이 검사의 요점이다. `Balance()` 만 보면 "밸런스에는 얹혔는데 웨이브에는 안 곱해진" 상태를 밖에서 구분할 수 없다. 그래서 파일에서 읽은 원본 웨이브와 제품이 실제로 굴리는 웨이브를 나란히 두고, 두 **독립한 출처**(밸런스 스크립트를 직접 읽은 값 × 일정이 낸 수정자)의 곱과 대조한다.
+
+**(5) 그리고 변이를 되돌리자 달력이 걸렸다.**
+
+세 번째 변이(`ApplyEventModifiers` 본문 건너뛰기)를 복원한 직후, 손대지 않은 검사 하나가 죽었다.
+
+```
+mega_defense_selftest_ai_astar ... ***Failed
+  [events] source=file active=2 scrap=x2.00 reward=x1.50 enemy_hp=x1.20 boss_rush=1
+  [selftest] result=LOST ticks=7552 towers=12 wave=5
+```
+
+원인은 코드가 아니라 **요일**이다. 복원한 날은 2026-08-23, 일요일이었다. 이 편이 지은 `boss_rush` 창은 `period=604800` 으로 **매주 일요일**에 열리고, 그 창은 적 체력 x1.2 에 보스 3배를 건다. A* 팔은 그 편성을 못 버틴다.
+
+즉 이 검사는 **처음부터 일요일마다 빨간** 상태였다. 변이가 이벤트를 통째로 꺼 두는 동안만 우연히 가려져 있었을 뿐이다. 그 주에 코드는 한 줄도 바뀌지 않았다.
+
+이것이 이 편의 진짜 교훈이다. 반복하는 이벤트를 들여오는 순간, **시각을 읽는 모든 검사가 달력에 종속된다.** `test_live_ops_wiring` 은 그 함정을 알고 시각을 주입했지만, 그보다 먼저 있던 셀프테스트 아홉 개는 전부 벽시계를 읽고 있었다.
+
+`DefenseOptions::matchUnixOverride` 에 CLI 표면을 열어 끊었다. 기본값 0 은 "진짜 시계"의 이름이므로 이 인자를 주지 않은 실행은 예전과 한 줄도 다르지 않다.
+
+```cmake
+set(MEGA_SELFTEST_UNIX_QUIET 1767312000)   # 활성 이벤트 0개
+set(MEGA_SELFTEST_UNIX_EVENT 1767484800)   # boss_rush + weekend_scrap 동시
+```
+
+전부 QUIET 로 밀어 두면 이벤트가 걸린 판이 제품 실행 파일 안에서 한 번도 돌지 않는다. 그래서 `mega_defense_selftest_event` 하나를 EVENT 로 못박아 따로 세웠다 — 달력이 우연히 주던 커버리지를 **의도**로 되돌리는 자리다. 두 시각의 틱 수가 실제로 갈린다(1377 대 1488).
+
+**(4)의 반대 방향도 함께 잠갔다.** `--ab` 가 파일 배정을 이긴다는 계약이다. 그것이 깨지면 이 검사를 강화한 대가로 A/B 게이트 전부가 약해진다 — `mega_defense_selftest_poly` 를 포함해 팔을 못박는 모든 항목이 서버 롤아웃에 좌우되기 때문이다.
+
+CTest 는 이 편 시점에 111개 대상을 전수 통과했다. 이 편이 들여온 검사는 `test_flag_rollout`(버킷 안정성 · 롤아웃 수렴 · 팔 독립성)과 `test_event_window`(경계 시각 · 합성 순서)이고, `test_live_ops` 가 그 위에 얹혀 있다. 위 (4)의 `test_live_ops_wiring` 과 `mega_defense_selftest_event` 가 뒤에 더해져 지금은 119개다.
 
 ```
 > test_flag_rollout.exe

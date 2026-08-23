@@ -7,6 +7,12 @@
 //      곱셈만 있으면 순서가 안 보이지만 더하기와 불리언이 섞이면 보인다.
 //   3. 같은 시각을 주입한 두 관측자(호스트·서버)는 같은 집합을 본다 — 시계를
 //      안에서 읽지 않기 때문이다.
+//
+// 이 파일이 **묻지 않는 것**: 합성된 수정자가 밸런스와 웨이브 표에 실제로
+// 곱해지는가. 여기 있는 것은 `live::EventSchedule` 하나이고,
+// `defense::ApplyEventModifiers` 는 한 줄도 지나지 않는다. 그 배선을 통째로
+// 건너뛰어도 이 파일은 전부 통과한다 — `tests/test_live_ops_wiring.cpp` 가
+// 보스 러시 창의 시각을 제품에 주입해 그 뒷단을 잇는다.
 #include "live/event_schedule.hpp"
 #include "test_util.h"
 

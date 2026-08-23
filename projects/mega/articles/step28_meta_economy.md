@@ -426,7 +426,41 @@ store.Close();
 
 `거부된 지출 119` 가 잔액 검사가 실제로 돌았다는 증거다. 그 수가 0이면 부하가 너무 관대해서 검사를 자극하지 못했다는 뜻이고, 그때 이 파일은 "음수 잔액이 생기지 않는다"를 증명하지 못한다.
 
-CTest 는 111개 대상을 전수 통과한다.
+**(4) 보존이 참인 것과 금액이 맞는 것은 다른 질문이다.**
+
+위 셋과 10절이 지키는 것은 전부 **관계**다 — `supply == sourced - sunk`, 잔액 ≥ 0, 왕복 동일성. 그 관계는 발행 **금액**에 대해 아무 말도 하지 않는다. 정산의 배율 한 줄을
+
+```cpp
+const double multiplier =
+    scrapEventEnabled_ ? static_cast<double>(eventMods_.scrapMultiplier) : 1.0;
+```
+
+상수 `1.0` 으로 바꿔 보면 그 사실이 드러난다. 활성 `weekend_scrap`(x2.00)이 통째로 사라져 정산이 `+416` 에서 `+208` 로 **정확히 반토막** 나는데, 세 불변식은 전부 참인 채로 남는다. 반토막 난 발행도 보존은 지킨다. 그때 ctest 117개가 전수 통과했다.
+
+`tests/test_live_ops_wiring.cpp` 가 그 자리를 잰다. 방법은 같은 매치를 **두 번** 돌리는 것이고, 다른 것은 `DefenseOptions::matchUnixOverride` 로 주입한 시각뿐이다. 그 시각이 정하는 것은 스크랩 배율 하나다 — 일정에서 "scrap 배율만 걸리고 나머지 수정자는 전부 항등인" 창을 골라 쓰므로, 두 판의 게임플레이가 완전히 같다. 같지 않으면 정산 차이를 배율 탓으로 돌릴 수 없다.
+
+```
+> build\bin\Release\test_live_ops_wiring.exe
+  창: quiet=1767312000 scrap_only=1767398400 content=1767484800 (이벤트 3개)
+[meta] settle scrap=+208 balance=208 supply=208 sourced=208 sunk=0 tier=0
+[meta] settle scrap=+416 balance=416 supply=416 sourced=416 sunk=0 tier=0
+  settle: score=1588 base=208  x1.00 -> +208  x2.00 -> +416  (ticks=1377 wave=6 won=1)
+[test] live_ops_wiring: 126 checks, 0 failures
+```
+
+`ticks=1377` 이 두 판 모두 같다는 것이 "같은 매치"의 근거다. 배율을 상수로 되돌리면 세 줄이 죽는다.
+
+```
+  FAIL …test_live_ops_wiring.cpp:424  CHECK_EQ(boosted.scrap, (int64_t)((double)base * (double)boosted.multiplier))
+  FAIL …test_live_ops_wiring.cpp:428  CHECK_EQ(boosted.scrap, (int64_t)((double)plain.scrap * (double)boosted.multiplier))
+  FAIL …test_live_ops_wiring.cpp:429  CHECK(boosted.scrap > plain.scrap)
+  settle: score=1588 base=208  x1.00 -> +208  x2.00 -> +208
+[test] live_ops_wiring: 126 checks, 3 failures
+```
+
+이 검사가 `test_meta_economy` 가 아니라 별도 파일에 사는 이유는 값을 어디서 얻느냐가 다르기 때문이다. 여기 발행되는 금액은 테스트가 지어낸 수이지만, 저기서는 제품이 진짜 한 판을 끝까지 돌려 낸 수다. 정산이 실행되려면 매치가 끝나야 하고, 매치를 끝내려면 `DefenseApp` 을 세워야 한다.
+
+CTest 는 이 편 시점에 111개 대상을 전수 통과했다. 위 (4)의 `test_live_ops_wiring` 과 `mega_defense_selftest_event` 가 뒤에 더해져 지금은 119개다.
 
 ---
 

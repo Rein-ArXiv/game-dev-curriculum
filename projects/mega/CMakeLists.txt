@@ -336,11 +336,42 @@ add_custom_command(TARGET mega_defense POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_CURRENT_SOURCE_DIR}/games/defense/assets
             $<TARGET_FILE_DIR:mega_defense>/assets)
+# ── 셀프테스트의 시계를 못박는다 ────────────────────────────────────
+#
+# `assets/events.txt` 의 창은 주 단위로 **반복**한다. 그래서 시각을 못박지 않으면
+# 셀프테스트의 승패가 그 판을 돌린 **요일**에 좌우된다. 가설이 아니라 실측이다 —
+# 2026-08-23(일)에 `mega_defense_selftest_ai_astar` 가 `result=LOST` 로 죽었고,
+# 원인은 그날 boss_rush 창(매주 일요일)이 열려 적 체력 x1.2 에 보스 3배가 걸린
+# 것이었다. 코드는 그 주에 한 줄도 바뀌지 않았다.
+#
+# 달력에 좌우되는 검사는 검사가 아니다. 아래 두 상수가 그 의존을 끊는다.
+#
+#   QUIET  가장 이른 이벤트 시작 하루 전 — 활성 이벤트 0개. 이벤트가 없는 상태는
+#          결함이 아니라 정상 경로이므로 이것이 기준선이다.
+#   EVENT  boss_rush 창의 시작 — weekend_scrap 과 겹쳐 scrap x2 · reward x1.5 ·
+#          enemy_hp x1.2 · 보스 3배가 **동시에** 걸린다.
+#
+# 전부 QUIET 로 밀어 두면 이벤트가 걸린 판은 제품 안에서 한 번도 돌지 않는다.
+# 그래서 아래 `mega_defense_selftest_event` 하나를 EVENT 로 못박아 따로 세운다 —
+# 달력이 주던 커버리지를 우연이 아니라 **의도**로 되돌리는 자리다. 두 시각의
+# 틱 수가 실제로 갈린다(1377 대 1488): 이벤트가 시뮬을 바꾼다는 증거다.
+set(MEGA_SELFTEST_UNIX_QUIET 1767312000)   # 2026-01-02 00:00 UTC
+set(MEGA_SELFTEST_UNIX_EVENT 1767484800)   # 2026-01-04 00:00 UTC
+
 # --selftest 는 이제 조기 반환하지 않는다. 창만 없을 뿐 제품의 진짜 프레임 루프를
 # N틱 구동한다 — 에셋 로드 · 명령 경로 · 고정 스텝 시뮬 · 소프트웨어 렌더 ·
 # 진행도 커밋이 전부 실제로 실행되고, 그 결과를 프로세스 종료 코드로 단언한다.
-add_test(NAME mega_defense_selftest COMMAND mega_defense --selftest)
+add_test(NAME mega_defense_selftest
+         COMMAND mega_defense --selftest --match-unix ${MEGA_SELFTEST_UNIX_QUIET})
 set_tests_properties(mega_defense_selftest PROPERTIES TIMEOUT 120)
+
+# 이벤트가 걸린 판. 위 전부가 QUIET 라 이 한 줄이 없으면 활성 이벤트가 콘텐츠
+# 수치에 곱해지는 경로는 제품 실행 파일 안에서 한 번도 돌지 않는다.
+# (`test_live_ops_wiring` 이 같은 배선을 라이브러리 경계 안에서 잰다 — 이쪽은
+# 프로세스 경계 밖에서 같은 질문을 한 번 더 묻는다.)
+add_test(NAME mega_defense_selftest_event
+         COMMAND mega_defense --selftest 25000 --match-unix ${MEGA_SELFTEST_UNIX_EVENT})
+set_tests_properties(mega_defense_selftest_event PROPERTIES TIMEOUT 300)
 
 # 같은 실행 파일, 다른 팔. G2 가 들여온 경로 — 절차 지형 · 기울인 카메라 ·
 # 조준 색인 · BVH 정적 질의 · 격자 광역 탐색 · 잔해 물리 — 는 기본 팔에서 한 줄도
@@ -350,7 +381,8 @@ set_tests_properties(mega_defense_selftest PROPERTIES TIMEOUT 120)
 add_test(NAME mega_defense_selftest_procgen
          COMMAND mega_defense --selftest 25000
                  --ab map=procgen --ab camera=tilted3d --ab target_index=grid
-                 --ab static_query=bvh --ab broadphase=grid)
+                 --ab static_query=bvh --ab broadphase=grid
+                 --match-unix ${MEGA_SELFTEST_UNIX_QUIET})
 set_tests_properties(mega_defense_selftest_procgen PROPERTIES TIMEOUT 300)
 
 # G3 가 들여온 팔들. archetype 저장 · 절차 보스 리그 · 기울인 카메라를 지나는
@@ -358,7 +390,8 @@ set_tests_properties(mega_defense_selftest_procgen PROPERTIES TIMEOUT 300)
 # 돌지 않으므로, 이 검사가 없으면 전부 "컴파일은 되는 코드"로 남는다.
 add_test(NAME mega_defense_selftest_rig
          COMMAND mega_defense --selftest 25000
-                 --ab entity_store=ecs --ab boss_render=rig --ab camera=tilted3d)
+                 --ab entity_store=ecs --ab boss_render=rig --ab camera=tilted3d
+                 --match-unix ${MEGA_SELFTEST_UNIX_QUIET})
 set_tests_properties(mega_defense_selftest_rig PROPERTIES TIMEOUT 300)
 
 # G4 가 들여온 팔들. 통행 격자 · 플로우 필드 · 군집 조향 · 은신 인지 · 정예 행동
@@ -369,7 +402,8 @@ set_tests_properties(mega_defense_selftest_rig PROPERTIES TIMEOUT 300)
 add_test(NAME mega_defense_selftest_ai
          COMMAND mega_defense --selftest 25000
                  --ab map=procgen --ab pathing=flowfield --ab steering=1
-                 --ab stealth=1 --ab elite_brain=bt)
+                 --ab stealth=1 --ab elite_brain=bt
+                 --match-unix ${MEGA_SELFTEST_UNIX_QUIET})
 set_tests_properties(mega_defense_selftest_ai PROPERTIES TIMEOUT 300)
 
 # 같은 축의 **다른 팔**. 위 검사가 도는 것은 필드 팔과 트리 팔뿐이라, A* 경로와
@@ -377,7 +411,8 @@ set_tests_properties(mega_defense_selftest_ai PROPERTIES TIMEOUT 300)
 # 표현이 같은 게임"이라는 판정이 제품 경계 안에서도 성립한다.
 add_test(NAME mega_defense_selftest_ai_astar
          COMMAND mega_defense --selftest 25000
-                 --ab map=procgen --ab pathing=astar --ab elite_brain=fsm)
+                 --ab map=procgen --ab pathing=astar --ab elite_brain=fsm
+                 --match-unix ${MEGA_SELFTEST_UNIX_QUIET})
 set_tests_properties(mega_defense_selftest_ai_astar PROPERTIES TIMEOUT 300)
 
 # G5·G6 가 들여온 팔들. 셋 다 기본 팔에서는 한 줄도 돌지 않는다.
@@ -391,15 +426,18 @@ set_tests_properties(mega_defense_selftest_ai_astar PROPERTIES TIMEOUT 300)
 #   meta        매치 밖 소비(sink). --buy-tier 가 지갑에서 스크랩을 빼 시작 골드
 #               티어를 올리고, 그 값이 다음 판의 balance_.startGold 에 더해진다.
 add_test(NAME mega_defense_selftest_poly
-         COMMAND mega_defense --selftest 25000 --ab pathing=poly)
+         COMMAND mega_defense --selftest 25000 --ab pathing=poly
+                 --match-unix ${MEGA_SELFTEST_UNIX_QUIET})
 set_tests_properties(mega_defense_selftest_poly PROPERTIES TIMEOUT 300)
 
 add_test(NAME mega_defense_selftest_avatar_gate
-         COMMAND mega_defense --selftest 25000 --ab avatar_gate=1)
+         COMMAND mega_defense --selftest 25000 --ab avatar_gate=1
+                 --match-unix ${MEGA_SELFTEST_UNIX_QUIET})
 set_tests_properties(mega_defense_selftest_avatar_gate PROPERTIES TIMEOUT 300)
 
 add_test(NAME mega_defense_selftest_meta
-         COMMAND mega_defense --selftest 25000 --buy-tier 5)
+         COMMAND mega_defense --selftest 25000 --buy-tier 5
+                 --match-unix ${MEGA_SELFTEST_UNIX_QUIET})
 set_tests_properties(mega_defense_selftest_meta PROPERTIES TIMEOUT 300)
 
 # ══ G7: 골든 해시 체인 리플레이 ══════════════════════════════════════
@@ -433,7 +471,8 @@ function(mega_add_replay_pair arm ticks port)
         set(shared --host ${port})
     endif()
     add_test(NAME mega_defense_record_${arm}
-             COMMAND mega_defense --selftest ${ticks} --record ${path} ${shared} ${ARGN})
+             COMMAND mega_defense --selftest ${ticks} --record ${path}
+                     --match-unix ${MEGA_SELFTEST_UNIX_QUIET} ${shared} ${ARGN})
     set_tests_properties(mega_defense_record_${arm} PROPERTIES
                          TIMEOUT 300 FIXTURES_SETUP replay_${arm})
     add_test(NAME mega_defense_replay_${arm}
@@ -480,12 +519,23 @@ set_tests_properties(mega_defense_gpu_selftest PROPERTIES
 #   test_defense_coop_process  호스트도 클라이언트도 mega_defense 실행 파일이다.
 #                              main.cpp → RunDefense → 클라이언트 루프까지 이어지는
 #                              배선 전체를 프로세스 경계 밖에서 확인한다.
+#   test_live_ops_wiring       같은 이유로 라이브 운영 축에 선 세 번째다. 배정이
+#                              스위치 표에 얹히는 자리 · 이벤트 수정자가 웨이브
+#                              수치에 곱해지는 자리 · 정산이 스크랩 배율을 곱하는
+#                              자리를 제품 DefenseApp 안에서 관측한다. 그 셋은
+#                              `live/` 단위 테스트가 닿지 못하는 배선이었다.
 #
 # 후자는 mega_defense 실행 파일과 그 옆의 assets 를 실제로 실행하므로 빌드 의존이
 # 필요하다. 전자도 같은 assets 를 읽는다(없어도 폴백으로 돌지만, 두 테스트가 같은
 # 콘텐츠를 보게 해 두는 편이 진단이 쉽다).
 add_dependencies(test_defense_coop_process mega_defense)
 add_dependencies(test_defense_client_loop mega_defense)
+# 이 검사는 **배포되는** assets/flags.txt · events.txt · balance.script ·
+# waves.txt 를 읽는다. 폴백으로 돌면 "전원 기본 팔 · 이벤트 없음"이 되어 배선이
+# 죽은 상태와 같은 값을 내므로, 파일이 실제로 채택됐는지를 먼저 단언한다.
+add_dependencies(test_live_ops_wiring mega_defense)
+# 매치 두 판을 헤드리스로 끝까지 돌린다(정산은 매치가 끝나야 일어난다).
+set_tests_properties(test_live_ops_wiring PROPERTIES TIMEOUT 180)
 # 아래 둘도 실행 파일 옆의 assets/ 를 읽는다(에셋 리로드와 프레임 계측은 진짜
 # 스프라이트가 있어야 성립한다). 그 디렉터리를 만드는 것은 mega_defense 의
 # POST_BUILD 다.

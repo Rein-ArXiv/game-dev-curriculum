@@ -8,6 +8,12 @@
 // 2번이 이 파일의 존재 이유다. 버킷 해시에서 플래그 이름 결합을 빼면 1·3·4는
 // 그대로 통과하고 2만 죽는다 — 그 상태에서는 두 실험이 정확히 같은 사용자
 // 집합을 켜므로, 한 실험의 효과가 다른 실험의 결과로 보고된다.
+//
+// 이 파일이 **묻지 않는 것**: 확정된 배정이 게임에 실제로 얹히는가. 여기 있는
+// 것은 `live::FeatureFlags` 하나이고, 그 결과를 `Switches` 표에 옮기는
+// `Switches::ApplyFlags` 는 한 줄도 지나지 않는다. 그 배선을 무력화해도 이
+// 파일은 전부 통과한다 — 그래서 `tests/test_live_ops_wiring.cpp` 가 제품
+// `DefenseApp` 을 세워 같은 질문을 한 계단 위에서 다시 묻는다.
 #include "live/feature_flag.hpp"
 #include "test_util.h"
 

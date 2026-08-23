@@ -385,7 +385,8 @@ function(mega_add_replay_pair arm ticks port)
         set(shared --host ${port})
     endif()
     add_test(NAME mega_defense_record_${arm}
-             COMMAND mega_defense --selftest ${ticks} --record ${path} ${shared} ${ARGN})
+             COMMAND mega_defense --selftest ${ticks} --record ${path}
+                     --match-unix ${MEGA_SELFTEST_UNIX_QUIET} ${shared} ${ARGN})
     set_tests_properties(mega_defense_record_${arm} PROPERTIES
                          TIMEOUT 300 FIXTURES_SETUP replay_${arm})
     add_test(NAME mega_defense_replay_${arm}
@@ -394,6 +395,8 @@ function(mega_add_replay_pair arm ticks port)
                          TIMEOUT 300 FIXTURES_REQUIRED replay_${arm})
 endfunction()
 ```
+
+기록 쪽은 시각을 못박는다. `assets/events.txt` 의 창은 주 단위로 **반복**하므로, 못박지 않으면 같은 명령이 화요일과 일요일에 서로 다른 게임을 기록한다 — 일요일에는 boss_rush 창이 열려 적 체력 x1.2 에 보스 3배가 걸린다. 기록과 재생은 파일이 시각을 나르므로 그때도 서로 일치하지만(`Replay::matchUnix`), 골든 체인의 값 자체가 요일마다 달라지면 "어제와 같은 해시인가"를 물을 수 없다. 실제로 이 저장소는 그 함정을 한 번 밟았다 — 2026-08-23(일)에 `mega_defense_selftest_ai_astar` 가 그 이유로 죽었고, 코드는 그 주에 한 줄도 바뀌지 않았다.
 
 재생 쪽에는 `--ab` 를 넘기지 않는다. 팔은 파일이 소유하고, 재생 실행 파일은 명령줄 스위치를 만나면 무시하지 않고 **거절한다** — 재생 중에 팔 하나를 덮으면 기록과 다른 게임을 돌린 뒤 그 차이를 결정성 결함으로 보고하게 된다.
 
