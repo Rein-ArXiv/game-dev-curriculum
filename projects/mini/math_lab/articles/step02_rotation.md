@@ -324,6 +324,93 @@ CHECK(free > 1e-3f);
 
 `free` 쪽이 대조군이다 — yaw=0 에서는 같은 조작이 회전을 *실제로 바꿔야* 한다. 이게 없으면 `QuatFromEulerXYZ` 가 무엇을 돌려주든 (예컨대 곱 순서를 뒤집어도) `locked` 만으로는 통과할 수 있다.
 
+여기까지가 *고정 사례* 다 — 잘 고른 입력 몇 개를 표로 못 박는다. 2.6 rad 짜리 호 하나, 175 개 Euler 조합 하나. 그런데 쿼터니언이 지켜야 하는 것의 대부분은 "이 입력에서 이 값" 이 아니라 "어떤 입력에서든 이 관계" 다. 정답표를 만들 수 없는 그쪽을 덮으려면 입력을 *생성* 해야 한다.
+
+`tests/property.h` 가 그 하네스다. 외부 라이브러리 없이 *생성기 · 시드 루프 · 축소기 · 반례 출력* 넷뿐이다. 용어는 알고리즘 쪽 property·fuzz 검증의 구분을 그대로 쓴다.
+
+- **property** — 생성된 모든 입력이 지켜야 하는 관계. 고정 기대값 표가 아니다.
+- **불변식** — 그중 연산 전후로 계속 참인 성질. 여기서는 단위 노름과 이중 덮개가 그렇다.
+- **oracle** — 관계가 참인지 판단하는 근거. 이 lab 은 셋만 쓴다: 수학적 항등식, 독립 구현 대조(differential), 입력 변환 전후 관계(metamorphic).
+- **shrink** — 실패를 유지한 채 반례를 단순화하는 절차.
+- **fuzz** — 이 층은 coverage-guided fuzzing 이 *아니다*. coverage 되먹임도 sanitizer corpus 도 없고, 입력은 seed 에서 결정론적으로 나올 뿐이다. 깊은 파서 상태를 여는 일은 이 하네스의 몫이 아니다.
+
+생성기가 균등 난수면 경계가 거의 안 나온다. 각도를 −6.5 ~ 6.5 에서 균등하게 뽑으면 0 이나 ±π/2 는 사실상 나오지 않는다. 그래서 파라미터마다 `{lo, hi, simplest}` 를 주고 네 갈래로 뽑는다 — 일반 난수 60%, 경계값 15%, 라운드값 10%, 경계 바로 옆의 퇴화값 15%.
+
+<!-- snippet: tests/property.h@property-distribution -->
+```cpp
+inline float GenerateParam(Rng& rng, const ParamSpec& spec) {
+    const float span = spec.hi - spec.lo;
+    const uint32_t bucket = rng.Next() % 100u;
+
+    if (bucket < 60u) return rng.Range(spec.lo, spec.hi);
+
+    const float anchors[4] = {spec.lo, spec.hi, spec.simplest, 0.0f};
+    if (bucket < 75u) {
+        const float value = anchors[rng.Next() & 3u];
+        return (value < spec.lo || value > spec.hi) ? spec.simplest : value;
+    }
+    // ...
+    float base = anchors[rng.Next() & 3u];
+    if (base < spec.lo || base > spec.hi) base = spec.simplest;
+    float value = base + span * 1e-4f * (rng.Unit() * 2.0f - 1.0f);
+    // ...
+}
+```
+
+`simplest` 는 두 가지 일을 한다. 생성기의 경계 후보이자 *축소기가 향하는 목표* 다. 후보가 언제나 `[lo, hi]` 안이므로 축소해도 사전조건이 깨지지 않는다 — 실패의 원인이 축소 도중에 바뀌지 않는다는 뜻이다. 무작위 입력을 만들고 조건에 안 맞으면 버리는 rejection 대신 domain 안에서만 값이 나오게 *구성* 하는 쪽을 골랐다.
+
+Step 2 가 얹은 property 는 넷이다.
+
+- `quat/norm-preserved` — 축-각 생성기는 언제나 단위 쿼터니언을 내고, `QuatSlerp`·`QuatNlerp` 는 *비단위* 입력을 받아도 단위 결과를 낸다. 그리고 단위 쿼터니언의 샌드위치 회전은 벡터 길이를 보존한다.
+- `quat/compose-assoc` — `(q1 ⊗ q2) ⊗ q3 = q1 ⊗ (q2 ⊗ q3)`. 허용 오차는 통과시키려고 키운 값이 아니라 반올림 횟수에서 나온다. 성분 하나가 4 곱 + 3 합이고 입력이 단위라 각 항이 1 이하, 두 번 겹치면 성분당 반올림 16 회 이하 → 16u. 여유 2 배로 32u 를 계약으로 쓴다 (u = 2⁻²⁴). 비퇴화 표본의 정의는 *비가환* 이다 — 곱이 상수나 가환 연산으로 바뀌면 결합성이 자명해지기 때문이다.
+- `quat/double-cover` — q 와 −q 는 같은 회전이다.
+- `quat/slerp-uniform` — 등각속도.
+
+이중 덮개는 tolerance 가 아니라 `==` 로 잡는다. `(−q) v (−q)*` 를 전개하면 모든 항에서 부호가 두 번 바뀌므로 IEEE 곱셈에서 *같은 비트* 가 나온다. `QuatToMatrix` 도 성분이 부호에 대해 짝수 차수라 마찬가지다. 계약이 허용하는 가장 강한 관계를 고른다는 원칙이 적용된 자리다.
+
+<!-- snippet: tests/core_tests.cpp@step02-property-double-cover -->
+```cpp
+const Vector3 r1 = mathlab::QuatRotateVec(qa, v);
+const Vector3 r2 = mathlab::QuatRotateVec(QuatNeg(qa), v);
+const bool sameVec = (r1.x == r2.x) && (r1.y == r2.y) && (r1.z == r2.z);
+if (!obs.Bound("q v q* vs (-q) v (-q)* (exact)", sameVec ? 0.0 : 1.0, 0.0)) ok = false;
+// ...
+const float d = QuatAbsDot(qa, qb);
+if (d < 1e-4f) {
+    obs.skipped = true;
+    return ok;
+}
+const Quaternion s1 = mathlab::QuatSlerp(qa, qb, t);
+const Quaternion s2 = mathlab::QuatSlerp(qa, QuatNeg(qb), t);
+// ...
+```
+
+`d < 1e-4f` 가 사전조건이다. 두 끝점이 직교에 너무 가까우면 짧은 호 뒤집기의 방향이 정해지지 않아 부호 불변이 성립하지 않는다. 그런 표본은 실패가 아니라 *판정하지 않음* 으로 세고, 탈락이 전체의 5% 를 넘으면 그 자체를 실패로 본다 — 사전조건이 property 를 통째로 비워 버리는 것을 막는 장치다.
+
+등속 property 는 한 번 헛발을 짚었다. 처음에는 인접 표본 사이의 *현 길이* 를 원본 쿼터니언에서 쟀는데, 그러면 `QuatSlerp` 의 가중치를 `wa = 1−t, wb = t` 로 바꿔치기한 변이가 살아남는다. 4 차원 직선(현) 위를 등간격으로 가는 구현도 현 길이가 균일하기 때문이다. 등속은 *단위 구 위* 의 성질이므로 표본을 구 위로 올린 뒤 재고, 원본이 애초에 구 위에 있었는지를 따로 단언해야 한다.
+
+<!-- snippet: tests/core_tests.cpp@step02-property-slerp-uniform -->
+```cpp
+if (!obs.Bound("max|norm(slerp sample) - 1| over the arc", (double)slerpNormError,
+               32.0 * kUnitRoundoff)) ok = false;
+if (!obs.Bound("slerp chord max/min - 1", (double)slerpRatio - 1.0, 0.02)) ok = false;
+// ...
+if (arc >= 1.5f) {
+    float nlerpNormError = 0.0f;
+    const float nlerpRatio =
+        QuatChordRatio(&mathlab::QuatNlerp, a, b, kSteps, nlerpNormError);
+    if (!obs.AtLeast("nlerp chord max/min - 1 (control floor)",
+                     (double)nlerpRatio - 1.0, 0.05)) {
+        ok = false;
+    }
+    obs.interesting = true;
+}
+```
+
+생성기도 독립 난수 나열이 아니다. 시작 회전 `a` 를 뽑은 뒤 `b` 를 *`a` 에서 정확히 `arcAngle` 라디안 떨어진 회전으로 구성* 한다. 호의 길이가 파라미터로 잡혀 있어야 "0.5 rad 짜리 호를 32 등분하면 현이 0.0156 이고 성분 오차는 1e-7 대" 라는 계산이 성립하고, 그래야 1.02 라는 상한에 근거가 생긴다.
+
+표본 수는 CI 부담과의 절충이다. 기본값(4,000 · 4,000 · 4,000 · 800)은 매 커밋에 도는 크기이고, 오래 도는 캠페인은 같은 실행 파일에 `--scale=25` 를 준다. `--seed=` 로 master seed 를 갈아 끼울 수 있고, 반례가 나오면 축소된 파라미터와 재현 명령 한 줄이 `stderr` 로 나온다.
+
 ```text
 $ ctest --test-dir build -C Release -R math_step02_rotation --output-on-failure
     Start 2: math_step02_rotation
@@ -337,8 +424,14 @@ $ ./build/Release/math_core_tests.exe step02
 [step02] quaternion/identities ........... 9 checks, 0 failed
 [step02] quaternion/slerp_uniform_speed .. 6 checks, 0 failed
 [step02] quaternion/gimbal_lock .......... 2 checks, 0 failed
-step02: 3 case(s), 17 check(s), 0 failure(s)
+[step02] quat/norm-preserved ............. 3 checks, 0 failed  (4000 samples, 3366 non-degenerate, 0 skipped, worst 0.375x on '|norm(axis-angle) - 1|')
+[step02] quat/compose-assoc .............. 3 checks, 0 failed  (4000 samples, 2912 non-degenerate, 0 skipped, worst 0.125x on '1 - |dot(left, right)|')
+[step02] quat/double-cover ............... 3 checks, 0 failed  (4000 samples, 3351 non-degenerate, 1 skipped, worst 0.188x on '1 - |dot(slerp(a,b), slerp(a,-b))|')
+[step02] quat/slerp-uniform .............. 3 checks, 0 failed  (800 samples, 402 non-degenerate, 0 skipped, worst 0.344x on 'nlerp chord max/min - 1 (control floor)')
+step02: 7 case(s), 29 check(s), 0 failure(s)
 ```
+
+`worst` 는 그 property 의 조항 중 상계에 가장 가까웠던 관측의 비율이다. 0.375 는 "가장 나빴던 표본도 선언한 상계의 37.5% 밖에 못 갔다" 는 뜻이고, 1.00 에 붙으면 계약이 빠듯하다는 신호다. 유도한 상계가 실제 관측보다 몇 배 넉넉한지가 한 줄로 보인다.
 
 ---
 
@@ -349,10 +442,11 @@ Step 2 에서 만든 것.
 1. **`algo/quaternion.h`** — Axis-Angle / Euler XYZ → Quaternion, Slerp / Nlerp, 짐벌락 검출. 0-vector 가드.
 2. **`scenes/rotation_scene.{h,cpp}`** — 두 모드 (Euler, Slerp vs Nlerp) 토글, 3D 카메라, 축 triad + 큐브 렌더, 슬라이더 패널.
 3. **3D 시각화 패턴** — `BeginMode3D` + `rlPushMatrix` 행렬 스택 + `DrawCylinderEx / DrawCubeV`. 이후 Scene 들에서 재사용 (SDF, BVH, 카메라 투영).
+4. **`tests/property.h`** — 시드 무작위 property 층의 하네스. 분포를 설계한 생성기, 사전조건을 유지하는 축소기, master seed 와 표본 번호를 함께 찍는 반례 보고. 쿼터니언 말고 다른 알고리즘도 같은 표에 property 를 등록한다.
 
 math 시리즈 part04 (회전 표현 비교) 와 part05 (쿼터니언) 의 *수식과 다이어그램* 이 *마우스에 반응하는 3D 큐브와 빨간 짐벌락 경고* 로 살아 있다.
 
-이 step 의 한계. 입력이 *슬라이더뿐* 이라 회전축을 마우스로 직접 끄는 조작이 없고, 축-각 표현을 따로 보여주는 모드도 없다 (`Mode` 는 `Euler` 와 `SlerpVsNlerp` 둘뿐). 자동 검증이 고정한 것은 *대수적 성질* 이고, Scene 이 실제로 그리는 것 — 큐브의 자세, 축 triad 의 방향, 빨간 경고가 켜지는 순간 — 은 여전히 눈으로만 확인된다. Slerp/Nlerp 판별도 `QuatAngleBetween` 이라는 *같은 파일 안의 보조 함수* 를 기준으로 재므로, 각도 계산 자체가 틀렸다면 두 곡선을 함께 오독한다.
+이 step 의 한계. 입력이 *슬라이더뿐* 이라 회전축을 마우스로 직접 끄는 조작이 없고, 축-각 표현을 따로 보여주는 모드도 없다 (`Mode` 는 `Euler` 와 `SlerpVsNlerp` 둘뿐). 자동 검증이 고정한 것은 *대수적 성질* 이고, Scene 이 실제로 그리는 것 — 큐브의 자세, 축 triad 의 방향, 빨간 경고가 켜지는 순간 — 은 여전히 눈으로만 확인된다. 고정 사례 쪽의 Slerp/Nlerp 판별은 `QuatAngleBetween` 이라는 *같은 파일 안의 보조 함수* 를 기준으로 재므로, 각도 계산 자체가 틀렸다면 두 곡선을 함께 오독한다 (property 쪽은 제품의 `QuatNormalize` 를 부르지 않고 측정 안에서 직접 정규화해 이 결합을 끊었다). property 층 자체의 사각지대도 남는다. 축소기는 파라미터를 하나씩 줄이는 탐욕적 방식이라 *두 값을 동시에 바꿔야 더 작아지는* 반례는 놓치고, 표본 분포는 실제 장애 데이터가 아니라 손으로 정한 비율이며, 짐벌락처럼 Euler 표현에 묶인 성질은 아직 고정 사례에만 있다.
 
 ## 더 읽을거리
 

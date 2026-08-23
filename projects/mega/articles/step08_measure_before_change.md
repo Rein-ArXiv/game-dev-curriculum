@@ -386,6 +386,9 @@ void TestFrameLoopIsInstrumented() {
     DefenseOptions options;
     options.selftest = true;
     options.profilePath = platform::ExecutableDirectory() + "/trace_probe.wal";
+    // 매 실행 같은 자리에서 출발한다 — 이 파일은 지워지지 않아 ctest 를 거듭
+    // 돌리면 지갑이 누적한다(`test_profile_isolation` 이 그 누적을 잰다).
+    CHECK(TruncateFile(options.profilePath));
     DefenseApp app;
     CHECK(app.Init(options));
 

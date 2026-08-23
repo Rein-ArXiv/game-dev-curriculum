@@ -230,30 +230,34 @@ ctest --test-dir build -C Release --output-on-failure
 ```
 
 ```text
- 1/19 Test  #1: physics_core_tests ...............   Passed    0.07 sec
- 2/19 Test  #2: physics_chrome_tests .............   Passed    0.07 sec
- 3/19 Test  #3: physics_forces_tests .............   Passed    0.07 sec
- 4/19 Test  #4: physics_collision_tests ..........   Passed    0.09 sec
- 5/19 Test  #5: physics_broad_tests ..............   Passed    0.12 sec
- 6/19 Test  #6: physics_response_tests ...........   Passed    0.10 sec
- 7/19 Test  #7: physics_constraints_tests ........   Passed    0.08 sec
- 8/19 Test  #8: physics_determinism_tests ........   Passed    0.12 sec
- 9/19 Test  #9: step01.layout ....................   Passed    0.03 sec
-10/19 Test #10: step02.integrators ...............   Passed    0.02 sec
-11/19 Test #11: step03.forces ....................   Passed    0.03 sec
-12/19 Test #12: step04.aabb_overlap ..............   Passed    0.02 sec
-13/19 Test #13: step04.broad_phase ...............   Passed    0.06 sec
-14/19 Test #14: step05.narrow_phase ..............   Passed    0.03 sec
-15/19 Test #15: step06.contact_impulse ...........   Passed    0.02 sec
-16/19 Test #16: step06.response ..................   Passed    0.04 sec
-17/19 Test #17: step07.distance_projection .......   Passed    0.03 sec
-18/19 Test #18: step07.constraints ...............   Passed    0.03 sec
-19/19 Test #19: step08.determinism ...............   Passed    0.07 sec
+ 1/23 Test  #1: physics_core_tests ...............   Passed    0.02 sec
+ 2/23 Test  #2: physics_chrome_tests .............   Passed    0.03 sec
+ 3/23 Test  #3: physics_forces_tests .............   Passed    0.03 sec
+ 4/23 Test  #4: physics_collision_tests ..........   Passed    0.03 sec
+ 5/23 Test  #5: physics_broad_tests ..............   Passed    0.08 sec
+ 6/23 Test  #6: physics_response_tests ...........   Passed    0.04 sec
+ 7/23 Test  #7: physics_constraints_tests ........   Passed    0.03 sec
+ 8/23 Test  #8: physics_determinism_tests ........   Passed    0.08 sec
+ 9/23 Test  #9: physics_property_tests ...........   Passed    0.93 sec
+10/23 Test #10: step01.layout ....................   Passed    0.02 sec
+11/23 Test #11: step02.integrators ...............   Passed    0.02 sec
+12/23 Test #12: step03.forces ....................   Passed    0.02 sec
+13/23 Test #13: step04.aabb_overlap ..............   Passed    0.02 sec
+14/23 Test #14: step04.broad_phase ...............   Passed    0.06 sec
+15/23 Test #15: step05.narrow_phase ..............   Passed    0.02 sec
+16/23 Test #16: step06.contact_impulse ...........   Passed    0.02 sec
+17/23 Test #17: step06.response ..................   Passed    0.03 sec
+18/23 Test #18: step07.distance_projection .......   Passed    0.02 sec
+19/23 Test #19: step07.constraints ...............   Passed    0.02 sec
+20/23 Test #20: step08.determinism ...............   Passed    0.05 sec
+21/23 Test #21: step05.property ..................   Passed    0.03 sec
+22/23 Test #22: step06.property ..................   Passed    0.24 sec
+23/23 Test #23: step08.property ..................   Passed    0.08 sec
 
-100% tests passed out of 19
+100% tests passed out of 23
 ```
 
-등록된 이름이 두 층이다. 앞의 여덟 개는 *실행 파일 하나를 통째로* 도는 이름이고 — chrome (레이아웃 분할), core 헤더 (적분기 오차 차수와 에너지 거동 / restitution target / 누적 impulse 클램프 / AABB / 거리 projection), forces (force 항·종단 속도·에너지 소산), narrow phase (SAT·GJK+EPA 의 hit·깊이·법선), broad phase (overlap 쌍 집합 대조), response (접촉 수집·SI 수렴·위치 보정량), constraints (chain stiffness·Baumgarte drift), 그리고 이 Scene 의 결정성 — 뒤의 열한 개는 *그 실행 파일들을 step 단위로 자른* 이름이다. 각 실행 파일이 `argv[1]` 로 케이스 필터를 받으므로 (`tests/step_cases.h` 의 {step, 이름, 함수} 표), Step k 를 막 끝낸 독자는 `ctest -R stepNN` 으로 그 시점에 존재하는 검사만 돌릴 수 있다. `physics_core_tests` 처럼 한 파일이 네 step 에 걸친 경우 — core 헤더는 여러 주제가 모이는 자리다 — 그 파일은 `step02` / `step04` / `step06` / `step07` 네 이름으로 나뉜다.
+등록된 이름이 두 층이다. 앞의 아홉 개는 *실행 파일 하나를 통째로* 도는 이름이고 — chrome (레이아웃 분할), core 헤더 (적분기 오차 차수와 에너지 거동 / restitution target / 누적 impulse 클램프 / AABB / 거리 projection), forces (force 항·종단 속도·에너지 소산), narrow phase (SAT·GJK+EPA 의 hit·깊이·법선), broad phase (overlap 쌍 집합 대조), response (접촉 수집·SI 수렴·위치 보정량), constraints (chain stiffness·Baumgarte drift), 이 Scene 의 결정성, 그리고 입력을 손으로 고르지 않는 property 배터리 (무작위 볼록쌍 · 무작위 강체 장면) — 뒤의 열네 개는 *그 실행 파일들을 step 단위로 자른* 이름이다. 각 실행 파일이 `argv[1]` 로 케이스 필터를 받으므로 (`tests/step_cases.h` 의 {step, 이름, 함수} 표), Step k 를 막 끝낸 독자는 `ctest -R stepNN` 으로 그 시점에 존재하는 검사만 돌릴 수 있다. `physics_core_tests` 처럼 한 파일이 네 step 에 걸친 경우 — core 헤더는 여러 주제가 모이는 자리다 — 그 파일은 `step02` / `step04` / `step06` / `step07` 네 이름으로 나뉜다.
 
 `physics_determinism_tests` 는 `MeasureScene` 의 `InitBodies` / `StepSim` / `RunDeterminismTest` 를 창 없이 부른다. GUI 가 `DrawWorld` 에서 넘겨주던 캔버스 좌표만 `SetCanvas` 로 주입하면 `T` 키가 밟는 것과 같은 경로다.
 
@@ -307,6 +311,48 @@ ctest --test-dir build -C Release -R step08 --output-on-failure
 **통합으로 측정값이 움직였고, 그게 정상이다.** 예전 `StepSim` 은 위치 보정을 자체 구현하면서 iteration 안에서 쌍을 하나 밀 때마다 *그 자리의 최신 위치로* 다음 쌍의 침투를 다시 쟀고, 벽·바닥은 body-body 보정이 전부 끝난 *뒤* 의 위치로 계산했다. 공유 구현은 Response 가 하던 대로 iteration 시작 시점에 접촉을 한 번 수집해 *그 스냅숏* 으로 모든 보정을 적용한다. 같은 물리, 다른 갱신 순서다 — 그리고 Gauss-Seidel 계열 풀이에서 갱신 순서는 결과다. 그래서 900 스텝 뒤 평균 침투가 0.6946 → 0.6965, 최저점이 316.572 → 316.583, KE 가 3.26e-4 → 3.23e-4 로 움직였고 shuffle 실험의 max delta 는 0.700 → 0.400 이 됐다. 반대로 유효질량 리터럴(`2.0f` / `1.0f`)은 이 워크로드의 `invMass` 가 1 이라 *숫자로는* 아무 차이도 만들지 않았다 — 값이 맞았기 때문이 아니라 가정이 우연히 성립했기 때문이고, 그래서 더 오래 숨어 있었다. 중요한 것은 어느 쪽이 더 예쁜 숫자인가가 아니라 **이전 숫자가 무엇을 재고 있었는가** 다. 이전 값들은 Response 가 가르친 위치 보정이 아니라 이 Scene 안에만 존재하던 사본의 거동이었다. 통합 직전에 두 Scene 을 같은 조건으로 240 스텝 돌려 보면 위치가 0.557 px, 속도가 4.77 px/s 벌어져 있었다. 지금은 둘 다 정확히 0 이고, 그 사실이 위 목록의 마지막 줄로 ctest 에 남는다.
 
 접촉 수집에서 바닥 접촉을 지우면 body 가 세계 밖으로 떨어져 절대 기준의 최저점(16974)과 KE(24300) 두 줄이 실패하고, 접촉이 아예 사라지므로 shuffle 이 섞을 것도 없어져 순서 의존 검사 세 줄이 함께 무너진다. 통합 전에는 같은 실험이 최저점 347 / 평균 침투 6.83 을 냈다 — `StepSim` 의 위치 보정 단계가 바닥을 *두 번째로* 처리하고 있어서, 접촉 수집을 지워도 바닥이 절반만 사라졌기 때문이다. 그 중복이 사라진 지금은 바닥이 한 곳에만 있다.
+
+### 하나의 배치가 아니라 배치 공간에서의 결정성
+
+위의 판정은 전부 *seed 1, body 24 개, 같은 초기 배치* 하나에서 나온다. "이 워크로드가 재현된다" 와 "이 솔버가 재현된다" 는 다른 주장이다. 접촉이 몇 개 생기느냐, 정적 body 가 섞이느냐, 질량이 얼마나 벌어지느냐에 따라 도는 코드 경로가 달라지기 때문이다.
+
+그래서 무작위 장면 배터리로 같은 계약을 넓힌다.
+
+```powershell
+ctest --test-dir build -C Release -R step08.property --output-on-failure
+.\build\Release\physics_property_tests.exe step08   # 같은 것을 직접 — 관측값까지 본다
+```
+
+```text
+[step08] determinism
+  48 장면 x 300 프레임 x 2 회: bit 동일
+  접촉이 둘 이상 얽힌 장면 48 개 중 순서를 돌렸을 때 갈라진 것 46 개 (최대 60.2678 px)
+  ok
+1 case(s) ok: physics property [step08]
+```
+
+무작위 장면 48 개를 각각 300 프레임씩 두 번 돌려 위치·속도의 *바이트* 를 비교한다. `== 0.0f` 가 아니라 `memcmp` 다 — 부동소수점 비교는 `-0.0f == 0.0f` 를 참으로 만들지만 바이트는 다르고, 재현성 주장은 값이 아니라 비트에 대한 것이다.
+
+**음성 대조군이 붙어 있다.** 반복 재현성만 보면 아무 일도 일어나지 않는 시뮬도 통과한다. 그래서 같은 장면을 contact 처리 순서만 매 iter 한 칸씩 돌려 다시 돌리고, 갈라지는지 본다. 접촉이 둘 이상 얽힌 48 개 장면 중 46 개가 갈라졌고 최대 편차는 60.3 px 다. Gauss-Seidel 풀이의 순서 의존이 이 배터리에서도 그대로 재현된다는 뜻이고, 동시에 위의 bit 동일이 공허하지 않다는 증거다.
+
+<!-- snippet: tests/physics_property_tests.cpp@property-negative-control -->
+```cpp
+const physlab::WorldBounds bounds = BoundsOf(in);
+std::vector<physlab::Contact> contacts;
+physlab::core::GatherCircleContacts(first, bounds, contacts);
+if (contacts.size() >= 2) {
+    ++determinismContended;
+    const auto rotated = RunFrames(in, kDeterminismFrames, true);
+    const float delta = WorstDelta(first, rotated);
+    determinismWorstShuffleDelta =
+        std::max(determinismWorstShuffleDelta, delta);
+    if (delta > 1e-4f) ++determinismDiverged;
+}
+```
+
+`SolveSequentialImpulse` 에 프로세스 전역 카운터로 처리 시작 위치를 미는 변이를 넣어 확인했다. 반복 실행의 위치 델타는 `0` 인 채로 속도 비트만 갈라졌고, 그래서 바이트 비교가 잡아냈다 — 위치만 봤다면 통과했을 변이다.
+
+이 배터리가 넓히지 *못하는* 것도 그대로다. 여전히 같은 프로세스, 같은 빌드, 같은 CPU 안의 반복성이다. 배치 공간은 넓어졌지만 실행 환경은 하나뿐이므로, cross-compiler / cross-CPU lockstep 은 이 lab 이 답하지 않는 질문으로 남는다.
 
 physics_lab 은 *시리즈의 주장이 측정으로 검증되는 도구*. *글의 그래프* 가 lab 의 *실시간 곡선* 으로 재현되고, *발산 / 수렴 / drift / 결정성 위반* 의 순간을 *직접 눈으로* 본다. 이게 *물리 lab* 이 *시각화 데모* 와 다른 결정적 차이.
 

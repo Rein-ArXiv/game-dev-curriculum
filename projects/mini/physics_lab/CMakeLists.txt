@@ -99,6 +99,11 @@ physlab_add_scene_test(physics_constraints_tests src/scenes/constraints_scene.cp
 # 그 동치를 ctest 가 직접 확인한다.
 physlab_add_scene_test(physics_determinism_tests src/scenes/measure_scene.cpp
                                                  src/scenes/response_scene.cpp)
+# 불변식 property 층. 무작위 볼록쌍은 narrow phase 의 두 구현을, 무작위 강체
+# 장면은 공유 접촉 솔버를 친다 — 그리고 그 솔버가 Response Scene 이 도는 것과
+# 같은 프레임인지도 property 하나가 직접 대조하므로 두 TU 를 함께 링크한다.
+physlab_add_scene_test(physics_property_tests    src/scenes/narrow_phase_scene.cpp
+                                                 src/scenes/response_scene.cpp)
 
 # --- step 단위 실행 ---------------------------------------------------------
 # 위의 전체 실행 타깃은 그대로 두고 *더한다*. 각 실행 파일은 argv[1] 로 케이스
@@ -121,6 +126,11 @@ physlab_add_step_test(step06.response           physics_response_tests    step06
 physlab_add_step_test(step07.distance_projection physics_core_tests       step07)
 physlab_add_step_test(step07.constraints        physics_constraints_tests step07)
 physlab_add_step_test(step08.determinism        physics_determinism_tests step08)
+# property 층도 같은 규칙으로 잘린다 — 볼록쌍은 step05, 강체 장면은 step06,
+# bit 결정성은 step08 소속이다.
+physlab_add_step_test(step05.property           physics_property_tests    step05)
+physlab_add_step_test(step06.property           physics_property_tests    step06)
+physlab_add_step_test(step08.property           physics_property_tests    step08)
 
 # 플랫폼 분기.
 if(UNIX AND NOT APPLE)

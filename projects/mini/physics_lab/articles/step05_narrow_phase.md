@@ -409,6 +409,81 @@ CHECK(std::fabs(satDepth - ref.intersect) > 0.4f);
 CHECK(satDepth > 0.0f);
 ```
 
+### 무작위 볼록쌍 property 배터리
+
+위의 100 조합은 전부 반크기 1 정사각형이다. 정사각형은 중심 대칭이고 변이 넷뿐이라 SAT 의 축 후보가 사실상 둘이다. 삼각형, 오각형, y 축으로 눌린 칠각형에서도 같은 계약이 성립하는지는 그 100 조합이 답하지 않는다. 입력을 손으로 고르는 한 손으로 고른 만큼만 안다.
+
+그래서 입력을 손으로 고르지 않는 층을 얹었다. 계약을 적고, 생성기가 만든 입력 공간에서 그 계약을 깨는 반례를 찾고, 찾으면 *줄여서* 시드와 함께 찍는다.
+
+```powershell
+cmake --build build --config Release -j
+ctest --test-dir build -C Release -R step05.property --output-on-failure
+.\build\Release\physics_property_tests.exe convex_pair   # 같은 것을 직접 — 관측값까지 본다
+```
+
+```text
+[step05] convex_pair
+  1500 표본: hits=744 misses=756 containment=368 unique-axis=557
+  최대 |SAT-MTD|=0 |EPA-MTD|=1.52588e-05 |SAT-EPA|=1.52588e-05
+  볼록쌍 버킷: general=669 boundary=215 containment=174 sliver=200 large-scale=158 corpus=84
+  ok
+1 case(s) ok: physics property [convex_pair]
+```
+
+**생성기는 domain 구조를 알아야 한다.** 무작위 점 n 개를 뽑아 볼록인 것만 남기는 방식은 표본을 대부분 버리고, 살아남는 것도 원에 가까운 도형으로 쏠린다. 대신 타원 위의 *정렬된* 각도 n 개로 다각형을 직접 구성한다 — 타원 위의 점들은 언제나 볼록 배치라 버리는 표본이 없다. `aspect` 로 y 축을 눌러 얇은 조각까지 같은 방식으로 만든다. 각도도 균등 표본을 정렬하는 대신 *간격* 을 만들어 정규화한다. 정렬 방식은 "정점이 서로 너무 붙지 않는다" 는 사전조건을 지키지 못하고, 못 지킨 표본을 버리면 분포가 틀어진다.
+
+**균등 난수는 중요한 경계를 거의 만들지 못한다.** 그래서 여섯 버킷으로 나눠 뽑는다.
+
+| 버킷 | 비율 | 무엇을 노리는가 |
+|---|---|---|
+| general | 45% | 정점 3~8 개, 반지름 0.6~1.6 의 일반 배치 |
+| boundary | 15% | 두 도형이 거의 정확히 맞닿는 거리 — hit / miss 가 갈리는 띠 |
+| containment | 12% | 한쪽이 다른 쪽을 삼킨 배치 — 교집합 길이 식이 무너지는 자리 |
+| sliver | 12% | `aspect` 0.03~0.12 의 얇은 조각, 거의 붙은 정점, 거의 평행한 두 도형 |
+| large-scale | 11% | 반지름 60~140 px — 같은 상대 오차가 절대값으로 커진다 |
+| corpus | 5% | 과거 실패에서 온 고정 배치 (동심 45 도, 삼킨 정사각형 세 종) |
+
+마지막 줄이 회귀 보존이다. 깊이 식을 교집합 길이로 되돌리면 무너지는 바로 그 배치들을 생성기 안에 corpus 로 넣어 두었다. 무작위 표본이 우연히 그 자리를 비켜 가도 corpus 는 매번 재생된다.
+
+**oracle 은 셋이다.** 하나는 독립 참조 구현 — `tests/sat_reference.h` 가 SAT / GJK+EPA 어느 쪽 코드도 쓰지 않고 교집합 길이와 진짜 MTD 를 따로 계산한다 (differential). 둘은 수학적 성질 — 인자를 바꾸면 깊이는 같고 법선은 뒤집힌다, 같은 rigid transform 을 둘 다에 적용하면 교차 여부와 깊이는 그대로고 법선만 같은 각도로 돈다 (metamorphic). 셋은 `(normal, depth)` 계약의 양면 — 법선으로 깊이보다 조금 더 밀면 반드시 떨어지고, 조금 덜 밀면 반드시 아직 겹친다.
+
+대칭성과 변환 불변에는 사전조건을 붙였다. 최소 축이 여럿 있으면 (동심 정사각형처럼) 어느 축을 골라도 계약 위반이 아니므로, 참조 구현이 *두 번째로 작은* 밀어내기까지 돌려주게 하고 그 차이가 허용 오차의 네 배를 넘을 때만 법선을 본다. 1500 표본 중 557 개가 그 조건을 만족했다.
+
+**허용 오차는 알고리즘의 계약에서 나온다.** EPA 는 지지점이 현재 면까지의 거리와 `1e-4` 안으로 붙으면 멈추고, float32 의 상대 오차는 좌표 크기에 비례한다. 그래서 `tol = 2e-3 + 2e-4 × scale` 이다 — 테스트를 통과시키려고 키운 값이 아니라 두 오차원을 더한 값이고, 실측 최대 편차는 `|EPA-MTD| = 1.5e-5` 로 그 상한의 1/100 이다.
+
+<!-- snippet: tests/physics_property_tests.cpp@property-convex-oracle -->
+```cpp
+convexStats.worstSatVsMtd =
+    std::max(convexStats.worstSatVsMtd, (double)std::fabs(satDepth - ref.push));
+convexStats.worstEpaVsMtd =
+    std::max(convexStats.worstEpaVsMtd, (double)std::fabs(epaDepth - ref.push));
+convexStats.worstSatVsEpa =
+    std::max(convexStats.worstSatVsEpa, (double)std::fabs(satDepth - epaDepth));
+if (std::fabs(satDepth - ref.push) > tol) {
+    return Format("SAT 깊이 %.5f 가 참조 MTD %.5f 와 %.5f 벌어졌다 "
+                  "(허용 %.5f, 교집합 길이 %.5f)",
+                  (double)satDepth, (double)ref.push,
+                  (double)std::fabs(satDepth - ref.push), (double)tol,
+                  (double)ref.intersect);
+}
+```
+
+**반례는 줄여서 찍는다.** 표본 하나가 실패하면 shrink 루프가 후보를 시험한다 — 정점 빼기, 각도를 정다각형으로, `aspect` 를 1 로, 회전을 0 으로, 오프셋을 0 으로, 반지름을 1 로 정규화. 실패가 유지되는 축소만 채택하고 다시 시작한다. 깊이 식을 교집합 길이로 되돌려 확인한 실제 출력이다.
+
+```text
+[property FAILED] 무작위 볼록쌍: SAT 깊이 = EPA 깊이 = 참조 MTD, ...
+  시드      : 12793680451439230182  (생성기 v1, 표본 5)
+  위반      : SAT 깊이 0.31233 가 참조 MTD 0.70820 와 0.39587 벌어졌다 (허용 0.00220, 교집합 길이 0.31233)
+  최초 위반 : SAT 깊이 0.94929 가 참조 MTD 2.00974 와 1.06045 벌어졌다 (허용 0.00260, 교집합 길이 0.94929)
+  원본 입력 : bucket=containment offset(dir=4.04332 dist=0.36741) A{n=4 r=2.62806 aspect=0.91880 ...} B{n=7 r=0.54721 ...}
+  축소 입력 : bucket=containment offset(dir=0.00000 dist=0.00003) A{n=3 r=1.00000 aspect=1.00000 rot=0.00000} B{n=3 r=0.20822 aspect=1.00000 rot=0.00000}
+  재현      : physics_property_tests convex_pair 12793680451439230182
+```
+
+정점 4 개와 7 개짜리 회전한 다각형 쌍이 *같은 중심의 정삼각형 두 개* 로 줄었다. 큰 삼각형 안에 작은 삼각형이 든 배치 — 포함 배치의 최소형이다. 마지막 줄을 그대로 붙여 넣으면 그 표본 하나만 다시 돈다. 시드만으로는 부족해서 축소된 입력 자체도 함께 찍는다. 생성기를 고치면 같은 시드가 다른 입력을 만들기 때문이고, 그래서 보고에 생성기 버전이 들어 있다.
+
+**property 에도 강도가 있다.** hit / miss 만 맞추는 property 는 깊이를 통째로 0 으로 만들어도 통과한다. 그래서 배터리는 표본 수가 아니라 *의미 버킷 커버리지* 를 검증 지표로 단언한다 — 여섯 버킷이 전부 채워졌는가, hit 과 miss 가 한쪽으로 쏠리지 않았는가 (744 대 756), 포함 배치가 실제로 뽑혔는가 (368), 최소 축이 유일한 표본이 충분한가 (557). 한 버킷이라도 비면 그 분기는 아무것도 검사하지 않은 것이다.
+
 ## 더 읽을거리
 
 - Casey Muratori, ["Implementing GJK"](https://caseymuratori.com/blog_0003) — simplex 케이스 처리의 표준 해설.

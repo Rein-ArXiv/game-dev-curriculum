@@ -27,8 +27,8 @@
 | [`parts_perf_lab`](parts_perf_lab/) | AoS/SoA/Archetype, scalar/SSE/AVX2, predication, malloc/Arena/Pool/Slab, vector/list/intrusive | 할당 정렬·slab 소유권·레이아웃 결과 동등성·SIMD 오차 테스트 |
 | [`system_kernel_lab`](system_kernel_lab/) | Linux read/pread/mmap/POSIX AIO/io_uring, mutex/spin/futex/CAS, pthread/ucontext, scheduler 정책 | Linux 전용 CTest 포함, Linux 실행 환경 필요 |
 | [`languages_lab`](languages_lab/) | 위치 보존 lexer, 우선순위 parser, 바이트코드 compiler·verifier·VM, 제한 host binding | 구문·제어 흐름·스택 깊이·실행 예산·오류 진단 계약 테스트 |
-| [`math_lab`](math_lab/) | 회전, 보간·곡선, 노이즈, SAT/GJK, SDF, BVH, 투영·수치 오차 시각화 | 쿼터니언·곡선 경계·충돌·SDF·BVH·noise 테스트 |
-| [`physics_lab`](physics_lab/) | 적분기, 힘, broad/narrow phase, 충돌 응답, 거리 제약, 에너지·반복성 관찰 | 적분기 오차 차수·normal impulse·퇴화 법선 테스트. broad/narrow·제약 테스트 보강 필요 |
+| [`math_lab`](math_lab/) | 회전, 보간·곡선, 노이즈, SAT/GJK, SDF, BVH, 투영·수치 오차 시각화 | 쿼터니언·곡선 경계·충돌·SDF·BVH·noise 고정 사례에 더해 시드 무작위 property 층 13종(`tests/property.h` — 생성기·축소기·반례 보고). 쿼터니언 항등식과 이중 덮개, Perlin/Simplex 범위 상계(그라디언트 조합 256 가지를 세는 독립 오라클), SAT⇔GJK 일치와 분리면 실증·강체 불변, 행렬 역행렬 왕복(조건수 규칙)과 합성 일치 |
+| [`physics_lab`](physics_lab/) | 적분기, 힘, broad/narrow phase, 충돌 응답, 거리 제약, 에너지·반복성 관찰 | 적분기 오차 차수·normal impulse·퇴화 법선 테스트. broad phase 는 brute 와의 쌍 집합 대조, narrow phase 와 접촉 솔버는 고정 사례에 더해 불변식 property 배터리(무작위 볼록쌍의 깊이 일치와 `(normal, depth)` 계약, 무작위 강체 장면의 에너지 비증가·관통 상계·bit 결정성) |
 | [`ai_lab`](ai_lab/) | A*/Dijkstra/Greedy/JPS, flow field, steering, boids, influence map | 최단 경로·도달 불가·휴리스틱 계약 테스트. 나머지 장면 테스트 보강 필요 |
 | [`graphics_gl_lab`](graphics_gl_lab/) | individual/instanced/MDI, shader permutation, uniform/UBO/SSBO, BC 포맷, MSAA | 빌드 검증 완료. GL 상태·렌더 캡처 회귀 보강 필요 |
 | [`graphics_dx_lab`](graphics_dx_lab/) | per-draw/instanced, PSO·RootSig 정책, descriptor write 수명, barrier 기록 형태, fence-safe timestamp | 빌드 검증 완료. 순수 상태 계약 테스트와 캡처 회귀 보강 필요 |

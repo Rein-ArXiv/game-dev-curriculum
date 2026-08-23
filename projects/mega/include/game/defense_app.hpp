@@ -99,6 +99,21 @@ struct DefenseOptions {
     // 살 수 있을 만큼 산다 — 매치 밖 소비(sink)의 유일한 제품 경로다.
     int         buyStartGoldTier = 0;
     std::string profilePath;              // 비면 platform::UserDataDirectory 기본값
+    // 거짓이면 프로필을 **이어서** 연다(기존 동작이자 제품 동작 — 지갑이 판을
+    // 넘어 남는 것이 이 게임의 기능이다). 참이면 열기 전에 그 파일을 비운다.
+    //
+    // 왜 옵션인가. 데워진 프로필은 다음 판의 시작 골드를 바꾸므로, 같은 명령이
+    // 몇 번째 실행이냐에 따라 다른 결과를 낸다(실측: 2회차에 towers 10→11,
+    // packet 181→192). 그 누적은 제품에서는 기능이고 검사에서는 결함이다.
+    // 이 한 줄이 두 요구를 가르는 자리다 — 인자를 주지 않은 실행은 예전과
+    // 한 줄도 다르지 않고, 준 실행만 매번 같은 자리에서 출발한다.
+    //
+    // 안전장치: `--profile` 로 경로를 **명시하지 않은** 실행에서는 비우지 않고
+    // 거절한다. 비우기는 되돌릴 수 없고, 명시가 없을 때 열리는 것은 둘 중
+    // 하나 — 플레이어의 진짜 프로필이거나, 모든 셀프테스트가 공유하는
+    // `selftest_profile.wal` 이다. 앞은 지워서는 안 되고, 뒤는 지우면 -j 병렬에서
+    // 한 검사가 다른 검사의 프로필을 판 중간에 날린다. 둘 다 이름을 대야 한다.
+    bool        freshProfile = false;
     std::string traceOut;                 // 비면 트레이스를 덤프하지 않는다
     // 비면 기록하지 않는다. 채우면 헤드리스 한 판의 입력 열과 골든 체인을 적는다.
     std::string recordPath;
@@ -119,8 +134,12 @@ struct DefenseOptions {
 inline const char* DefenseUsage() {
     return "usage: mega_defense [--selftest [ticks] | --gpu-selftest | --host [port] | "
            "--join <ipv4> [port] [--token TOKEN] [--queue PLAYER_ID]] [--profile PATH] [--buy-tier N] [--vulkan]\n"
-           "                    [--ab name=value]... [--trace-out PATH]\n"
+           "                    [--fresh-profile] [--ab name=value]... [--trace-out PATH]\n"
            "                    [--record PATH [stride]] [--verify-replay PATH]\n"
+           "  --profile        진행도·지갑 저장소의 경로. 검사는 반드시 여기를 자기 것으로 잡는다\n"
+           "  --fresh-profile  그 저장소를 비우고 출발한다 — 같은 명령이 몇 번째 실행이든\n"
+           "                   같은 결과를 내게 한다. --profile 없이는 거절한다(플레이어 프로필 보호).\n"
+           "                   --record / --verify-replay 는 이 인자 없이도 언제나 새 프로필로 출발한다\n"
            "  --record         헤드리스 한 판의 입력 열과 골든 해시 체인을 PATH 에 적는다\n"
            "  --verify-replay  그 파일의 입력만으로 같은 체인을 다시 만들어 대조한다\n"
            "  --ab   entity_store=aos|soa|ecs  id_map=linear|hash  frame_alloc=malloc|arena\n"
@@ -220,6 +239,11 @@ inline bool ParseDefenseOptions(int argc, char** argv, DefenseOptions& options) 
         } else if (std::strcmp(argv[i], "--profile") == 0) {
             if (i + 1 >= argc) return false;
             options.profilePath = argv[++i];
+        } else if (std::strcmp(argv[i], "--fresh-profile") == 0) {
+            // 이 인자를 주지 않은 실행은 예전과 한 줄도 다르지 않다. 기본값이
+            // "이어서 연다"인 이유는 그것이 제품의 동작이기 때문이다 — 지갑이
+            // 판을 넘어 남지 않으면 28편의 메타 경제가 성립하지 않는다.
+            options.freshProfile = true;
         } else if (std::strcmp(argv[i], "--match-unix") == 0) {
             // 이번 판의 벽시계를 못박는다. 0 은 "진짜 시계"의 이름이고 그것이
             // 기본값이므로, 이 인자를 주지 않은 실행은 예전과 한 줄도 다르지 않다.
@@ -2207,6 +2231,9 @@ inline int RunDefense(const DefenseOptions& options) {
     // 실패 메시지는 무시당하고, 무시당하는 진단은 없는 것과 같다.
     platform::EnableUtf8Console();
     DefenseOptions effective = options;
+    // 아래에서 셀프테스트 기본 경로가 채워지므로, "사람이 경로를 댔는가"는
+    // 그 전에 기억해 둬야 한다. --fresh-profile 의 안전장치가 이 값에 걸린다.
+    const bool profileNamed = !options.profilePath.empty();
     // 재생은 자기 옵션을 파일에서 만든다 — 여기서 만든 것을 쓰면 재생이 기록과
     // 다른 팔·다른 시계로 돌고, 그 차이가 결정성 결함으로 보고된다.
     if (!effective.verifyPath.empty() && !effective.recordPath.empty()) {
@@ -2230,8 +2257,36 @@ inline int RunDefense(const DefenseOptions& options) {
         // 셀프테스트도 진짜 ProgressionStore 에 진짜 파일로 커밋한다. 다만
         // 플레이어의 프로필을 덮지 않도록 실행 파일 옆의 별도 파일을 쓴다.
         // 코드 경로가 아니라 데이터 경로만 다르다.
+        //
+        // 주의: 이 기본 경로는 **공용이고 누적한다.** 실행 파일이 하나이므로
+        // 모든 셀프테스트가 같은 파일을 데우고, 데워진 지갑은 다음 판의 시작
+        // 골드를 바꾼다. 그래서 ctest 는 이 기본값에 기대지 않고 검사마다
+        // 자기 경로를 --profile 로 잡은 뒤 --fresh-profile 로 비우고 출발한다.
         effective.profilePath = platform::ExecutableDirectory() + "/selftest_profile.wal";
     }
+
+    // ── 프로필 비우기 ──────────────────────────────────────────────
+    // 여기가 "누적은 제품의 기능, 격리는 검사의 요구"를 가르는 단 한 줄이다.
+    // 인자를 주지 않으면 이 블록은 통째로 건너뛴다 — 제품 동작 불변.
+    // snippet-begin: fresh-profile
+    if (effective.freshProfile) {
+        // 경로를 대지 않았다면 지워질 것은 플레이어의 프로필이거나 모든
+        // 셀프테스트가 공유하는 파일이다. 둘 다 이 인자가 지울 대상이 아니다.
+        if (!profileNamed) {
+            std::fprintf(stderr,
+                         "--fresh-profile 은 --profile PATH 와 함께 써야 한다 — 경로를 대지 "
+                         "않으면 지워질 것이 플레이어의 프로필이거나 셀프테스트 공용 "
+                         "프로필이다\n");
+            return 2;
+        }
+        if (!TruncateFile(effective.profilePath)) {
+            std::fprintf(stderr, "[meta] 프로필 저장소를 비울 수 없다: %s\n",
+                         effective.profilePath.c_str());
+            return 1;
+        }
+        std::printf("[meta] fresh profile=%s\n", effective.profilePath.c_str());
+    }
+    // snippet-end: fresh-profile
 
     DefenseApp app;
     if (!app.Init(effective)) return 1;

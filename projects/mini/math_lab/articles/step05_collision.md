@@ -341,10 +341,85 @@ CHECK(hits < kPairs - kPairs / 10);
 
 무작위 대조만으로는 놓치는 경우가 하나 있어 배치를 손으로 하나 더 만들었다 — *오직 B 의 면 법선에서만 분리되는* 배치다. 45° 로 기운 얇고 긴 막대를 정사각형의 대각선 투영 반경 바깥에 법선 방향으로만 밀어 두면, A 의 두 축과 B 의 긴 축에서는 투영이 겹친다. 후보 축에서 B 의 법선을 빼면 "충돌" 로 오판하는 배치이고, 실제로 `axes[0..2]` 는 분리되지 않고 `axes[3]` 만 분리된다는 것까지 못 박아 뒀다.
 
+이 대조에는 규칙이 하나 빠져 있다. 두 도형이 *정확히 맞닿는* 배치에서는 SAT 와 GJK 가 서로 다른 쪽으로 반올림해도 버그가 아니다. 20,000 쌍을 돌리는 고정 사례는 그런 쌍이 사실상 뽑히지 않는다는 사실에 기대고 있을 뿐, 규칙을 적어 두지 않았다. property 층은 그 규칙을 명시한다 — *경계 두께* 다.
+
+<!-- snippet: tests/core_tests.cpp@step05-property-boundary-band -->
+```cpp
+const double eps = BoundaryEps(A, B);
+if (std::fabs(SatMargin(sat)) < eps) {
+    obs.skipped = true;
+    return true;
+}
+const bool gjk = GjkIntersect(A, B);
+bool ok = true;
+if (!obs.Bound("SAT verdict != GJK verdict", (sat.intersect == gjk) ? 0.0 : 1.0, 0.0)) {
+    ok = false;
+}
+```
+
+`SatMargin` 은 후보 4 축의 overlap 중 최솟값 — 판정을 가르는 바로 그 값이다. 축이 단위벡터라 이 값은 *길이* 이고, 좌표 크기에 비례한 오차 두께 `1e-5 × span` 안에 있으면 판정하지 않고 `skipped` 로 센다. 사전조건이 property 를 통째로 비워 버리는 것을 막기 위해 탈락이 5% 를 넘으면 그것을 실패로 본다 (실측 5,000 표본 중 1 개).
+
+SAT ⇔ GJK 일치는 *두 구현이 같은 답을 낸다* 는 것까지만 말한다. 둘이 같은 이유로 틀릴 수도 있다. 그래서 두 번째 property 는 판정을 믿지 않고 *증거* 를 요구한다 — 분리라고 했으면 실제로 두 도형을 가르는 평면을 만들어 보이라는 것이다.
+
+<!-- snippet: tests/core_tests.cpp@step05-property-witness-plane -->
+```cpp
+double plane = 0.0;
+double sign  = 0.0;
+if (aHi < bLo)      { plane = 0.5 * (aHi + bLo); sign =  1.0; }
+else if (bHi < aLo) { plane = 0.5 * (bHi + aLo); sign = -1.0; }
+if (!obs.Bound("reported axis does not actually separate the corner sets",
+               (sign == 0.0) ? 1.0 : 0.0, 0.0)) {
+    return false;
+}
+// ...
+double violation = 0.0;
+for (int i = 0; i < 4; ++i) {
+    const double pa = sign * (ca[i][0] * dx + ca[i][1] * dy - plane);
+    const double pb = sign * (cb[i][0] * dx + cb[i][1] * dy - plane);
+    violation = std::max(violation, pa);
+    violation = std::max(violation, -pb);
+}
+if (!obs.Bound("witness plane violation", violation, 0.0)) ok = false;
+```
+
+`ca` 와 `cb` 는 제품의 `Corners()` 나 `SATEvaluateAxis` 를 부르지 않고 검증 파일 안에서 `(center, half, angle)` 로부터 double 로 다시 계산한 꼭짓점이다. 오라클이 검사 대상을 다시 호출하면 같은 오류를 양쪽이 공유한다. 반대쪽 분기도 있다 — SAT 가 "충돌" 이라고 하면 후보 4 축 *밖의* 64 방향까지 훑어 분리 방향이 하나도 없음을 확인한다. 볼록 도형이 교차한다면 어떤 방향으로도 분리되지 않아야 한다는 정리의 대우다.
+
+세 번째는 metamorphic 관계다. 답을 몰라도 *입력을 바꿨을 때 답이 어떻게 변해야 하는지* 는 안다 — 두 도형에 같은 강체 변환을 걸거나 원점 기준으로 같은 배율을 곱하면 교차 여부는 변하지 않는다.
+
+<!-- snippet: tests/core_tests.cpp@step05-property-metamorphic -->
+```cpp
+if (!obs.Bound("SAT verdict changed under rigid transform",
+               (base.intersect == rigid.intersect) ? 0.0 : 1.0, 0.0)) ok = false;
+if (!obs.Bound("SAT verdict changed under uniform scale",
+               (base.intersect == scaled.intersect) ? 0.0 : 1.0, 0.0)) ok = false;
+const bool gjkBase = GjkIntersect(A, B);
+if (!obs.Bound("GJK verdict changed under rigid transform",
+               (gjkBase == GjkIntersect(rA, rB)) ? 0.0 : 1.0, 0.0)) ok = false;
+if (!obs.Bound("GJK verdict changed under uniform scale",
+               (gjkBase == GjkIntersect(sA, sB)) ? 0.0 : 1.0, 0.0)) ok = false;
+```
+
+세 property 모두 비퇴화 표본의 정의를 *교차하는 쌍* 으로 잡고 하한 10% · 상한 90~95% 를 건다. 표본이 전부 "떨어짐" 으로 쏠리면 두 함수가 모두 `false` 를 상수로 돌려줘도 일치하기 때문이다. 고정 사례의 `hits > kPairs/10` 과 같은 방어를 하네스 쪽으로 옮긴 것이다.
+
+세 property 에 각각 무력화 변이를 넣어 죽는 것을 확인했다. SAT 후보축에서 B 의 면 법선을 빼면 일치가 깨지고, 분리 판정 문턱을 `overlap < 0` 에서 `overlap < 0.05f` 로 올리면 *실제로는 겹치는데 분리라고 말하는* 축이 나와 실증이 깨지며, A 의 첫 면 법선을 월드 X 축으로 고정하면 회전 불변이 깨진다. 두 번째 변이의 보고는 이렇게 나온다.
+
+```text
+$ ./build/Release/math_core_tests.exe --only=collision/axis-witness
+  property 'collision/axis-witness' found a counterexample
+    contract : a separated verdict comes with a plane that really splits the corner sets
+    sample   : 93 of 2500   (master seed 20260823, scale 1)
+    broke    : SAT says separated but reports no separating axis = 1   (bound 0)
+    generated: A.cx=-0.0002187663 A.cy=0.2472081 A.hx=1.5 A.hy=0.5 A.angle=0.0002033455 B.cx=2.956419 B.cy=1.197598 B.hx=1.5 B.hy=0.8772337 B.angle=0.01883733
+    shrunk   : A.cx=0 A.cy=0 A.hx=1.5 A.hy=1 A.angle=0 B.cx=2.956419 B.cy=0 B.hx=1.5 B.hy=1 B.angle=0   (8 shrink step(s))
+    repro    : math_core_tests step05 --only=collision/axis-witness --seed=20260823 --sample=93
+```
+
+축소가 하는 일이 여기서 보인다. 생성된 반례는 미세하게 기울어진 두 상자였는데, 8 번의 축소를 거쳐 *원점에 놓인 축 정렬 상자와 x 축으로 2.956 만큼 떨어진 축 정렬 상자* 가 됐다. 각도도 y 좌표도 0 이고 반크기는 정수다 — 손으로 종이에 그릴 수 있는 배치다. `repro` 줄을 그대로 복사하면 그 표본 하나만 다시 돈다.
+
 ```text
 $ ctest --test-dir build -C Release -R math_step05_collision --output-on-failure
     Start 5: math_step05_collision
-1/1 Test #5: math_step05_collision ............   Passed    0.05 sec
+1/1 Test #5: math_step05_collision ............   Passed    0.09 sec
 
 100% tests passed out of 1
 ```
@@ -352,10 +427,13 @@ $ ctest --test-dir build -C Release -R math_step05_collision --output-on-failure
 ```text
 $ ./build/Release/math_core_tests.exe step05
 [step05] collision/sat_vs_gjk ............ 14 checks, 0 failed
-step05: 1 case(s), 14 check(s), 0 failure(s)
+[step05] collision/sat-gjk-agree ......... 4 checks, 0 failed  (5000 samples, 734 non-degenerate, 1 skipped, worst 0.000x)
+[step05] collision/axis-witness .......... 4 checks, 0 failed  (2500 samples, 2131 non-degenerate, 0 skipped, worst 0.004x on '|separating axis| - 1')
+[step05] collision/rigid-invariance ...... 4 checks, 0 failed  (3000 samples, 456 non-degenerate, 0 skipped, worst 0.000x)
+step05: 4 case(s), 26 check(s), 0 failure(s)
 ```
 
-CHECK 는 14 개지만 그 뒤에서 도형 쌍 20,000 개가 돌아간다 — 루프 안에서 세고 밖에서 한 번 단언하는 형태라 실패해도 출력이 터지지 않는다. 갈리는 쌍이 나오면 처음 3 개의 인덱스와 두 판정값이 `stderr` 로 찍힌다.
+고정 사례의 CHECK 는 14 개지만 그 뒤에서 도형 쌍 20,000 개가 돌아간다 — 루프 안에서 세고 밖에서 한 번 단언하는 형태라 실패해도 출력이 터지지 않는다. 갈리는 쌍이 나오면 처음 3 개의 인덱스와 두 판정값이 `stderr` 로 찍힌다. property 쪽 `worst 0.000x` 는 그 property 의 조항이 전부 *정확 일치* (상계 0) 라는 뜻이다 — 판정이 불리언이라 허용 오차라는 것이 없다. `axis-witness` 의 `0.004x` 만 예외인데, 분리축이 단위벡터인지 재는 조항이 유일한 수치 조항이기 때문이다.
 
 ---
 
@@ -369,7 +447,7 @@ Step 5 에서 만든 것.
 
 math 시리즈 part12 (SAT) + part13 (GJK/EPA) 가 *마우스로 도형을 끌면 4 축 막대 / GJK simplex 가 즉시 갱신되는* 형태로 살아 있다. *분리축이 발견되면 즉시 분리 결정*, *GJK 의 simplex 가 원점 향해 자라는 과정*, *지원 함수의 추상화* 를 사용자가 *직접 본다*.
 
-이 step 의 한계. 교차 검증이 고정하는 것은 *충돌하는가* 라는 불리언 하나다. SAT 의 MTV 축과 overlap 값, GJK 가 몇 번 만에 끝나는지, simplex 정점이 어떤 순서로 자라는지는 화면에만 있다 — 두 알고리즘이 같은 답을 내되 *같은 이유로* 내는지는 검사하지 않는다. 접촉면이 정확히 맞닿는 퇴화 배치도 무작위 표본에서는 사실상 뽑히지 않아 부동소수 경계 동작은 미검증이고, EPA (관통 깊이) 는 다루지 않아 `intersect` 가 참일 때 *얼마나* 겹쳤는지는 SAT 의 MTV 축 한 개로만 근사한다.
+이 step 의 한계. 교차 검증이 고정하는 것은 *충돌하는가* 라는 불리언 하나다. SAT 의 MTV 축과 overlap 값, GJK 가 몇 번 만에 끝나는지, simplex 정점이 어떤 순서로 자라는지는 화면에만 있다 — 분리면 실증이 "분리축이 진짜 분리한다" 까지는 밀어 놨지만, 두 알고리즘이 같은 답을 내되 *같은 이유로* 내는지는 여전히 검사하지 않는다. 접촉면이 정확히 맞닿는 퇴화 배치는 이제 규칙이 생겼지만 그 규칙은 *판정하지 않는다* 는 것이라 여전히 미검증이고 — 경계 두께 안의 동작을 확정하려면 정확 술어(exact predicate)가 필요하다 — 무작위 표본이 그 띠에 들어갈 확률도 5,000 분의 1 수준이라 띠 자체가 제대로 그어졌는지는 손으로 만든 배치로만 확인된다. EPA (관통 깊이) 는 다루지 않아 `intersect` 가 참일 때 *얼마나* 겹쳤는지는 SAT 의 MTV 축 한 개로만 근사한다. metamorphic 관계도 강체 변환과 균등 스케일 둘뿐이라, 비균등 스케일처럼 OBB 를 OBB 가 아니게 만드는 변환은 애초에 표현할 수 없다.
 
 ## 더 읽을거리
 

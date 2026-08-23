@@ -157,4 +157,19 @@ server allocation·짧은 수명의 game token·멱등 result를 HTTP 제어 경
 | 게임플레이 | 배치 규칙, 경제, 승패, 입력 흐름, 플레이 세션 |
 | 통합 | clean configure/build/ctest와 실행 파일 smoke test |
 
+### 「코어」 행의 property test — 충족(2026-08-23)
+
+이 표의 「코어」 행이 요구하는 **property test**는 세 lab에 실제 배터리로 들어와 있다. 요구를 항목으로 갈라 현재 상태를 적는다.
+
+| 요구 | 충족 | 근거 |
+|---|---|---|
+| 무작위 입력에서 도는 property 층 | 예 | `math_lab` property 13개(표본 42,300) · `physics_lab` property 5개 · `languages_lab` fuzz 4개(표본 80,000) |
+| 반례의 축소와 재현 | 예 | 세 하네스 모두 shrink 뒤 시드와 **재현 명령 한 줄**을 출력한다. 그 명령을 그대로 붙여 넣으면 같은 반례가 다시 나온다(실측 확인) |
+| 결정성 — 벽시계·프로세스 시간 금지 | 예 | 입력은 고정 master seed에서만 나온다. 세 배터리 모두 3회 반복 출력이 바이트 동일. mega의 시각 의존은 `--match-unix` 주입으로 제거 |
+| ctest 등재 | 예 | `math_property_layer` 1개, physics `step05/06/08.property` 3개 + `physics_property_tests`, languages는 step 타깃 안에 포함(정지 실패는 CMake `TIMEOUT`이 잡는다) |
+| sanitizer | 부분 | mega만 `MEGA_SANITIZE=address`로 ASan 구성이 있다. 세 lab에는 sanitizer 구성이 없다 |
+| coverage-guided fuzzing | 아니오 | 어느 lab도 libFuzzer·coverage 되먹임을 쓰지 않는다. 「property test」 요구의 범위 밖이며, 대응 없음을 그대로 적는다 |
+
+기법 자체의 소유는 `algorithms/part11_property_fuzz_verification.md`이고, 어느 절이 어느 lab에서 도는지는 [`algorithms/README.md`의 실행 자산 표](algorithms/README.md#part11의-실행-자산--어느-lab에서-도는가)에 있다.
+
 README에는 구현된 기능, 시뮬레이션으로만 검증한 기능, 교체 지점만 있는 기능을 구분해 적는다. “풀 스택 멀티플레이” 같은 표현은 실제 socket 서버·클라이언트와 플레이 세션이 검증된 뒤에만 사용한다.

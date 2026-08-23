@@ -39,6 +39,10 @@
 - **수치 안정성**: dt 를 키워가며 에너지가 발산하는 임계점.
 - **동일 프로세스 반복성**: 같은 초기 상태에서 두 번 돌려 위치 차이 최댓값.
   cross-build·cross-machine 결정성을 증명하지 않는다.
+- **불변식 property**: 고정 배치가 아니라 *생성기가 만든 배치 공간* 에서 계약을
+  검사한다. 무작위 볼록쌍의 깊이 일치와 `(normal, depth)` 계약, 무작위 강체 장면의
+  에너지 비증가·관통 잔량 상계·bit 결정성. 실패하면 입력을 shrink 해서 시드와
+  재현 명령 한 줄과 함께 찍는다.
 
 ## 기술 스택
 
@@ -99,6 +103,12 @@ physics_lab/
     physics_response_tests.cpp  접촉 수집 / SI / 위치 보정 (step06)
     physics_constraints_tests.cpp chain solve · Baumgarte drift (step07)
     physics_determinism_tests.cpp 같은 seed 반복 재현성 (step08)
+    property_kit.h              property 실행 하네스 — 결정적 난수원(splitmix64) +
+                                 표본별 시드 파생 + shrink 루프 + 반례 보고
+    sat_reference.h             독립 참조 구현 (교집합 길이 vs 진짜 MTD) —
+                                 collision 타깃과 property 타깃이 함께 쓴다
+    physics_property_tests.cpp  불변식 property 층 — 무작위 볼록쌍(step05) ·
+                                 무작위 강체 장면(step06) · bit 결정성(step08)
 ```
 
 Scene 테스트 타깃은 모두 *제품 TU 를 그대로 컴파일* 한다. 테스트 전용 사본은 두지
@@ -108,6 +118,11 @@ Scene 테스트 타깃은 모두 *제품 TU 를 그대로 컴파일* 한다. 테
 각 실행 파일은 `argv[1]` 로 케이스 필터를 받는다 (`step_cases.h`). 인자가 없으면
 표 전체를 돌고, `step04` 나 `aabb_overlap` 을 주면 그것만 돈다. `--list` 는 표를
 찍는다. 필터가 아무것도 고르지 못하면 조용히 통과하지 않고 exit 2 로 실패한다.
+
+`physics_property_tests` 는 `argv[2]` 로 시드를 하나 더 받는다. 반례 보고가 찍는
+재현 명령이 그 형태다 — `physics_property_tests convex_pair 12793680451439230182`
+은 그 시드가 만든 표본 하나만 돌린다. 무작위는 전부 고정 마스터 시드에서
+파생되고 (splitmix64), 벽시계나 프로세스 시간은 어디에도 들어가지 않는다.
 
 ## 디렉토리 구조 (확장 / 리팩터링 목표)
 
@@ -149,9 +164,9 @@ ctest --test-dir build -C Release --output-on-failure
 `-R` 로 이름을 건다. step 단위로 돌릴 때도 같은 방식이다 —
 `ctest --test-dir build -C Release -R step04` 는 그 step 이 추가한 검사만 돌린다.
 
-`ctest` 는 19 개를 돌린다 — 기대 출력은 `100% tests passed out of 19` (CMake 4.4 기준).
-등록 이름이 두 층이다. 실행 파일 하나를 통째로 도는 이름 8 개와, 그 실행 파일들을
-step 단위로 자른 이름 11 개.
+`ctest` 는 23 개를 돌린다 — 기대 출력은 `100% tests passed out of 23` (CMake 4.4 기준).
+등록 이름이 두 층이다. 실행 파일 하나를 통째로 도는 이름 9 개와, 그 실행 파일들을
+step 단위로 자른 이름 14 개.
 
 | 타깃 | 검사 대상 | step 이름 |
 |---|---|---|
@@ -163,6 +178,7 @@ step 단위로 자른 이름 11 개.
 | `physics_response_tests` | 접촉 수집의 깊이·법선, 위치 보정량 `(depth - slop) * factor`, SI 수렴, iteration 증가 시 침투 단조 감소 | `step06.response` |
 | `physics_constraints_tests` | chain 구성, PBD iteration 이 stiffness 로 작동하는지, Baumgarte 가 SI 의 position drift 를 줄이는지 | `step07.constraints` |
 | `physics_determinism_tests` | 같은 seed 600 스텝 두 번이 bit-exact 인지, contact 순서를 섞으면 갈라지는지, 900 스텝 뒤 캔버스 안에 가라앉는지, Response Scene 과 같은 솔버인지 | `step08.determinism` |
+| `physics_property_tests` | 입력을 손으로 고르지 않는 층. 무작위 볼록쌍 1500 표본 (SAT 깊이 = EPA 깊이 = 독립 참조의 MTD, `(normal, depth)` 양면 계약, 인자 대칭, 강체 변환 불변), 무작위 강체 장면 (중력 0·반발 0 에서 운동에너지 비증가, 관통 잔량·에너지 상계, NaN/Inf 부재, 정착, 배터리의 프레임이 Response Scene 과 bit 동일), 무작위 장면의 bit 결정성 + 순서 변경 음성 대조군 | `step05.property` · `step06.property` · `step08.property` |
 
 8개 Scene (Welcome / Integrators / Forces / BroadPhase / NarrowPhase / Response / Constraints / Measure) 이 탭으로 전환된다. 좌측은 캔버스, 우측 280 px 패널이 토글 / 슬라이더 / 상태 라벨을 노출. 하단 24 px 푸터에 ms/fps 표시.
 

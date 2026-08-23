@@ -373,10 +373,69 @@ CHECK(discriminating > 4);
 
 나머지는 *상수화 방어* 다. 세 노이즈의 표본 분산 하한 (해시나 그라디언트를 상수로 바꾸면 0 이 된다), 격자 정점에서 Perlin 이 정확히 0, 그리고 FBM 이 *진폭 가중 평균* 이라는 것 — 상수 노이즈를 넣으면 옥타브·gain 이 무엇이든 그 상수를 돌려줘야 한다 (정규화를 빼면 1.875 가 나온다).
 
+여기까지는 고른 좌표에서의 값을 못 박는 *고정 사례* 다. 그런데 이 헤더의 주석 두 줄은 좌표 하나가 아니라 *출력 전체* 에 대한 주장이다 — `Perlin2D` 의 실측 범위 ≈ [−0.535, 0.535], `Simplex2D` ≈ [−0.684, 0.684]. 주석에만 있는 주장은 코드가 바뀌어도 아무 소리를 내지 않는다. 시드 무작위 property 층이 그 두 줄을 검사 대상으로 승격한다.
+
+Perlin 쪽은 상계를 *독립으로 계산할 수 있다*. `Grad2` 는 축 정렬 단위 벡터 4 종만 내므로 한 셀의 네 모서리 그라디언트 조합은 4⁴ = 256 가지뿐이다. 그 전부를 셀 안 격자에서 quintic 블렌드해 최대 절댓값을 구하면, 해시가 무엇을 내든 `Perlin2D` 의 값은 그 안에 있다. 해시를 흉내 내는 것이 아니라 *해시의 치역을 전부 세는* 오라클이다.
+
+<!-- snippet: tests/core_tests.cpp@step04-property-perlin-scan -->
+```cpp
+const float gx[4] = {1.0f, -1.0f, 0.0f, 0.0f};
+const float gy[4] = {0.0f, 0.0f, 1.0f, -1.0f};
+constexpr int kGrid = 96;
+double best = 0.0;
+for (int a = 0; a < 4; ++a) {
+    for (int b = 0; b < 4; ++b) {
+        for (int c = 0; c < 4; ++c) {
+            for (int d = 0; d < 4; ++d) {
+                for (int i = 0; i <= kGrid; ++i) {
+                    const float fx = (float)i / (float)kGrid;
+                    const float u  = mathlab::nz::Quintic(fx);
+                    for (int j = 0; j <= kGrid; ++j) {
+                        const float fy = (float)j / (float)kGrid;
+                        const float v  = mathlab::nz::Quintic(fy);
+                        const float n00 = gx[a] * fx + gy[a] * fy;
+                        const float n10 = gx[b] * (fx - 1.0f) + gy[b] * fy;
+                        const float n01 = gx[c] * fx + gy[c] * (fy - 1.0f);
+                        const float n11 = gx[d] * (fx - 1.0f) + gy[d] * (fy - 1.0f);
+                        const float lo  = n00 + (n10 - n00) * u;
+                        const float hi  = n01 + (n11 - n01) * u;
+                        best = std::max(best, std::fabs((double)(lo + (hi - lo) * v)));
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+이 스캔이 낸 값은 0.535244 다. 헤더 주석의 0.535 와 소수 셋째 자리까지 같다. property 는 여기에 1e-3 여유만 붙여 상계로 쓴다 — 스캔이 96×96 격자라 참 상한을 아래로 조금 놓칠 수 있기 때문이다.
+
+<!-- snippet: tests/core_tests.cpp@step04-property-range-bounds -->
+```cpp
+if (!obs.Bound("Value2D outside [0,1]",
+               std::max(0.0 - (double)value, (double)value - 1.0),
+               2.0 * kUnitRoundoff)) ok = false;
+if (!obs.Bound("|Perlin2D| over scanned bound", std::fabs((double)perlin),
+               PerlinScanBound() + 1e-3)) ok = false;
+if (!obs.Bound("|Simplex2D| over measured bound", std::fabs((double)simplex),
+               kSimplexBound)) ok = false;
+```
+
+상계가 헐거우면 성질이 자명해진다. 그래서 이 property 에는 조항이 하나 더 붙는다 — *관측 최댓값이 선언한 상계의 70% 이상* 이어야 한다. 실행 요약이 그 두 수를 그대로 찍는다. 기본 표본 6,000 개에서 최대 |Perlin| = 0.534333, 상계 0.536244 (99.6%). `--scale=200` (120 만 표본) 으로 늘리면 0.535241 까지 올라가 스캔값에 3e-6 까지 붙고, `|Simplex2D|` 의 최댓값은 0.684005 로 헤더 주석의 0.684 와 정확히 맞는다.
+
+Simplex 쪽에는 조합을 다 세는 오라클이 없다. 상계는 여전히 *실측* 이고 property 는 거기에 1% 여유를 붙여 고정할 뿐이다. 이것이 지키는 것은 "값이 [−0.684, 0.684] 안이라는 법칙" 이 아니라 "그라디언트 집합이나 정규화 상수 `70.0` 이 바뀌면 즉시 드러난다" 는 회귀 방어다. 두 상계의 성격이 다르다는 것을 계약 문자열에도 적어 뒀다 — `scanned bound` 대 `measured bound`.
+
+나머지 둘.
+
+- `noise/fbm-average` — FBM 이 합이 아니라 *진폭 가중 평균* 이라는 주장을 무작위 (octaves, lacunarity, gain, 상수) 조합으로 확장한다. 상수 기저를 넣으면 그 상수가 그대로 나오고, Perlin 기저의 FBM 은 Perlin 의 범위 상계를 넘지 않는다. 정규화를 빼면 두 조항이 함께 깨진다.
+- `noise/lattice-seam` — 격자 정점에서 `Perlin2D` 가 *정확히* 0 이고 `Value2D` 가 `HashTo01` 과 *비트 단위로* 같다. 그리고 셀 경계를 δ 만큼 사이에 두고 건너뛰어도 값이 이어진다. Lipschitz 상계는 quintic fade 의 도함수 30t²(1−t)² ≤ 1.875 와 격자 값 |n| ≤ 1 에서 유도한다: |∂/∂x| ≤ 1 + 2·1.875 < 5, 여유 2 배로 L = 10.
+
+연속성 조항은 격자 인덱싱 버그에 특히 민감하다. 오른쪽 격자 기여에서 오프셋 −1 을 빼먹으면 (`gx*(fx−1)` → `gx*fx`) 격자 정점 값은 여전히 0 이라 정점 조항이 살아남지만, 셀 경계에서 양쪽 값이 어긋나 연속성이 그 자리에서 깨진다. 실제로 그 변이를 넣어 확인했다.
+
 ```text
 $ ctest --test-dir build -C Release -R math_step04_noise --output-on-failure
     Start 4: math_step04_noise
-1/1 Test #4: math_step04_noise ................   Passed    0.03 sec
+1/1 Test #4: math_step04_noise ................   Passed    0.04 sec
 
 100% tests passed out of 1
 ```
@@ -384,7 +443,10 @@ $ ctest --test-dir build -C Release -R math_step04_noise --output-on-failure
 ```text
 $ ./build/Release/math_core_tests.exe step04
 [step04] noise/value_perlin_simplex_fbm .. 91 checks, 0 failed
-step04: 1 case(s), 91 check(s), 0 failure(s)
+[step04] noise/range-bounds .............. 4 checks, 0 failed  (6000 samples, 4706 non-degenerate, 0 skipped, worst 0.996x on '|Perlin2D| over scanned bound' = 0.534333 of 0.536244)
+[step04] noise/fbm-average ............... 3 checks, 0 failed  (2000 samples, 1090 non-degenerate, 0 skipped, worst 0.969x on '|FBM(Perlin)| over base bound')
+[step04] noise/lattice-seam .............. 3 checks, 0 failed  (3000 samples, 2160 non-degenerate, 0 skipped, worst 0.100x on '|Perlin across cell seam|')
+step04: 4 case(s), 101 check(s), 0 failure(s)
 ```
 
 ---
@@ -396,10 +458,11 @@ Step 4 에서 만든 것.
 1. **`algo/noise.h`** — Hash2 / HashTo01 + Smoothstep / Quintic + Value2D / Perlin2D / Simplex2D + FBM2D (template).
 2. **`scenes/noise_scene.{h,cpp}`** — 3 노이즈 토글 + FBM + zoom/offset/seed 슬라이더 + Texture2D 기반 256×256 heatmap.
 3. **재사용 패턴들** — *Texture 빌드 + UpdateTexture*, *dirty flag* 로 비싼 계산 절감 — 이후 SDF Scene 등에서 재활용.
+4. **노이즈 property 3 종** — 헤더 주석에만 있던 실측 범위를 검사 대상으로 승격했다. Perlin 의 상계는 그라디언트 조합 256 가지를 전부 세는 독립 오라클에서 나온다.
 
 math 시리즈 part09 (PRNG) + part10 (절차적 노이즈) 가 *마우스에 반응하는 256×256 heatmap* 으로 살아 있다. 사용자가 직접 *Value 의 격자감*, *Perlin 의 사선 bias*, *Simplex 의 등방성*, *FBM 의 fractal 디테일* 을 본다.
 
-이 step 의 한계. `Grad2` 가 축 정렬 단위 벡터 4 종만 쓰기 때문에 `Perlin2D` 와 `Simplex2D` 의 실제 출력 범위가 각각 약 *±0.535* / *±0.684* 로 좁고, `Simplex2D` 의 `70.0` 은 그 코드에 맞지 않는 상수다. 그래서 세 노이즈를 나란히 비교할 때 *대비 차이* 가 알고리즘 차이보다 먼저 보인다. 자동 검증에도 빈 곳이 있다 — `Simplex2D` 는 유한성과 분산 하한까지만 잡혀 있어, skew/unskew 상수나 기여 반경을 바꿔도 값이 유한하고 변하기만 하면 통과한다. Perlin 처럼 *가중치를 손으로 쓴 기대값* 으로 못 박힌 것은 격자선 위 한 줄뿐이고, 화면의 등방성 차이 자체는 여전히 눈으로 보는 증거다.
+이 step 의 한계. `Grad2` 가 축 정렬 단위 벡터 4 종만 쓰기 때문에 `Perlin2D` 와 `Simplex2D` 의 실제 출력 범위가 각각 약 *±0.535* / *±0.684* 로 좁고, `Simplex2D` 의 `70.0` 은 그 코드에 맞지 않는 상수다. 그래서 세 노이즈를 나란히 비교할 때 *대비 차이* 가 알고리즘 차이보다 먼저 보인다. 자동 검증에도 빈 곳이 있다 — `Simplex2D` 에 붙은 것은 유한성·분산 하한·범위 상계뿐이라, skew/unskew 상수나 기여 반경을 그 범위 안에서 흔드는 변경은 여전히 통과한다. `Perlin2D` 처럼 *가중치를 손으로 쓴 기대값* 으로 못 박힌 것은 격자선 위 한 줄뿐이고, 셀 경계 연속성도 x 방향 한 축만 본다. property 층의 상계 두 개도 성격이 다르다 — Perlin 은 조합을 다 센 상한이지만 Simplex 는 관측을 굳힌 것이라 구현이 *더 좁아지는* 변경은 잡지 못한다. 화면의 등방성 차이 자체는 여전히 눈으로 보는 증거다.
 
 ## 더 읽을거리
 

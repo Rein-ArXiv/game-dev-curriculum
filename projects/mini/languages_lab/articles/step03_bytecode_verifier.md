@@ -17,6 +17,7 @@
 3. 스택 효과
 4. 분기 합류
 5. 실패 주입
+6. 명령 단위 fuzz
 
 ---
 
@@ -143,7 +144,8 @@ CHECK(error == "분기 합류점의 스택 깊이가 일치하지 않는다");
 성공으로 바꾸거나 종결 검사를 지우면 곧바로 실패한다. 모두 VM 실행 전에 걸러진다.
 
 두 사례는 등록표에서 `step03` 라벨을 달고 있다. VM을 한 번도 만들지 않고 `Verify`만
-직접 부르므로, 실행기가 통째로 망가져 있어도 이 타깃의 결과는 바뀌지 않는다.
+직접 부르므로, 실행기가 통째로 망가져 있어도 이 타깃의 결과는 바뀌지 않는다. 같은 타깃에
+생성된 명령열을 도는 사례가 하나 더 있고, 그것은 아래에서 따로 설명한다.
 
 ```powershell
 ctest --test-dir build -C Release -R languages_step03 --output-on-failure
@@ -151,16 +153,135 @@ ctest --test-dir build -C Release -R languages_step03 --output-on-failure
 ```
 
 ```text
-1/1 Test #4: languages_step03_bytecode_verifier ...   Passed
+1/1 Test #4: languages_step03_bytecode_verifier ...   Passed    0.43 sec
 100% tests passed out of 1
 [step03] verifier_rejects_malformed_program ok
 [step03] verifier_branch_contracts ok
-languages_tests [step03]: all checks passed (2 case(s), 11 check(s))
+  [fuzz] bytecode: 표본 20000 · 거부 17597 · 통과 2403 · opcode변형 8030 · 미지opcode거부 5908
+[step03] fuzz_bytecode_mutation_verifier ok
+languages_tests [step03]: all checks passed (3 case(s), 21 check(s))
 ```
 
-11개의 단언 중 절반 이상이 `verifier_branch_contracts` 안의 사유 문자열 비교다. 거부
-여부만 세는 검증이었다면 같은 사례가 4~5개 단언으로 끝났을 것이고, 합류 검사를 항상
-성공으로 바꿔도 다른 이유로 거부되어 통과했을 것이다.
+21개 단언 중 10개가 생성 배터리의 것이고 나머지 11개가 손으로 만든 두 사례의 것이다. 그
+11개 중 절반 이상이 `verifier_branch_contracts` 안의 사유 문자열 비교다. 거부 여부만 세는
+검증이었다면 같은 사례가 4~5개 단언으로 끝났을 것이고, 합류 검사를 항상 성공으로 바꿔도
+다른 이유로 거부되어 통과했을 것이다.
+
+## 6. 명령 단위 fuzz
+
+손으로 만든 네 개의 잘못된 프로그램은 검증기가 *아는* 실패 부류를 못 박는다. 하지만 이
+검증기의 위협 모델은 손상된 캐시 파일과 주입된 명령열이고, 그 입력 공간은 손으로 덮을 수
+없다. 그래서 유효 프로그램을 컴파일한 뒤 명령을 직접 깨뜨려 같은 계약을 다시 검사한다.
+
+토큰을 깨뜨리는 것만으로는 여기에 닿지 못한다. 컴파일러는 진단이 하나라도 있으면
+`Program`을 내지 않으므로, 소스를 아무리 망가뜨려도 검증기에 도달하는 바이트코드는 항상
+컴파일러가 만든 정상 코드다. 검증기를 밀어붙이려면 명령 배열 자체를 건드려야 한다.
+
+<!-- snippet: src/fuzz.hpp#MutateBytecode -->
+```cpp
+const size_t index = rng.Below(static_cast<uint32_t>(mutated.code.size()));
+const uint32_t roll = rng.Below(100);
+if (roll < 30) {
+    // opcode 바이트를 통째로 바꾼다. 열거자 범위 밖 값도 포함한다.
+    mutated.code[index].op = static_cast<OpCode>(rng.Below(256));
+    touchedOpCode = true;
+} else if (roll < 60) {
+    const uint32_t choice = rng.Below(4);
+    if (choice == 0) mutated.code[index].operand = -rng.Between(1, 4);
+    else if (choice == 1) mutated.code[index].operand = rng.Between(0, 40);
+    else if (choice == 2) mutated.code[index].operand = 2147483647;
+    else mutated.code[index].operand += rng.Between(-3, 3);
+} else if (roll < 75) {
+    mutated.code.resize(index + 1);  // 꼬리 절단. Halt가 사라질 수 있다.
+// ...
+}
+```
+
+property는 둘이다. **거부하면** 사유가 비어 있지 않고 검증기의 닫힌 어휘 안에 있어야 한다.
+**통과시키면** 그 프로그램에 미지의 명령 코드가 남아 있지 않아야 하고, VM이 예산 안에서
+닫힌 실패 어휘로 끝나야 한다. 거부 자체는 실패가 아니다 — 검증기의 일이 거부다.
+
+### 배터리가 찾은 실결함
+
+이 배터리를 붙이자마자 `opcode 바이트를 통째로 바꾼다` 변형이 검증기의 구멍을 드러냈다.
+`OpCode`의 기반 타입이 `uint8_t`라 0~255 전부가 표현 가능한 값인데, 깊이 전파 루프의
+`switch`에는 `default` 절이 없었다. 열거자에 없는 값은 어떤 `case`에도 걸리지 않아 필요
+깊이 0, 변화량 0으로 조용히 통과했다.
+
+통과한 뒤가 문제다. VM의 이항 연산 분기가 `default`라서, 알 수 없는 명령은 거기로 떨어져
+빈 스택에서 값 두 개를 꺼낸다. 릴리스 빌드에서는 꺼낸 값을 아무도 쓰지 않아 조용히
+지나가지만, 표준 라이브러리의 범위 검사를 켠 빌드에서는 그 자리에서 중단한다.
+
+```text
+Verify(op=200) = true, error=""
+run: 실행을 시도한다 (검증을 통과했다면 빈 스택에서 pop 한다)
+exit=-2147483645
+```
+
+수정은 깊이 전파에 들어가기 전, 도달 가능성과 무관한 정적 검사에 명령 코드 검사를 더하는
+것이다. `default:`를 쓰지 않고 열거자를 전부 적는다 — 명령을 추가하면서 여기를 빠뜨리면
+컴파일러가 미처리 열거자를 경고하고, 침묵하는 통과보다 시끄러운 경고가 낫다.
+
+<!-- snippet: src/language.hpp@known-opcode -->
+```cpp
+inline bool IsKnownOpCode(OpCode op) {
+    switch (op) {
+        case OpCode::Constant:
+        case OpCode::LoadGlobal:
+        case OpCode::StoreGlobal:
+        // ...
+        case OpCode::Pop:
+        case OpCode::Halt:
+            return true;
+    }
+    return false;
+}
+```
+
+같은 탐침이 수정 뒤에는 거부로 끝난다.
+
+```text
+Verify(op=200) = false, error="알 수 없는 명령 코드다"
+run.ok=0 instructions=0 message="바이트코드 검증 실패: 알 수 없는 명령 코드다"
+```
+
+### 무력화 변이
+
+수정을 다시 지우면 무엇이 죽는지가 이 검증의 값어치다. 열다섯 개의 손으로 만든 사례는
+전부 `ok`이고 이 배터리만 죽는다. 결함이 저장소에 있는 동안 아무 사례도 그것을 보지
+못했다는 뜻이기도 하다.
+
+```text
+[step03] verifier_rejects_malformed_program ok
+[step03] verifier_branch_contracts ok
+  [fuzz] bytecode: 표본 3000 · 거부 2332 · 통과 668 · opcode변형 1158 · 미지opcode거부 0
+[step03] fuzz_bytecode_mutation_verifier FAIL
+FAIL src/tests.cpp:671: unknownOpcodeAccepted == 0
+FAIL src/tests.cpp:677: unknownOpcodeRejections * 20 >= samples
+2 test(s) failed in 1 case(s)
+```
+
+두 줄이 각각 다른 것을 말한다. 위는 검증기가 미지 명령을 통과시켰다는 사실이고, 아래는
+그 부류를 거부한 표본이 하나도 없다는 사실이다. 아래 단언이 없으면 변형기가 그 부류를
+만들지 않게 되었을 때 위 단언이 조용히 참으로 남는다.
+
+```powershell
+.\build\Release\languages_tests.exe fuzz_bytecode_mutation_verifier
+```
+
+```text
+  [fuzz] bytecode: 표본 20000 · 거부 17597 · 통과 2403 · opcode변형 8030 · 미지opcode거부 5908
+[step03] fuzz_bytecode_mutation_verifier ok
+languages_tests [fuzz_bytecode_mutation_verifier]: all checks passed (1 case(s), 10 check(s))
+```
+
+20,000표본 중 17,597개가 거부되고 2,403개가 통과한다. 통과가 0이면 이 배터리는 "검증기가
+전부 거부한다"만 확인하는 것이라 VM 쪽 property가 한 번도 실행되지 않으므로, 통과 표본이
+있다는 것에도 단언을 건다.
+
+이 배터리가 덮지 못하는 것은 검증기가 *통과시켜야 하는데 거부하는* 경우다. 변형된
+바이트코드에는 정답이 없어서, 거부가 옳은 거부인지 과도한 거부인지 판정할 oracle이 없다.
+그 방향은 컴파일러가 낸 정상 바이트코드가 항상 통과한다는 별도의 property가 맡는다.
 
 ---
 

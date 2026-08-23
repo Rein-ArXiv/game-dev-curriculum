@@ -1,5 +1,6 @@
 #include "scenes/narrow_phase_scene.h"
 
+#include "sat_reference.h"
 #include "step_cases.h"
 
 #include <algorithm>
@@ -42,62 +43,11 @@ physlab::Polygon2D Translated(const physlab::Polygon2D& p, Vector2 t) {
     return r;
 }
 
-// 테스트 안의 독립 참조 구현. SAT / GJK+EPA 어느 쪽 코드도 쓰지 않고 두 값을
-// 따로 낸다.
-//   intersect : 축 위 두 구간의 *교집합 길이* 의 최소  (예전 SATCollide 의 식)
-//   push      : 두 도형을 분리하는 데 필요한 최소 이동 거리 = 진짜 MTD
-// 한 구간이 다른 구간을 *포함* 하면 (깊은 겹침) 둘이 갈라진다.
-struct AxisReference {
-    bool  hit       = false;
-    float intersect = 0.0f;
-    float push      = 0.0f;
-};
-
-AxisReference ReferenceDepths(const physlab::Polygon2D& a,
-                              const physlab::Polygon2D& b) {
-    const auto va = a.WorldVerts();
-    const auto vb = b.WorldVerts();
-    AxisReference r;
-    r.hit       = true;
-    r.intersect = 1e30f;
-    r.push      = 1e30f;
-
-    auto project = [](const std::vector<Vector2>& v, Vector2 axis,
-                      float& mn, float& mx) {
-        mn = mx = v[0].x * axis.x + v[0].y * axis.y;
-        for (size_t i = 1; i < v.size(); ++i) {
-            const float d = v[i].x * axis.x + v[i].y * axis.y;
-            mn = std::min(mn, d);
-            mx = std::max(mx, d);
-        }
-    };
-
-    auto runAxes = [&](const std::vector<Vector2>& v) {
-        const int n = (int)v.size();
-        for (int i = 0; i < n && r.hit; ++i) {
-            const Vector2 p = v[(size_t)i];
-            const Vector2 q = v[(size_t)((i + 1) % n)];
-            Vector2 axis{-(q.y - p.y), q.x - p.x};
-            const float len = std::sqrt(axis.x * axis.x + axis.y * axis.y);
-            if (len < 1e-9f) continue;
-            axis = {axis.x / len, axis.y / len};
-
-            float amn, amx, bmn, bmx;
-            project(va, axis, amn, amx);
-            project(vb, axis, bmn, bmx);
-            if (amx < bmn || bmx < amn) { r.hit = false; return; }
-
-            r.intersect = std::min(r.intersect,
-                                   std::min(amx, bmx) - std::max(amn, bmn));
-            r.push = std::min(r.push, std::min(amx - bmn, bmx - amn));
-        }
-    };
-
-    runAxes(va);
-    if (r.hit) runAxes(vb);
-    if (!r.hit) { r.intersect = 0.0f; r.push = 0.0f; }
-    return r;
-}
+// 독립 참조 구현은 `tests/sat_reference.h` 한 벌뿐이다 — SAT / GJK+EPA 어느 쪽
+// 코드도 쓰지 않고 교집합 길이와 진짜 MTD 를 따로 계산한다. property 층도 같은
+// oracle 을 쓴다. 참조를 두 벌 두면 둘이 따로 썩는다.
+using physlab::testkit::AxisReference;
+using physlab::testkit::ReferenceDepths;
 
 // (normal, depth) 계약의 양면 검사 — 참조 구현만 쓰므로 SAT / EPA 어느 쪽도
 // 자기 자신을 채점하지 않는다.

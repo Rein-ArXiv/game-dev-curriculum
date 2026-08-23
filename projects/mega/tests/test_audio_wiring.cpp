@@ -140,6 +140,11 @@ void TestAppFrameRoutesSoundThroughCamera() {
     DefenseOptions options;
     options.selftest = true;
     options.profilePath = platform::ExecutableDirectory() + "/audio_probe.wal";
+    // 비우고 출발한다. 이 파일은 지워지지 않으므로 ctest 를 두 번 돌리면 지갑이
+    // 데워지고, 데워진 지갑은 시작 골드를 바꿀 수 있다(`--buy-tier` 가 걸린
+    // 실행에서 실제로 바뀐다). 이 검사는 티어를 사지 않지만, 프로필이 매번
+    // 같은 자리에서 출발하지 않는 상태 자체가 재현을 깨는 씨앗이다.
+    CHECK(TruncateFile(options.profilePath));
     DefenseApp app;
     CHECK(app.Init(options));
 

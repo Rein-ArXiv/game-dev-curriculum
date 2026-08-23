@@ -1,4 +1,5 @@
 #include "bench_program.hpp"
+#include "fuzz.hpp"
 #include "language.hpp"
 
 #include <cmath>
@@ -345,6 +346,487 @@ void TestBenchProgramInvariants() {
           32240000);
 }
 
+// ── 문법 유도 fuzz 배터리 ────────────────────────────────────────────────────
+//
+// 위의 사례들은 사람이 고른 입력으로 계약을 못 박는다. 배터리는 같은 계약을 *생성된*
+// 입력에서 검사한다. 사람이 고른 입력이 덮지 못하는 것은 조합이다 — 렉서·파서·검증기·VM이
+// 각각 옳아도 특정 조합에서만 어긋날 수 있다.
+//
+// 규칙 셋을 지킨다.
+//   1. 난수는 전부 고정 시드에서 나온다. 벽시계와 프로세스 시간을 읽지 않는다.
+//   2. 실패는 반례를 축소해 보고하고, 재현 명령 한 줄을 함께 찍는다.
+//   3. 표본마다 CHECK를 세지 않는다. property 하나가 CHECK 하나다 — 표본 수가 검증의
+//      강도라고 말하는 출력은 지표를 망가뜨린다.
+
+namespace fz = lab::lang::fuzz;
+
+// 배터리의 기본 시드. 실행마다 다른 시드를 뽑으면 통과가 무엇을 뜻하는지 알 수 없고
+// 실패가 재현되지 않는다. 넓은 탐색은 시드를 바꿔 *명시적으로* 돌린다.
+constexpr uint64_t kDefaultMasterSeed = 0x5EED10CC1A2B3C4Dull;
+
+// 실행 상한. 예산의 일은 "멈춘다"를 증명하는 것이지 오래 도는 것이 아니므로 기본값
+// 100000보다 작게 잡아 같은 주장을 더 빨리 한다.
+constexpr uint64_t kFuzzBudget = 4000;
+constexpr size_t kFuzzStack = 256;
+// 좁은 상한. 같은 프로그램을 두 자원 한도로 돌려 한도 자체가 관측되게 한다.
+constexpr uint64_t kTightBudget = 64;
+constexpr size_t kTightStack = 3;
+
+// 표본 수는 측정으로 정했다. 이 기계에서 표본 하나가 30~60 마이크로초이므로 사례당
+// 20,000표본이면 네 사례 합계가 4초 안쪽이다. 커버리지 하한은 500표본에서 이미 채워지므로
+// 나머지는 드문 조합을 만날 확률에 쓰는 몫이다. 근거 수치는 step 문서에 있다.
+constexpr uint64_t kGrammarSamples = 20000;
+constexpr uint64_t kBytecodeSamples = 20000;
+constexpr uint64_t kExecutionSamples = 20000;
+constexpr uint64_t kMutationSamples = 20000;
+
+uint64_t masterSeed = kDefaultMasterSeed;
+long long sampleOverride = -1;
+long long onlyIndex = -1;
+int reportedCounterexamples = 0;
+constexpr int kMaxReports = 3;
+
+struct SampleRange {
+    uint64_t begin;
+    uint64_t end;
+};
+
+SampleRange Samples(uint64_t defaultCount) {
+    if (onlyIndex >= 0) {
+        const uint64_t only = static_cast<uint64_t>(onlyIndex);
+        return {only, only + 1};
+    }
+    return {0, sampleOverride >= 0 ? static_cast<uint64_t>(sampleOverride) : defaultCount};
+}
+
+// 커버리지 단언은 표본이 충분할 때만 뜻이 있다. `--only` 재현이나 소표본 실행에서는
+// property 단언만 남긴다 — 재현 명령이 "커버리지 부족"으로 실패하면 반례를 가린다.
+bool CoverageEnforced(uint64_t samples) { return onlyIndex < 0 && samples >= 500; }
+
+std::string Indent(const std::string& text) {
+    std::string out = "    ";
+    for (const char c : text) {
+        out.push_back(c);
+        if (c == '\n') out += "    ";
+    }
+    return out;
+}
+
+// 반례 보고. 시드와 표본 번호, 축소된 소스, 그리고 그 하나만 다시 도는 명령을 낸다.
+// 상한은 사례마다 따로 센다 — 한 사례가 상한을 다 쓰면 다른 사례의 반례가 사라진다.
+void BeginCase() { reportedCounterexamples = 0; }
+
+void ReportCounterexample(const char* caseName, uint64_t index, const fz::TokenList& original,
+                          const fz::TokenList& shrunk, const std::string& detail) {
+    if (reportedCounterexamples++ >= kMaxReports) return;
+    std::fprintf(stderr,
+                 "\nFUZZ 반례 [%s] 표본 %llu\n"
+                 "  실패: %s\n"
+                 "  축소: 토큰 %zu -> %zu\n"
+                 "  재현: languages_tests.exe %s --seed=0x%016llX --only=%llu\n"
+                 "  소스:\n%s\n",
+                 caseName, static_cast<unsigned long long>(index), detail.c_str(),
+                 original.size(), shrunk.size(), caseName,
+                 static_cast<unsigned long long>(masterSeed),
+                 static_cast<unsigned long long>(index), Indent(fz::Render(shrunk)).c_str());
+}
+
+// ── property 판정기 ─────────────────────────────────────────────────────────
+// 빈 문자열은 통과다. 판정기를 하나로 두면 본 루프와 축소기가 *같은* 실패 정의를 쓴다.
+// 정의가 갈리면 축소된 반례가 원래 실패를 재현하지 않는다.
+
+// 축소는 "아무 실패나 유지"로 하면 안 된다. 토큰을 지우다 보면 문법이 깨져 *다른* 이유로
+// 실패하는 입력에 도달하고, 그것을 반례로 보고하면 원인을 엉뚱한 곳에서 찾게 된다.
+// 실제로 이 배터리의 첫 판본이 그랬다 — 컴파일러 결함을 주입했더니 축소된 반례가
+// `;` 한 토큰이었고, 그것은 결함과 무관한 구문 오류였다. 그래서 축소는 실패의 *부류*를
+// 보존한다. 부류는 진단 문자열의 가변부(`: ` 뒤) 앞까지다.
+std::string ViolationClass(const std::string& detail) {
+    const size_t separator = detail.find(": ");
+    return separator == std::string::npos ? detail : detail.substr(0, separator);
+}
+
+// snippet-begin: fuzz-grammar-property
+// 문법 유도 생성기가 만든 소스가 지켜야 하는 것.
+//   (1) 파스·컴파일이 성공한다.               생성기가 이 lab의 문법만 만들기 때문이다.
+//   (2) 산출물과 진단이 동시에 나오지 않는다.  CompileResult의 불변식이다.
+//   (3) 두 번 컴파일하면 같은 바이트코드다.    결정성. 위치까지 비교한다.
+//   (4) 그 바이트코드는 검증기를 통과한다.     컴파일러는 검증 불가 코드를 내지 않는다.
+std::string GrammarCompileViolation(const std::string& source) {
+    const auto first = lab::lang::Compiler{}.Compile(source);
+    if (!first.program) {
+        return "컴파일 실패: " + (first.diagnostics.empty()
+                                      ? std::string("(진단조차 없다)")
+                                      : lab::lang::FormatDiagnostic(first.diagnostics.front()));
+    }
+    if (!first.diagnostics.empty()) return "프로그램과 진단이 동시에 나왔다";
+
+    const auto second = lab::lang::Compiler{}.Compile(source);
+    if (!second.program) return "같은 소스의 두 번째 컴파일이 실패했다";
+    if (!fz::SameBytecode(*first.program, *second.program))
+        return "같은 소스의 두 컴파일이 다른 바이트코드를 냈다";
+
+    std::string error;
+    if (!lab::lang::Verify(*first.program, error))
+        return "컴파일러가 검증을 통과하지 못하는 바이트코드를 냈다: " + error;
+    return {};
+}
+// snippet-end: fuzz-grammar-property
+
+// snippet-begin: fuzz-execution-property
+// 컴파일된 프로그램을 실행할 때 지켜야 하는 것.
+//   (1) 같은 VM으로 두 번 돌려도 결과가 같다.   실행 사이에 상태가 새지 않는다.
+//   (2) 새 VM으로 돌려도 결과가 같다.           인스턴스에 숨은 상태가 없다.
+//   (3) 성공한 실행은 값 스택을 비운 채 끝난다. 모든 문장이 스택 중립이기 때문이다.
+//   (4) 명령 수가 예산 + 1을 넘지 않는다.       예산은 초과 명령 하나에서 끊는다.
+//   (5) 실패 메시지가 닫힌 어휘 안에 있다.      통제되지 않은 실패 경로가 없다.
+//   (6) 실패 위치가 소스 안을 가리킨다.
+//   (7) 좁은 자원 한도에서도 같은 것이 성립한다.
+std::string ExecutionViolation(const std::string& source) {
+    const auto compiled = lab::lang::Compiler{}.Compile(source);
+    if (!compiled.program) return "실행 전 컴파일이 실패했다";
+
+    lab::lang::VirtualMachine reused;
+    fz::BindStandardNatives(reused);
+    const auto first = fz::Observe(reused, *compiled.program, kFuzzBudget, kFuzzStack);
+    const auto again = fz::Observe(reused, *compiled.program, kFuzzBudget, kFuzzStack);
+    if (!(first == again)) return "같은 VM으로 다시 실행하니 결과가 달라졌다(상태 누수)";
+
+    lab::lang::VirtualMachine fresh;
+    fz::BindStandardNatives(fresh);
+    const auto other = fz::Observe(fresh, *compiled.program, kFuzzBudget, kFuzzStack);
+    if (!(first == other)) return "새 VM의 실행 결과가 다르다";
+
+    if (first.ok && first.stackDepth != 0) return "성공한 실행이 값 스택을 비우지 않았다";
+    if (first.instructions > kFuzzBudget + 1) return "명령 수가 예산을 넘었다";
+    if (!first.ok) {
+        if (!fz::IsKnownRuntimeMessage(first.message))
+            return "닫힌 실패 어휘 밖의 메시지: " + first.message;
+        if (!fz::LocationWithinSource(source, first.location))
+            return "실패 위치가 소스 밖을 가리킨다: " + lab::lang::FormatDiagnostic(
+                                                            {first.location, first.message});
+    }
+
+    lab::lang::VirtualMachine tight;
+    fz::BindStandardNatives(tight);
+    const auto limited = fz::Observe(tight, *compiled.program, kTightBudget, kTightStack);
+    if (limited.instructions > kTightBudget + 1) return "좁은 예산에서 명령 수가 넘었다";
+    if (!limited.ok && !fz::IsKnownRuntimeMessage(limited.message))
+        return "좁은 한도에서 닫힌 어휘 밖의 메시지: " + limited.message;
+    return {};
+}
+// snippet-end: fuzz-execution-property
+
+// snippet-begin: fuzz-mutation-property
+// 토큰 단위로 깨뜨린 소스가 지켜야 하는 것. 거부는 실패가 아니다 — 거부의 *방식*이
+// 계약이다. 크래시, 무한 루프, 산출물과 진단의 동시 발생, 어휘 밖 메시지, 소스 밖
+// 위치가 실패다.
+std::string MutationViolation(const std::string& source) {
+    const auto compiled = lab::lang::Compiler{}.Compile(source);
+    if (compiled.program && !compiled.diagnostics.empty())
+        return "프로그램과 진단이 동시에 나왔다";
+    if (!compiled.program && compiled.diagnostics.empty())
+        return "프로그램도 진단도 없이 거부했다";
+
+    for (const auto& diagnostic : compiled.diagnostics) {
+        if (!fz::IsKnownCompileMessage(diagnostic.message))
+            return "닫힌 진단 어휘 밖의 메시지: " + diagnostic.message;
+        if (!fz::LocationWithinSource(source, diagnostic.location))
+            return "진단 위치가 소스 밖을 가리킨다: " + lab::lang::FormatDiagnostic(diagnostic);
+    }
+
+    const auto again = lab::lang::Compiler{}.Compile(source);
+    if (again.program.has_value() != compiled.program.has_value())
+        return "같은 소스를 두 번 컴파일했는데 성공 여부가 달라졌다";
+    if (again.diagnostics.size() != compiled.diagnostics.size())
+        return "같은 소스의 두 컴파일이 다른 수의 진단을 냈다";
+    for (size_t i = 0; i < again.diagnostics.size(); ++i) {
+        if (again.diagnostics[i].message != compiled.diagnostics[i].message ||
+            again.diagnostics[i].location.line != compiled.diagnostics[i].location.line ||
+            again.diagnostics[i].location.column != compiled.diagnostics[i].location.column)
+            return "같은 소스의 두 컴파일이 다른 진단을 냈다";
+    }
+
+    if (!compiled.program) return {};
+
+    std::string error;
+    if (!lab::lang::Verify(*compiled.program, error))
+        return "깨진 소스가 검증 불가 바이트코드로 컴파일됐다: " + error;
+    return ExecutionViolation(source);
+}
+// snippet-end: fuzz-mutation-property
+
+void PrintCoverage(const char* label, const std::string& text) {
+    std::printf("  [fuzz] %s: %s\n", label, text.c_str());
+}
+
+std::string Count(const char* name, uint64_t value) {
+    return std::string(name) + " " + std::to_string(value);
+}
+
+// ── 사례 (1) 문법 유도 생성기 → 컴파일 계약 ──────────────────────────────────
+void TestFuzzGrammarDirectedCompile() {
+    BeginCase();
+    const SampleRange range = Samples(kGrammarSamples);
+    uint64_t samples = 0, violations = 0;
+    uint64_t multiLine = 0, loops = 0, natives = 0, nestedBlocks = 0, tokens = 0;
+
+    for (uint64_t index = range.begin; index < range.end; ++index) {
+        fz::Rng rng(fz::SampleSeed(masterSeed, index));
+        fz::ProgramGenerator generator(rng, fz::GeneratorLimits{});
+        const fz::Sample sample = generator.Generate();
+        const std::string source = fz::Render(sample.tokens);
+
+        ++samples;
+        tokens += sample.tokens.size();
+        if (fz::LineCount(source) > 2) ++multiLine;
+        if (sample.hasLoop) ++loops;
+        if (sample.hasNativeCall) ++natives;
+        if (sample.hasNestedBlock) ++nestedBlocks;
+
+        const std::string detail = GrammarCompileViolation(source);
+        if (detail.empty()) continue;
+        ++violations;
+        const std::string wanted = ViolationClass(detail);
+        const auto shrunk = fz::Shrink(sample.tokens, [&wanted](const fz::TokenList& candidate) {
+            return ViolationClass(GrammarCompileViolation(fz::Render(candidate))) == wanted;
+        });
+        ReportCounterexample("fuzz_grammar_directed_compile", index, sample.tokens, shrunk,
+                             detail);
+    }
+
+    CHECK(violations == 0);
+
+    // 커버리지. 표본 수가 아니라 *무엇을 쳤는지*가 배터리의 강도다. 생성기가 한쪽으로
+    // 쏠려 문장 한 종류만 만들면 위의 property는 여전히 통과하므로 여기서 막는다.
+    CHECK(samples > 0);
+    if (CoverageEnforced(samples)) {
+        CHECK(loops * 4 >= samples);
+        CHECK(natives * 4 >= samples);
+        CHECK(nestedBlocks * 8 >= samples);
+        CHECK(multiLine * 2 >= samples);
+    }
+
+    PrintCoverage("grammar",
+                  Count("표본", samples) + " · " + Count("평균토큰", tokens / (samples ? samples : 1)) +
+                      " · " + Count("여러줄", multiLine) + " · " + Count("루프", loops) + " · " +
+                      Count("호스트호출", natives) + " · " + Count("중첩블록", nestedBlocks));
+}
+
+// ── 사례 (2) 바이트코드 변형 → 검증기 계약 ───────────────────────────────────
+void TestFuzzBytecodeMutationVerifier() {
+    BeginCase();
+    const SampleRange range = Samples(kBytecodeSamples);
+    uint64_t samples = 0, rejected = 0, accepted = 0;
+    uint64_t opcodeMutations = 0, unknownOpcodeRejections = 0;
+    uint64_t silentRejections = 0, badVerifyMessages = 0, badRuntimeMessages = 0, overBudget = 0;
+    uint64_t generatorFailures = 0, unknownOpcodeAccepted = 0;
+
+    for (uint64_t index = range.begin; index < range.end; ++index) {
+        fz::Rng rng(fz::SampleSeed(masterSeed, index));
+        fz::ProgramGenerator generator(rng, fz::GeneratorLimits{});
+        const fz::Sample sample = generator.Generate();
+        const auto compiled = lab::lang::Compiler{}.Compile(fz::Render(sample.tokens));
+        if (!compiled.program) {
+            ++generatorFailures;
+            continue;
+        }
+        ++samples;
+
+        bool touchedOpCode = false;
+        const lab::lang::Program mutated =
+            fz::MutateBytecode(*compiled.program, rng, touchedOpCode);
+        if (touchedOpCode) ++opcodeMutations;
+
+        std::string error;
+        if (!lab::lang::Verify(mutated, error)) {
+            ++rejected;
+            if (error.empty()) ++silentRejections;
+            else if (!fz::IsKnownVerifyMessage(error)) ++badVerifyMessages;
+            if (error == "알 수 없는 명령 코드다") ++unknownOpcodeRejections;
+            continue;
+        }
+
+        // 검증기가 통과시킨 손상 바이트코드는 VM이 안전하게 끝내야 한다. 여기서 프로세스가
+        // 죽으면 그것이 곧 검증기의 구멍이다.
+        ++accepted;
+        // 통과한 프로그램에 미지의 명령 코드가 남아 있으면 VM의 이항 연산 분기가 빈 스택을
+        // 읽는다. 실행 결과를 보기 전에 그 사실 자체를 단언한다 — 릴리스 빌드에서는 빈
+        // 스택 접근이 조용히 지나갈 수 있어 결과만 봐서는 구멍이 보이지 않는다.
+        for (const auto& instruction : mutated.code)
+            if (!lab::lang::IsKnownOpCode(instruction.op)) ++unknownOpcodeAccepted;
+
+        lab::lang::VirtualMachine vm;
+        fz::BindStandardNatives(vm);
+        const auto observation = fz::Observe(vm, mutated, kFuzzBudget, kFuzzStack);
+        if (observation.instructions > kFuzzBudget + 1) ++overBudget;
+        if (!observation.ok && !fz::IsKnownRuntimeMessage(observation.message))
+            ++badRuntimeMessages;
+    }
+
+    CHECK(generatorFailures == 0);
+    CHECK(silentRejections == 0);
+    CHECK(badVerifyMessages == 0);
+    CHECK(badRuntimeMessages == 0);
+    CHECK(overBudget == 0);
+    CHECK(unknownOpcodeAccepted == 0);
+
+    // 이 배터리가 실제로 opcode 범위 밖 값을 만들고, 검증기가 그것을 잡는지. 두 카운터가
+    // 0이면 위의 단언들은 아무것도 검사하지 않은 채 통과한 것이다.
+    if (CoverageEnforced(samples)) {
+        CHECK(opcodeMutations * 5 >= samples);
+        CHECK(unknownOpcodeRejections * 20 >= samples);
+        CHECK(rejected > 0);
+        CHECK(accepted > 0);
+    }
+
+    PrintCoverage("bytecode", Count("표본", samples) + " · " + Count("거부", rejected) + " · " +
+                                  Count("통과", accepted) + " · " +
+                                  Count("opcode변형", opcodeMutations) + " · " +
+                                  Count("미지opcode거부", unknownOpcodeRejections));
+}
+
+// ── 사례 (3) 실행 결정성과 자원 상한 ─────────────────────────────────────────
+void TestFuzzExecutionDeterminismAndBudget() {
+    BeginCase();
+    const SampleRange range = Samples(kExecutionSamples);
+    uint64_t samples = 0, violations = 0;
+    uint64_t ranToHalt = 0, budgetStopped = 0, nonFinite = 0, dividedByZero = 0;
+    uint64_t uninitialized = 0, unregistered = 0, tightStackStopped = 0, tightBudgetStopped = 0;
+
+    for (uint64_t index = range.begin; index < range.end; ++index) {
+        fz::Rng rng(fz::SampleSeed(masterSeed, index));
+        fz::ProgramGenerator generator(rng, fz::GeneratorLimits{});
+        const fz::Sample sample = generator.Generate();
+        const std::string source = fz::Render(sample.tokens);
+        ++samples;
+
+        const std::string detail = ExecutionViolation(source);
+        if (!detail.empty()) {
+            ++violations;
+            const std::string wanted = ViolationClass(detail);
+            const auto shrunk =
+                fz::Shrink(sample.tokens, [&wanted](const fz::TokenList& candidate) {
+                    return ViolationClass(ExecutionViolation(fz::Render(candidate))) == wanted;
+                });
+            ReportCounterexample("fuzz_execution_determinism_and_budget", index, sample.tokens,
+                                 shrunk, detail);
+            continue;
+        }
+
+        // 관측 버킷. 실패 메시지의 종류가 곧 "어떤 방어가 실제로 발동했는가"다.
+        const auto compiled = lab::lang::Compiler{}.Compile(source);
+        lab::lang::VirtualMachine vm;
+        fz::BindStandardNatives(vm);
+        const auto wide = fz::Observe(vm, *compiled.program, kFuzzBudget, kFuzzStack);
+        if (wide.ok) ++ranToHalt;
+        else if (wide.message == "명령 실행 예산을 초과했다") ++budgetStopped;
+        else if (wide.message == "연산 결과가 유한하지 않다") ++nonFinite;
+        else if (wide.message == "0으로 나눌 수 없다") ++dividedByZero;
+        else if (fz::StartsWith(wide.message, "초기화되지 않은 변수: ")) ++uninitialized;
+        else if (fz::StartsWith(wide.message, "등록되지 않은 호스트 함수: ")) ++unregistered;
+
+        lab::lang::VirtualMachine tight;
+        fz::BindStandardNatives(tight);
+        const auto limited = fz::Observe(tight, *compiled.program, kTightBudget, kTightStack);
+        if (limited.message == "VM 스택 한도를 초과했다") ++tightStackStopped;
+        else if (limited.message == "명령 실행 예산을 초과했다") ++tightBudgetStopped;
+    }
+
+    CHECK(violations == 0);
+
+    // 여섯 실패 정책이 모두 실제로 발동해야 배터리가 그 정책들을 검사했다고 말할 수 있다.
+    if (CoverageEnforced(samples)) {
+        CHECK(ranToHalt * 4 >= samples);
+        CHECK(budgetStopped > 0);
+        CHECK(nonFinite > 0);
+        CHECK(dividedByZero > 0);
+        CHECK(uninitialized > 0);
+        CHECK(unregistered > 0);
+        CHECK(tightStackStopped + tightBudgetStopped > 0);
+    }
+
+    PrintCoverage("execution",
+                  Count("표본", samples) + " · " + Count("정상종료", ranToHalt) + " · " +
+                      Count("예산", budgetStopped) + " · " + Count("비유한", nonFinite) + " · " +
+                      Count("0나눗셈", dividedByZero) + " · " + Count("미초기화", uninitialized) +
+                      " · " + Count("미등록호출", unregistered) + " · " +
+                      Count("좁은스택", tightStackStopped) + " · " +
+                      Count("좁은예산", tightBudgetStopped));
+}
+
+// ── 사례 (4) 토큰 변형 → 실패 방식 계약 ──────────────────────────────────────
+void TestFuzzTokenMutationDiagnostics() {
+    BeginCase();
+    const SampleRange range = Samples(kMutationSamples);
+    uint64_t samples = 0, violations = 0, rejectedByCompiler = 0, stillCompiles = 0;
+    uint64_t beyondFirstLine = 0, deepNestingRejections = 0, unknownCharacterRejections = 0;
+    uint64_t distinctMessages = 0;
+    std::vector<std::string> seenMessages;
+
+    for (uint64_t index = range.begin; index < range.end; ++index) {
+        fz::Rng rng(fz::SampleSeed(masterSeed, index));
+        fz::ProgramGenerator generator(rng, fz::GeneratorLimits{});
+        const fz::Sample sample = generator.Generate();
+        unsigned kinds = 0;
+        const fz::TokenList broken = fz::ApplyMutations(sample.tokens, rng, kinds);
+        const std::string source = fz::Render(broken);
+        ++samples;
+
+        const std::string detail = MutationViolation(source);
+        if (!detail.empty()) {
+            ++violations;
+            const std::string wanted = ViolationClass(detail);
+            const auto shrunk = fz::Shrink(broken, [&wanted](const fz::TokenList& candidate) {
+                return ViolationClass(MutationViolation(fz::Render(candidate))) == wanted;
+            });
+            ReportCounterexample("fuzz_token_mutation_diagnostics", index, broken, shrunk,
+                                 detail);
+            continue;
+        }
+
+        const auto compiled = lab::lang::Compiler{}.Compile(source);
+        if (compiled.program) {
+            ++stillCompiles;
+            continue;
+        }
+        ++rejectedByCompiler;
+        const auto& first = compiled.diagnostics.front();
+        if (first.location.line > 1) ++beyondFirstLine;
+        if (first.message == "중첩 깊이가 파서 한도를 초과했다") ++deepNestingRejections;
+        if (fz::StartsWith(first.message, "알 수 없는 문자: ")) ++unknownCharacterRejections;
+
+        bool seen = false;
+        for (const std::string& message : seenMessages)
+            if (message == first.message) seen = true;
+        if (!seen) {
+            seenMessages.push_back(first.message);
+            ++distinctMessages;
+        }
+    }
+
+    CHECK(violations == 0);
+
+    // 커버리지. 특히 중첩 괄호는 이 lab이 과거에 실제로 죽었던 부류다. 그 표본이 0이면
+    // 위의 property는 그 부류를 한 번도 치지 않은 것이다.
+    if (CoverageEnforced(samples)) {
+        CHECK(rejectedByCompiler * 2 >= samples);
+        CHECK(stillCompiles > 0);
+        CHECK(deepNestingRejections * 60 >= samples);
+        CHECK(unknownCharacterRejections * 20 >= samples);
+        CHECK(distinctMessages >= 10);
+        // 진단 위치를 상수로 고정하면 이 줄이 먼저 죽는다.
+        CHECK(beyondFirstLine * 4 >= rejectedByCompiler);
+    }
+
+    PrintCoverage("mutation",
+                  Count("표본", samples) + " · " + Count("거부", rejectedByCompiler) + " · " +
+                      Count("여전히컴파일", stillCompiles) + " · " +
+                      Count("2줄이후진단", beyondFirstLine) + " · " +
+                      Count("깊은중첩거부", deepNestingRejections) + " · " +
+                      Count("미지문자거부", unknownCharacterRejections) + " · " +
+                      Count("진단종류", distinctMessages));
+}
+
 // 등록표. 어느 계약이 어느 step에서 추가됐는지가 여기 한 곳에 적히고,
 // CMake의 step별 ctest 타깃은 첫 칸의 라벨을 인자로 넘겨 이 표를 걸러낸다.
 // snippet-begin: test-registry
@@ -361,12 +843,16 @@ constexpr TestCase kTestCases[] = {
     {"step02", "associativity_and_unary_precedence", TestAssociativityAndUnaryPrecedence},
     {"step02", "control_flow", TestControlFlow},
     {"step02", "parser_rejects_incomplete_expression", TestParserRejectsIncompleteExpression},
+    {"step02", "fuzz_grammar_directed_compile", TestFuzzGrammarDirectedCompile},
     {"step03", "verifier_rejects_malformed_program", TestVerifierRejectsMalformedProgram},
     {"step03", "verifier_branch_contracts", TestVerifierBranchContracts},
+    {"step03", "fuzz_bytecode_mutation_verifier", TestFuzzBytecodeMutationVerifier},
     {"step04", "runtime_value_diagnostics", TestRuntimeValueDiagnostics},
     {"step04", "budget_stops_untrusted_loop", TestBudgetStopsUntrustedLoop},
     {"step04", "stack_limit_stops_deep_expression", TestStackLimitStopsDeepExpression},
     {"step04", "parser_rejects_deep_nesting", TestParserRejectsDeepNesting},
+    {"step04", "fuzz_execution_determinism_and_budget", TestFuzzExecutionDeterminismAndBudget},
+    {"step04", "fuzz_token_mutation_diagnostics", TestFuzzTokenMutationDiagnostics},
     {"step05", "host_boundary", TestHostBoundary},
     {"step05", "host_boundary_rejects_unregistered_name", TestHostBoundaryRejectsUnregisteredName},
     {"step06", "bench_program_invariants", TestBenchProgramInvariants},
@@ -378,8 +864,33 @@ constexpr TestCase kTestCases[] = {
 // 인자가 없으면 전부, 있으면 step 라벨(`step01`) 또는 사례 이름과 정확히 일치하는
 // 것만 실행한다. 필터가 아무것도 고르지 못하면 조용히 통과하지 않고 실패한다 —
 // 오타 난 ctest 타깃이 "통과"로 보이는 것이 가장 나쁜 결과다.
+//
+// fuzz 배터리는 세 개의 선택 인자를 더 받는다. 기본값으로 도는 CI 실행과, 시드를 바꿔
+// 오래 도는 탐색과, 반례 하나만 다시 도는 재현이 같은 실행 파일로 갈린다.
+//   --seed=0x...     master 시드. 기본값은 소스에 박힌 상수다.
+//   --samples=N      표본 수를 덮어쓴다.
+//   --only=N         N번 표본 하나만 돈다(반례 보고가 찍어 주는 번호).
 int main(int argc, char** argv) {
-    const char* filter = argc > 1 ? argv[1] : nullptr;
+    const char* filter = nullptr;
+    for (int i = 1; i < argc; ++i) {
+        const char* argument = argv[i];
+        if (std::strncmp(argument, "--seed=", 7) == 0) {
+            masterSeed = std::strtoull(argument + 7, nullptr, 0);
+        } else if (std::strncmp(argument, "--samples=", 10) == 0) {
+            sampleOverride = std::strtoll(argument + 10, nullptr, 0);
+        } else if (std::strncmp(argument, "--only=", 7) == 0) {
+            onlyIndex = std::strtoll(argument + 7, nullptr, 0);
+        } else if (std::strncmp(argument, "--", 2) == 0) {
+            std::fprintf(stderr, "알 수 없는 옵션: %s\n", argument);
+            return EXIT_FAILURE;
+        } else if (!filter) {
+            filter = argument;
+        } else {
+            std::fprintf(stderr, "필터는 하나만 받는다: %s\n", argument);
+            return EXIT_FAILURE;
+        }
+    }
+
     int selected = 0;
     int failedCases = 0;
 

@@ -57,6 +57,21 @@ CLRS의 분석·증명 체계와 *The Algorithm Design Manual*의 문제 모델�
 
 코딩 테스트 준비가 목적이라면 02~09의 구현을 제한 시간 안에 빈 파일에서 다시 작성한다. 커리큘럼의 완료 조건은 암기한 template이 아니라, 조건이 바뀌었을 때 기존 증명의 어느 단계가 깨지는지 설명하는 것이다.
 
+## part11의 실행 자산 — 어느 lab에서 도는가
+
+`algorithms/`에는 대응 lab이 없다. 다만 **part11(속성·퍼징 검증)만은 예외로 실행 자산을 갖는다** — 그 기법은 특정 자료구조가 아니라 *검증 방식*이라서, 다른 축의 lab이 자기 알고리즘을 검증하는 자리에 그대로 얹히기 때문이다. 아래가 그 소재다. 세 lab 모두 외부 라이브러리 없이 시드 루프 + 생성기 + 축소기 + 반례 출력으로 되어 있다.
+
+| part11 절 | 실행 자산 | 무엇이 도는가 |
+|---|---|---|
+| §2 예제와 property<br>§3 입력 생성과 shrinking | `projects/mini/math_lab/tests/property.h` + `tests/core_tests.cpp` | property 13개 · 표본 42,300개. `math_core_tests --properties`. 반례는 축소 뒤 `--seed`·`--sample` 재현 명령으로 출력 |
+| §3 shrinking (독립 하네스) | `projects/mini/physics_lab/tests/property_kit.h` + `tests/physics_property_tests.cpp` | property 5개(볼록쌍 1500표본 · 강체 장면 · bit 결정성). 탐욕+재시작 축소, 재현 명령 `physics_property_tests <case> <seed>` |
+| §5 Metamorphic·differential | 같은 두 lab | math: SAT ⇔ GJK 판정 일치, 행렬 ⇔ 쿼터니언 샌드위치, 강체 변환·균등 스케일 불변. physics: SAT 깊이 ⇔ EPA 깊이 ⇔ 참조 MTD |
+| §7 수치·확률 검증 | 같은 두 lab | 허용 오차를 통과시키려고 키우지 않고 float 단위 반올림(2⁻²⁴) 횟수에서 유도한다. 각 property의 `contract` 문자열이 그 근거를 적는다 |
+| §9 비신뢰 입력과 자원 상한 | `projects/mini/languages_lab/src/fuzz.hpp` + `src/tests.cpp` | fuzz 배터리 4개 · 표본 80,000개. 문법 유도 생성 · 토큰/opcode 변형. 실행 예산·스택 상한·검증기 거부 어휘·진단 위치를 친다 |
+| §10 지속 가능한 검증 절차 | `projects/mega` — `tests/test_profile_isolation.cpp` | 검증이 실행 순서에 의존하지 않게 만드는 자리. 누적이 제품 기능임을 확인하고, `--profile PATH --fresh-profile`이 실행 횟수와 무관하게 같은 결과를 내는지, **그 인자를 빼면 실제로 갈리는지**(음성 대조)까지 본다 |
+
+**여기에 없는 것.** §4 상태 기계·model-based testing과 §6 coverage-guided fuzzing은 이 저장소에 실행 자산이 없다. 세 lab의 하네스는 coverage 되먹임도 sanitizer corpus도 쓰지 않고 고정 시드에서 결정론적으로 입력을 만들 뿐이다 — `math_lab/tests/property.h`가 자기 주석에 그렇게 못박아 두었다. §8 mutation testing은 자동화 도구가 아니라 **손으로 도는 규율**로 있다. 각 step 문서의 `### 무력화 변이` 절이 그 기록이다 — 어떤 한 줄을 어떻게 망가뜨렸고 어느 검사가 어떤 메시지로 죽었는지가 적혀 있다(예: `math_lab/articles/step05_collision.md`, `languages_lab/articles/step03_bytecode_verifier.md`). 변이는 확인 뒤 복원하고 SHA-256으로 대조한다.
+
 ## 완료 기준
 
 - 문제를 입력·출력·가능성·목적 함수로 명세할 수 있다.

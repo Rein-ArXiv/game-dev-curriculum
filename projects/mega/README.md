@@ -236,6 +236,32 @@ $env:MEGA_AB = "frame_alloc=arena,body_alloc=pool"; .\build\bin\Release\mega_def
 
 프로필 WAL은 Windows에서 `%LOCALAPPDATA%/MegaDefense/profile.wal`에 저장된다.
 
+## 프로필과 재현
+
+프로필은 **판을 넘어 남는다.** 매치 정산이 발행한 스크랩이 지갑에 쌓이고, 그 잔액으로
+산 시작 골드 티어가 다음 판의 시작 조건을 바꾼다(`--buy-tier`). 이것은 기능이다.
+
+같은 성질이 검사 쪽에서는 반대의 이름을 갖는다. 경로를 대지 않은 `--selftest`는 전부
+실행 파일 옆의 `selftest_profile.wal` 하나를 쓰고 그 파일은 지워지지 않으므로, 같은
+명령이 몇 번째 실행이냐에 따라 다른 결과를 낸다 — 실측으로 2회차에 `towers=10`이
+`towers=11`이 되고 스냅샷이 181바이트에서 192바이트가 된다.
+
+그래서 두 인자를 함께 쓴다. `--profile PATH`가 이 실행이 쓸 파일을 지정하고,
+`--fresh-profile`이 그 파일을 비우고 출발한다.
+
+```powershell
+.\build\bin\Release\mega_defense.exe --selftest --profile .\demo.wal --fresh-profile --match-unix 1767312000
+```
+
+시각까지 못박으면 이 명령은 몇 번을 돌려도 같은 줄을 낸다. `ctest`의 셀프테스트는
+전부 이 형태이며, 검사 이름이 곧 파일 이름이라 `-j` 병렬에서도 겹치지 않는다.
+`--fresh-profile`을 `--profile` 없이 주면 거절한다(종료 코드 2) — 그때 지워질 것이
+플레이어의 프로필이거나 공용 셀프테스트 프로필이기 때문이다. `--record`와
+`--verify-replay`는 이 인자 없이도 언제나 새 프로필로 출발한다.
+
+누적이 여전히 기능인지, 격리가 실제로 재현을 만드는지, 그리고 격리를 빼면 정말
+갈리는지를 `test_profile_isolation`이 함께 확인한다.
+
 ## 코드 구조
 
 ```text

@@ -1,6 +1,6 @@
 # Mini Lab 검증 현황
 
-기준일: 2026-08-02
+기준일: 2026-08-23
 
 이 문서는 mini lab의 **빌드 가능 여부**와 **동작 정확성 검증 여부**를 구분한다. 실행 파일이 만들어지는 것과 알고리즘이 옳게 작동하는 것은 같은 완료 조건이 아니다.
 
@@ -37,9 +37,9 @@ README의 빌드 절차를 실행한다. 2026-08-15 WSL2 Ubuntu 26.04(커널 6.1
 | Lab | Release build | 자동 테스트 | 단계 문서 |
 |---|---|---|---:|
 | `parts_perf_lab` | 통과 | CTest 9개. 전체 1개 + step별 8개(실행 파일이 첫 인자를 step 필터로 받는다) | 8 |
-| `languages_lab` | 통과 | CTest 7개. 전체 1개 + 계약별 6개(step 라벨로 등록표를 거른다) | 6 |
-| `math_lab` | 통과 | CTest 9개. 전체 1개 + step별 8개(실행 파일이 첫 인자를 step 필터로 받는다) | 8 |
-| `physics_lab` | 통과 | CTest 19개. 실행 파일 전체 8개 + step별 11개(실행 파일이 첫 인자를 step 필터로 받는다) | 8 |
+| `languages_lab` | 통과 | CTest 7개. 전체 1개 + 계약별 6개(step 라벨로 등록표를 거른다). 사례 19개 중 4개가 문법 유도 fuzz 배터리(기본 8만 표본, 고정 시드, 반례 축소) | 6 |
+| `math_lab` | 통과 | CTest 10개. 전체 1개 + step별 8개(실행 파일이 첫 인자를 step 필터로 받는다) + property 층 1개. 사례 26개 중 13개가 시드 무작위 property(기본 42,300 표본, 고정 시드, 반례 축소) | 8 |
+| `physics_lab` | 통과 | CTest 23개. 실행 파일 전체 9개 + step별 14개(실행 파일이 첫 인자를 step 필터로 받는다). 아홉 번째는 불변식 property 층 — 사례 5개(볼록쌍 1500 표본 · 에너지 소산 · 침투 상계 · Measure⇔Response 프레임 동일 · bit 결정성)를 고정 시드에서 돌리고, 실패하면 입력을 shrink 해 시드·재현 명령과 함께 찍는다 | 8 |
 | `ai_lab` | 통과 | CTest 9개. 전체 2개(pathfinder·model) + step별 7개 | 6 |
 | `graphics_gl_lab` | 통과 | CTest 12개. 전체 2개(계약·렌더) + step별 10개(실행 파일이 첫 인자를 step 필터로 받는다) | 7 |
 | `graphics_dx_lab` | 통과 | CTest 8개. 전체 1개 + step별 7개(실행 파일이 첫 인자를 step 필터로 받는다) | 7 |
@@ -52,13 +52,34 @@ README의 빌드 절차를 실행한다. 2026-08-15 WSL2 Ubuntu 26.04(커널 6.1
 전체 스크립트의 마지막 검사는 C# Live Service의 실제 game token 두 개를 C++ Mega 전용 서버가
 검증하고 서로 다른 UDP 끝점 두 곳에 snapshot을 보내는 교차 언어 process smoke다.
 
+### property·fuzz 층 (2026-08-23 독립 재검증)
+
+`math_lab` · `physics_lab` · `languages_lab` 셋은 `algorithms/part11_property_fuzz_verification.md`의
+실행 자산이기도 하다. 어느 절이 어디서 도는지는
+[`algorithms/README.md`의 실행 자산 표](../../algorithms/README.md#part11의-실행-자산--어느-lab에서-도는가)에 있다.
+
+| 확인 | 결과 |
+|---|---|
+| 클린 빌드(캐시 없는 새 디렉터리, MSVC Release `/W4 /permissive- /utf-8`) | 제품·테스트 소스 경고 **0**. math·physics의 raylib/raygui/glfw 서드파티 경고(각 43 · 203)는 전부 `_deps/` 소재 |
+| ctest 전수 · 연속 3회 | math 10/10 · physics 23/23 · languages 7/7 — 3회 모두 동일 |
+| 배터리 출력 반복 동일 | 세 실행 파일 모두 3회 실행 출력이 **바이트 동일** |
+| 무력화 변이 | physics EPA 깊이 ×1.02 → `step05.property` 사망 · math SAT 후보축 4→3 → `collision/sat-gjk-agree` 사망 · languages 실행 예산 ×1000 → `step04` 정지 실패로 CMake `TIMEOUT`이 사망 판정. 셋 다 복원 뒤 SHA-256 동일 |
+| 반례 재현 | 출력된 재현 명령(`physics_property_tests convex_pair <seed>` · `math_core_tests step05 --only=... --seed=... --sample=...`)을 그대로 실행해 같은 반례·같은 축소 입력·종료 코드 1 확인 |
+
 ## 남은 완료 조건
 
 GUI lab은 장면을 직접 실행해 화면과 상호작용을 확인해야 한다. 현재 headless
 CTest는 다음 핵심 계약을 검사한다.
 
 - `parts_perf_lab`: allocator 정렬·해제와 simulation 모드 계약
-- `math_lab`: 행렬·쿼터니언·교차 판정·수치 안정성
+- `languages_lab`: 토큰 위치, 우선순위·결합, 바이트코드 검증기, 실행 예산·스택 상한,
+  호스트 바인딩. 여기에 더해 문법 유도 생성기와 토큰·명령 변형기로 도는 property 배터리가
+  컴파일 결정성, 검증기의 닫힌 거부 어휘, 실행 결정성과 자원 상한, 진단 어휘·위치를
+  고정 시드 8만 표본에서 검사한다(`--seed`·`--samples`·`--only`로 확장·재현)
+- `math_lab`: 행렬·쿼터니언·교차 판정·수치 안정성. 여기에 더해 구성적 생성기와 축소기로 도는
+  property 층이 쿼터니언 항등식·이중 덮개·등각속도, Perlin/Simplex 범위 상계(그라디언트 조합
+  256 가지를 세는 독립 오라클), SAT⇔GJK 일치와 분리면 실증·강체 불변, 역행렬 왕복의 조건수
+  규칙을 고정 시드 42,300 표본에서 검사한다(`--seed`·`--scale`·`--only`·`--sample`로 확장·재현)
 - `physics_lab`: chrome 레이아웃 분할, 적분기 차수·에너지 거동, force 항과 종단 속도,
   임펄스 클램프, AABB/PBD, SAT·GJK/EPA, 결정성과 Response 솔버 동일성
 - `ai_lab`: 경로 비용, flow field, 반사 경계, boid 속도, influence 결합

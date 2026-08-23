@@ -356,6 +356,81 @@ ctest --test-dir build -C Release -R step06 --output-on-failure
 
 `1.345 → 0.485` 가 iter 슬라이더를 1 에서 16 으로 올렸을 때 그래프에서 보던 그 감소다. position correction 을 지우면 16 회에서도 4.07 로 남아 실패한다. `approach -200 -> relative 20` 은 임계 (50 px/s) 를 넘는 접근에서만 반발이 살아난다는 규약이다 — e = 0.1 이므로 상대 속도 -200 이 +20 으로 튕겨 나간다.
 
+### 무작위 장면으로 계약을 넓히기
+
+위의 다섯 줄은 전부 *하나의* 워크로드다 — 24 개의 같은 반지름, 같은 질량, 같은 초기 배치. 그 워크로드에서 `invMass` 가 전부 1 이었기 때문에 유효질량을 `2.0f` / `1.0f` 리터럴로 박아 둔 버그가 숫자로는 아무 차이도 만들지 않고 오래 숨어 있었다. 고정 워크로드는 자기가 고정한 가정을 검사하지 못한다.
+
+그래서 배치를 생성기에 맡기는 층을 얹었다. 무작위 강체 장면 배터리는 계약을 적고, 그 계약을 깨는 장면을 찾고, 찾으면 body 를 하나씩 빼 가며 줄여 시드와 함께 찍는다.
+
+```powershell
+cmake --build build --config Release -j
+ctest --test-dir build -C Release -R step06.property --output-on-failure
+.\build\Release\physics_property_tests.exe step06   # 같은 것을 직접 — 관측값까지 본다
+```
+
+```text
+[step06] energy_dissipation
+  120 장면 x 180 프레임: 최대 프레임간 KE 비율=1 (1 이하가 계약)
+  충돌이 있던 장면 120 개, 그 중 최소 소산 후 KE/KE0=0.00521402
+  장면 버킷: general=56 resting=23 mass-spread=15 dense=11 fast=9 degenerate=6
+  ok
+[step06] penetration_bound
+  120 장면 x 600 프레임: 최대 상대 침투=1.007 (1 이 반지름)
+  정착 뒤 최대 평균 침투=0.790839 px, 최대 침투=1.51775 px, KE/상계=0.555462
+  장면 버킷: general=53 resting=15 mass-spread=26 dense=15 fast=10 degenerate=1
+  ok
+[step06] frame_mirrors_response
+  24 장면 x 120 프레임: max pos delta=0 max vel delta=0
+  ok
+3 case(s) ok: physics property [step06]
+```
+
+**감쇠 규칙을 먼저 못 박는다.** "에너지가 늘지 않는다" 는 무조건 참이 아니다. 중력을 켜면 위치 보정이 물체를 중력에 거슬러 밀어 올리고, 그 일이 다음 프레임의 운동에너지로 돌아온다. 반발계수가 0 이 아니면 목표 속도 자체가 분리 방향을 요구한다. 그래서 비증가 property 는 **중력 0 · 반발 0** 에서만 단언한다. 그 조건에서는 에너지를 올릴 수 있는 항이 하나도 없다.
+
+- semi-implicit Euler 는 중력이 0 이므로 속도를 건드리지 않는다.
+- 위치 보정은 위치만 옮긴다. 중력이 없으니 위치에너지도 없다.
+- 접촉 임펄스 하나의 에너지 변화는 $a v_n + \frac{1}{2}a^2 w$ 이고, $a = -v_n/w$ (또는 누적 $\lambda$ 를 0 으로 되돌리는 clamp) 이므로 $-\frac{v_n^2}{2w} \le 0$ 이다.
+
+중력을 켠 쪽은 다른 계약을 단다. 낙하 가능한 높이는 캔버스 높이를 넘지 못하므로 $KE \le KE_0 + g H \sum m$ 이라는 상계가 성립하고 (실측 최대 비율 0.56), 관통 잔량은 *반지름* 을 넘지 않아야 하며 (실측 최대 1.007 — 초기부터 겹쳐 시작한 퇴화 장면 하나), 600 프레임 뒤 평균 침투는 고정 워크로드가 쓰는 것과 같은 `slop + 1 px` 아래여야 한다 (실측 0.79).
+
+관통 상계는 사전조건이 있어야 성립한다. `dt·v` 가 반지름을 넘으면 한 프레임에 상대를 지나칠 수 있다. 초기 속도 상한과 자유낙하로 얻는 속도를 더해도 프레임당 이동이 반지름보다 작도록 생성기가 반지름 하한을 잡는다 — 빠른 장면 버킷의 반지름이 14 px 부터인 이유다.
+
+**property 층이 도는 프레임이 이 Scene 의 프레임인가.** 배터리가 자기만의 솔버 사본을 돌면 위의 모든 단언은 사본에 대한 단언이다. 그래서 세 번째 property 가 같은 장면을 배터리의 프레임 함수와 `ResponseScene::Step` 양쪽으로 120 프레임 돌려 위치·속도가 bit 단위로 같은지 본다 (실측 max pos delta `0`, max vel delta `0`).
+
+<!-- snippet: tests/physics_property_tests.cpp@property-frame -->
+```cpp
+void PropertyFrame(std::vector<physlab::CircleRb>& bodies,
+                   const physlab::WorldBounds& bounds,
+                   const physlab::SolverParams& params, float gravity,
+                   int iterations, float dt) {
+    physlab::core::IntegrateSemiImplicitEuler(bodies, gravity, dt);
+    std::vector<physlab::Contact> contacts;
+    physlab::core::GatherCircleContacts(bodies, bounds, contacts);
+    physlab::core::SolveSequentialImpulse(bodies, contacts, params, iterations);
+    physlab::core::SolvePositionCorrection(bodies, bounds, params,
+                                           iterations / 2);
+}
+```
+
+**shrink 가 반례를 읽을 수 있게 만든다.** 위치 보정을 무력화하고 돌리면 13 body 짜리 장면이 *두 개* 로 줄고, 임펄스를 2.6 배 과다 적용하면 13 body 가 *벽에 부딪히는 body 하나* 로 줄어든다.
+
+```text
+[property FAILED] 무작위 강체 장면: 중력 0 · 반발 0 이면 운동에너지는 비증가
+  시드      : 1597418466603412013  (생성기 v1, 표본 1)
+  위반      : 접근 속도 5 px/s 를 넘는 충돌이 있었는데 운동에너지가 6922.98203 -> 6922.98203 로 그대로다
+  최초 위반 : 프레임 12 에서 운동에너지가 421199.543 -> 427501.993 로 늘었다 (접촉 3 개)
+  원본 입력 : bucket=general canvas=400x320 iters=8 bodies=13
+              [0] pos=(223.3861,148.6747) vel=(226.6776,251.2710) r=16.1144 invMass=1.0000
+              ...
+  축소 입력 : bucket=general canvas=400x320 iters=8 bodies=1
+              [0] pos=(85.0000,258.0000) vel=(-52.5597,-105.2779) r=18.0000 invMass=1.0000   (5 step)
+  재현      : physics_property_tests energy_dissipation 1597418466603412013
+```
+
+**비증가만으로는 약하다.** *아무것도 하지 않는* 솔버도 "에너지가 늘지 않았다" 를 만족한다. 그래서 배터리는 적분만 한 사본으로 이번 프레임이 풀 접촉을 미리 보고, 접근 속도 5 px/s 를 넘는 충돌이 있었던 장면에서는 에너지가 *실제로 줄었는지* 도 요구한다 (120 장면 전부 해당, 최소 소산 후 `KE/KE₀ = 0.005`).
+
+살아남은 mutant 도 기록해 둔다. 벽 임펄스를 `1.4` 배로 과다 적용해도 이 property 는 통과한다 — 목표 속도가 0 인 임펄스를 1.4 배 주는 것은 반발계수 0.4 로 튕기는 것과 같고, 나가는 속도가 들어온 속도보다 작으니 에너지는 여전히 줄기 때문이다. 에너지가 실제로 늘려면 배수가 2 를 넘어야 하고, `2.6` 배에서 이 property 가 죽인다. 소산 계약은 *에너지 부호* 를 본다는 뜻이고, 반발계수 자체의 값은 고정 워크로드 쪽 케이스가 리터럴로 잡는다.
+
 ---
 
 ## 결론

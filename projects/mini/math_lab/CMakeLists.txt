@@ -60,6 +60,7 @@ enable_testing()
 # ComputeLayout 만 scene_chrome.cpp 에 있어 함께 컴파일한다(그리기 함수는 부르지 않는다).
 add_executable(math_core_tests
     tests/core_tests.cpp
+    tests/property.h
     src/ui/scene_chrome.cpp)
 target_include_directories(math_core_tests PRIVATE src)
 target_link_libraries(math_core_tests PRIVATE raylib)
@@ -83,6 +84,12 @@ endforeach()
 
 # step 필터 없이 표 전체를 도는 타깃. 위 step 타깃의 합집합이다.
 add_test(NAME math_core_tests COMMAND math_core_tests)
+
+# property 층만 도는 타깃. 위 step 타깃에 이미 포함되지만, 시드 무작위 검증이
+# 깨졌는지를 한 줄로 보기 위한 진입점이다. 표본을 늘린 야간 캠페인은 같은
+# 실행 파일에 `--scale=N` 을 주면 된다(ctest 타깃으로 걸지 않는다 — 매 커밋에
+# 도는 것과 오래 도는 것을 섞지 않는다).
+add_test(NAME math_property_layer COMMAND math_core_tests --properties)
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     src

@@ -348,10 +348,90 @@ CHECK(Near(mathlab::MatDeterminant(R), 1.0f, 1e-4f));
 
 여기에 `QuatToMatrix(q)·v == QuatRotateVec(q, v)` 를 무작위 벡터 100 개로 대조한다 — 행렬 경로와 쿼터니언 경로가 *독립 구현* 이므로 서로의 오라클이 된다. TRS 와 SRT 가 다른 변환이라는 비가환성, 열 우선 규약 (평행이동이 네 번째 열), 특이행렬에서 `MatInvert` 가 거짓을 돌려주는 것까지 함께 본다.
 
+이 항등식들은 *고른 입력 하나* 에서 확인한 것이다. `trs` 는 축 `(0.3, -0.5, 0.8)` 에 각 1.1, 스케일 `(2, 0.5, 1.5)` 하나뿐이다. 그런데 역행렬의 정확도는 입력의 *조건수* 에 따라 달라지므로, 표본 하나로는 "어느 범위까지 이 오차 안에 드는가" 를 말할 수 없다. `1e-5f` 라는 숫자가 어디서 왔는지도 코드에 적혀 있지 않다. property 층이 그 둘을 명시한다.
+
+먼저 생성기가 조건수를 상계한다. 스케일 파라미터는 `[-4, 4]` 에서 뽑되 `|s| >= 0.1` 로 *보정* 되므로 선형부의 조건수 κ = max|s| / min|s| 는 40 을 넘지 않는다. 표본을 만들어 보고 나쁘면 버리는 rejection 이 아니라 domain 안으로 옮기는 구성이라 축소 뒤에도 조건이 유지된다. 그래도 `κ > 1e3` 이면 판정하지 않는다는 문을 코드에 남겨 뒀다 — 생성기를 넓히면 그 문이 먼저 걸린다.
+
+허용 오차는 통과시키려고 고른 값이 아니라 오차 증폭에서 유도한다. `M p + t` 를 계산할 때 잃는 자릿수가 `|t| + max|s|·|p|` 규모이고, `M⁻¹` 을 적용하면 `1/min|s|` 배 커진다.
+
+<!-- snippet: tests/core_tests.cpp@step08-property-inverse-tolerance -->
+```cpp
+const double tol = 64.0 * kUnitRoundoff * kappa *
+                   ((double)mathlab::V3Length(pt) +
+                    (double)mathlab::V3Length(t) / maxS + 1.0);
+
+const Vector3 back = mathlab::MatTransformPoint(inv, mathlab::MatTransformPoint(M, pt));
+if (!obs.Bound("|M^-1 (M p) - p|",
+               (double)mathlab::V3Length(mathlab::V3Sub(back, pt)), tol)) ok = false;
+```
+
+같은 property 의 행렬식 조항은 상대 오차가 아니라 *절대* 상계를 쓴다. TRS 의 행렬식은 스케일 곱이지만 3×3 전개는 크기 `max|s|³` 인 항들이 상쇄되며 그 값을 만들기 때문에, 스케일이 극단적으로 갈리면 상대 오차가 커지는 것이 정상이다. 상계를 `64u · max|s|³` 로 잡는 것이 그 사정을 정직하게 적는 방법이다.
+
+두 번째 property 는 *합성 대 개별 적용* 이다. `(A·B) p` 와 `A (B p)` 가 같아야 한다. 여기에 tolerance 가 아니라 `==` 로 잡히는 조항이 둘 붙는다.
+
+<!-- snippet: tests/core_tests.cpp@step08-property-exact-transpose -->
+```cpp
+if (!obs.Bound("(A B)^T != B^T A^T (exact)",
+               MatBitEqual(mathlab::MatTranspose(AB),
+                           mathlab::MatMul(mathlab::MatTranspose(B),
+                                           mathlab::MatTranspose(A)))
+                   ? 0.0 : 1.0,
+               0.0)) ok = false;
+if (!obs.Bound("A * I != A (exact)",
+               MatBitEqual(mathlab::MatMul(A, mathlab::MatIdentity()), A) ? 0.0 : 1.0,
+               0.0)) ok = false;
+
+obs.interesting = MatMaxDiff(AB, mathlab::MatMul(B, A)) > 1e-3;
+```
+
+`(A·B)ᵀ` 와 `Bᵀ·Aᵀ` 는 *같은 곱을 같은 순서로* 더한다. `MatMul` 의 누적 순서가 양쪽에서 동일하고 IEEE 곱셈의 교환법칙은 정확하므로, 결과는 근사가 아니라 비트가 같다. 계약이 허용하는 가장 강한 관계를 고른다는 원칙이 적용된 자리다. 마지막 줄의 비가환 조항이 대조군이다 — 곱이 가환으로 바뀌면 위 관계들이 자명해진다.
+
+세 번째 `matrix/quat-agreement` 는 고정 사례가 벡터 100 개로 하던 행렬 경로 ⇔ 쿼터니언 경로 대조를 무작위 축·각·비단위 스케일로 확장하고, `RᵀR = I` 와 `det(R) = 1` 을 함께 건다.
+
+축소기가 하는 일은 여기서 가장 잘 보인다. `MatInvert` 의 Gauss-Jordan 소거 부호를 `-=` 에서 `+=` 로 뒤집는 변이를 넣으면 보고가 이렇게 나온다.
+
+```text
+$ ./build/Release/math_core_tests.exe --only=matrix/inverse-roundtrip
+  property 'matrix/inverse-roundtrip' found a counterexample
+    contract : M^-1 (M p) == p within 64u * kappa * scale; kappa is capped by the generator
+    sample   : 0 of 3000   (master seed 20260823, scale 1)
+    broke    : |M^-1 (M p) - p| = 1.39106e-05   (bound 7.62939e-06)
+    generated: t.x=-7.729573 t.y=6.940718 t.z=0.1635618 axis.x=-0.1897763 axis.y=0.3894504 axis.z=0.9032391 angle=-3.64658 s.x=-0.9783964 s.y=1.746374 s.z=4 p.x=-2.265283 p.y=-8 p.z=0.0003816442
+    shrunk   : t.x=0 t.y=0 t.z=0 axis.x=0 axis.y=0 axis.z=1 angle=-6.9553e-06 s.x=1 s.y=1 s.z=1 p.x=1 p.y=0 p.z=0   (31 shrink step(s))
+    repro    : math_core_tests step08 --only=matrix/inverse-roundtrip --seed=20260823 --sample=0
+```
+
+31 번의 축소를 거쳐 평행이동 0, 스케일 `(1, 1, 1)`, 점 `(1, 0, 0)`, 축 `(0, 0, 1)` 만 남았다. 회전각만 `-6.9553e-06` 으로 남는데, 이 잔여물이 변이의 성질을 그대로 말해 준다 — 각이 정확히 0 이면 `M` 이 항등이라 소거 루프가 `f == 0` 에서 건너뛰어 통과하고, 조금이라도 회전이 있으면 즉시 깨진다. 사람이 손으로 줄였다면 각을 0 으로 만들어 놓고 "재현이 안 된다" 고 했을 자리다. 축소 후보가 `[lo, hi]` 밖으로 나가지 않고 실패가 유지되는 것만 채택하기 때문에 이런 잔여물이 살아남는다.
+
+<!-- snippet: tests/property.h@property-shrink-candidates -->
+```cpp
+for (int c = 0; c < 5 && budget > 0; ++c) {
+    const float candidate = candidates[c];
+    // 후보가 domain 안에 있으므로 축소 뒤에도 사전조건이 유지된다.
+    if (!(candidate >= spec.lo && candidate <= spec.hi)) continue;
+    if (candidate == current) continue;
+    // "더 단순하다" 의 정의 — 목표값에 더 가깝다.
+    if (std::fabs(candidate - spec.simplest) >
+        std::fabs(current - spec.simplest)) {
+        continue;
+    }
+    values[(size_t)k] = candidate;
+    --budget;
+    Observation trial;
+    if (StillFails(property, values, trial)) {
+        obs   = trial;      // 실패가 유지됐다 — 축소를 채택한다.
+        moved = true;
+        ++steps;
+        break;
+    }
+    values[(size_t)k] = current;
+}
+```
+
 ```text
 $ ctest --test-dir build -C Release -R math_step08_projection --output-on-failure
     Start 8: math_step08_projection
-1/1 Test #8: math_step08_projection ...........   Passed    0.04 sec
+1/1 Test #8: math_step08_projection ...........   Passed    0.03 sec
 
 100% tests passed out of 1
 ```
@@ -362,10 +442,23 @@ $ ./build/Release/math_core_tests.exe step08
 [step08] kahan/compensated_sum ........... 8 checks, 0 failed
 [step08] vector/cross_project_reflect .... 1208 checks, 0 failed
 [step08] matrix/inverse_orthogonal_trs ... 322 checks, 0 failed
-step08: 4 case(s), 1626 check(s), 0 failure(s)
+[step08] matrix/inverse-roundtrip ........ 3 checks, 0 failed  (3000 samples, 1417 non-degenerate, 0 skipped, worst 0.235x on '|det(M) - sx sy sz|')
+[step08] matrix/compose-vs-apply ......... 3 checks, 0 failed  (2000 samples, 2000 non-degenerate, 0 skipped, worst 0.022x on '|(A B) p - A (B p)|')
+[step08] matrix/quat-agreement ........... 3 checks, 0 failed  (3000 samples, 2549 non-degenerate, 0 skipped, worst 0.312x on 'max|R^T R - I|')
+step08: 7 case(s), 1635 check(s), 0 failure(s)
 ```
 
-검사가 실제로 결함을 잡는지는 변이 주입으로 확인했다. `StdNdcZ` 의 `A` 부호를 뒤집으면 `depth/std_vs_reverse` 가, `KahanAccumulator::Add` 의 보상항 대입을 `c_ = 0.0f` 로 지우면 `kahan/compensated_sum` 이 즉시 실패한다.
+property 층 전체는 별도 타깃으로도 돈다. 어느 step 이 깨졌는지는 step 타깃 이름이 알려 주고, 시드 무작위 검증만 따로 보고 싶을 때는 `math_property_layer` 하나면 된다.
+
+```text
+$ ctest --test-dir build -C Release -R math_property_layer --output-on-failure
+    Start 10: math_property_layer
+1/1 Test #10: math_property_layer ..............   Passed    0.07 sec
+
+100% tests passed out of 1
+```
+
+검사가 실제로 결함을 잡는지는 변이 주입으로 확인했다. `StdNdcZ` 의 `A` 부호를 뒤집으면 `depth/std_vs_reverse` 가, `KahanAccumulator::Add` 의 보상항 대입을 `c_ = 0.0f` 로 지우면 `kahan/compensated_sum` 이 즉시 실패한다. property 쪽은 셋 모두 각자의 변이를 갖는다 — Gauss-Jordan 소거 부호 반전은 `matrix/inverse-roundtrip` 을, `MatMul` 이 `B` 를 전치해 곱하게 바꾸면 `matrix/compose-vs-apply` 를, `QuatToMatrix` 의 `m1 = xy + wz` 를 `xy - wz` 로 바꾸면 `matrix/quat-agreement` 를 죽인다. 변이를 넣고 재빌드해 죽는 것을 본 뒤 원본 바이트로 되돌리고 SHA256 을 대조하는 것까지가 한 번의 확인이다.
 
 ---
 
@@ -388,7 +481,7 @@ Step 8 + math_lab 전체에서 만든 것.
 
 이 lab 의 8 Step 빌드가 *math 시리즈의 컴패니언 도구* 로 완결. 시리즈를 읽다가 의문이 생기는 지점 (*짐벌락이 어떻게 보이는가, smin 의 k 값이 어떻게 효과 하는가, BVH 가 광선을 얼마나 가지치기하는가, Reverse-Z 가 정말 정밀도를 개선하는가*) 에서 lab 의 해당 Scene 을 열고 슬라이더를 끌면 즉시 답이 보인다.
 
-이 step 의 한계. 깊이 정밀도는 *NDC 매핑 곡선* 만 그릴 뿐 실제 float 비트 분포에서 몇 개의 서로 다른 깊이 값이 나오는지는 세지 않는다 — 검증도 매핑 값까지이고 "그래서 z-fighting 이 줄어드는가" 는 재지 않는다. 벡터 (part02)·행렬 (part03)·좌표계 (part06) 는 `src/algo/mat.h` 로 계산부만 들어와 검사되지만, 이 축을 마우스로 만지는 Scene 은 없다 — 이 lab 에서 유일하게 *화면 없는* 코드다.
+이 step 의 한계. 깊이 정밀도는 *NDC 매핑 곡선* 만 그릴 뿐 실제 float 비트 분포에서 몇 개의 서로 다른 깊이 값이 나오는지는 세지 않는다 — 검증도 매핑 값까지이고 "그래서 z-fighting 이 줄어드는가" 는 재지 않는다. 벡터 (part02)·행렬 (part03)·좌표계 (part06) 는 `src/algo/mat.h` 로 계산부만 들어와 검사되지만, 이 축을 마우스로 만지는 Scene 은 없다 — 이 lab 에서 유일하게 *화면 없는* 코드다. property 층이 덮는 범위도 생성기가 그은 상자 안뿐이다. 조건수는 40 까지, 평행이동은 ±8 까지만 보므로 그 밖에서 `MatInvert` 가 어떻게 무너지는지는 미측정이고, 깊이 매핑과 Kahan 누적기에는 아직 property 가 없다 — 둘 다 *명령 sequence* 에서 성질이 드러나는 대상이라 단일 호출용 하네스로는 담기지 않는다.
 
 ## 더 읽을거리
 

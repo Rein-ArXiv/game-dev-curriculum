@@ -16,6 +16,7 @@
 3. 수치 오류
 4. 자원 예산
 5. 검증
+6. 생성 입력에서의 자원 상한
 
 ---
 
@@ -215,7 +216,8 @@ CHECK(overflow.run.diagnostic->message == "연산 결과가 유한하지 않다"
 전역 변수도 같은 방식으로 실패해야 한다.
 
 네 사례는 등록표에서 `step04` 라벨을 달고 있다. 실행기의 정책 — 값 진단, 시간 예산,
-스택 상한, 컴파일 시점 재귀 한도 — 만 이 타깃에 모인다.
+스택 상한, 컴파일 시점 재귀 한도 — 만 이 타깃에 모인다. 같은 타깃에 생성된 입력을 도는
+사례가 둘 더 있고, 그것은 아래에서 따로 설명한다.
 
 ```powershell
 ctest --test-dir build -C Release -R languages_step04 --output-on-failure
@@ -224,21 +226,173 @@ ctest --test-dir build -C Release -R languages_step04 --output-on-failure
 ```
 
 ```text
-1/1 Test #5: languages_step04_vm_runtime ......   Passed
+1/1 Test #5: languages_step04_vm_runtime ......   Passed    1.76 sec
 100% tests passed out of 1
 [step04] runtime_value_diagnostics ok
 [step04] budget_stops_untrusted_loop ok
 [step04] stack_limit_stops_deep_expression ok
 [step04] parser_rejects_deep_nesting ok
-languages_tests [step04]: all checks passed (4 case(s), 20 check(s))
+  [fuzz] execution: 표본 20000 · 정상종료 7799 · 예산 794 · 비유한 635 · 0나눗셈 1847 · 미초기화 7393 · 미등록호출 1532 · 좁은스택 1044 · 좁은예산 4882
+[step04] fuzz_execution_determinism_and_budget ok
+  [fuzz] mutation: 표본 20000 · 거부 19184 · 여전히컴파일 816 · 2줄이후진단 15876 · 깊은중첩거부 772 · 미지문자거부 4165 · 진단종류 30
+[step04] fuzz_token_mutation_diagnostics ok
+languages_tests [step04]: all checks passed (6 case(s), 35 check(s))
 instructions=96 hp=270.271
 ```
 
-네 이름이 네 가지 한도에 하나씩 대응한다. 어느 하나를 지우면 `ok`가 `FAIL`로 바뀌는
+처음 네 이름이 네 가지 한도에 하나씩 대응한다. 어느 하나를 지우면 `ok`가 `FAIL`로 바뀌는
 줄이 그 이름 하나뿐이므로, 어떤 정책이 무너졌는지가 출력에서 바로 읽힌다.
 
 데모는 유한한 웨이브 체력 계산을 실행하고 실제 명령 수와 결과를 출력한다. 두 값은 소스가
 바뀌지 않는 한 환경과 무관하게 같다.
+
+## 6. 생성 입력에서의 자원 상한
+
+위의 네 사례는 각 한도마다 그 한도를 정확히 밟는 프로그램을 하나씩 손으로 준다. 그것은
+한도가 *존재한다*는 것을 증명하지만, 임의의 프로그램에서 그 한도가 계속 유지된다는 것은
+증명하지 않는다. 실행기 정책은 하나가 아니라 여섯 개이고, 어느 정책이 다른 정책을 가릴 수
+있다. 그래서 생성된 프로그램에 같은 정책을 다시 걸어 본다.
+
+### 실행 property
+
+<!-- snippet: src/tests.cpp#ExecutionViolation -->
+```cpp
+lab::lang::VirtualMachine reused;
+fz::BindStandardNatives(reused);
+const auto first = fz::Observe(reused, *compiled.program, kFuzzBudget, kFuzzStack);
+const auto again = fz::Observe(reused, *compiled.program, kFuzzBudget, kFuzzStack);
+if (!(first == again)) return "같은 VM으로 다시 실행하니 결과가 달라졌다(상태 누수)";
+
+lab::lang::VirtualMachine fresh;
+fz::BindStandardNatives(fresh);
+const auto other = fz::Observe(fresh, *compiled.program, kFuzzBudget, kFuzzStack);
+if (!(first == other)) return "새 VM의 실행 결과가 다르다";
+
+if (first.ok && first.stackDepth != 0) return "성공한 실행이 값 스택을 비우지 않았다";
+if (first.instructions > kFuzzBudget + 1) return "명령 수가 예산을 넘었다";
+// ...
+```
+
+같은 프로그램을 두 자원 한도로 각각 돌린다. 넓은 쪽은 명령 4,000·스택 256이고 좁은 쪽은
+명령 64·스택 3이다. 좁은 쪽이 없으면 스택 상한 경로가 생성 표본에서 거의 밟히지 않는다 —
+실제로 좁은 한도에서 1,044개 표본이 스택 상한에, 4,882개가 예산에 걸린다.
+
+무한 반복을 시간으로 재지 않는다는 점이 중요하다. 벽시계를 읽는 순간 결과가 기계에 따라
+흔들린다. 대신 명령 수가 예산 + 1을 넘지 않는다는 것을 값으로 확인하고, 진짜로 멈추지
+않는 경우는 ctest의 타임아웃이 잡는다. 테스트 안에는 시계가 없다.
+
+### 관측이 없으면 property도 없다
+
+무력화 변이로 `Run`의 `stack_.clear()`를 지웠는데 배터리가 살아남았다. 이유는 실행 사이에
+남은 스택 값이 *아무 명령에도 읽히지 않기* 때문이다. `Pop`은 맨 위를 꺼내고 `StoreGlobal`은
+방금 올린 값을 읽으므로, 아래에 쌓인 찌꺼기는 결과를 바꾸지 않는다.
+
+이것은 equivalent mutant처럼 보이지만 아니었다. 관측이 부족했던 것이다. `VirtualMachine`에
+값 스택 높이를 읽는 접근자를 더하고 관측에 포함하자 변이가 죽었다. 스택 높이는 원래
+계약의 일부다 — 컴파일러가 내는 모든 문장이 스택 중립이므로 `Halt`에 도달한 실행은 높이
+0으로 끝나야 하고, 실행 사이에 이월되어서도 안 된다.
+
+```text
+FUZZ 반례 [fuzz_execution_determinism_and_budget] 표본 4
+  실패: 같은 VM으로 다시 실행하니 결과가 달라졌다(상태 누수)
+  축소: 토큰 127 -> 21
+  재현: languages_tests.exe fuzz_execution_determinism_and_budget --seed=0x5EED10CC1A2B3C4D --only=4
+```
+
+### 토큰 변형과 실패의 방식
+
+두 번째 배터리는 유효 프로그램을 토큰 단위로 깨뜨린다. 바이트 단위 변형과 달리 토큰 경계를
+유지하므로 렉서에서 바로 죽지 않고 파서 안쪽까지 도달하는 입력이 나온다.
+
+<!-- snippet: src/fuzz.hpp@fuzz-mutator -->
+```cpp
+if (roll < 20) {
+    kind = Mutation::Delete;
+    tokens.erase(tokens.begin() + static_cast<std::ptrdiff_t>(position));
+} else if (roll < 34) {
+    kind = Mutation::Duplicate;
+    tokens.insert(tokens.begin() + static_cast<std::ptrdiff_t>(position),
+                  tokens[position]);
+// ...
+} else {
+    kind = Mutation::DeepNesting;
+    tokens.insert(tokens.begin() + static_cast<std::ptrdiff_t>(position),
+                  std::string(static_cast<size_t>(rng.Between(160, 600)), '('));
+}
+```
+
+거부는 실패가 아니다. 거부의 *방식*이 계약이다.
+
+<!-- snippet: src/tests.cpp#MutationViolation -->
+```cpp
+const auto compiled = lab::lang::Compiler{}.Compile(source);
+if (compiled.program && !compiled.diagnostics.empty())
+    return "프로그램과 진단이 동시에 나왔다";
+if (!compiled.program && compiled.diagnostics.empty())
+    return "프로그램도 진단도 없이 거부했다";
+
+for (const auto& diagnostic : compiled.diagnostics) {
+    if (!fz::IsKnownCompileMessage(diagnostic.message))
+        return "닫힌 진단 어휘 밖의 메시지: " + diagnostic.message;
+    if (!fz::LocationWithinSource(source, diagnostic.location))
+        return "진단 위치가 소스 밖을 가리킨다: " + lab::lang::FormatDiagnostic(diagnostic);
+}
+// ...
+```
+
+진단 어휘를 닫는 것 자체가 property다. 통제되지 않은 새 실패 경로가 생기면 목록에 없는
+문자열이 나오고 배터리가 그것을 잡는다. 위치는 줄 번호와 그 줄의 길이를 모두 본다. 생성
+소스가 여러 줄이므로, 20,000표본 중 거부된 19,184개 가운데 15,876개의 진단이 두 번째 줄
+이후를 가리킨다. 위치 추적을 상수로 바꾸면 이 비율이 0이 되어 단언이 먼저 죽는다.
+
+### 과거 실결함의 부류를 실제로 치는가
+
+이 lab이 깊게 중첩된 괄호에서 프로세스 스택으로 죽었던 적이 있다. 그래서 손으로 만든
+사례가 괄호 20,000겹을 넣어 파서 한도를 확인한다. 그 사례는 정확히 한 모양만 본다 —
+`let x = ((((1))));` 형태다.
+
+변형기는 괄호 160~600겹을 표본의 임의 위치에 끼운다. 문장 시작이든 표현식 중간이든
+블록 안이든 파서는 결국 같은 재귀에 들어가므로 한도가 걸려야 한다. 20,000표본 중 772개가
+`중첩 깊이가 파서 한도를 초과했다`로 거부되고, 배터리는 그 수가 0이 아니라는 것에 단언을
+건다. 한도를 지우면 이 표본들은 실패가 아니라 프로세스 종료가 된다.
+
+### 무력화 변이
+
+`Consume`이 내는 진단 문구를 등록되지 않은 문자열로 바꿨다. 기존 사례 중 이 경로의 문구를
+비교하는 것이 하나도 없어서, 열다섯 개가 전부 `ok`인 채 이 배터리만 죽는다.
+
+```text
+[step04] parser_rejects_deep_nesting ok
+[step04] fuzz_execution_determinism_and_budget ok
+[step04] fuzz_token_mutation_diagnostics FAIL
+
+FUZZ 반례 [fuzz_token_mutation_diagnostics] 표본 0
+  실패: 닫힌 진단 어휘 밖의 메시지: 구문 오류
+  축소: 토큰 27 -> 1
+  재현: languages_tests.exe fuzz_token_mutation_diagnostics --seed=0x5EED10CC1A2B3C4D --only=0
+  소스:
+    while
+```
+
+27토큰이 한 토큰으로 줄었다. `while` 하나만으로 그 경로가 재현된다는 것이 반례의 전부다.
+
+```powershell
+.\build\Release\languages_tests.exe fuzz_execution_determinism_and_budget
+.\build\Release\languages_tests.exe fuzz_token_mutation_diagnostics
+```
+
+```text
+  [fuzz] execution: 표본 20000 · 정상종료 7799 · 예산 794 · 비유한 635 · 0나눗셈 1847 · 미초기화 7393 · 미등록호출 1532 · 좁은스택 1044 · 좁은예산 4882
+[step04] fuzz_execution_determinism_and_budget ok
+languages_tests [fuzz_execution_determinism_and_budget]: all checks passed (1 case(s), 8 check(s))
+  [fuzz] mutation: 표본 20000 · 거부 19184 · 여전히컴파일 816 · 2줄이후진단 15876 · 깊은중첩거부 772 · 미지문자거부 4165 · 진단종류 30
+[step04] fuzz_token_mutation_diagnostics ok
+languages_tests [fuzz_token_mutation_diagnostics]: all checks passed (1 case(s), 7 check(s))
+```
+
+`여전히컴파일 816`이 중요한 숫자다. 깨뜨린 소스의 4%는 여전히 유효한 프로그램이고, 그것들은
+거부 계약이 아니라 실행 계약으로 넘어간다. 이 수가 0이면 배터리는 "깨진 것은 거부된다"만
+확인하는 것이라 실행 경로를 한 번도 밟지 않는다.
 
 ---
 

@@ -489,6 +489,40 @@ private:
     std::vector<Diagnostic>* diagnostics_ = nullptr;
 };
 
+// snippet-begin: known-opcode
+// `Instruction::op`은 손상된 캐시나 주입된 명령열에서 열거자에 없는 값을 가질 수 있다.
+// `OpCode`의 기반 타입이 `uint8_t`라 0~255 전부가 표현 가능한 값이므로 이 검사가
+// 없으면 미지의 값이 검증기의 switch를 그냥 통과한다.
+//
+// `default:` 대신 열거자를 전부 적는다. 명령을 추가하면서 여기를 빠뜨리면 컴파일러가
+// 미처리 열거자를 경고한다 — 침묵하는 통과보다 시끄러운 경고가 낫다.
+inline bool IsKnownOpCode(OpCode op) {
+    switch (op) {
+        case OpCode::Constant:
+        case OpCode::LoadGlobal:
+        case OpCode::StoreGlobal:
+        case OpCode::Add:
+        case OpCode::Subtract:
+        case OpCode::Multiply:
+        case OpCode::Divide:
+        case OpCode::Negate:
+        case OpCode::Equal:
+        case OpCode::NotEqual:
+        case OpCode::Less:
+        case OpCode::LessEqual:
+        case OpCode::Greater:
+        case OpCode::GreaterEqual:
+        case OpCode::JumpIfFalse:
+        case OpCode::Jump:
+        case OpCode::CallNative:
+        case OpCode::Pop:
+        case OpCode::Halt:
+            return true;
+    }
+    return false;
+}
+// snippet-end: known-opcode
+
 inline bool Verify(const Program& program, std::string& error) {
     if (program.code.empty() || program.code.back().op != OpCode::Halt) {
         error = "프로그램은 Halt로 끝나야 한다";
@@ -511,8 +545,12 @@ inline bool Verify(const Program& program, std::string& error) {
         return true;
     };
 
-    // 도달 가능성과 무관하게 파일 전체의 정적 피연산자를 먼저 검사한다.
+    // 도달 가능성과 무관하게 파일 전체의 명령 코드와 정적 피연산자를 먼저 검사한다.
     for (const Instruction& instruction : program.code) {
+        if (!IsKnownOpCode(instruction.op)) {
+            error = "알 수 없는 명령 코드다";
+            return false;
+        }
         switch (instruction.op) {
             case OpCode::Constant:
                 if (!requireOperand(instruction, program.constants.size(), "상수"))
@@ -756,6 +794,11 @@ public:
             if (program.names[i] == name && i < globals_.size()) return globals_[i];
         return std::nullopt;
     }
+
+    // 실행 뒤 남은 값 스택의 높이. 컴파일러가 내는 모든 문장은 스택 중립이므로 `Halt`에
+    // 도달한 실행은 0으로 끝나야 하고, 실행 사이에 이 값이 이월되어서도 안 된다. 관측할
+    // 수단이 없으면 두 불변식 중 어느 것도 검사할 수 없다.
+    size_t StackDepth() const { return stack_.size(); }
 
 private:
     static RunResult Failure(SourceLocation location, std::string message,

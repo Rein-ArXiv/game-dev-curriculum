@@ -358,62 +358,83 @@ add_custom_command(TARGET mega_defense POST_BUILD
 set(MEGA_SELFTEST_UNIX_QUIET 1767312000)   # 2026-01-02 00:00 UTC
 set(MEGA_SELFTEST_UNIX_EVENT 1767484800)   # 2026-01-04 00:00 UTC
 
+# ── 셀프테스트의 프로필도 못박는다 ──────────────────────────────────
+#
+# 시계와 **같은 종류의 결함**이 하나 더 있었다. `--selftest` 는 진행도를 실제로
+# 커밋한다(그것이 이 검사의 값이다). 경로를 주지 않으면 전부 실행 파일 옆의
+# `selftest_profile.wal` 하나를 쓰고, 그 파일은 지워지지 않으므로 **누적한다.**
+#
+# 누적한 지갑은 다음 판의 시작 골드를 바꾼다. 실측(2026-08-23,
+# `--selftest 25000 --buy-tier 5 --match-unix QUIET` 를 냉각 프로필에서 두 번):
+#
+#   1회차  [meta] scrap=0 tier=0 start_gold=420+0
+#          [selftest] result=CLEAR ticks=1377 towers=10 wave=6 packet=181
+#   2회차  [meta] buy start_gold_tier=1 cost=200 balance=8
+#          [selftest] result=CLEAR ticks=1377 towers=11 wave=6 packet=192
+#
+# 코드는 한 줄도 바뀌지 않았고, 명령도 같다. 달라진 것은 **몇 번째 실행이냐**뿐이다.
+# 그 상태에서는 아티클이 인용하는 수치가 독자에게 재현되지 않고, 값을 단언하는
+# 검사를 세우는 순간 그것은 플래키가 된다.
+#
+# 아래 두 줄이 그 의존을 끊는다. 검사마다 **자기 파일**을 잡고(-j 병렬에서 서로
+# 밟지 않는다), 매 실행 그 파일을 비우고 출발한다(같은 명령 = 같은 결과).
+# 누적 자체는 제품의 기능이므로 지우지 않는다 — 그것을 **의도로** 검증하는
+# 자리가 아래 `mega_defense_selftest_meta` 짝과 `test_profile_isolation` 이다.
+set(MEGA_PROFILE_DIR ${CMAKE_CURRENT_BINARY_DIR}/profiles)
+file(MAKE_DIRECTORY ${MEGA_PROFILE_DIR})
+
+# 셀프테스트 한 줄을 세우는 유일한 자리. 프로필 격리를 함수 안에 두는 이유는
+# 잊을 수 없게 하려는 것이다 — 검사를 하나 더 붙이는 사람이 --profile 을
+# 빼먹으면 그 검사만 조용히 공용 프로필로 돌아간다.
+# snippet-begin: selftest-profile
+function(mega_add_selftest name ticks matchUnix timeout)
+    add_test(NAME ${name}
+             COMMAND mega_defense --selftest ${ticks} --match-unix ${matchUnix}
+                     --profile ${MEGA_PROFILE_DIR}/${name}.wal --fresh-profile ${ARGN})
+    set_tests_properties(${name} PROPERTIES TIMEOUT ${timeout})
+endfunction()
+# snippet-end: selftest-profile
+
 # --selftest 는 이제 조기 반환하지 않는다. 창만 없을 뿐 제품의 진짜 프레임 루프를
 # N틱 구동한다 — 에셋 로드 · 명령 경로 · 고정 스텝 시뮬 · 소프트웨어 렌더 ·
 # 진행도 커밋이 전부 실제로 실행되고, 그 결과를 프로세스 종료 코드로 단언한다.
-add_test(NAME mega_defense_selftest
-         COMMAND mega_defense --selftest --match-unix ${MEGA_SELFTEST_UNIX_QUIET})
-set_tests_properties(mega_defense_selftest PROPERTIES TIMEOUT 120)
+mega_add_selftest(mega_defense_selftest 18000 ${MEGA_SELFTEST_UNIX_QUIET} 120)
 
 # 이벤트가 걸린 판. 위 전부가 QUIET 라 이 한 줄이 없으면 활성 이벤트가 콘텐츠
 # 수치에 곱해지는 경로는 제품 실행 파일 안에서 한 번도 돌지 않는다.
 # (`test_live_ops_wiring` 이 같은 배선을 라이브러리 경계 안에서 잰다 — 이쪽은
 # 프로세스 경계 밖에서 같은 질문을 한 번 더 묻는다.)
-add_test(NAME mega_defense_selftest_event
-         COMMAND mega_defense --selftest 25000 --match-unix ${MEGA_SELFTEST_UNIX_EVENT})
-set_tests_properties(mega_defense_selftest_event PROPERTIES TIMEOUT 300)
+mega_add_selftest(mega_defense_selftest_event 25000 ${MEGA_SELFTEST_UNIX_EVENT} 300)
 
 # 같은 실행 파일, 다른 팔. G2 가 들여온 경로 — 절차 지형 · 기울인 카메라 ·
 # 조준 색인 · BVH 정적 질의 · 격자 광역 탐색 · 잔해 물리 — 는 기본 팔에서 한 줄도
 # 돌지 않는다. 이 검사가 없으면 그 전부가 "컴파일은 되는 코드"로 남는다.
 # 스크립트는 배치·강화에 더해 발파와 철거까지 실제로 눌러, 지형이 매치 중에
 # 바뀌고 잔해가 통행 격자를 막는 경로를 제품 안에서 통과시킨다.
-add_test(NAME mega_defense_selftest_procgen
-         COMMAND mega_defense --selftest 25000
-                 --ab map=procgen --ab camera=tilted3d --ab target_index=grid
-                 --ab static_query=bvh --ab broadphase=grid
-                 --match-unix ${MEGA_SELFTEST_UNIX_QUIET})
-set_tests_properties(mega_defense_selftest_procgen PROPERTIES TIMEOUT 300)
+mega_add_selftest(mega_defense_selftest_procgen 25000 ${MEGA_SELFTEST_UNIX_QUIET} 300
+                  --ab map=procgen --ab camera=tilted3d --ab target_index=grid
+                  --ab static_query=bvh --ab broadphase=grid)
 
 # G3 가 들여온 팔들. archetype 저장 · 절차 보스 리그 · 기울인 카메라를 지나는
 # 소리가 제품 안에서 한 판을 끝까지 도는지 본다. 기본 팔에서는 셋 다 한 줄도
 # 돌지 않으므로, 이 검사가 없으면 전부 "컴파일은 되는 코드"로 남는다.
-add_test(NAME mega_defense_selftest_rig
-         COMMAND mega_defense --selftest 25000
-                 --ab entity_store=ecs --ab boss_render=rig --ab camera=tilted3d
-                 --match-unix ${MEGA_SELFTEST_UNIX_QUIET})
-set_tests_properties(mega_defense_selftest_rig PROPERTIES TIMEOUT 300)
+mega_add_selftest(mega_defense_selftest_rig 25000 ${MEGA_SELFTEST_UNIX_QUIET} 300
+                  --ab entity_store=ecs --ab boss_render=rig --ab camera=tilted3d)
 
 # G4 가 들여온 팔들. 통행 격자 · 플로우 필드 · 군집 조향 · 은신 인지 · 정예 행동
 # 트리는 기본 팔(pathing=poly · steering=0 · stealth=0 · elite_brain=plain)에서
 # 한 줄도 돌지 않는다. 절차 맵을 함께 켜는 것은 선택이 아니다 — 저작된 무분기
 # 회랑에는 탐색할 분기도, 시야를 막을 내부 벽도 없어 경로와 인지가 표현할 것을
 # 갖지 못한다.
-add_test(NAME mega_defense_selftest_ai
-         COMMAND mega_defense --selftest 25000
-                 --ab map=procgen --ab pathing=flowfield --ab steering=1
-                 --ab stealth=1 --ab elite_brain=bt
-                 --match-unix ${MEGA_SELFTEST_UNIX_QUIET})
-set_tests_properties(mega_defense_selftest_ai PROPERTIES TIMEOUT 300)
+mega_add_selftest(mega_defense_selftest_ai 25000 ${MEGA_SELFTEST_UNIX_QUIET} 300
+                  --ab map=procgen --ab pathing=flowfield --ab steering=1
+                  --ab stealth=1 --ab elite_brain=bt)
 
 # 같은 축의 **다른 팔**. 위 검사가 도는 것은 필드 팔과 트리 팔뿐이라, A* 경로와
 # 상태 기계 정예는 제품 안에서 한 줄도 돌지 않는다. 두 팔을 다 등록해야 "두
 # 표현이 같은 게임"이라는 판정이 제품 경계 안에서도 성립한다.
-add_test(NAME mega_defense_selftest_ai_astar
-         COMMAND mega_defense --selftest 25000
-                 --ab map=procgen --ab pathing=astar --ab elite_brain=fsm
-                 --match-unix ${MEGA_SELFTEST_UNIX_QUIET})
-set_tests_properties(mega_defense_selftest_ai_astar PROPERTIES TIMEOUT 300)
+mega_add_selftest(mega_defense_selftest_ai_astar 25000 ${MEGA_SELFTEST_UNIX_QUIET} 300
+                  --ab map=procgen --ab pathing=astar --ab elite_brain=fsm)
 
 # G5·G6 가 들여온 팔들. 셋 다 기본 팔에서는 한 줄도 돌지 않는다.
 #
@@ -425,20 +446,38 @@ set_tests_properties(mega_defense_selftest_ai_astar PROPERTIES TIMEOUT 300)
 #               제품 안에서 실제로 돈다.
 #   meta        매치 밖 소비(sink). --buy-tier 가 지갑에서 스크랩을 빼 시작 골드
 #               티어를 올리고, 그 값이 다음 판의 balance_.startGold 에 더해진다.
-add_test(NAME mega_defense_selftest_poly
-         COMMAND mega_defense --selftest 25000 --ab pathing=poly
-                 --match-unix ${MEGA_SELFTEST_UNIX_QUIET})
-set_tests_properties(mega_defense_selftest_poly PROPERTIES TIMEOUT 300)
+mega_add_selftest(mega_defense_selftest_poly 25000 ${MEGA_SELFTEST_UNIX_QUIET} 300
+                  --ab pathing=poly)
 
-add_test(NAME mega_defense_selftest_avatar_gate
-         COMMAND mega_defense --selftest 25000 --ab avatar_gate=1
-                 --match-unix ${MEGA_SELFTEST_UNIX_QUIET})
-set_tests_properties(mega_defense_selftest_avatar_gate PROPERTIES TIMEOUT 300)
+mega_add_selftest(mega_defense_selftest_avatar_gate 25000 ${MEGA_SELFTEST_UNIX_QUIET} 300
+                  --ab avatar_gate=1)
+
+# ── meta 팔만 프로필을 **데운 채** 돈다 ─────────────────────────────
+#
+# 여기서 격리를 위 여덟과 똑같이 적용하면 이 검사는 아무것도 검사하지 않게 된다.
+# 냉각 프로필의 잔액은 0이고, 티어 하나가 200스크랩이므로 `--buy-tier 5` 는
+# **한 번도 사지 못하고** 조용히 지나간다. 매치 밖 소비 경로는 한 줄도 돌지 않고,
+# 그래도 셀프테스트는 CLEAR 로 끝나 초록불이 켜진다.
+#
+# 지금까지 이 검사가 실제로 무언가를 산 것은 앞선 실행들이 공용 프로필을 데워
+# 뒀기 때문이었다 — 즉 이 검사의 **커버리지가 실행 순서와 횟수에 딸려 있었다.**
+# 우연에 기댄 커버리지는 커버리지가 아니다.
+#
+# 그래서 데우기를 우연이 아니라 **한 단계로** 만든다. warm 이 프로필을 비우고
+# 한 판을 돌려 정확히 한 판치 스크랩(208)을 남기고, meta 가 그 위에서 산다
+# (티어 0→1, 비용 200, 잔액 8). fixture 가 순서를 강제하므로 -j 에서도 뒤집히지
+# 않고, warm 이 매번 비우고 출발하므로 몇 번째 ctest 이든 같은 잔액에서 시작한다.
+# `--buy-tier 5` 는 그대로다 — 그 인자는 목표 티어의 **상한**이지 요구가 아니다.
+mega_add_selftest(mega_defense_selftest_meta_warm 25000 ${MEGA_SELFTEST_UNIX_QUIET} 300)
+set_tests_properties(mega_defense_selftest_meta_warm PROPERTIES
+                     FIXTURES_SETUP meta_profile)
 
 add_test(NAME mega_defense_selftest_meta
          COMMAND mega_defense --selftest 25000 --buy-tier 5
-                 --match-unix ${MEGA_SELFTEST_UNIX_QUIET})
-set_tests_properties(mega_defense_selftest_meta PROPERTIES TIMEOUT 300)
+                 --match-unix ${MEGA_SELFTEST_UNIX_QUIET}
+                 --profile ${MEGA_PROFILE_DIR}/mega_defense_selftest_meta_warm.wal)
+set_tests_properties(mega_defense_selftest_meta PROPERTIES
+                     TIMEOUT 300 FIXTURES_REQUIRED meta_profile)
 
 # ══ G7: 골든 해시 체인 리플레이 ══════════════════════════════════════
 #
@@ -463,6 +502,13 @@ file(MAKE_DIRECTORY ${MEGA_REPLAY_DIR})
 
 # port 0 = 솔로(소켓 없음). 재생 쪽에는 --ab 를 넘기지 않는다 — 팔은 파일이
 # 소유하고, 재생 실행 파일은 명령줄 스위치를 만나면 무시하지 않고 거절한다.
+#
+# 이 여섯에는 --profile 도 --fresh-profile 도 붙이지 않는다. 붙일 필요가 없기
+# 때문이다 — `--record PATH` 와 `--verify-replay PATH` 는 제품 안에서 프로필을
+# `PATH + ".wal"` 로 못박고(ReplayProfilePath) 열기 전에 비운다(TruncateFile).
+# 즉 팔마다 다른 파일(격리)이고 실행마다 새 파일(재현)이다. 위 셀프테스트들이
+# 겪던 누적을 리플레이가 겪지 않은 이유가 이것이고, 이번에 연 --fresh-profile 은
+# 그 규칙을 셀프테스트 쪽에도 **명시적으로** 준 것이다.
 # snippet-begin: replay-pair
 function(mega_add_replay_pair arm ticks port)
     set(path ${MEGA_REPLAY_DIR}/${arm}.mgrp)
@@ -536,6 +582,13 @@ add_dependencies(test_defense_client_loop mega_defense)
 add_dependencies(test_live_ops_wiring mega_defense)
 # 매치 두 판을 헤드리스로 끝까지 돌린다(정산은 매치가 끝나야 일어난다).
 set_tests_properties(test_live_ops_wiring PROPERTIES TIMEOUT 180)
+# 프로필 격리의 게이트. 위 `mega_add_selftest` 가 붙이는 두 인자가 실제로
+# 재현성을 만드는지, 그리고 그 인자를 빼면 실제로 결과가 갈리는지를 **같은
+# 파일에서 양쪽 다** 확인한다. 음성 대조가 없으면 이 검사는 "무엇을 해도 통과"가
+# 될 수 있다 — 두 실행이 우연히 같은 것과 격리가 작동한 것을 구분하지 못한다.
+# 제품 실행 파일을 두 번 띄우고 헤드리스 매치도 두 판 돌리므로 시간을 넉넉히 준다.
+add_dependencies(test_profile_isolation mega_defense)
+set_tests_properties(test_profile_isolation PROPERTIES TIMEOUT 300)
 # 아래 둘도 실행 파일 옆의 assets/ 를 읽는다(에셋 리로드와 프레임 계측은 진짜
 # 스프라이트가 있어야 성립한다). 그 디렉터리를 만드는 것은 mega_defense 의
 # POST_BUILD 다.

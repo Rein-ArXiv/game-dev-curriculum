@@ -5,9 +5,21 @@
 // 반드시 비퇴화 케이스를 짝으로 둔다. 독립 오라클(brute force / 다른 알고리즘)
 // 과의 대조는 제품 함수를 다시 호출하지 않고 이 파일 안에서 따로 구현한다.
 //
-// 실행 단위: 파일 끝의 kCases 표가 각 검증 함수를 그것을 들여온 step 에 묶는다.
+// 두 층이 있다. 위쪽은 *고정 사례* — 알려진 중요 입력을 못 박는다. 아래쪽은
+// *property 층* — 고정 seed 에서 생성한 수천 개 입력이 지켜야 하는 관계를 건다
+// (`property.h` 의 하네스). 두 층은 서로를 보완한다: 고정 사례는 회귀를 잡고,
+// property 는 표를 만들 수 없는 입력 공간을 덮는다.
+//
+// 실행 단위: 파일 끝의 kCases 표가 각 검증을 그것을 들여온 step 에 묶는다.
 // 인자 없이 부르면 전부 돌고, `math_core_tests step05` 처럼 step 키를 주면
 // 그 step 이 추가한 것만 돈다. CMake 의 add_test 가 step 마다 하나씩 걸려 있다.
+//
+// property 층 전용 플래그.
+//   --properties     property 사례만 돈다 (ctest 의 math_property_layer).
+//   --scale=N        표본 수를 N 배로 (야간 확장 캠페인).
+//   --seed=N         master seed 교체. 반례 보고가 이 값을 그대로 찍는다.
+//   --only=NAME      이름이 NAME 을 포함하는 property 만.
+//   --sample=I       그 표본 하나만 (반례 재현 모드 — 비자명성 검사는 건너뛴다).
 
 #include "algo/bvh2d.h"
 #include "algo/collision2d.h"
@@ -20,11 +32,17 @@
 #include "algo/sdf2d.h"
 #include "ui/scene_chrome.h"
 
+#include "property.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
+#include <string>
 #include <vector>
 
 namespace {
@@ -1053,52 +1071,1136 @@ void TestMatrix() {
     CHECK(!mathlab::MatInvert(mathlab::MatScale({1.0f, 0.0f, 1.0f}), dummy));
 }
 
+// ==================== property 층 ====================
+//
+// 위의 고정 사례가 "이 입력에서 이 값" 을 못 박는다면, 이 층은 "생성된 *모든*
+// 입력에서 이 관계" 를 못 박는다. 표본은 master seed 에서 결정론적으로 나오고,
+// 반례가 나오면 축소한 파라미터와 재현 명령 한 줄이 stderr 로 나온다.
+//
+// oracle 은 세 가지만 쓴다.
+//   (a) 수학적 property — 단위 노름, 결합성, 이중 덮개, 항등식.
+//   (b) 독립 구현 대조(differential) — SAT ⇔ GJK, 행렬 ⇔ 쿼터니언 샌드위치,
+//       제품의 Corners()/SATEvaluateAxis 를 쓰지 않는 이 파일 안의 double 투영.
+//   (c) 입력 변환 전후 관계(metamorphic) — 강체 변환·균등 스케일에서 판정 불변.
+//
+// 계약(허용 오차)은 테스트를 통과시키려고 키운 값이 아니라 부동소수 반올림
+// 횟수에서 유도한 값이다. 각 property 의 contract 문자열에 근거를 적는다.
+
+// ---- 공용 파라미터 도우미 ----
+
+Quaternion QuatScaleQ(Quaternion q, float k) {
+    return {q.x * k, q.y * k, q.z * k, q.w * k};
+}
+
+Quaternion QuatNeg(Quaternion q) { return {-q.x, -q.y, -q.z, -q.w}; }
+
+float QuatDotSigned(Quaternion a, Quaternion b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+}
+
+double QuatMaxDiff(Quaternion a, Quaternion b) {
+    double d = std::fabs((double)a.x - b.x);
+    d = std::max(d, std::fabs((double)a.y - b.y));
+    d = std::max(d, std::fabs((double)a.z - b.z));
+    return std::max(d, std::fabs((double)a.w - b.w));
+}
+
+double MatMaxDiff(const Matrix& a, const Matrix& b) {
+    float A[16], B[16];
+    mathlab::MatToArray(a, A);
+    mathlab::MatToArray(b, B);
+    double worst = 0.0;
+    for (int i = 0; i < 16; ++i) worst = std::max(worst, std::fabs((double)A[i] - B[i]));
+    return worst;
+}
+
+double MatMaxAbs(const Matrix& m) {
+    float A[16];
+    mathlab::MatToArray(m, A);
+    double worst = 0.0;
+    for (int i = 0; i < 16; ++i) worst = std::max(worst, std::fabs((double)A[i]));
+    return worst;
+}
+
+bool MatBitEqual(const Matrix& a, const Matrix& b) {
+    float A[16], B[16];
+    mathlab::MatToArray(a, A);
+    mathlab::MatToArray(b, B);
+    for (int i = 0; i < 16; ++i) {
+        if (!(A[i] == B[i])) return false;
+    }
+    return true;
+}
+
+// float 의 단위 반올림 (2^-24). 모든 허용 오차 상계가 이 값에서 유도된다.
+constexpr double kUnitRoundoff = 5.9604645e-8;
+
+// 생성기의 구성적 보정 — 스케일이 0 을 지나가지 않게 만든다. 표본을 버리는
+// rejection 이 아니라 값을 domain 안으로 옮기는 것이라, shrink 후보도 언제나
+// 유효하다(사전조건이 축소 중에 깨지지 않는다).
+float RepairScale(float s) {
+    constexpr float kMin = 0.1f;
+    if (s >= 0.0f) return (s < kMin) ? kMin : s;
+    return (s > -kMin) ? -kMin : s;
+}
+
+const prop::ParamSpec kAxisAngleSpec[4] = {
+    {"axis.x", -1.0f, 1.0f, 0.0f},
+    {"axis.y", -1.0f, 1.0f, 0.0f},
+    {"axis.z", -1.0f, 1.0f, 1.0f},
+    {"angle",  -6.5f, 6.5f, 0.0f},
+};
+
+// ---- step02: 쿼터니언 ----
+
+// (1) 정규화 불변. 축-각 생성기는 언제나 단위 쿼터니언을 내고, slerp/nlerp 는
+//     비단위 입력을 받아도 단위 결과를 낸다. 단위 쿼터니언의 샌드위치 회전은
+//     벡터 길이를 보존한다.
+const prop::ParamSpec kQuatNormParams[] = {
+    {"axisA.x", -1.0f,  1.0f, 0.0f}, {"axisA.y", -1.0f,  1.0f, 0.0f},
+    {"axisA.z", -1.0f,  1.0f, 1.0f}, {"angleA",  -6.5f,  6.5f, 0.0f},
+    {"axisB.x", -1.0f,  1.0f, 0.0f}, {"axisB.y", -1.0f,  1.0f, 0.0f},
+    {"axisB.z", -1.0f,  1.0f, 1.0f}, {"angleB",  -6.5f,  6.5f, 0.0f},
+    {"scaleA",   0.05f, 20.0f, 1.0f}, {"scaleB",  0.05f, 20.0f, 1.0f},
+    {"t",        0.0f,  1.0f, 0.5f},
+    {"v.x",     -5.0f,  5.0f, 1.0f}, {"v.y", -5.0f, 5.0f, 0.0f},
+    {"v.z",     -5.0f,  5.0f, 0.0f},
+};
+
+bool PropQuatNormPreserved(const float* p, prop::Observation& obs) {
+    const Quaternion qa = mathlab::QuatFromAxisAngle({p[0], p[1], p[2]}, p[3]);
+    const Quaternion qb = mathlab::QuatFromAxisAngle({p[4], p[5], p[6]}, p[7]);
+    const Quaternion sa = QuatScaleQ(qa, p[8]);
+    const Quaternion sb = QuatScaleQ(qb, p[9]);
+    const float      t  = p[10];
+    const Vector3    v{p[11], p[12], p[13]};
+    const float      vLen = mathlab::V3Length(v);
+
+    bool ok = true;
+    if (!obs.Bound("|norm(axis-angle) - 1|",
+                   std::fabs((double)mathlab::QuatNorm(qa) - 1.0), 8.0 * kUnitRoundoff)) ok = false;
+    if (!obs.Bound("|norm(normalize(k*q)) - 1|",
+                   std::fabs((double)mathlab::QuatNorm(mathlab::QuatNormalize(sa)) - 1.0),
+                   8.0 * kUnitRoundoff)) ok = false;
+    if (!obs.Bound("|norm(slerp) - 1|",
+                   std::fabs((double)mathlab::QuatNorm(mathlab::QuatSlerp(sa, sb, t)) - 1.0),
+                   16.0 * kUnitRoundoff)) ok = false;
+    if (!obs.Bound("|norm(nlerp) - 1|",
+                   std::fabs((double)mathlab::QuatNorm(mathlab::QuatNlerp(sa, sb, t)) - 1.0),
+                   16.0 * kUnitRoundoff)) ok = false;
+
+    const Vector3 rotated = mathlab::QuatRotateVec(qa, v);
+    if (!obs.Bound("|len(q v q*) - len(v)| / len(v)",
+                   std::fabs((double)mathlab::V3Length(rotated) - vLen) /
+                       std::max(1e-3, (double)vLen),
+                   64.0 * kUnitRoundoff)) ok = false;
+
+    obs.interesting = std::fabs(p[3]) > 0.1f && vLen > 0.5f &&
+                      (std::fabs(p[0]) + std::fabs(p[1]) + std::fabs(p[2])) > 1e-3f;
+    return ok;
+}
+
+// (2) Hamilton 곱의 결합성. 대조군은 *비가환성* 이다 — 곱이 상수나 가환 연산으로
+//     바뀌면 결합성은 자명하게 참이 되므로, 비퇴화 표본의 정의에 비가환을 넣는다.
+const prop::ParamSpec kQuatAssocParams[] = {
+    {"axis1.x", -1.0f, 1.0f, 0.0f}, {"axis1.y", -1.0f, 1.0f, 0.0f},
+    {"axis1.z", -1.0f, 1.0f, 1.0f}, {"angle1",  -6.5f, 6.5f, 0.0f},
+    {"axis2.x", -1.0f, 1.0f, 0.0f}, {"axis2.y", -1.0f, 1.0f, 0.0f},
+    {"axis2.z", -1.0f, 1.0f, 1.0f}, {"angle2",  -6.5f, 6.5f, 0.0f},
+    {"axis3.x", -1.0f, 1.0f, 0.0f}, {"axis3.y", -1.0f, 1.0f, 0.0f},
+    {"axis3.z", -1.0f, 1.0f, 1.0f}, {"angle3",  -6.5f, 6.5f, 0.0f},
+};
+
+bool PropQuatComposeAssoc(const float* p, prop::Observation& obs) {
+    const Quaternion q1 = mathlab::QuatFromAxisAngle({p[0], p[1], p[2]},   p[3]);
+    const Quaternion q2 = mathlab::QuatFromAxisAngle({p[4], p[5], p[6]},   p[7]);
+    const Quaternion q3 = mathlab::QuatFromAxisAngle({p[8], p[9], p[10]},  p[11]);
+
+    const Quaternion left  = mathlab::QuatMul(mathlab::QuatMul(q1, q2), q3);
+    const Quaternion right = mathlab::QuatMul(q1, mathlab::QuatMul(q2, q3));
+
+    bool ok = true;
+    // 성분 하나는 4 곱 + 3 합이고 입력이 단위라 각 항의 크기가 1 이하다.
+    // 두 번 겹치면 반올림이 성분당 16 회 이하 → 16u. 여유 2 배로 32u 를 쓴다.
+    if (!obs.Bound("max|(q1 q2) q3 - q1 (q2 q3)|", QuatMaxDiff(left, right),
+                   32.0 * kUnitRoundoff)) ok = false;
+    if (!obs.Bound("1 - |dot(left, right)|",
+                   1.0 - (double)QuatAbsDot(left, right), 64.0 * kUnitRoundoff)) ok = false;
+
+    obs.interesting =
+        QuatMaxDiff(mathlab::QuatMul(q1, q2), mathlab::QuatMul(q2, q1)) > 1e-3;
+    return ok;
+}
+
+// (3) 이중 덮개. q 와 -q 는 같은 회전이다. 샌드위치와 행렬 변환은 성분이 부호에
+//     대해 짝수 차수라 *비트 단위로* 같아야 하고, slerp 은 짧은 호 뒤집기 덕에
+//     끝점 부호에 불변이다. |dot| 이 0 근처면 뒤집을 방향이 정해지지 않으므로
+//     사전조건에서 뺀다.
+const prop::ParamSpec kQuatCoverParams[] = {
+    {"axisA.x", -1.0f, 1.0f, 0.0f}, {"axisA.y", -1.0f, 1.0f, 0.0f},
+    {"axisA.z", -1.0f, 1.0f, 1.0f}, {"angleA",  -6.5f, 6.5f, 0.0f},
+    {"axisB.x", -1.0f, 1.0f, 0.0f}, {"axisB.y", -1.0f, 1.0f, 0.0f},
+    {"axisB.z", -1.0f, 1.0f, 1.0f}, {"angleB",  -6.5f, 6.5f, 0.0f},
+    {"t",        0.0f, 1.0f, 0.5f},
+    {"v.x",     -5.0f, 5.0f, 1.0f}, {"v.y", -5.0f, 5.0f, 0.0f},
+    {"v.z",     -5.0f, 5.0f, 0.0f},
+};
+
+bool PropQuatDoubleCover(const float* p, prop::Observation& obs) {
+    const Quaternion qa = mathlab::QuatFromAxisAngle({p[0], p[1], p[2]}, p[3]);
+    const Quaternion qb = mathlab::QuatFromAxisAngle({p[4], p[5], p[6]}, p[7]);
+    const float      t  = p[8];
+    const Vector3    v{p[9], p[10], p[11]};
+
+    bool ok = true;
+    // snippet-begin: step02-property-double-cover
+    // 부호는 샌드위치 안에서 정확히 상쇄된다 — tolerance 가 아니라 == 로 잡는다.
+    const Vector3 r1 = mathlab::QuatRotateVec(qa, v);
+    const Vector3 r2 = mathlab::QuatRotateVec(QuatNeg(qa), v);
+    const bool sameVec = (r1.x == r2.x) && (r1.y == r2.y) && (r1.z == r2.z);
+    if (!obs.Bound("q v q* vs (-q) v (-q)* (exact)", sameVec ? 0.0 : 1.0, 0.0)) ok = false;
+
+    const bool sameMat = MatBitEqual(mathlab::QuatToMatrix(qa),
+                                     mathlab::QuatToMatrix(QuatNeg(qa)));
+    if (!obs.Bound("QuatToMatrix(q) vs QuatToMatrix(-q) (exact)", sameMat ? 0.0 : 1.0, 0.0)) {
+        ok = false;
+    }
+
+    const float d = QuatAbsDot(qa, qb);
+    if (d < 1e-4f) {   // 사전조건: 두 끝점이 직교에 너무 가까우면 판정하지 않는다.
+        obs.skipped = true;
+        return ok;
+    }
+    const Quaternion s1 = mathlab::QuatSlerp(qa, qb, t);
+    const Quaternion s2 = mathlab::QuatSlerp(qa, QuatNeg(qb), t);
+    const Quaternion s3 = mathlab::QuatSlerp(QuatNeg(qa), qb, t);
+    if (!obs.Bound("1 - |dot(slerp(a,b), slerp(a,-b))|",
+                   1.0 - (double)QuatAbsDot(s1, s2), 32.0 * kUnitRoundoff)) ok = false;
+    if (!obs.Bound("1 - |dot(slerp(a,b), slerp(-a,b))|",
+                   1.0 - (double)QuatAbsDot(s1, s3), 32.0 * kUnitRoundoff)) ok = false;
+    // snippet-end: step02-property-double-cover
+
+    obs.interesting = std::fabs(p[3]) > 0.1f && mathlab::V3Length(v) > 0.5f && d < 0.999f;
+    return ok;
+}
+
+// (4) 등각속도. 각도를 acos 로 재면 dot 이 1 근처라 조건이 나빠지므로 *현 길이*
+//     로 잰다 — 등속이면 모든 인접 표본의 현 길이가 같다. 생성기는 a 에서
+//     정확히 arc 라디안 떨어진 b 를 *구성* 한다(의존 생성기).
+const prop::ParamSpec kQuatSlerpParams[] = {
+    {"base.x", -1.0f, 1.0f, 0.0f}, {"base.y", -1.0f, 1.0f, 0.0f},
+    {"base.z", -1.0f, 1.0f, 1.0f}, {"baseAngle", -6.5f, 6.5f, 0.0f},
+    {"arc.x",  -1.0f, 1.0f, 0.0f}, {"arc.y",  -1.0f, 1.0f, 0.0f},
+    {"arc.z",  -1.0f, 1.0f, 1.0f}, {"arcAngle", 0.5f, 2.9f, 1.0f},
+};
+
+// 등속은 *단위 구 위* 의 성질이다. 그래서 표본을 구 위로 올린 뒤 현 길이를 잰다
+// — 구 위에서 현이 일정하면 호도 일정하다. 이 정규화가 없으면 "직선(현)을 따라
+// 등간격으로 가는" 구현도 통과한다(실제로 변이 MP04 가 그 구멍으로 살아남았다).
+// 정규화는 제품의 QuatNormalize 를 부르지 않고 여기서 직접 한다 — 측정 자가 검사
+// 대상에 의존하면 오라클이 아니다. 부산물로 원본 표본의 노름 이탈도 돌려준다.
+float QuatChordRatio(Quaternion (*interp)(Quaternion, Quaternion, float),
+                     Quaternion a, Quaternion b, int steps, float& worstNormError) {
+    auto unit = [](Quaternion q, float& normError) {
+        const float n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+        normError = std::max(normError, std::fabs(n - 1.0f));
+        if (n < 1e-12f) return Quaternion{0, 0, 0, 1};
+        const float inv = 1.0f / n;
+        return Quaternion{q.x * inv, q.y * inv, q.z * inv, q.w * inv};
+    };
+
+    worstNormError = 0.0f;
+    float maxChord = 0.0f;
+    float minChord = 1e30f;
+    Quaternion prev = unit(interp(a, b, 0.0f), worstNormError);
+    for (int i = 1; i <= steps; ++i) {
+        const float t = (float)i / (float)steps;
+        Quaternion cur = unit(interp(a, b, t), worstNormError);
+        if (QuatDotSigned(prev, cur) < 0.0f) cur = QuatNeg(cur);
+        const float dx = cur.x - prev.x, dy = cur.y - prev.y;
+        const float dz = cur.z - prev.z, dw = cur.w - prev.w;
+        const float chord = std::sqrt(dx * dx + dy * dy + dz * dz + dw * dw);
+        maxChord = std::max(maxChord, chord);
+        minChord = std::min(minChord, chord);
+        prev = cur;
+    }
+    return (minChord > 1e-9f) ? (maxChord / minChord) : 1e30f;
+}
+
+bool PropQuatSlerpUniform(const float* p, prop::Observation& obs) {
+    const Quaternion a = mathlab::QuatFromAxisAngle({p[0], p[1], p[2]}, p[3]);
+    Vector3 arcAxis{p[4], p[5], p[6]};
+    if (mathlab::V3Length(arcAxis) < 1e-3f) arcAxis = {0.0f, 0.0f, 1.0f};
+    const float arc = p[7];
+    const Quaternion b = mathlab::QuatMul(a, mathlab::QuatFromAxisAngle(arcAxis, arc));
+
+    constexpr int kSteps = 32;
+    float slerpNormError = 0.0f;
+    const float slerpRatio =
+        QuatChordRatio(&mathlab::QuatSlerp, a, b, kSteps, slerpNormError);
+
+    bool ok = true;
+    // snippet-begin: step02-property-slerp-uniform
+    // 등속의 사전조건 — 결과가 애초에 단위 구 위에 있어야 "호를 등속으로 지난다"
+    // 는 말이 성립한다.
+    if (!obs.Bound("max|norm(slerp sample) - 1| over the arc", (double)slerpNormError,
+                   32.0 * kUnitRoundoff)) ok = false;
+    // 현 = 2 sin(dTheta/2). 등속이면 모든 구간의 dTheta 가 같아 비가 1 이다.
+    // 호 0.5 rad 를 32 등분하면 현이 0.0156 이고 성분 오차는 1e-7 대라 여유가
+    // 세 자릿수 있다. 계약은 "비 - 1 <= 0.02".
+    if (!obs.Bound("slerp chord max/min - 1", (double)slerpRatio - 1.0, 0.02)) ok = false;
+    if (!obs.Bound("1 - |dot(slerp(a,b,0), a)|",
+                   1.0 - (double)QuatAbsDot(mathlab::QuatSlerp(a, b, 0.0f), a),
+                   32.0 * kUnitRoundoff)) ok = false;
+    if (!obs.Bound("1 - |dot(slerp(a,b,1), b)|",
+                   1.0 - (double)QuatAbsDot(mathlab::QuatSlerp(a, b, 1.0f), b),
+                   32.0 * kUnitRoundoff)) ok = false;
+
+    // 대조군 — 같은 호에서 nlerp 는 균일하지 않아야 한다. 이게 없으면 상한이
+    // 자명해질 수 있다(slerp 를 nlerp 로 바꿔치기해도 둘이 같이 움직인다).
+    if (arc >= 1.5f) {
+        float nlerpNormError = 0.0f;
+        const float nlerpRatio =
+            QuatChordRatio(&mathlab::QuatNlerp, a, b, kSteps, nlerpNormError);
+        if (!obs.AtLeast("nlerp chord max/min - 1 (control floor)",
+                         (double)nlerpRatio - 1.0, 0.05)) {
+            ok = false;
+        }
+        obs.interesting = true;
+    }
+    // snippet-end: step02-property-slerp-uniform
+    return ok;
+}
+
+// ---- step04: 노이즈 ----
+
+// Perlin 의 범위 상계를 *독립으로* 계산한다. Grad2 는 축 정렬 단위 벡터 4 종만
+// 내므로 한 셀의 네 모서리 그라디언트 조합은 4^4 = 256 가지뿐이다. 그 전부를
+// 셀 안 격자에서 quintic 블렌드해 최대 |값| 을 구하면, 해시가 무엇을 내든
+// Perlin2D 의 값은 그 안에 있다. 헤더 주석의 실측 [-0.535, 0.535] 을 확인하는
+// 오라클이자 property 의 상계다.
+double PerlinScanBound() {
+    static double cached = -1.0;
+    if (cached >= 0.0) return cached;
+    // snippet-begin: step04-property-perlin-scan
+    const float gx[4] = {1.0f, -1.0f, 0.0f, 0.0f};
+    const float gy[4] = {0.0f, 0.0f, 1.0f, -1.0f};
+    constexpr int kGrid = 96;
+    double best = 0.0;
+    for (int a = 0; a < 4; ++a) {
+        for (int b = 0; b < 4; ++b) {
+            for (int c = 0; c < 4; ++c) {
+                for (int d = 0; d < 4; ++d) {
+                    for (int i = 0; i <= kGrid; ++i) {
+                        const float fx = (float)i / (float)kGrid;
+                        const float u  = mathlab::nz::Quintic(fx);
+                        for (int j = 0; j <= kGrid; ++j) {
+                            const float fy = (float)j / (float)kGrid;
+                            const float v  = mathlab::nz::Quintic(fy);
+                            const float n00 = gx[a] * fx + gy[a] * fy;
+                            const float n10 = gx[b] * (fx - 1.0f) + gy[b] * fy;
+                            const float n01 = gx[c] * fx + gy[c] * (fy - 1.0f);
+                            const float n11 = gx[d] * (fx - 1.0f) + gy[d] * (fy - 1.0f);
+                            const float lo  = n00 + (n10 - n00) * u;
+                            const float hi  = n01 + (n11 - n01) * u;
+                            best = std::max(best, std::fabs((double)(lo + (hi - lo) * v)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // snippet-end: step04-property-perlin-scan
+    cached = best;
+    return cached;
+}
+
+// Simplex 쪽은 헤더 주석의 실측 상계를 그대로 property 로 승격한다. 격자 조합을
+// 다 세는 오라클이 없으므로 여유 1% 를 붙이고, 대신 "관측 최댓값이 상계의 70%
+// 이상" 이라는 비자명성 하한을 함께 건다.
+constexpr double kSimplexBound = 0.684 * 1.01;
+
+const prop::ParamSpec kNoiseRangeParams[] = {
+    {"x",    -256.0f, 256.0f, 0.0f},
+    {"y",    -256.0f, 256.0f, 0.0f},
+    {"seed",    0.0f,  64.0f, 7.0f},
+};
+
+bool PropNoiseRange(const float* p, prop::Observation& obs) {
+    const float    x    = p[0];
+    const float    y    = p[1];
+    const uint32_t seed = (uint32_t)std::lround((double)p[2]);
+
+    const float value   = mathlab::nz::Value2D(x, y, seed);
+    const float perlin  = mathlab::nz::Perlin2D(x, y, seed);
+    const float simplex = mathlab::nz::Simplex2D(x, y, seed);
+
+    bool ok = true;
+    // snippet-begin: step04-property-range-bounds
+    // Value 는 [0,1) 해시들의 볼록 결합이므로 [0,1] 을 벗어날 수 없다.
+    if (!obs.Bound("Value2D outside [0,1]",
+                   std::max(0.0 - (double)value, (double)value - 1.0),
+                   2.0 * kUnitRoundoff)) ok = false;
+    if (!obs.Bound("|Perlin2D| over scanned bound", std::fabs((double)perlin),
+                   PerlinScanBound() + 1e-3)) ok = false;
+    if (!obs.Bound("|Simplex2D| over measured bound", std::fabs((double)simplex),
+                   kSimplexBound)) ok = false;
+    // snippet-end: step04-property-range-bounds
+    // 결정성: 같은 (x, y, seed) 는 같은 비트를 내야 한다.
+    const bool stable = mathlab::nz::Perlin2D(x, y, seed) == perlin &&
+                        mathlab::nz::Value2D(x, y, seed) == value &&
+                        mathlab::nz::Simplex2D(x, y, seed) == simplex;
+    if (!obs.Bound("noise is not deterministic (exact)", stable ? 0.0 : 1.0, 0.0)) ok = false;
+
+    obs.interesting = std::fabs(perlin) > 0.2f || std::fabs(simplex) > 0.2f;
+    return ok;
+}
+
+// FBM 은 합이 아니라 *진폭 가중 평균* 이다. 그래서 (a) 상수 기저를 넣으면 그
+// 상수를 그대로 돌려주고, (b) Perlin 기저의 FBM 은 Perlin 의 범위 상계를 넘지
+// 않는다. 정규화를 빼면 둘 다 깨진다.
+const prop::ParamSpec kNoiseFbmParams[] = {
+    {"x",          -128.0f, 128.0f, 0.0f},
+    {"y",          -128.0f, 128.0f, 0.0f},
+    {"seed",          0.0f,  64.0f, 9.0f},
+    {"octaves",       0.0f,   8.0f, 4.0f},
+    {"lacunarity",    1.2f,   4.0f, 2.0f},
+    {"gain",          0.05f,  1.0f, 0.5f},
+    {"constant",     -3.0f,   3.0f, 1.0f},
+};
+
+bool PropNoiseFbmAverage(const float* p, prop::Observation& obs) {
+    const float    x       = p[0];
+    const float    y       = p[1];
+    const uint32_t seed    = (uint32_t)std::lround((double)p[2]);
+    const int      octaves = (int)std::lround((double)p[3]);
+    const float    lac     = p[4];
+    const float    gain    = p[5];
+    const float    konst   = p[6];
+
+    const float constFbm = mathlab::nz::FBM2D(
+        x, y, seed, octaves, lac, gain,
+        [konst](float, float, uint32_t) { return konst; });
+    const float perlinFbm = mathlab::nz::FBM2D(
+        x, y, seed, octaves, lac, gain,
+        [](float px, float py, uint32_t s) { return mathlab::nz::Perlin2D(px, py, s); });
+
+    const double expected = (octaves > 0) ? (double)konst : 0.0;
+
+    bool ok = true;
+    if (!obs.Bound("|FBM(const) - const|", std::fabs((double)constFbm - expected),
+                   32.0 * kUnitRoundoff * (std::fabs((double)konst) + 1.0))) ok = false;
+    if (!obs.Bound("|FBM(Perlin)| over base bound", std::fabs((double)perlinFbm),
+                   PerlinScanBound() + 1e-3)) ok = false;
+
+    obs.interesting = octaves >= 3 && gain < 0.95f;
+    return ok;
+}
+
+// 격자 정점의 정확값 + 셀 경계 연속성. Perlin 은 정점에서 오프셋이 0 이라 정확히
+// 0 이고, 셀 경계에서는 양쪽 셀이 같은 그라디언트를 쓰므로 값이 이어져야 한다.
+const prop::ParamSpec kNoiseSeamParams[] = {
+    {"ix",    -64.0f, 64.0f, 0.0f},
+    {"iy",    -64.0f, 64.0f, 0.0f},
+    {"seed",    0.0f, 64.0f, 7.0f},
+    {"fy",     0.05f, 0.95f, 0.5f},
+    {"delta", 1e-4f,  1e-2f, 1e-3f},
+};
+
+bool PropNoiseLatticeSeam(const float* p, prop::Observation& obs) {
+    const int      ix    = (int)std::lround((double)p[0]);
+    const int      iy    = (int)std::lround((double)p[1]);
+    const uint32_t seed  = (uint32_t)std::lround((double)p[2]);
+    const float    fy    = p[3];
+    const float    delta = p[4];
+
+    bool ok = true;
+    // 격자 정점: 네 오프셋 중 하나가 (0,0) 이고 나머지 가중치가 0 이다.
+    if (!obs.Bound("Perlin2D at lattice vertex (exact)",
+                   std::fabs((double)mathlab::nz::Perlin2D((float)ix, (float)iy, seed)),
+                   0.0)) ok = false;
+    const float latticeValue = mathlab::nz::Value2D((float)ix, (float)iy, seed);
+    const float latticeHash  = mathlab::nz::HashTo01(ix, iy, seed);
+    if (!obs.Bound("Value2D at lattice vertex != HashTo01 (exact)",
+                   (latticeValue == latticeHash) ? 0.0 : 1.0, 0.0)) ok = false;
+
+    // 셀 경계 연속성. quintic fade 의 도함수는 30 t^2 (1-t)^2 <= 1.875 이고
+    // 격자 값은 [-1,1] 이라 |d/dx| <= 1 + 2*1.875 < 5. 여유 2 배로 L = 10.
+    const float x0 = (float)(ix + 1);
+    const float y  = (float)iy + fy;
+    const float lo = mathlab::nz::Perlin2D(x0 - delta, y, seed);
+    const float hi = mathlab::nz::Perlin2D(x0 + delta, y, seed);
+    if (!obs.Bound("|Perlin across cell seam|", std::fabs((double)hi - lo),
+                   10.0 * 2.0 * (double)delta + 1e-5)) ok = false;
+
+    obs.interesting =
+        std::fabs((double)mathlab::nz::Perlin2D(x0 - 0.5f, y, seed)) > 0.05;
+    return ok;
+}
+
+// ---- step05: 충돌 ----
+
+const prop::ParamSpec kObbPairSpec[10] = {
+    {"A.cx",   -4.0f, 4.0f, 0.0f}, {"A.cy",   -4.0f, 4.0f, 0.0f},
+    {"A.hx",    0.3f, 1.5f, 1.0f}, {"A.hy",    0.3f, 1.5f, 1.0f},
+    {"A.angle", 0.0f, 3.14159265f, 0.0f},
+    {"B.cx",   -4.0f, 4.0f, 0.0f}, {"B.cy",   -4.0f, 4.0f, 0.0f},
+    {"B.hx",    0.3f, 1.5f, 1.0f}, {"B.hy",    0.3f, 1.5f, 1.0f},
+    {"B.angle", 0.0f, 3.14159265f, 0.0f},
+};
+
+mathlab::OBB2D ObbFromParams(const float* p) {
+    return mathlab::OBB2D{{p[0], p[1]}, p[2], p[3], p[4]};
+}
+
+// 판정을 가르는 값 — 후보 4 축 중 최소 overlap. 음수면 분리다.
+double SatMargin(const mathlab::SATResult& sat) {
+    double margin = 1e30;
+    for (const mathlab::SATAxisInfo& info : sat.axes) {
+        margin = std::min(margin, (double)info.overlap);
+    }
+    return margin;
+}
+
+// 경계 두께. 좌표 크기에 비례한 부동소수 오차 두께다. 판정이 이 안에 있으면
+// 두 구현이 서로 다른 쪽으로 반올림해도 버그가 아니다.
+double BoundaryEps(const mathlab::OBB2D& a, const mathlab::OBB2D& b) {
+    const double span = std::fabs((double)a.center.x) + std::fabs((double)a.center.y) +
+                        std::fabs((double)b.center.x) + std::fabs((double)b.center.y) +
+                        a.halfX + a.halfY + b.halfX + b.halfY;
+    return 1e-5 * std::max(1.0, span);
+}
+
+bool GjkIntersect(const mathlab::OBB2D& a, const mathlab::OBB2D& b) {
+    const std::vector<mathlab::GJKStep> trace = mathlab::GJK2DTraced(a, b);
+    return !trace.empty() && trace.back().done && trace.back().intersect;
+}
+
+// 제품의 Corners()/Axes() 를 쓰지 않는 독립 꼭짓점 계산 — 분리면 실증의 오라클.
+void RefCorners(const mathlab::OBB2D& o, double out[4][2]) {
+    const double c = std::cos((double)o.angle);
+    const double s = std::sin((double)o.angle);
+    const double ex[2] = {c * o.halfX, s * o.halfX};
+    const double ey[2] = {-s * o.halfY, c * o.halfY};
+    const double cx = o.center.x, cy = o.center.y;
+    out[0][0] = cx - ex[0] - ey[0];  out[0][1] = cy - ex[1] - ey[1];
+    out[1][0] = cx + ex[0] - ey[0];  out[1][1] = cy + ex[1] - ey[1];
+    out[2][0] = cx + ex[0] + ey[0];  out[2][1] = cy + ex[1] + ey[1];
+    out[3][0] = cx - ex[0] + ey[0];  out[3][1] = cy - ex[1] + ey[1];
+}
+
+void ProjectCorners(const double corners[4][2], double dx, double dy,
+                    double& lo, double& hi) {
+    lo = 1e30;
+    hi = -1e30;
+    for (int i = 0; i < 4; ++i) {
+        const double t = corners[i][0] * dx + corners[i][1] * dy;
+        lo = std::min(lo, t);
+        hi = std::max(hi, t);
+    }
+}
+
+// (5) 두 독립 구현의 판정 일치. 경계 두께 안의 표본은 판정하지 않는다.
+bool PropCollisionAgree(const float* p, prop::Observation& obs) {
+    const mathlab::OBB2D A = ObbFromParams(p);
+    const mathlab::OBB2D B = ObbFromParams(p + 5);
+    const mathlab::SATResult sat = mathlab::OBBOBBSat2D(A, B);
+    // snippet-begin: step05-property-boundary-band
+    // 경계 두께 규칙 — 판정을 가르는 최소 overlap 이 부동소수 오차 두께 안이면
+    // 두 구현이 서로 다른 쪽으로 반올림해도 버그가 아니다. 이 표본은 판정하지
+    // 않고 skipped 로 센다(탈락이 5% 를 넘으면 그 자체가 실패다).
+    const double eps = BoundaryEps(A, B);
+    if (std::fabs(SatMargin(sat)) < eps) {
+        obs.skipped = true;
+        return true;
+    }
+    const bool gjk = GjkIntersect(A, B);
+    bool ok = true;
+    if (!obs.Bound("SAT verdict != GJK verdict", (sat.intersect == gjk) ? 0.0 : 1.0, 0.0)) {
+        ok = false;
+    }
+    // snippet-end: step05-property-boundary-band
+    obs.interesting = sat.intersect;
+    return ok;
+}
+
+// (6) 분리면 실증. SAT 가 "분리" 라고 하면 그 축으로 *실제 분리 평면* 을 만들어
+//     A 의 네 꼭짓점과 B 의 네 꼭짓점이 서로 반대편에 있음을 보인다. "교차"
+//     라고 하면 후보 4 축 밖의 64 방향까지 훑어 분리 방향이 없음을 보인다.
+bool PropCollisionWitness(const float* p, prop::Observation& obs) {
+    const mathlab::OBB2D A = ObbFromParams(p);
+    const mathlab::OBB2D B = ObbFromParams(p + 5);
+    const mathlab::SATResult sat = mathlab::OBBOBBSat2D(A, B);
+    const double eps = BoundaryEps(A, B);
+    if (std::fabs(SatMargin(sat)) < eps) {
+        obs.skipped = true;
+        return true;
+    }
+
+    double ca[4][2], cb[4][2];
+    RefCorners(A, ca);
+    RefCorners(B, cb);
+    bool ok = true;
+
+    if (!sat.intersect) {
+        int    best    = -1;
+        double bestGap = 0.0;
+        for (int i = 0; i < (int)sat.axes.size(); ++i) {
+            if (!sat.axes[(size_t)i].separating) continue;
+            const double gap = -(double)sat.axes[(size_t)i].overlap;
+            if (gap > bestGap) {
+                bestGap = gap;
+                best    = i;
+            }
+        }
+        if (!obs.Bound("SAT says separated but reports no separating axis",
+                       (best >= 0) ? 0.0 : 1.0, 0.0)) {
+            return false;
+        }
+        const Vector2 axis = sat.axes[(size_t)best].axis;
+        const double  len  = std::sqrt((double)axis.x * axis.x + (double)axis.y * axis.y);
+        // overlap 이 실제 *거리* 이려면 축이 단위여야 한다.
+        if (!obs.Bound("|separating axis| - 1", std::fabs(len - 1.0), 1e-5)) return false;
+        const double dx = axis.x / len, dy = axis.y / len;
+
+        double aLo, aHi, bLo, bHi;
+        ProjectCorners(ca, dx, dy, aLo, aHi);
+        ProjectCorners(cb, dx, dy, bLo, bHi);
+
+        // snippet-begin: step05-property-witness-plane
+        double plane = 0.0;
+        double sign  = 0.0;                  // +1 이면 A 가 평면 아래쪽이다.
+        if (aHi < bLo)      { plane = 0.5 * (aHi + bLo); sign =  1.0; }
+        else if (bHi < aLo) { plane = 0.5 * (bHi + aLo); sign = -1.0; }
+        if (!obs.Bound("reported axis does not actually separate the corner sets",
+                       (sign == 0.0) ? 1.0 : 0.0, 0.0)) {
+            return false;
+        }
+        // 평면 실증 — A 의 네 점은 한쪽, B 의 네 점은 반대쪽.
+        double violation = 0.0;
+        for (int i = 0; i < 4; ++i) {
+            const double pa = sign * (ca[i][0] * dx + ca[i][1] * dy - plane);
+            const double pb = sign * (cb[i][0] * dx + cb[i][1] * dy - plane);
+            violation = std::max(violation, pa);
+            violation = std::max(violation, -pb);
+        }
+        if (!obs.Bound("witness plane violation", violation, 0.0)) ok = false;
+        // snippet-end: step05-property-witness-plane
+        obs.interesting = true;
+    } else {
+        // 볼록 분리 정리의 역: 교차한다면 *어떤* 방향으로도 분리되지 않는다.
+        double worstGap = 0.0;
+        for (int k = 0; k < 64; ++k) {
+            const double theta = 3.14159265358979 * (double)k / 64.0;
+            const double dx = std::cos(theta), dy = std::sin(theta);
+            double aLo, aHi, bLo, bHi;
+            ProjectCorners(ca, dx, dy, aLo, aHi);
+            ProjectCorners(cb, dx, dy, bLo, bHi);
+            worstGap = std::max(worstGap, std::max(bLo - aHi, aLo - bHi));
+        }
+        if (!obs.Bound("gap found in 64 directions while SAT says intersect",
+                       worstGap, eps)) ok = false;
+    }
+    return ok;
+}
+
+// (7) metamorphic — 강체 변환과 균등 스케일에서 판정이 변하지 않는다.
+const prop::ParamSpec kCollisionRigidParams[] = {
+    {"A.cx",   -4.0f, 4.0f, 0.0f}, {"A.cy",   -4.0f, 4.0f, 0.0f},
+    {"A.hx",    0.3f, 1.5f, 1.0f}, {"A.hy",    0.3f, 1.5f, 1.0f},
+    {"A.angle", 0.0f, 3.14159265f, 0.0f},
+    {"B.cx",   -4.0f, 4.0f, 0.0f}, {"B.cy",   -4.0f, 4.0f, 0.0f},
+    {"B.hx",    0.3f, 1.5f, 1.0f}, {"B.hy",    0.3f, 1.5f, 1.0f},
+    {"B.angle", 0.0f, 3.14159265f, 0.0f},
+    {"phi",    -3.14159265f, 3.14159265f, 0.0f},
+    {"tx",    -30.0f, 30.0f, 0.0f}, {"ty", -30.0f, 30.0f, 0.0f},
+    {"scale",   0.2f, 5.0f, 1.0f},
+};
+
+mathlab::OBB2D ApplyRigid(const mathlab::OBB2D& o, float phi, float tx, float ty) {
+    const float c = std::cos(phi), s = std::sin(phi);
+    return mathlab::OBB2D{{c * o.center.x - s * o.center.y + tx,
+                           s * o.center.x + c * o.center.y + ty},
+                          o.halfX, o.halfY, o.angle + phi};
+}
+
+mathlab::OBB2D ApplyScale(const mathlab::OBB2D& o, float k) {
+    return mathlab::OBB2D{{o.center.x * k, o.center.y * k},
+                          o.halfX * k, o.halfY * k, o.angle};
+}
+
+bool PropCollisionRigidInvariance(const float* p, prop::Observation& obs) {
+    const mathlab::OBB2D A = ObbFromParams(p);
+    const mathlab::OBB2D B = ObbFromParams(p + 5);
+    const float phi = p[10], tx = p[11], ty = p[12], k = p[13];
+
+    const mathlab::OBB2D rA = ApplyRigid(A, phi, tx, ty);
+    const mathlab::OBB2D rB = ApplyRigid(B, phi, tx, ty);
+    const mathlab::OBB2D sA = ApplyScale(A, k);
+    const mathlab::OBB2D sB = ApplyScale(B, k);
+
+    const mathlab::SATResult base  = mathlab::OBBOBBSat2D(A, B);
+    const mathlab::SATResult rigid = mathlab::OBBOBBSat2D(rA, rB);
+    const mathlab::SATResult scaled = mathlab::OBBOBBSat2D(sA, sB);
+
+    // 세 배치 모두 경계 두께 밖이어야 판정을 비교할 수 있다.
+    if (std::fabs(SatMargin(base))   < BoundaryEps(A, B) ||
+        std::fabs(SatMargin(rigid))  < BoundaryEps(rA, rB) ||
+        std::fabs(SatMargin(scaled)) < BoundaryEps(sA, sB)) {
+        obs.skipped = true;
+        return true;
+    }
+
+    bool ok = true;
+    // snippet-begin: step05-property-metamorphic
+    if (!obs.Bound("SAT verdict changed under rigid transform",
+                   (base.intersect == rigid.intersect) ? 0.0 : 1.0, 0.0)) ok = false;
+    if (!obs.Bound("SAT verdict changed under uniform scale",
+                   (base.intersect == scaled.intersect) ? 0.0 : 1.0, 0.0)) ok = false;
+    const bool gjkBase = GjkIntersect(A, B);
+    if (!obs.Bound("GJK verdict changed under rigid transform",
+                   (gjkBase == GjkIntersect(rA, rB)) ? 0.0 : 1.0, 0.0)) ok = false;
+    if (!obs.Bound("GJK verdict changed under uniform scale",
+                   (gjkBase == GjkIntersect(sA, sB)) ? 0.0 : 1.0, 0.0)) ok = false;
+    // snippet-end: step05-property-metamorphic
+
+    obs.interesting = base.intersect;
+    return ok;
+}
+
+// ---- step08: 행렬 ----
+
+// 생성기가 조건수를 상계한다. |s| 를 [0.1, 4] 로 보정하므로 선형부의 조건수는
+// kappa = max|s| / min|s| <= 40 이다. 표본을 버리는 규칙이 아니라 *구성하는*
+// 규칙이라 축소 뒤에도 조건이 유지된다. 그래도 규칙을 코드에 남겨 둔다 —
+// 생성기를 넓히면 이 문이 먼저 걸린다.
+constexpr double kMaxConditionNumber = 1e3;
+
+const prop::ParamSpec kTrsSpec[10] = {
+    {"t.x",   -8.0f, 8.0f, 0.0f}, {"t.y", -8.0f, 8.0f, 0.0f}, {"t.z", -8.0f, 8.0f, 0.0f},
+    {"axis.x", -1.0f, 1.0f, 0.0f}, {"axis.y", -1.0f, 1.0f, 0.0f},
+    {"axis.z", -1.0f, 1.0f, 1.0f}, {"angle", -6.5f, 6.5f, 0.0f},
+    {"s.x",   -4.0f, 4.0f, 1.0f}, {"s.y", -4.0f, 4.0f, 1.0f}, {"s.z", -4.0f, 4.0f, 1.0f},
+};
+
+const prop::ParamSpec kMatrixInverseParams[] = {
+    {"t.x",   -8.0f, 8.0f, 0.0f}, {"t.y", -8.0f, 8.0f, 0.0f}, {"t.z", -8.0f, 8.0f, 0.0f},
+    {"axis.x", -1.0f, 1.0f, 0.0f}, {"axis.y", -1.0f, 1.0f, 0.0f},
+    {"axis.z", -1.0f, 1.0f, 1.0f}, {"angle", -6.5f, 6.5f, 0.0f},
+    {"s.x",   -4.0f, 4.0f, 1.0f}, {"s.y", -4.0f, 4.0f, 1.0f}, {"s.z", -4.0f, 4.0f, 1.0f},
+    {"p.x",   -8.0f, 8.0f, 1.0f}, {"p.y", -8.0f, 8.0f, 0.0f}, {"p.z", -8.0f, 8.0f, 0.0f},
+};
+
+Matrix TrsFromParams(const float* p) {
+    return mathlab::MatComposeTRS(
+        {p[0], p[1], p[2]},
+        mathlab::QuatFromAxisAngle({p[3], p[4], p[5]}, p[6]),
+        {RepairScale(p[7]), RepairScale(p[8]), RepairScale(p[9])});
+}
+
+bool PropMatrixInverseRoundtrip(const float* p, prop::Observation& obs) {
+    const Vector3 t{p[0], p[1], p[2]};
+    const Vector3 s{RepairScale(p[7]), RepairScale(p[8]), RepairScale(p[9])};
+    const Vector3 pt{p[10], p[11], p[12]};
+
+    const double maxS = std::max(std::fabs((double)s.x),
+                                 std::max(std::fabs((double)s.y), std::fabs((double)s.z)));
+    const double minS = std::min(std::fabs((double)s.x),
+                                 std::min(std::fabs((double)s.y), std::fabs((double)s.z)));
+    const double kappa = maxS / minS;
+    if (kappa > kMaxConditionNumber) {   // 조건수 규칙. 생성기상 여기 오지 않는다.
+        obs.skipped = true;
+        return true;
+    }
+
+    const Matrix M = TrsFromParams(p);
+    Matrix inv = mathlab::MatIdentity();
+    const bool invertible = mathlab::MatInvert(M, inv);
+    bool ok = true;
+    if (!obs.Bound("MatInvert failed on a well-conditioned TRS",
+                   invertible ? 0.0 : 1.0, 0.0)) {
+        return false;
+    }
+
+    // snippet-begin: step08-property-inverse-tolerance
+    // 오차 증폭의 근거: M p + t 를 계산할 때 잃는 자릿수가 |t| + maxS*|p| 규모이고
+    // M^-1 을 적용하면 1/minS 배 커진다 → u * kappa * (|p| + |t|/maxS).
+    // 두 번의 행렬-벡터 곱과 Gauss-Jordan 을 합쳐 여유 계수 64 를 붙인다.
+    const double tol = 64.0 * kUnitRoundoff * kappa *
+                       ((double)mathlab::V3Length(pt) +
+                        (double)mathlab::V3Length(t) / maxS + 1.0);
+
+    const Vector3 back = mathlab::MatTransformPoint(inv, mathlab::MatTransformPoint(M, pt));
+    if (!obs.Bound("|M^-1 (M p) - p|",
+                   (double)mathlab::V3Length(mathlab::V3Sub(back, pt)), tol)) ok = false;
+    // snippet-end: step08-property-inverse-tolerance
+    const Vector3 fwd = mathlab::MatTransformPoint(M, mathlab::MatTransformPoint(inv, pt));
+    if (!obs.Bound("|M (M^-1 p) - p|",
+                   (double)mathlab::V3Length(mathlab::V3Sub(fwd, pt)), tol)) ok = false;
+
+    // 아핀 TRS 의 행렬식은 스케일 곱이다(회전은 부피를 보존한다). 3x3 전개는
+    // 크기 maxS^3 인 항들이 상쇄되며 만들어지므로 상계도 절대값 기준이다.
+    const double detExpect = (double)s.x * s.y * s.z;
+    if (!obs.Bound("|det(M) - sx sy sz|",
+                   std::fabs((double)mathlab::MatDeterminant(M) - detExpect),
+                   64.0 * kUnitRoundoff * maxS * maxS * maxS)) ok = false;
+
+    obs.interesting = kappa > 5.0 && mathlab::V3Length(pt) > 1.0;
+    return ok;
+}
+
+// (12) 합성 대 개별 적용. 그리고 전치·항등원은 *비트 단위로* 같아야 한다 —
+//      MatMul 이 같은 곱을 같은 순서로 더하기 때문이다.
+const prop::ParamSpec kMatrixComposeParams[] = {
+    {"A.t.x", -8.0f, 8.0f, 0.0f}, {"A.t.y", -8.0f, 8.0f, 0.0f}, {"A.t.z", -8.0f, 8.0f, 0.0f},
+    {"A.axis.x", -1.0f, 1.0f, 0.0f}, {"A.axis.y", -1.0f, 1.0f, 0.0f},
+    {"A.axis.z", -1.0f, 1.0f, 1.0f}, {"A.angle", -6.5f, 6.5f, 0.0f},
+    {"A.s.x", -4.0f, 4.0f, 1.0f}, {"A.s.y", -4.0f, 4.0f, 1.0f}, {"A.s.z", -4.0f, 4.0f, 1.0f},
+    {"B.t.x", -8.0f, 8.0f, 0.0f}, {"B.t.y", -8.0f, 8.0f, 0.0f}, {"B.t.z", -8.0f, 8.0f, 0.0f},
+    {"B.axis.x", -1.0f, 1.0f, 0.0f}, {"B.axis.y", -1.0f, 1.0f, 0.0f},
+    {"B.axis.z", -1.0f, 1.0f, 1.0f}, {"B.angle", -6.5f, 6.5f, 0.0f},
+    {"B.s.x", -4.0f, 4.0f, 1.0f}, {"B.s.y", -4.0f, 4.0f, 1.0f}, {"B.s.z", -4.0f, 4.0f, 1.0f},
+    {"p.x", -8.0f, 8.0f, 1.0f}, {"p.y", -8.0f, 8.0f, 0.0f}, {"p.z", -8.0f, 8.0f, 0.0f},
+};
+
+bool PropMatrixComposeVsApply(const float* p, prop::Observation& obs) {
+    const Matrix A = TrsFromParams(p);
+    const Matrix B = TrsFromParams(p + 10);
+    const Vector3 pt{p[20], p[21], p[22]};
+
+    const Matrix AB = mathlab::MatMul(A, B);
+    bool ok = true;
+
+    const double scale = (1.0 + MatMaxAbs(A)) * (1.0 + MatMaxAbs(B)) *
+                         (1.0 + (double)mathlab::V3Length(pt));
+    const double tol = 64.0 * kUnitRoundoff * scale;
+
+    const Vector3 once  = mathlab::MatTransformPoint(AB, pt);
+    const Vector3 twice = mathlab::MatTransformPoint(A, mathlab::MatTransformPoint(B, pt));
+    if (!obs.Bound("|(A B) p - A (B p)|",
+                   (double)mathlab::V3Length(mathlab::V3Sub(once, twice)), tol)) ok = false;
+
+    const Vector3 vOnce  = mathlab::MatTransformVector(AB, pt);
+    const Vector3 vTwice = mathlab::MatTransformVector(A, mathlab::MatTransformVector(B, pt));
+    if (!obs.Bound("|(A B) v - A (B v)| (direction)",
+                   (double)mathlab::V3Length(mathlab::V3Sub(vOnce, vTwice)), tol)) ok = false;
+
+    // snippet-begin: step08-property-exact-transpose
+    // (AB)^T 와 B^T A^T 는 같은 곱을 같은 순서로 더하므로 비트가 같다.
+    if (!obs.Bound("(A B)^T != B^T A^T (exact)",
+                   MatBitEqual(mathlab::MatTranspose(AB),
+                               mathlab::MatMul(mathlab::MatTranspose(B),
+                                               mathlab::MatTranspose(A)))
+                       ? 0.0 : 1.0,
+                   0.0)) ok = false;
+    if (!obs.Bound("A * I != A (exact)",
+                   MatBitEqual(mathlab::MatMul(A, mathlab::MatIdentity()), A) ? 0.0 : 1.0,
+                   0.0)) ok = false;
+
+    // 대조군 — 합성은 비가환이다. 곱이 가환으로 바뀌면 위 관계가 자명해진다.
+    obs.interesting = MatMaxDiff(AB, mathlab::MatMul(B, A)) > 1e-3;
+    // snippet-end: step08-property-exact-transpose
+    return ok;
+}
+
+// (13) 독립 구현 대조 — 행렬 회전과 쿼터니언 샌드위치는 같은 결과를 내야 한다.
+const prop::ParamSpec kMatrixQuatParams[] = {
+    {"axis.x", -1.0f,  1.0f, 0.0f}, {"axis.y", -1.0f, 1.0f, 0.0f},
+    {"axis.z", -1.0f,  1.0f, 1.0f}, {"angle",  -6.5f, 6.5f, 0.0f},
+    {"scale",   0.05f, 20.0f, 1.0f},
+    {"v.x",    -8.0f,  8.0f, 1.0f}, {"v.y", -8.0f, 8.0f, 0.0f},
+    {"v.z",    -8.0f,  8.0f, 0.0f},
+};
+
+bool PropMatrixQuatAgreement(const float* p, prop::Observation& obs) {
+    const Quaternion raw = QuatScaleQ(
+        mathlab::QuatFromAxisAngle({p[0], p[1], p[2]}, p[3]), p[4]);
+    const Vector3 v{p[5], p[6], p[7]};
+    const double  vLen = (double)mathlab::V3Length(v);
+
+    const Matrix R = mathlab::MatRotate(raw);
+    bool ok = true;
+    if (!obs.Bound("max|R^T R - I|",
+                   MatMaxDiff(mathlab::MatMul(mathlab::MatTranspose(R), R),
+                              mathlab::MatIdentity()),
+                   64.0 * kUnitRoundoff)) ok = false;
+    if (!obs.Bound("|det(R) - 1|", std::fabs((double)mathlab::MatDeterminant(R) - 1.0),
+                   256.0 * kUnitRoundoff)) ok = false;
+
+    const Vector3 byMat  = mathlab::MatTransformVector(R, v);
+    const Vector3 byQuat = mathlab::QuatRotateVec(mathlab::QuatNormalize(raw), v);
+    if (!obs.Bound("|R v - q v q*|",
+                   (double)mathlab::V3Length(mathlab::V3Sub(byMat, byQuat)),
+                   128.0 * kUnitRoundoff * (vLen + 1.0))) ok = false;
+    if (!obs.Bound("| |R v| - |v| |",
+                   std::fabs((double)mathlab::V3Length(byMat) - vLen),
+                   128.0 * kUnitRoundoff * (vLen + 1.0))) ok = false;
+
+    obs.interesting = std::fabs(p[3]) > 0.1f && vLen > 0.5;
+    return ok;
+}
+
+// ---- property 등록부 ----
+//
+// 표본 수는 CI 부담과의 절충이다. 기본값으로 property 층 전체가 0.5 초 안쪽에서
+// 돌고, `--scale=N` 이 표본을 N 배로 늘린다(야간 확장). seed 는 `--seed=` 로
+// 바꿀 수 있고, 반례 보고가 그대로 재현 명령을 찍는다.
+
+#define PROP_COUNT(array) (int)(sizeof(array) / sizeof((array)[0]))
+
+const prop::Property kProperties[] = {
+    {"step02", "quat/norm-preserved", kQuatNormParams, PROP_COUNT(kQuatNormParams),
+     PropQuatNormPreserved, 4000, 25, 100, 2, 0,
+     "unit quaternion in, unit quaternion out; sandwich rotation preserves |v|"},
+    {"step02", "quat/compose-assoc", kQuatAssocParams, PROP_COUNT(kQuatAssocParams),
+     PropQuatComposeAssoc, 4000, 40, 100, 2, 0,
+     "(q1 q2) q3 == q1 (q2 q3) within 32u; the product itself stays non-commutative"},
+    {"step02", "quat/double-cover", kQuatCoverParams, PROP_COUNT(kQuatCoverParams),
+     PropQuatDoubleCover, 4000, 25, 100, 5, 0,
+     "q and -q are the same rotation; slerp is invariant to negating an endpoint"},
+    {"step02", "quat/slerp-uniform", kQuatSlerpParams, PROP_COUNT(kQuatSlerpParams),
+     PropQuatSlerpUniform, 800, 20, 100, 2, 0,
+     "slerp walks the arc at constant speed (chord max/min <= 1.02); nlerp does not"},
+    {"step04", "noise/range-bounds", kNoiseRangeParams, PROP_COUNT(kNoiseRangeParams),
+     PropNoiseRange, 6000, 20, 100, 2, 70,
+     "Value in [0,1]; |Perlin| within the scanned gradient bound; |Simplex| within 0.691"},
+    {"step04", "noise/fbm-average", kNoiseFbmParams, PROP_COUNT(kNoiseFbmParams),
+     PropNoiseFbmAverage, 2000, 20, 100, 2, 0,
+     "FBM is an amplitude-weighted mean: constant in, constant out; base bound kept"},
+    {"step04", "noise/lattice-seam", kNoiseSeamParams, PROP_COUNT(kNoiseSeamParams),
+     PropNoiseLatticeSeam, 3000, 40, 100, 2, 0,
+     "Perlin is exactly 0 at lattice vertices and continuous across cell seams"},
+    {"step05", "collision/sat-gjk-agree", kObbPairSpec, PROP_COUNT(kObbPairSpec),
+     PropCollisionAgree, 5000, 10, 90, 5, 0,
+     "SAT and GJK agree outside a float-thickness band around the touching case"},
+    {"step05", "collision/axis-witness", kObbPairSpec, PROP_COUNT(kObbPairSpec),
+     PropCollisionWitness, 2500, 10, 95, 5, 0,
+     "a separated verdict comes with a plane that really splits the corner sets"},
+    {"step05", "collision/rigid-invariance", kCollisionRigidParams,
+     PROP_COUNT(kCollisionRigidParams), PropCollisionRigidInvariance, 3000, 10, 90, 10, 0,
+     "the verdict is invariant under rigid motion and uniform scaling"},
+    {"step08", "matrix/inverse-roundtrip", kMatrixInverseParams,
+     PROP_COUNT(kMatrixInverseParams), PropMatrixInverseRoundtrip, 3000, 20, 100, 2, 0,
+     "M^-1 (M p) == p within 64u * kappa * scale; kappa is capped by the generator"},
+    {"step08", "matrix/compose-vs-apply", kMatrixComposeParams,
+     PROP_COUNT(kMatrixComposeParams), PropMatrixComposeVsApply, 2000, 40, 100, 2, 0,
+     "(A B) p == A (B p); (A B)^T == B^T A^T bit for bit; A B != B A"},
+    {"step08", "matrix/quat-agreement", kMatrixQuatParams, PROP_COUNT(kMatrixQuatParams),
+     PropMatrixQuatAgreement, 3000, 25, 100, 2, 0,
+     "MatRotate(q) v == q v q* and R stays orthogonal with det 1"},
+};
+
+#undef PROP_COUNT
+
+// ---- property 실행 ----
+
+prop::RunConfig gPropertyConfig;
+const char*     gPropertyOnly = nullptr;
+std::string     gCaseSummary;
+
+void PrintParams(const prop::Property& property, const std::vector<float>& values) {
+    for (int k = 0; k < property.paramCount && k < (int)values.size(); ++k) {
+        if (k) std::cerr << ' ';
+        std::cerr << property.params[k].name << '=' << std::setprecision(7)
+                  << values[(size_t)k];
+    }
+}
+
+void RunPropertyCase(const prop::Property& property) {
+    const prop::RunResult result = prop::Run(property, gPropertyConfig);
+
+    if (result.failed) {
+        std::cerr << "\n  property '" << property.name << "' found a counterexample\n";
+        std::cerr << "    contract : " << property.contract << '\n';
+        std::cerr << "    sample   : " << result.failedSample << " of " << result.planned
+                  << "   (master seed " << gPropertyConfig.masterSeed
+                  << ", scale " << gPropertyConfig.scale << ")\n";
+        std::cerr << "    broke    : " << result.failure.worstName << " = "
+                  << std::setprecision(6) << result.failure.worstObserved
+                  << "   (bound " << result.failure.worstBound << ")\n";
+        std::cerr << "    generated: ";
+        PrintParams(property, result.generated);
+        std::cerr << '\n';
+        std::cerr << "    shrunk   : ";
+        PrintParams(property, result.shrunk);
+        std::cerr << "   (" << result.shrinkSteps << " shrink step(s))\n";
+        std::cerr << "    repro    : math_core_tests " << property.step
+                  << " --only=" << property.name
+                  << " --seed=" << gPropertyConfig.masterSeed
+                  << " --sample=" << result.failedSample << "\n\n";
+    }
+    CHECK(!result.failed);
+
+    // 반례가 나오면 표본 루프가 거기서 멈추므로 아래 통계는 의미가 없다.
+    // `--sample=` 재현 모드도 표본이 하나뿐이라 마찬가지다.
+    const int judged = result.samples - result.skipped;
+    if (gPropertyConfig.onlySample < 0 && !result.failed) {
+        // 비자명성. 퇴화 표본만 모이면 property 는 아무것도 강제하지 않는다.
+        const bool enough =
+            judged > 0 && result.interesting * 100 >= judged * property.minInterestPct;
+        if (!enough) {
+            std::cerr << "  property '" << property.name << "': only " << result.interesting
+                      << " of " << judged << " judged sample(s) were non-degenerate "
+                      << "(need " << property.minInterestPct << "%)\n";
+        }
+        CHECK(enough);
+
+        if (property.maxInterestPct < 100) {
+            const bool balanced =
+                result.interesting * 100 <= judged * property.maxInterestPct;
+            if (!balanced) {
+                std::cerr << "  property '" << property.name << "': " << result.interesting
+                          << " of " << judged << " sample(s) hit the same branch\n";
+            }
+            CHECK(balanced);
+        }
+
+        // 사전조건 탈락이 많으면 대부분의 표본이 판정되지 않은 것이다.
+        const bool fewSkips = result.skipped * 100 <= result.samples * property.maxSkipPct;
+        if (!fewSkips) {
+            std::cerr << "  property '" << property.name << "': " << result.skipped
+                      << " of " << result.samples << " sample(s) fell outside the "
+                      << "precondition\n";
+        }
+        CHECK(fewSkips);
+
+        if (property.minWorstPct > 0) {
+            // 실측 상계를 승격한 property 는 상계가 헐거우면 자명해진다.
+            const bool tight = result.worst * 100.0f >= (float)property.minWorstPct;
+            if (!tight) {
+                std::cerr << "  property '" << property.name
+                          << "': worst observation is only " << (result.worst * 100.0f)
+                          << "% of the declared bound\n";
+            }
+            CHECK(tight);
+        }
+    }
+
+    // 요약 한 줄. `worst` 는 가장 상계에 가까웠던 관측의 비율이다 — 1.00 에
+    // 붙으면 계약이 빠듯하다는 뜻이고, 0.00 이면 그 property 의 모든 조항이
+    // 정확 일치(상계 0)였다는 뜻이다.
+    std::ostringstream summary;
+    summary << "(" << result.samples << " samples, " << result.interesting
+            << " non-degenerate, " << result.skipped << " skipped, worst "
+            << std::fixed << std::setprecision(3) << result.worst << "x";
+    if (result.worst > 0.0f && result.worstName[0]) {
+        summary << " on '" << result.worstName << "'";
+    }
+    if (property.minWorstPct > 0) {
+        // 실측 상계를 승격한 property 는 실제 관측과 선언한 상계를 같이 찍는다 —
+        // 이 두 수가 아티클에 그대로 실려야 상계가 어디서 왔는지 추적된다.
+        summary << " = " << std::setprecision(6) << result.worstObserved << " of "
+                << result.worstBound;
+    }
+    summary << ")";
+    gCaseSummary = summary.str();
+}
+
 // ==================== 실행 단위 ====================
 
-// 검증 함수를 *그것을 들여온 step* 에 묶는다. step 키가 곧 ctest 타깃의 인자다.
+// 검증을 *그것을 들여온 step* 에 묶는다. step 키가 곧 ctest 타깃의 인자다.
+// 고정 사례는 fn 을, property 사례는 property 를 가진다(둘은 배타적이다).
 struct TestCase {
-    const char* step;
-    const char* name;
-    void (*fn)();
+    const char*           step;
+    const char*           name;      // property 사례면 nullptr
+    void                (*fn)();
+    const prop::Property* property;
 };
 
 const TestCase kCases[] = {
-    {"step01", "layout/tab_canvas_footer",        TestLayout},
-    {"step02", "quaternion/identities",           TestQuaternion},
-    {"step02", "quaternion/slerp_uniform_speed",  TestQuaternionSlerpUniformSpeed},
-    {"step02", "quaternion/gimbal_lock",          TestQuaternionGimbalLock},
-    {"step03", "curves/basis_and_arc_length",     TestCurves},
-    {"step04", "noise/value_perlin_simplex_fbm",  TestNoise},
-    {"step05", "collision/sat_vs_gjk",            TestCollision},
-    {"step06", "bvh/median_split_and_traversal",  TestBvh},
-    {"step07", "sdf/primitives_and_smin",         TestSdf},
-    {"step08", "depth/std_vs_reverse",            TestDepth},
-    {"step08", "kahan/compensated_sum",           TestKahan},
-    {"step08", "vector/cross_project_reflect",    TestVectorAlgebra},
-    {"step08", "matrix/inverse_orthogonal_trs",   TestMatrix},
+    {"step01", "layout/tab_canvas_footer",        TestLayout,                      nullptr},
+    {"step02", "quaternion/identities",           TestQuaternion,                  nullptr},
+    {"step02", "quaternion/slerp_uniform_speed",  TestQuaternionSlerpUniformSpeed, nullptr},
+    {"step02", "quaternion/gimbal_lock",          TestQuaternionGimbalLock,        nullptr},
+    {"step02", nullptr, nullptr, &kProperties[0]},
+    {"step02", nullptr, nullptr, &kProperties[1]},
+    {"step02", nullptr, nullptr, &kProperties[2]},
+    {"step02", nullptr, nullptr, &kProperties[3]},
+    {"step03", "curves/basis_and_arc_length",     TestCurves,                      nullptr},
+    {"step04", "noise/value_perlin_simplex_fbm",  TestNoise,                       nullptr},
+    {"step04", nullptr, nullptr, &kProperties[4]},
+    {"step04", nullptr, nullptr, &kProperties[5]},
+    {"step04", nullptr, nullptr, &kProperties[6]},
+    {"step05", "collision/sat_vs_gjk",            TestCollision,                   nullptr},
+    {"step05", nullptr, nullptr, &kProperties[7]},
+    {"step05", nullptr, nullptr, &kProperties[8]},
+    {"step05", nullptr, nullptr, &kProperties[9]},
+    {"step06", "bvh/median_split_and_traversal",  TestBvh,                         nullptr},
+    {"step07", "sdf/primitives_and_smin",         TestSdf,                         nullptr},
+    {"step08", "depth/std_vs_reverse",            TestDepth,                       nullptr},
+    {"step08", "kahan/compensated_sum",           TestKahan,                       nullptr},
+    {"step08", "vector/cross_project_reflect",    TestVectorAlgebra,               nullptr},
+    {"step08", "matrix/inverse_orthogonal_trs",   TestMatrix,                      nullptr},
+    {"step08", nullptr, nullptr, &kProperties[10]},
+    {"step08", nullptr, nullptr, &kProperties[11]},
+    {"step08", nullptr, nullptr, &kProperties[12]},
 };
+
+const char* CaseName(const TestCase& testCase) {
+    return testCase.fn ? testCase.name : testCase.property->name;
+}
 
 }  // namespace
 
 // 인자 없이 부르면 표 전체, `step05` 처럼 키를 주면 그 step 이 추가한 것만 돈다.
+// `--` 로 시작하는 인자는 property 층의 플래그다(파일 머리 주석 참고).
 int main(int argc, char** argv) {
-    const char* filter = (argc > 1) ? argv[1] : nullptr;
+    const char* filter        = nullptr;
+    bool        propertiesOnly = false;
+
+    for (int i = 1; i < argc; ++i) {
+        const char* arg = argv[i];
+        if (std::strncmp(arg, "--", 2) != 0) {
+            if (!filter) filter = arg;
+            continue;
+        }
+        if (std::strcmp(arg, "--properties") == 0) {
+            propertiesOnly = true;
+        } else if (std::strncmp(arg, "--only=", 7) == 0) {
+            gPropertyOnly  = arg + 7;
+            propertiesOnly = true;
+        } else if (std::strncmp(arg, "--seed=", 7) == 0) {
+            gPropertyConfig.masterSeed = (uint32_t)std::strtoul(arg + 7, nullptr, 10);
+        } else if (std::strncmp(arg, "--scale=", 8) == 0) {
+            const long value = std::strtol(arg + 8, nullptr, 10);
+            gPropertyConfig.scale = (value > 1) ? (int)value : 1;
+        } else if (std::strncmp(arg, "--sample=", 9) == 0) {
+            gPropertyConfig.onlySample = (int)std::strtol(arg + 9, nullptr, 10);
+            propertiesOnly             = true;
+        } else {
+            std::cerr << "unknown option '" << arg << "'\n";
+            return 2;
+        }
+    }
 
     int selected = 0;
     for (const TestCase& testCase : kCases) {
         if (filter && std::strcmp(filter, testCase.step) != 0) continue;
+        if (propertiesOnly && !testCase.property) continue;
+        if (gPropertyOnly && (!testCase.property ||
+                              !std::strstr(testCase.property->name, gPropertyOnly))) {
+            continue;
+        }
         ++selected;
 
         const int checksBefore   = checks;
         const int failuresBefore = failures;
-        testCase.fn();
+        gCaseSummary.clear();
+        if (testCase.fn) {
+            testCase.fn();
+        } else {
+            RunPropertyCase(*testCase.property);
+        }
 
-        std::cout << '[' << testCase.step << "] " << testCase.name << ' ';
-        for (size_t pad = std::strlen(testCase.name); pad < 32; ++pad) {
+        const char* name = CaseName(testCase);
+        std::cout << '[' << testCase.step << "] " << name << ' ';
+        for (size_t pad = std::strlen(name); pad < 32; ++pad) {
             std::cout << '.';
         }
         std::cout << ' ' << (checks - checksBefore) << " checks, "
-                  << (failures - failuresBefore) << " failed\n";
+                  << (failures - failuresBefore) << " failed";
+        if (!gCaseSummary.empty()) std::cout << "  " << gCaseSummary;
+        std::cout << '\n';
     }
 
     if (selected == 0) {

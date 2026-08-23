@@ -37,6 +37,8 @@
 9. [영구 강화가 밸런스 검증을 바꾼다](#9-영구-강화가-밸런스-검증을-바꾼다)
 10. [변이 하나](#10-변이-하나)
 11. [실행과 관측](#11-실행과-관측)
+12. [제품 실측](#12-제품-실측)
+13. [누적은 기능이면서 재현의 적이다](#13-누적은-기능이면서-재현의-적이다)
 
 ---
 
@@ -197,25 +199,35 @@ static int64_t TowerUnlockCost(uint32_t towerType) {
 
 발행 자리가 둘이면 `supply == sourced - sunk` 를 어디서 깨뜨렸는지 말할 수 없다. 그리고 이벤트 배율 위에 운영 토글(`scrap_weekend`)이 한 겹 더 있다 — 일정 파일을 고치지 않고도 시즌 보너스를 끌 수 있어야 운영이 성립한다.
 
-**실측.** 새 프로필로 한 판:
+**실측.** 새 프로필로 한 판. 두 인자가 이 수치를 **재현 가능하게** 만든다 — `--fresh-profile` 이 지갑을 0에서 출발시키고, `--match-unix` 가 이벤트 창을 못박는다(여기서는 `weekend_scrap`, scrap x2). 둘 중 하나라도 빼면 아래 수는 실행 순서와 달력에 따라 달라진다. 그 이유는 13절에 있다.
 
 ```
-> mega_defense --selftest --profile ./tierdemo.wal
+> mega_defense --selftest --profile ./tierdemo.wal --fresh-profile --match-unix 1767398400
+[meta] fresh profile=./tierdemo.wal
 [meta] scrap=0 tier=0 start_gold=420+0
 [meta] settle scrap=+416 balance=416 supply=416 sourced=416 sunk=0 tier=0
 [selftest] result=CLEAR ticks=1377 towers=10 wave=6 packet=181
 ```
 
-`start_gold=420+0` 의 두 수가 밸런스와 강화다. 티어를 사고 나면 뒤쪽 수가 오른다.
+`start_gold=420+0` 의 두 수가 밸런스와 강화다. 티어를 사고 나면 뒤쪽 수가 오른다. 티어 다섯 개의 값이 3500스크랩이고 한 판이 416을 내므로, 다 사려면 아홉 판이 먼저 필요하다 — 그래서 앞의 아홉 판은 프로필을 **비우지 않고** 돌린다(그것이 누적이 하는 일이다).
 
 ```
-> mega_defense --selftest --profile ./tierdemo.wal --buy-tier 5     (스크랩이 모인 뒤)
-[meta] buy start_gold_tier=5 cost=1200 balance=174
-[meta] scrap=174 tier=5 start_gold=420+200
-[meta] settle scrap=+416 balance=590 supply=590 sourced=4090 sunk=3500 tier=5
+> mega_defense --selftest --profile ./tierdemo.wal --match-unix 1767398400   (2~9판째, 비우지 않는다)
+...
+> mega_defense --selftest --profile ./tierdemo.wal --buy-tier 5 --match-unix 1767398400
+[meta] buy start_gold_tier=1 cost=200 balance=3544
+[meta] buy start_gold_tier=2 cost=450 balance=3094
+[meta] buy start_gold_tier=3 cost=700 balance=2394
+[meta] buy start_gold_tier=4 cost=950 balance=1444
+[meta] buy start_gold_tier=5 cost=1200 balance=244
+[meta] scrap=244 tier=5 start_gold=420+200
+[meta] settle scrap=+416 balance=660 supply=660 sourced=4160 sunk=3500 tier=5
+[selftest] result=CLEAR ticks=1377 towers=12 wave=6 packet=203
 ```
 
-`sourced=4090 sunk=3500 supply=590` — 보존 불변식이 제품 안에서 성립한다. 그리고 `420+200` 이 그 3500스크랩이 산 것의 전부다.
+`sourced=4160 sunk=3500 supply=660` — 보존 불변식이 제품 안에서 성립한다. 그리고 `420+200` 이 그 3500스크랩이 산 것의 전부다.
+
+여기서 눈여겨볼 것은 마지막 줄이다. 같은 명령, 같은 시각, 같은 콘텐츠인데 첫 판의 `towers=10 packet=181` 이 `towers=12 packet=203` 이 됐다. 시작 골드 200이 타워 두 개를 더 세웠고, 그 두 개가 스냅샷 패킷을 22바이트 늘렸다. **프로필이 시뮬레이션을 바꾼다** — 이것이 5절의 주장이자, 13절이 다루는 문제의 씨앗이다.
 
 ## 6. 가격이 가팔라야 하는 이유
 
@@ -363,16 +375,18 @@ store.Close();
 **(1) 잔액이 판을 넘어 이어진다.**
 
 ```
-> mega_defense --selftest                 (첫 판)
+> mega_defense --selftest --profile ./tierdemo.wal --fresh-profile --match-unix 1767398400
 [meta] scrap=0 tier=0 start_gold=420+0
 [meta] settle scrap=+416 balance=416 supply=416 sourced=416 sunk=0 tier=0
 
-> mega_defense --selftest                 (둘째 판, 같은 프로필)
+> mega_defense --selftest --profile ./tierdemo.wal --match-unix 1767398400
 [meta] scrap=416 tier=0 start_gold=420+0
 [meta] settle scrap=+416 balance=832 supply=832 sourced=832 sunk=0 tier=0
 ```
 
 둘째 판의 시작 잔액이 첫 판의 정산 결과다. 그 사이에 프로세스가 죽었다 살아났고, 지갑은 `wallet:1` 레코드로 WAL 에 남아 있었다.
+
+두 명령의 차이가 `--fresh-profile` **하나**다. 첫 줄에만 붙어 있고 둘째 줄에는 없다 — 그것이 "첫 판은 0에서, 둘째 판은 첫 판 뒤에서"를 만드는 전부다. 이 문서를 읽으며 그대로 쳐 본 사람이 위 수를 그대로 보는 것도 그 인자 덕분이고, 그 인자가 왜 생겼는지가 13절이다.
 
 원자성이 여기서 값을 한다. 지갑 저장이 프로필·매치 기록과 **같은 트랜잭션**에 들어간다.
 
@@ -460,7 +474,135 @@ const double multiplier =
 
 이 검사가 `test_meta_economy` 가 아니라 별도 파일에 사는 이유는 값을 어디서 얻느냐가 다르기 때문이다. 여기 발행되는 금액은 테스트가 지어낸 수이지만, 저기서는 제품이 진짜 한 판을 끝까지 돌려 낸 수다. 정산이 실행되려면 매치가 끝나야 하고, 매치를 끝내려면 `DefenseApp` 을 세워야 한다.
 
-CTest 는 이 편 시점에 111개 대상을 전수 통과했다. 위 (4)의 `test_live_ops_wiring` 과 `mega_defense_selftest_event` 가 뒤에 더해져 지금은 119개다.
+CTest 는 이 편 시점에 111개 대상을 전수 통과했다. 위 (4)의 `test_live_ops_wiring` 과 `mega_defense_selftest_event` 가 뒤에 더해졌고, 아래 13절의 둘까지 더해 지금은 121개다.
+
+## 13. 누적은 기능이면서 재현의 적이다
+
+이 편이 만든 것은 **판을 넘어 남는 상태**다. 그것이 이 편의 목적이었다. 그런데 같은 성질이 검사 쪽에서는 정반대의 이름을 갖는다.
+
+`--selftest` 는 진행도를 진짜 파일에 진짜로 커밋한다. 그것이 이 검사의 값이다 — 커밋 경로가 죽어도 "돌기는 하는" 셀프테스트는 아무것도 증명하지 않는다. 그런데 경로를 주지 않으면 모든 셀프테스트가 실행 파일 옆의 `selftest_profile.wal` **하나**를 쓰고, 그 파일은 지워지지 않는다.
+
+그래서 지갑이 실행마다 데워지고, 데워진 지갑은 5절이 보인 그대로 다음 판의 시작 골드를 바꾼다. 같은 명령이 **몇 번째 실행이냐**에 따라 다른 결과를 낸다. 냉각 프로필에서 같은 명령을 두 번 돌린 실측이다.
+
+```
+> mega_defense --selftest 25000 --buy-tier 5 --match-unix 1767312000   (1회차)
+[meta] scrap=0 tier=0 start_gold=420+0
+[selftest] result=CLEAR ticks=1377 towers=10 wave=6 packet=181
+
+> mega_defense --selftest 25000 --buy-tier 5 --match-unix 1767312000   (2회차, 같은 명령)
+[meta] buy start_gold_tier=1 cost=200 balance=8
+[meta] scrap=8 tier=1 start_gold=420+40
+[selftest] result=CLEAR ticks=1377 towers=11 wave=6 packet=192
+```
+
+코드도 명령도 콘텐츠도 시각도 같다. 달라진 것은 앞선 실행이 남긴 200스크랩뿐이다. 27편이 **달력**에서 끊어 낸 것과 정확히 같은 종류의 의존 — 검사 결과가 검사 대상 밖의 무언가에 딸려 있는 상태 — 이 **파일**에 하나 더 있었던 것이다.
+
+이 상태의 대가는 둘이다. 위 5절과 12절이 인용하는 수치를 독자가 두 번 다시 보지 못하고, 값을 단언하는 검사를 세우는 순간 그것이 플래키가 된다.
+
+**고치는 방향이 "누적을 없앤다"가 아닌 이유.** 누적은 이 편 전체가 만든 기능이다. 그것을 지우면 메타 경제가 사라진다. 필요한 것은 누적을 없애는 것이 아니라 **누가 어느 프로필을 쓰는지를 명시하게** 만드는 것이다.
+
+경로를 대는 표면(`--profile PATH`)은 이미 6편에 있었다. 없던 것은 "그 파일을 비우고 출발한다"였다.
+
+<!-- snippet: include/game/defense_app.hpp@fresh-profile -->
+```cpp
+    if (effective.freshProfile) {
+        // 경로를 대지 않았다면 지워질 것은 플레이어의 프로필이거나 모든
+        // 셀프테스트가 공유하는 파일이다. 둘 다 이 인자가 지울 대상이 아니다.
+        if (!profileNamed) {
+            std::fprintf(stderr,
+                         "--fresh-profile 은 --profile PATH 와 함께 써야 한다 — 경로를 대지 "
+                         "않으면 지워질 것이 플레이어의 프로필이거나 셀프테스트 공용 "
+                         "프로필이다\n");
+            return 2;
+        }
+        if (!TruncateFile(effective.profilePath)) {
+            std::fprintf(stderr, "[meta] 프로필 저장소를 비울 수 없다: %s\n",
+                         effective.profilePath.c_str());
+            return 1;
+        }
+        std::printf("[meta] fresh profile=%s\n", effective.profilePath.c_str());
+    }
+```
+
+세 가지가 설계의 전부다.
+
+**기본값은 "이어서 연다".** 인자를 주지 않은 실행은 한 줄도 달라지지 않는다. 제품이 하는 일은 누적이고, 그것을 옵션 뒤로 숨기면 이 편이 뒤집힌다.
+
+**경로를 대지 않은 비우기는 거절한다.** 경로가 없을 때 열리는 것은 둘 중 하나다 — 플레이어의 진짜 프로필이거나, 모든 셀프테스트가 공유하는 `selftest_profile.wal`. 앞은 지워서는 안 되고, 뒤는 지우면 `-j` 병렬에서 한 검사가 다른 검사의 프로필을 판 중간에 날린다. 비우기는 되돌릴 수 없으므로 종료 코드 2로 끝낸다.
+
+**리플레이는 이미 이 규칙을 지키고 있었다.** `--record` 와 `--verify-replay` 는 프로필을 `PATH + ".wal"` 로 못박고 열기 전에 비운다(31편). 팔마다 다른 파일이고 실행마다 새 파일이다. 셀프테스트만 그 규칙 밖에 있었던 것이고, 이 인자는 같은 규칙을 그쪽에도 준 것이다.
+
+**CTest 쪽.** 셀프테스트를 세우는 자리를 함수 하나로 모았다. 격리를 함수 안에 두는 이유는 잊을 수 없게 하려는 것이다 — 검사를 하나 더 붙이는 사람이 `--profile` 을 빼먹으면 그 검사만 조용히 공용 프로필로 돌아간다.
+
+<!-- snippet: CMakeLists.txt@selftest-profile -->
+```cmake
+function(mega_add_selftest name ticks matchUnix timeout)
+    add_test(NAME ${name}
+             COMMAND mega_defense --selftest ${ticks} --match-unix ${matchUnix}
+                     --profile ${MEGA_PROFILE_DIR}/${name}.wal --fresh-profile ${ARGN})
+    set_tests_properties(${name} PROPERTIES TIMEOUT ${timeout})
+endfunction()
+```
+
+검사 이름이 곧 파일 이름이므로 `-j` 병렬에서 두 검사가 같은 파일을 밟을 수 없다.
+
+**예외 하나가 있고, 그것이 이번에 드러난 두 번째 결함이다.** `mega_defense_selftest_meta` 는 `--buy-tier 5` 로 매치 밖 소비 경로를 돌리는 검사다. 그런데 냉각 프로필의 잔액은 0이고 티어 하나가 200스크랩이므로, 격리를 그대로 적용하면 이 검사는 **한 번도 사지 못하고** 조용히 지나간다. 소비 경로는 한 줄도 돌지 않는데 셀프테스트는 CLEAR 로 끝나 초록불이 켜진다.
+
+지금까지 이 검사가 실제로 무언가를 산 것은 앞선 실행들이 공용 프로필을 데워 뒀기 때문이었다. 즉 **이 검사의 커버리지가 실행 순서와 횟수에 딸려 있었다.** 우연에 기댄 커버리지는 커버리지가 아니다.
+
+그래서 데우기를 우연이 아니라 한 단계로 만들었다. `mega_defense_selftest_meta_warm` 이 프로필을 비우고 한 판을 돌려 정확히 한 판치(208)를 남기고, `mega_defense_selftest_meta` 가 그 위에서 산다. fixture 가 순서를 강제하므로 `-j` 에서도 뒤집히지 않는다.
+
+```
+> ctest --test-dir build -C Release -V -R "mega_defense_selftest_meta$"
+112: [meta] fresh profile=.../build/profiles/mega_defense_selftest_meta_warm.wal
+112: [meta] scrap=0 tier=0 start_gold=420+0
+112: [meta] settle scrap=+208 balance=208 supply=208 sourced=208 sunk=0 tier=0
+112: [selftest] result=CLEAR ticks=1377 towers=10 wave=6 packet=181 ...
+113: [meta] buy start_gold_tier=1 cost=200 balance=8
+113: [meta] scrap=8 tier=1 start_gold=420+40
+113: [meta] settle scrap=+203 balance=211 supply=211 sourced=411 sunk=200 tier=1
+113: [selftest] result=CLEAR ticks=1377 towers=11 wave=6 packet=192 ...
+```
+
+같은 명령을 한 번 더 돌리면 위 여덟 줄이 **바이트로 같다.** 격리 전에는 2회차에 `tier=1` 이 `tier=2` 가 되고 `scrap=414` 가 `scrap=370` 이 됐다.
+
+### 검증
+
+`test_profile_isolation` 이 네 가지를 함께 묻는다. 앞의 셋이 서로를 지탱한다 — 누적이 기능이라는 것, 격리한 실행은 반복해도 같다는 것, 그리고 **격리를 빼면 실제로 갈린다는 것**. 셋째가 음성 대조다. 그것이 없으면 둘째는 "무엇을 해도 통과"가 될 수 있다.
+
+```
+> build\bin\Release\test_profile_isolation.exe
+[test] profile_isolation
+  누적: 냉각 tier=0 gold=420 → 정산 208 → 데움 tier=1 gold=460 balance=8(=208-200) → 비움 tier=0 gold=420
+  격리 2회: [selftest] result=CLEAR ticks=1377 towers=10 wave=6 packet=181 protocol=OK render=OK assets=10/10 content=external stomps=2
+         [meta] scrap=0 tier=0 start_gold=420+0
+  누적 2회: [selftest] result=CLEAR ticks=1377 towers=10 wave=6 packet=181 protocol=OK render=OK assets=10/10 content=external stomps=2
+         [selftest] result=CLEAR ticks=1377 towers=11 wave=6 packet=192 protocol=OK render=OK assets=10/10 content=external stomps=2
+  거절: exit=2
+[test] profile_isolation: 35 checks, 0 failures
+```
+
+첫 줄이 1번이다. 같은 파일 위에서 앱을 세 번 세운다 — 냉각(tier 0, gold 420) → 데움(tier 1, gold 460) → 비움(tier 0, gold 420). 티어 비용도 시작 골드 보너스도 손으로 적지 않고 `live::Economy` 의 정적 함수에서 읽어 관계식으로 단언한다. 상수를 베껴 적으면 밸런스가 바뀐 날 이 검사가 "배선이 죽었다"고 거짓 보고한다.
+
+둘째·셋째 줄이 2번과 3번이다. 제품 실행 파일을 두 번씩 띄워 결과 줄을 바이트로 대조한다 — 격리한 쪽은 같고, 격리를 뺀 쪽은 `towers=10 packet=181` 이 `towers=11 packet=192` 로 갈린다. 마지막 줄이 4번, 경로 없는 비우기의 거절이다.
+
+**변이 셋을 실제로 넣어 죽는 것을 확인했다.**
+
+| 변이 | 죽는 단언 |
+|---|---|
+| `--fresh-profile` 이 `TruncateFile` 을 부르지 않게 한다 | `CHECK_EQ(resultA, resultB)` · `CHECK_EQ(metaA, metaB)` (2건) |
+| 경로 없는 비우기의 거절을 지운다 | `CHECK_EQ(run.exitCode, 2)` — 종료 코드가 2가 아닌 1이 되고, 그 실행은 공용 셀프테스트 프로필을 실제로 지운다 |
+| `OpenProfileStore` 가 지갑을 읽지 않게 한다 | 6건 — 데움 티어·잔액·시작 골드 셋과 음성 대조 셋이 함께 죽는다 |
+
+셋째 변이가 6건을 죽이는 것이 이 파일 구조의 값이다. 지갑 적재가 끊기면 누적이 기능이라는 단언도, 누적이 실제로 결과를 바꾼다는 음성 대조도 동시에 무너진다 — 한쪽만 죽는 상태는 없다.
+
+CMake 쪽 배선은 관측으로 확인했다. `mega_add_selftest` 에서 `--fresh-profile` 을 빼고 `ctest -R "mega_defense_selftest_meta$"` 를 두 번 돌리면 2회차가 `tier=1 scrap=414` 에서 `tier=2 scrap=370` 으로 갈린다. 되돌리면 두 실행이 바이트로 같아진다.
+
+### 남은 것
+
+**같은 결함이 세 검사에 더 있었다.** `test_audio_wiring` · `test_frame_trace` · `test_avatar_wiring` 이 고정 경로의 `.wal` 을 열고 지우지 않았다. 셋 다 티어를 사지 않으므로 시뮬레이션은 바뀌지 않았지만, `test_avatar_wiring` 은 **한 프로세스 안에서 두 팔이 같은 파일을 공유**해 둘째 팔이 첫째 팔의 지갑을 물려받고 있었다. "같은 조건의 두 팔"이라는 그 검사의 전제가 절반만 참이었다는 뜻이다. 셋 다 열기 전에 비우도록 고쳤다.
+
+**CMake 배선 자체를 지키는 게이트는 없다.** 누군가 `mega_add_selftest` 를 쓰지 않고 `add_test` 를 직접 적으면 그 검사만 공용 프로필로 돌아가고, 어떤 테스트도 그것을 잡지 못한다. 지금 그것을 막는 것은 함수 하나뿐이다.
 
 ---
 

@@ -12,6 +12,8 @@
 4. 신뢰하지 않는 스크립트에는 명령 수와 스택 크기의 자원 한도가 필요하다.
 5. 호스트 바인딩은 임의의 C++ 호출이 아니라 등록된 이름과 값 변환만 노출해야 한다.
 6. 컴파일 결과를 재사용하면 매 실행마다 렉싱·파싱하는 비용을 제거할 수 있다.
+7. 위 계약들은 손으로 고른 입력뿐 아니라 문법이 만들어 내는 임의의 프로그램과 그것을
+   토큰·명령 단위로 깨뜨린 입력에서도 유지되어야 한다.
 
 ## 최종 구현
 
@@ -24,6 +26,7 @@
 - 등록제 단항 호스트 함수
 - 파서 중첩 깊이 한도, 명령 실행 예산과 VM 스택 상한
 - 컴파일 포함 실행과 캐시된 바이트코드 실행의 비용 비교
+- 문법 유도 생성기와 토큰·명령 단위 변형기로 도는 property 배터리, 반례 축소와 시드 재현
 
 ## 빌드
 
@@ -70,11 +73,38 @@ ctest --test-dir build -C Release -R languages_step03 --output-on-failure
 ```text
 [step03] verifier_rejects_malformed_program ok
 [step03] verifier_branch_contracts ok
-languages_tests [step03]: all checks passed (2 case(s), 11 check(s))
+  [fuzz] bytecode: 표본 20000 · 거부 17597 · 통과 2403 · opcode변형 8030 · 미지opcode거부 5908
+[step03] fuzz_bytecode_mutation_verifier ok
+languages_tests [step03]: all checks passed (3 case(s), 21 check(s))
 ```
 
 라벨이 등록표에 없으면 실행 파일은 통과가 아니라 실패로 끝난다. 오타 난 필터가 "통과"로
 보이는 것이 가장 나쁜 결과이기 때문이다.
+
+## fuzz 배터리
+
+등록표의 사례 넷은 생성된 입력에서 계약을 다시 검사한다. 난수는 전부 소스에 박힌 시드에서
+나오고 벽시계를 읽지 않으므로, 통과도 실패도 같은 명령으로 재현된다. 실행 파일은 세 개의
+선택 인자를 더 받는다.
+
+```powershell
+.\build\Release\languages_tests.exe fuzz_token_mutation_diagnostics
+.\build\Release\languages_tests.exe fuzz_token_mutation_diagnostics --samples=200000
+.\build\Release\languages_tests.exe fuzz_token_mutation_diagnostics --seed=0xC0FFEE --samples=50000
+.\build\Release\languages_tests.exe fuzz_token_mutation_diagnostics --seed=0x5EED10CC1A2B3C4D --only=0
+```
+
+```text
+  [fuzz] mutation: 표본 20000 · 거부 19184 · 여전히컴파일 816 · 2줄이후진단 15876 · 깊은중첩거부 772 · 미지문자거부 4165 · 진단종류 30
+[step04] fuzz_token_mutation_diagnostics ok
+languages_tests [fuzz_token_mutation_diagnostics]: all checks passed (1 case(s), 7 check(s))
+```
+
+기본값은 사례당 20,000표본이고, 사례 열아홉 개를 전부 도는 실행이 이 기계에서 3~4초다.
+`ctest`는 전체 타깃과 계약별 타깃을 따로 돌아 배터리를 두 번 실행하므로 6초 안팎이다. 실패하면
+반례를 토큰 단위로 축소해 시드·표본 번호와 함께 찍고, 그 표본 하나만 다시 도는 명령을
+같이 낸다. `--only`로 도는 재현 실행에서는 커버리지 단언을 걸지 않는다 — 표본 하나짜리
+실행이 "커버리지 부족"으로 실패하면 반례가 가려진다.
 
 ## 디렉터리
 
@@ -86,7 +116,8 @@ languages_lab/
   src/
     language.hpp       렉서, 컴파일러, 바이트코드 검증기, VM
     main.cpp           게임 밸런스 식 실행 예제
-    tests.cpp          문법·실행·실패 주입 테스트, 계약별 등록표
+    tests.cpp          문법·실행·실패 주입 테스트, fuzz property, 계약별 등록표
+    fuzz.hpp           문법 유도 생성기, 토큰·명령 변형기, 반례 축소기, 실패 어휘
     bench.cpp          컴파일 비용 상각 실험
     bench_program.hpp  측정과 정확성 테스트가 공유하는 벤치마크 소스
 ```

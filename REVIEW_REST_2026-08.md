@@ -198,7 +198,7 @@ python scripts/check_snippets.py --fix-ranges   # 밀린 줄번호 앵커 자동
 
 | # | 대상 | 남은 일 | 성격 |
 |---|---|---|---|
-| 1 | `system_kernel_lab` — 권한·하드웨어 | cgroup 쓰기 성공 경로, `SCHED_FIFO` 적용 성공 경로, 베어메탈 대조 수치. 절차와 통과 조건은 그 lab 의 `docs/` 인수인계 문서에 있다. **`cpu.weight` 가 쓰기 가능한 기기에서는 `access(W_OK)` 분기가 테스트를 통째로 skip 하므로**, 권한을 붙여도 그 seam 에 도달하려면 테스트 쪽 분기를 손봐야 한다 | 별도 Linux 기기 |
+| 1 | `system_kernel_lab` — 권한·하드웨어 | cgroup 쓰기 성공 경로, `SCHED_FIFO` 적용 성공 경로, 베어메탈 대조 수치. **테스트 쪽 준비는 끝났다**(2026-08-22) — `access(W_OK)` 통째 skip 은 제거됐고 유권한이면 실쓰기→복구까지 밟으며, `SKL_REQUIRE_SCHED=fifo,cgroup` 강제 모드가 조용한 폴백을 막는다. 남은 것은 **실행뿐**: 권한 있는 리눅스 기기에서 그 lab 의 인수인계 문서 §3 명령을 그대로 | 별도 Linux 기기 |
 
 **사라진 둘.**
 
@@ -230,6 +230,18 @@ python scripts/check_snippets.py --fix-ranges   # 밀린 줄번호 앵커 자동
 
 세 변이를 다시 걸어 **전부 죽는 것**을 확인했다 — 각각 16 · 12 · 3 실패, 복원 뒤 바이트
 동일(SHA-256 대조).
+
+**`algorithms` 소유 공백 — part11에 한해 닫힘(2026-08-23).** 아래 감사 #6이 "`algorithms`는
+mini에 대응 lab조차 없어 **소유자 결정이 선행**"이라고 적은 그 공백 중, **part11(속성·퍼징
+검증)** 몫은 닫혔다. 그 축만은 자료구조가 아니라 *검증 방식*이라 다른 lab에 얹히기 때문이다 —
+`math_lab` property 13개(표본 42,300) · `physics_lab` property 5개 · `languages_lab` fuzz
+4개(표본 80,000), 그리고 §10(지속 가능한 검증 절차)은 `projects/mega/tests/test_profile_isolation.cpp`가
+받는다. 소재 지도는 [`algorithms/README.md`의 실행 자산 표](algorithms/README.md#part11의-실행-자산--어느-lab에서-도는가),
+충족 판정은 [`PROJECTS_PLAN.md`의 「코어」 행](PROJECTS_PLAN.md#코어-행의-property-test--충족2026-08-23)에 있다.
+독립 재검증(2026-08-23): 네 트리 클린 빌드 후 ctest 연속 3회 전수 통과(math 10 · physics 23 ·
+languages 7 · mega **121**), 배터리 출력 3회 바이트 동일, 무력화 변이 4건 전부 사망·복원 SHA 동일.
+**part02~part10의 공백은 그대로 열려 있다** — 감사 #6이 세는 huffman·fenwick·aho·union-find·
+kruskal·bellman 0건은 이 항목이 건드리지 않는다.
 
 **그리고 그 복원이 다른 결함 하나를 드러냈다.** `ApplyEventModifiers` 변이를 되돌리자
 `mega_defense_selftest_ai_astar` 가 `result=LOST` 로 죽었다. 원인은 코드가 아니라

@@ -70,6 +70,10 @@ static void TestBuildReachGate(bool gate, int& towersOut, uint64_t& rejectedOut,
     options.mode = RunMode::Solo;
     options.switches.avatarGate = gate;
     options.profilePath = "avatar_wiring_selftest.wal";
+    // 두 팔이 같은 파일을 쓴다. 비우지 않으면 **둘째 팔이 첫째 팔의 지갑을
+    // 물려받아** 출발하고, 그러면 "같은 칸·같은 클릭"이라는 이 검사의 전제가
+    // 팔 하나에서만 참이 된다. 비우고 출발해야 두 팔이 정말 같은 조건이다.
+    CHECK(TruncateFile(options.profilePath));
 
     DefenseApp app;
     CHECK(app.Init(options));
@@ -152,6 +156,8 @@ static void RunPair(bool predict, PairResult& out) {
     hostOptions.mode = RunMode::Host;
     hostOptions.port = 0;                    // 임의 포트
     hostOptions.profilePath = "avatar_wiring_host.wal";
+    // 예측 켠 팔과 끈 팔이 같은 파일을 쓴다 — 비우고 출발해야 두 팔이 같은 조건이다.
+    CHECK(TruncateFile(hostOptions.profilePath));
     DefenseApp host;
     CHECK(host.Init(hostOptions));
 
@@ -248,6 +254,8 @@ static void RunSnapshotArm(SnapshotMode mode, SnapshotArm& out) {
     hostOptions.mode = RunMode::Host;
     hostOptions.port = 0;
     hostOptions.profilePath = "avatar_wiring_host.wal";
+    // 두 스냅샷 팔도 같은 파일을 쓴다 — 비우고 출발해야 두 팔이 같은 조건이다.
+    CHECK(TruncateFile(hostOptions.profilePath));
     hostOptions.switches.snapshotMode = mode;
     DefenseApp host;
     CHECK(host.Init(hostOptions));
