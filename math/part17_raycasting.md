@@ -248,7 +248,7 @@ bool RaySphereNormalized(vec3 ro, vec3 rd, vec3 center, float radius, float& t) 
 }
 ```
 
-PBRT 의 표준 형태. early-out 추가 + 정규화 가정.
+Ericson *Real-Time Collision Detection* Ch. 5.3 의 표준 형태. early-out + 정규화 가정.
 
 ### 3.5 법선
 

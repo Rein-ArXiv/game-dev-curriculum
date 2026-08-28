@@ -976,7 +976,6 @@ struct SplineEditor {
 
 ## 더 읽을거리
 
-- Eric Lengyel, *Foundations of Game Engine Development*, Vol. 1, Ch. 9 — 게임 엔진 스플라인 종합.
 - Carl de Boor, *A Practical Guide to Splines* — B-Spline의 표준 레퍼런스.
 - Gerald Farin, *Curves and Surfaces for CAGD* — CAD 곡선의 종합 교재.
 - Freya Holmer, "The Continuity of Splines" (YouTube) — 스플라인의 시각적 직관.

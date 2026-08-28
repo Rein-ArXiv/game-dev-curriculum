@@ -964,7 +964,7 @@ void UpdateTriggers(std::vector<TriggerVolume>& triggers,
 ## 더 읽을거리
 
 - Christer Ericson, *Real-Time Collision Detection* (Morgan Kaufmann, 2005) — 게임 충돌의 표준 레퍼런스. 이 글의 closest point 함수, SAT 실용 형태가 모두 이 책에서.
-- Eric Lengyel, *Foundations of Game Engine Development*, Vol. 2 — 충돌 수학의 게임 엔진 적용.
+- Eric Lengyel, *Foundations of Game Engine Development*, Vol. 1, Ch. 3 — 직선·평면 등 기하 프리미티브 수학의 게임 엔진 적용.
 - David Eberly, *3D Game Engine Design*, 2nd ed. — 도형 라이브러리의 종합.
 - Box2D 소스 (`box2d/src/collision/`) — 2D 충돌의 산업 표준 구현.
 - Bullet Physics 소스 (`bullet3/src/BulletCollision/`) — 3D 충돌의 산업 표준.

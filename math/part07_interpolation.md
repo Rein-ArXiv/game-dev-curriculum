@@ -293,7 +293,7 @@ T HermiteInterpolate(T p0, T m0, T p1, T m1, float t) {
 }
 ```
 
-8회 곱 + 6회 합 + 4회 가중합. 매개변수 4개 — 키마다 *위치 + 접선* 두 개씩 보관.
+7회 곱 + 6회 합 + 4회 가중합. 매개변수 4개 — 키마다 *위치 + 접선* 두 개씩 보관.
 
 ### 4.4 Hermite의 게임 활용
 
@@ -787,7 +787,6 @@ Newton 또는 이분 탐색으로 *x = t 에 해당하는 매개변수* 를 찾�
 
 ## 더 읽을거리
 
-- Eric Lengyel, *Foundations of Game Engine Development*, Vol. 1, Ch. 9 — 게임 엔진의 보간 기초.
 - Ron Goldman, *Pyramid Algorithms* — Bezier·B-Spline의 알고리즘적 접근.
 - Robert Penner, "Easing functions" — UI Easing 카탈로그의 표준.
 - Freya Holmer, "The Beauty of Bezier Curves" (YouTube) — Bezier·Hermite의 시각적 직관.

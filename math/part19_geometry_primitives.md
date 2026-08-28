@@ -104,8 +104,8 @@ bool PlaneFromTriangle(vec3 v0, vec3 v1, vec3 v2, Plane& out) {
 |---|---|---|
 | OpenGL | CCW | 오른손 외적 |
 | DirectX | CW (전통), CCW (현대) | 좌우수에 따름 |
-| Unity | CCW | 오른손 |
-| Unreal | CW (역사) | 좌수 |
+| Unity | CW | 오른손 |
+| Unreal | CCW | 좌수 |
 
 메쉬 임포트 시 *winding 자동 변환* 이 흔한 처리. *front face* 결정에 영향.
 
