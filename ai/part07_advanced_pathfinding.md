@@ -258,7 +258,7 @@ JPS의 점프는 최악의 경우 한 방향으로 그리드 너비 $N$만큼 �
 
 ### 점프를 사전 계산한다
 
-JPS는 런타임에 매번 점프를 계산한다. 그리드가 *정적* 이라면, 이 점프 결과를 *미리 계산* 해 테이블에 저장할 수 있다. 이것이 Harabor와 Grastien이 ICAPS 2014에서 제시한 JPS+이며, Rabin과 Sturtevant의 GDC 2015 발표를 통해 게임 개발 실무에 널리 알려졌다.
+JPS는 런타임에 매번 점프를 계산한다. 그리드가 *정적* 이라면, 이 점프 결과를 *미리 계산* 해 테이블에 저장할 수 있다. 이것이 Harabor와 Grastien이 ICAPS 2014에서 제시한 JPS+이며, Rabin의 GDC 2015 발표를 통해 게임 개발 실무에 널리 알려졌다.
 
 JPS+는 각 칸에서 8방향 각각으로 다음 값을 사전 계산해 둔다.
 
@@ -713,7 +713,7 @@ HPA\*는 맵을 클러스터로 계층화해 거대 맵의 장거리 쿼리를 �
 
 - Daniel Harabor & Alban Grastien, "Online Graph Pruning for Pathfinding on Grid Maps" (AAAI 2011) — JPS 원논문, 가지치기와 forced neighbor 정의.
 - Daniel Harabor & Alban Grastien, "Improving Jump Point Search" (ICAPS 2014) — JPS+ 전처리와 bounding box 가지치기 도입.
-- Steve Rabin & Nathan Sturtevant, "JPS+: Over 100x Faster than A*" (GDC 2015) — JPS+를 게임 개발 관점에서 정리하고 대중화한 발표.
+- Steve Rabin, "JPS+: Over 100x Faster than A*" (GDC 2015) — JPS+를 게임 개발 관점에서 정리하고 대중화한 발표.
 - Kenny Daniel, Alex Nash, Sven Koenig & Ariel Felner, "Theta*: Any-Angle Path Planning on Grids" (JAIR 2010) — Basic Theta\*와 AP Theta\*.
 - Alex Nash et al., "Lazy Theta*: Any-Angle Path Planning and Path Length Analysis in 3D" (AAAI 2010) — 시야 검사 지연.
 - Alex Nash & Sven Koenig, "Any-Angle Path Planning" (AI Magazine 34(4), 2013) — 격자 경로의 차선성과 임의 각도 계획의 경로 길이 분석.

@@ -721,7 +721,7 @@ Recast 파이프라인은 임의의 3D 메시를 복셀로 rasterize해 문제�
 - Mikko Mononen, "Recast & Detour" (github.com/recastnavigation) — 대표적인 오픈소스 NavMesh 구현과 문서. 생성 파라미터와 tile cache의 레퍼런스.
 - Mikko Mononen, "Simple Stupid Funnel Algorithm" (블로그) — Funnel/string pulling의 간결한 설명과 원본 코드.
 - D. T. Lee & F. P. Preparata, "Euclidean shortest paths in the presence of rectilinear barriers" (*Networks* 14(3), 1984) — 다각형 장애물 사이의 유클리드 최단경로 알고리즘에 관한 고전 연구. 동일 길이 경로가 여럿일 수 있으므로 최단경로의 유일성을 일반적으로 보장하지는 않는다.
-- J. Hershberger & S. Snoeyink, "Computing minimum length paths of a given homotopy class" (*Computational Geometry* 4(2), 1994) — sleeve를 따라 funnel을 선형 시간에 도는 deque 기반 분할상환 논법.
+- J. Hershberger & J. Snoeyink, "Computing minimum length paths of a given homotopy class" (*Computational Geometry* 4(2), 1994) — sleeve를 따라 funnel을 선형 시간에 도는 deque 기반 분할상환 논법.
 - Greg Snook, "Simplified 3D Movement and Pathfinding Using Navigation Meshes" (*Game Programming Gems*) — NavMesh 개념의 고전.
 - Douglas & Peucker, "Algorithms for the reduction of the number of points required to represent a digitized line" (1973) — 윤곽 단순화의 원전.
 - Steve Rabin (ed.), *Game AI Pro* 1권, "Tactical Pathfinding on a NavMesh" — NavMesh 위 전술 길찾기와 영역 비용.

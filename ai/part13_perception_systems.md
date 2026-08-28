@@ -619,7 +619,7 @@ Splinter Cell·Thief 같은 잠입 게임은 빛, 소리, 엄폐와 적의 경�
 - Unreal Engine 공식 문서, "AI Perception System" — sense/stimulus·affiliation 필터·자극 만료의 상용 구현.
 - Brian Schwab, *AI Game Engine Programming*, 감각 시스템 장 — 시야·청각 모델의 구현.
 - Ian Millington, *AI for Games*, 3rd Ed., "World Interfacing"·"Sensory Systems" — 감지 관리(sense management)와 폴링 스케줄.
-- Damián Isla, "Third Eye Crime: Building a Stealth Game on an Occupancy Map" (GDC) — 점유 맵 기반 적 위치 확률 추정과 외삽.
+- Damián Isla, "Third Eye Crime: Building a Stealth Game Around Occupancy Maps" (AIIDE 2013) — 점유 맵 기반 적 위치 확률 추정과 외삽.
 - Splinter Cell·Thief·Metal Gear Solid 디자인 분석 (GDC/postmortem) — 인지 기반 잠입 게임플레이와 공정성.
 - Mark Brown, "What Makes a Good Stealth Game?" (Game Maker's Toolkit) — 인지 시스템의 게임플레이 영향과 발각 피드백.
 - Judea Pearl, *Probabilistic Reasoning in Intelligent Systems* (Morgan Kaufmann, 1988), §4 — noisy-OR 인과 모델과 독립 원인 결합.

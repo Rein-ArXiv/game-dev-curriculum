@@ -561,7 +561,7 @@ A*의 정확성은 weighted A*로 속도와 맞바꿀 수 있고($w$배 부분 �
 - Hart, Nilsson & Raphael, "A Formal Basis for the Heuristic Determination of Minimum Cost Paths" (1968) — A*의 원논문. admissibility와 최적성 증명의 출처.
 - Amit Patel, "Introduction to A*" 및 "Heuristics" (Red Blob Games) — 시각적 직관과 휴리스틱·tie-break·스케일 정합 정리.
 - Ian Millington, *AI for Games*, 4장 "Pathfinding" — 구현과 휴리스틱 선택, open/closed 자료구조의 실무.
-- Steve Rabin, "Pathfinding Architecture Optimizations" (*Game AI Pro* 1권) — 큰 그리드에서의 메모리·버킷 큐·generation 트릭.
+- Steve Rabin & Nathan Sturtevant, "Pathfinding Architecture Optimizations" (*Game AI Pro* 1권) — 큰 그리드에서의 메모리·버킷 큐·generation 트릭.
 - Dijkstra, "A Note on Two Problems in Connexion with Graphs" (1959) — Dijkstra 알고리즘 원전.
 - Russell & Norvig, *AIMA*, "Informed Search" 장 — admissibility·consistency·weighted A*의 형식적 증명과 부분 최적성 한계.
 - Pohl, "Heuristic Search Viewed as Path Finding in a Graph" (1970) — weighted A*와 $w$배 한계의 기초.
