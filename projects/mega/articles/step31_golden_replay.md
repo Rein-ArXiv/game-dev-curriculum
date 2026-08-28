@@ -187,7 +187,7 @@ inline ChainDiff CompareChains(const GoldenChain& golden, const GoldenChain& fre
 
 **A/B 팔 전체.** `assets/flags.txt` 는 `pathing` 을 `flowfield` 로 강제하고 `entity_store` 를 절반에게 `soa` 로 준다. 명시된 스위치만 기록하면 나머지는 **재생 시점의** 롤아웃이 정한다. 운영자가 롤아웃 하나를 바꾸는 순간 어제 기록한 리플레이가 오늘 갈리고, 그 갈림은 결정성 결함이 아닌데 게이트는 실패로 보고한다.
 
-그래서 27개 전부를 적는다. 배정이 **끝난 뒤**의 값이다.
+그래서 30개 전부를 적는다. 배정이 **끝난 뒤**의 값이다.
 
 <!-- snippet: include/game/switches.hpp@switch-assignments -->
 ```cpp

@@ -162,7 +162,7 @@ PPM 로더는 P3 형식, 최대 256x256, 채널 범위, 정확한 픽셀 수를 
 | 제품 경로 | `game`, `net`, `render`, `db`, `io`, `platform` 창·오디오·경로·VFS·표시·신호, `math` vec·scalar·aabb, `physics` shape·rigid_body·narrow phase, `engine` 입력·파티클, `tools` 스크립트, `serialize`, `live` 입장 토큰·지표 | 실제 한 판과 협동 세션에 필요 |
 | OS 경계 | `platform/window`, `platform/audio_device`, `platform/vk_present`, `platform/paths`, `platform/process`, `io/file`, `net/udp_*` | 입력·출력·전송·표시·종료 신호의 유일한 입구 |
 | 제품 경로(검증 장치) | `mp` golden·lockstep, `profiler` | 결정성 리플레이가 제품 실행 파일 안에서 돈다 — `--record` 가 틱마다 체인을 접고 `--verify-replay` 가 그 조작만으로 같은 체인을 다시 만든다 |
-| 참조 구현 | **없다** | `include/` 114개 헤더 전부가 제품에서 도달한다. 랩 전용 등재는 0행이다 |
+| 참조 구현 | **없다** | `include/` 121개 헤더 전부가 제품에서 도달한다. 랩 전용 등재는 0행이다 |
 
 축 단위의 판정과 근거는 [`AXIS_OWNERSHIP.md`](AXIS_OWNERSHIP.md), 헤더 단위의 사실은 빌드가
 생성하는 `PRODUCT_LAYERS.md`가 소유한다. 도달 불가인데 `LAB_ONLY.md`에 등재도 되지 않은

@@ -336,7 +336,7 @@ GCC/Clang `-MD`)이다 — 텍스트로 `#include`를 훑은 추정치가 아니
 - 지원: 실제 UDP, listen host 또는 2인 전용 서버, 권위 명령, 재전송·확인, 제한 크기
   스냅샷, 보간, HMAC 입장 토큰
 - 미지원: NAT traversal, relay, UDP payload 암호화·패킷별 인증, 재접속, 악성 패킷
-  rate limiting, delta snapshot, AOI, 자동 서버 기동·heartbeat·결과 제출
+  rate limiting, AOI, 자동 서버 기동·heartbeat·결과 제출
 
 따라서 입장 토큰이 있다고 해서 그대로 인터넷 공개 서비스가 되는 것은 아니다. 현재 실행
 범위는 로컬호스트·LAN·보호된 배포망·직접 포트 포워딩 환경의 협동 게임이다.

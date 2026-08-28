@@ -18,7 +18,7 @@
 //
 // 자세는 쿼터니언이 든다. 상방은 월드 +z 로 고정한다(카메라가 롤하지 않는다).
 // 그 조합에서 피치가 ±90° 에 닿으면 전방이 상방과 평행해져 LookAt 의
-// Cross(forward, up) 가 0 이 되고 뷰 기저가 통째로 NaN 이 된다 — 오일러각 매개화의
+// Cross(forward, up) 가 0 이 되고 뷰 기저가 통째로 무너진다(특이 행렬) — 오일러각 매개화의
 // 짐벌락이 카메라에서 드러나는 형태가 정확히 이것이다. ±89° 클램프가 그 각도에
 // 닿지 못하게 한다.
 //
@@ -113,7 +113,7 @@ public:
         const float aspect = static_cast<float>(viewWidth_) / static_cast<float>(viewHeight_);
         projection_ = math::Perspective(math::Radians(50.0f), aspect,
                                         distance_ * 0.05f, distance_ * 4.0f);
-        // 상방은 월드 +z. 전방이 여기에 평행해지는 순간 이 행렬은 NaN 이 되고,
+        // 상방은 월드 +z. 전방이 여기에 평행해지는 순간 이 행렬은 특이(singular)가 되고,
         // 그 각도에 닿지 못하게 하는 것이 SetYawPitch 의 클램프다.
         view_ = math::LookAt(eye_, target, math::Vec3{0.0f, 0.0f, 1.0f});
         viewProjection_ = projection_ * view_;

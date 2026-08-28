@@ -461,7 +461,7 @@ void MaybeSendTerrain() {
 }
 ```
 
-목록이 자란 순간 한 번, 그 뒤로는 3초마다 한 번. 96칸 상한에서 최대 193바이트다.
+목록이 자란 순간 한 번, 그 뒤로는 3초마다 한 번. 96칸 상한에서 최대 209바이트다(화물 193 + 헤더 16).
 
 명령 쪽에는 `CommandType::Blast = 5` 가 늘었다. 인자를 읽지 않는 명령이므로 `CommandArgumentInRange` 는 `argument == 0` 을 요구한다 — 4편이 `Upgrade`/`Sell` 에 세운 규칙 그대로다.
 

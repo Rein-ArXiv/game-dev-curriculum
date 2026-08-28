@@ -141,7 +141,7 @@ void Update() {
     const float aspect = static_cast<float>(viewWidth_) / static_cast<float>(viewHeight_);
     projection_ = math::Perspective(math::Radians(50.0f), aspect,
                                     distance_ * 0.05f, distance_ * 4.0f);
-    // 상방은 월드 +z. 전방이 여기에 평행해지는 순간 이 행렬은 NaN 이 되고,
+    // 상방은 월드 +z. 전방이 여기에 평행해지는 순간 이 행렬은 특이(singular)가 되고,
     // 그 각도에 닿지 못하게 하는 것이 SetYawPitch 의 클램프다.
     view_ = math::LookAt(eye_, target, math::Vec3{0.0f, 0.0f, 1.0f});
     viewProjection_ = projection_ * view_;
@@ -488,7 +488,7 @@ auto clickAt = [&app](FrameInput& input, const math::Vec2& world) {
 
 ## 11. 변이: 원근 나눗셈을 지운다
 
-`math/mat.hpp` 의 `Perspective` 에서 `At(3,2) = -1.0f` 한 줄을 지운다. 그러면 클립 좌표의 `w` 가 언제나 1이 되어 **원근 나눗셈이 사라진다** — 투영이 직교 투영 비슷한 것이 되고, 그 행렬은 4행이 (0,0,0,0) 이라 역행렬이 없다.
+`math/mat.hpp` 의 `Perspective` 에서 `At(3,2) = -1.0f` 한 줄을 지운다. 그러면 클립 좌표의 `w` 가 언제나 0이 되어 **원근 나눗셈이 성립하지 않는다** — 4행이 통째로 (0,0,0,0) 이라, 그 행렬은 역행렬이 없다.
 
 ```
 [test] camera_pick
