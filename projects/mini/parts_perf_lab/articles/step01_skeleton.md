@@ -563,7 +563,7 @@ skeleton: 1 test(s), 14 check(s), 0 failure(s)
 - [raylib 공식 문서](https://www.raylib.com/cheatsheet/cheatsheet.html)
 - [raylib examples](https://github.com/raysan5/raylib/tree/master/examples) — 즉시 모드 그리기 패턴 다수
 - [CMake FetchContent 모듈](https://cmake.org/cmake/help/latest/module/FetchContent.html)
-- Andrei Alexandrescu, "Strong Types for Strong Interfaces" (2015) — 측정용 코드의 단위(ms, ns) 안전 처리 패턴
+- Jonathan Boccara, "Strong Types for Strong Interfaces" (Meeting C++ 2017) — 측정용 코드의 단위(ms, ns) 안전 처리 패턴
 - Bryce Adelstein-Lelbach, "Benchmarking C++ Code" (CppCon 2015) — 측정의 함정과 정직한 비교
 - [Google Benchmark](https://github.com/google/benchmark) — 자동화 비교 측정. 시각화는 빈약하지만 자동화에 강함
 - [Tracy Profiler](https://github.com/wolfpld/tracy) — 시각화 풀 기능 프로파일러. 프로덕션 게임에서 표준

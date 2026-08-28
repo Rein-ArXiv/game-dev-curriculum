@@ -25,7 +25,7 @@
 ## 결정적 protocol test
 
 `game_network_tests`는 OS scheduler에 의존하지 않고 바이트 경계를 직접 만든다. control frame을
-3 / 7 / 나머지 세 조각으로 `Push`해 header 분할과 payload 분할을 만들고, 조각 사이에서 `Pop`이
+3 / 7 / 나머지 세 조각으로 `Push`해 12바이트 header 안에 두 개의 분할 지점을 만들고, 조각 사이에서 `Pop`이
 아직 비어 있는지까지 확인한다. 두 frame을 이어 붙여 coalescing도 만든다. 실패 시 즉시 종료하는
 helper는 `Require`다.
 

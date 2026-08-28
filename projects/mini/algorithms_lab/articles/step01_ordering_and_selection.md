@@ -294,7 +294,7 @@ counting sort는 k가 n에 가까워질수록 히스토그램 비용에 짓눌�
 | random | 0.001 | full sort | 31.6 | — |
 | organ-pipe | 0.500 | quickselect | 1.52 | — |
 
-quickselect가 전체 정렬보다 10배 빠르고, median-of-medians는 최악 보장의 대가로 quickselect의 7배 비교를 쓴다. 최악 보장이 필요 없는 워크로드에서 median-of-medians를 고르는 것은 보험료만 내는 셈이다.
+quickselect가 전체 정렬보다 10배 빠르고, median-of-medians는 최악 보장의 대가로 quickselect의 4.7배 비교를 쓴다. 최악 보장이 필요 없는 워크로드에서 median-of-medians를 고르는 것은 보험료만 내는 셈이다.
 
 ## 7. 실행과 관측
 

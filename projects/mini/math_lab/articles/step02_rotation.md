@@ -311,7 +311,7 @@ CHECK(nlerpRatio > 1.3f);
 
 Nlerp 쪽 하한이 핵심이다. 상한만 있으면 `QuatSlerp` 본문을 `QuatNlerp` 로 바꿔치기해도 *두 값이 같이 움직여* 통과할 수 있다. 두 방향을 함께 잡아야 판별이 된다.
 
-`quaternion/gimbal_lock` — 짐벌락을 *경고 문구* 가 아니라 불변식으로 쓴다. 가운데 축 (yaw) 이 ±90° 면 바깥 두 축이 한 자유도로 축약되므로, pitch 와 roll 을 *같은 양만큼 밀어도* 회전이 변하지 않아야 한다. 175 개 (pitch, roll, 미는 양) 조합에서 최악의 `1-|dot|` 을 잰다.
+`quaternion/gimbal_lock` — 짐벌락을 *경고 문구* 가 아니라 불변식으로 쓴다. 가운데 축 (yaw) 이 +90° 면 바깥 두 축이 한 자유도로 축약되므로, pitch 와 roll 을 *같은 양만큼 밀어도* 회전이 변하지 않아야 한다. 175 개 (pitch, roll, 미는 양) 조합에서 최악의 `1-|dot|` 을 잰다.
 
 <!-- snippet: tests/core_tests.cpp@step02-gimbal-lock -->
 ```cpp

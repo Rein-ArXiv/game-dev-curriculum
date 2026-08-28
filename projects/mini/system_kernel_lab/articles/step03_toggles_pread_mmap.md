@@ -292,7 +292,7 @@ std::uint64_t MmapBackend::RunCycle(const std::vector<std::string>& paths,
 
 세 가지 결정 포인트.
 
-1. **`MAP_PRIVATE`**: copy-on-write 매핑. 다만 우리는 *읽기만* 하므로 실제로는 페이지 캐시를 그대로 가리킨다. `MAP_SHARED` 도 가능하지만 *쓰기 시 디스크에 즉시 반영되는* 의미가 있어 read-only 워크로드에는 `MAP_PRIVATE` 가 더 자연스럽다.
+1. **`MAP_PRIVATE`**: copy-on-write 매핑. 다만 우리는 *읽기만* 하므로 실제로는 페이지 캐시를 그대로 가리킨다. `MAP_SHARED` 도 가능하지만 *쓰기가 밑의 파일로 전파되는* (디스크 반영 자체는 커널 writeback 이나 `msync` 시점) 의미가 있어 read-only 워크로드에는 `MAP_PRIVATE` 가 더 자연스럽다.
 2. **`PROT_READ`**: 읽기 전용. 워크로드가 매핑된 주소에 *쓰기를 시도하면* SIGSEGV. 의도적인 가드.
 3. **사이클마다 mmap + munmap**: 매번 다시 매핑한다. 매핑을 *유지* 하면 mmap/munmap 시스템 콜과 새 매핑의 minor fault 비용을 줄일 수 있지만, *backend가 매번 새 인스턴스 같은 동작* 을 하도록 통일하기 위해 매번 매핑·해제. 현재 범위 밖의 확장에서 *매핑 캐시* 토글을 추가하면 그 효과를 비교할 수 있다.
 

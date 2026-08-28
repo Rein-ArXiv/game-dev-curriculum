@@ -126,7 +126,7 @@ CHECK(!lab::lang::Verify(malformed, error));
 
 <!-- snippet: src/tests.cpp#TestVerifierBranchContracts -->
 ```cpp
-// 참 경로는 Pop으로 깊이를 줄이고 거짓 경로는 그대로 통과해 인덱스 4에서 0과 1이 만난다.
+// 거짓 경로는 Pop으로 깊이를 줄이고 참 경로는 그대로 통과해 인덱스 4에서 0과 1이 만난다.
 Program mismatched;
 mismatched.constants.push_back(1.0);
 mismatched.code.push_back({OpCode::Constant, 0, {1, 1}});
@@ -163,7 +163,7 @@ languages_tests [step03]: all checks passed (3 case(s), 21 check(s))
 ```
 
 21개 단언 중 10개가 생성 배터리의 것이고 나머지 11개가 손으로 만든 두 사례의 것이다. 그
-11개 중 절반 이상이 `verifier_branch_contracts` 안의 사유 문자열 비교다. 거부 여부만 세는
+11개 중 3개가 `verifier_branch_contracts` 안의 사유 문자열 비교다. 거부 여부만 세는
 검증이었다면 같은 사례가 4~5개 단언으로 끝났을 것이고, 합류 검사를 항상 성공으로 바꿔도
 다른 이유로 거부되어 통과했을 것이다.
 

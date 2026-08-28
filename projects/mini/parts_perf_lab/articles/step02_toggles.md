@@ -177,7 +177,7 @@ SIMD 폭과 branchless predication은 *경로 선택* 이라 재시작 없이 �
 
 ```mermaid
 flowchart LR
-    L[좌측 16-300<br/>핵심 수치<br/>entities/update/draw/total/fps] --> M[중앙 320-800<br/>토글 패널<br/>콤보박스 6개 + 체크박스 1개]
+    L[좌측 16-300<br/>핵심 수치<br/>entities/update/draw/total/fps] --> M[중앙 320-800<br/>토글 패널<br/>콤보박스 5개 + 체크박스 1개]
     M --> R[우측 820-끝<br/>프레임 그래프<br/>슬라이딩 600프레임 + 기준선]
 ```
 
@@ -720,4 +720,4 @@ toggles: 2 test(s), 34 check(s), 0 failure(s)
 - Casey Muratori, "Immediate-Mode Graphical User Interfaces" (2005) — 즉시 모드 GUI 개념의 기원
 - [Dear ImGui](https://github.com/ocornut/imgui) — 더 풀 기능이 필요할 때의 대안
 - [rlImGui](https://github.com/raylib-extras/rlImGui) — raylib + ImGui 어댑터
-- Bryce Adelstein-Lelbach, "The Art of Benchmarking" (CppCon 2020) — 측정 그래프의 시각적 함정
+- Bryce Adelstein-Lelbach, "Benchmarking C++ Code" (CppCon 2015) — 측정 그래프의 시각적 함정

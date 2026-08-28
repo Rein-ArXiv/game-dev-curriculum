@@ -150,7 +150,7 @@ void MsaaTarget::EnsureSize(int width, int height, MsaaSamples samples) {
 }
 ```
 
-게이트를 *요청값* (`requested_`) 으로 비교하는 것이 중요하다. FBO 가 불완전하면 `Recreate` 가 실제 사용값 `current_` 를 Off 로 되돌리는데, 게이트가 `current_` 를 본다면 요청값과 영원히 어긋나 *매 프레임 재시도* 하게 된다.
+게이트는 *요청값* (`requested_`) 으로 비교한다. FBO 가 불완전하면 `Recreate` 가 실제 사용값 `current_` 와 요청값을 *함께* Off 로 되돌리므로 두 값은 늘 같이 움직이고, *매 프레임 재시도* 는 App 이 `TakeFallbackNotice()` 를 소비해 자기 토글 값을 Off 로 내리는 것으로 막는다.
 
 <!-- snippet: src/render/msaa_target.cpp#MsaaTarget::Recreate -->
 ```cpp

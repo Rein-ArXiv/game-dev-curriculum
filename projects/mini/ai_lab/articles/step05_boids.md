@@ -17,7 +17,7 @@ Boids는 중앙 지휘자 없이 세 가지 국소 규칙만으로 무리 행동
 
 각 개체는 perception 반경 안의 이웃만 본다.
 
-- Separation: 거리의 역수에 비례해 밀어냄
+- Separation: 가까운 이웃에게서 멀어지는 단위 벡터의 합으로 밀어냄
 - Alignment: 이웃 평균 속도로 맞춤
 - Cohesion: 이웃 평균 위치로 이동
 

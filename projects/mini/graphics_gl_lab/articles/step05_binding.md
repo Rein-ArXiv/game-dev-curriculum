@@ -178,7 +178,7 @@ UBO 는 *컴파일 시점 길이* 필요. SSBO 는 *runtime 가변 길이*. *대
 
 ### std430 의 vec3 처리
 
-std430 도 *vec3 base alignment 16바이트* 는 동일. *남는 4 바이트를 다음 멤버가 채울 수 있다* 는 점만 std140 과 다름. `vec3 + float` 같은 조합에서 std140 은 *float 가 offset 16*, std430 은 *offset 12 가능*. 안전성을 위해 *vec4 패킹* 이 권장.
+std430 도 *vec3 base alignment 16바이트* 는 동일. `vec3 + float` 같은 조합은 두 레이아웃 모두 *float 가 offset 12* 로 남는 4 바이트를 채운다. 다른 것은 *배열 stride 와 구조체 정렬* 뿐 — std140 은 vec4 배수로 올림하고 std430 은 요소 정렬을 그대로 쓴다. 안전성을 위해 *vec4 패킹* 이 권장.
 
 ## 5. 측정 결과
 

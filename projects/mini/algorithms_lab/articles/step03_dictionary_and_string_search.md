@@ -307,7 +307,7 @@ const std::vector<std::string> pats = {"he", "she", "his", "hers", "s"};
 const std::string text = "ushers his shell here";
 ```
 
-`she` 안에 `he`가 있고 `he` 안에 `e`는 없지만 `hers` 안에 `he`가 있으며 `s`는 `his`·`hers`의 접미사다. 오라클은 패턴별로 따로 찾아 (끝 위치, 패턴 번호) multiset을 만들고, Aho의 결과와 정렬 후 비교한다.
+`she` 안에 `he`가 있고 `his` 안에 `he`는 없지만 `hers` 안에 `he`가 있으며 `s`는 `his`·`hers`의 접미사다. 오라클은 패턴별로 따로 찾아 (끝 위치, 패턴 번호) multiset을 만들고, Aho의 결과와 정렬 후 비교한다.
 
 검사는 하나를 더 단언한다 — 패턴 수를 늘려도 텍스트를 한 번만 지나간다는 것이다. 상태 방문 수가 정확히 `|text|`여야 한다.
 

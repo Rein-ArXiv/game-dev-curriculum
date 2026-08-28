@@ -414,7 +414,7 @@ $ ./build/Release/math_core_tests.exe --only=collision/axis-witness
     repro    : math_core_tests step05 --only=collision/axis-witness --seed=20260823 --sample=93
 ```
 
-축소가 하는 일이 여기서 보인다. 생성된 반례는 미세하게 기울어진 두 상자였는데, 8 번의 축소를 거쳐 *원점에 놓인 축 정렬 상자와 x 축으로 2.956 만큼 떨어진 축 정렬 상자* 가 됐다. 각도도 y 좌표도 0 이고 반크기는 정수다 — 손으로 종이에 그릴 수 있는 배치다. `repro` 줄을 그대로 복사하면 그 표본 하나만 다시 돈다.
+축소가 하는 일이 여기서 보인다. 생성된 반례는 미세하게 기울어진 두 상자였는데, 8 번의 축소를 거쳐 *원점에 놓인 축 정렬 상자와 x 축으로 2.956 만큼 떨어진 축 정렬 상자* 가 됐다. 각도도 y 좌표도 0 이고 반크기는 1.5 와 1 로 단순하다 — 손으로 종이에 그릴 수 있는 배치다. `repro` 줄을 그대로 복사하면 그 표본 하나만 다시 돈다.
 
 ```text
 $ ctest --test-dir build -C Release -R math_step05_collision --output-on-failure

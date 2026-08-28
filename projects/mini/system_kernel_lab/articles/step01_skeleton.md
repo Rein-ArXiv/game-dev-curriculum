@@ -633,7 +633,7 @@ void Hud::Draw(const FrameTimer& timer, const FileIoWorkload& workload) {
 
 - **HUD를 화면 하단 200px 고정 영역에** 배치. `NoMove`/`NoResize`/`NoTitleBar` 플래그로 사용자가 실수로 옮기지 않게 한다.
 - **`BeginChild` 로 좌/우 분할**. 좌측 360px stats, 나머지를 그래프 두 개가 나누어 차지.
-- **`PlotLines` 의 자동 스케일**: `scale_min=0.0f, scale_max=FLT_MAX` 가 ImGui sentinel — *측정 값의 min/max를 자동* 으로 잡는다.
+- **`PlotLines` 의 스케일**: `scale_max=FLT_MAX` 만 ImGui sentinel — *측정 값의 max를 자동* 으로 잡는다. `scale_min=0.0f` 는 sentinel 이 아니라 하한을 0 으로 고정하는 값이다.
 - **overlay 텍스트**: 그래프 위에 현재 값이 텍스트로 표시되어 그래프가 작아도 정확한 수치를 본다.
 
 ### 그림: HUD 영역 구성

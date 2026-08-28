@@ -312,7 +312,7 @@ Instanced 모드는 드로우가 한 번뿐이라 PSO 를 정책과 무관하게
 해석.
 
 - *Per-Draw 의 CPU 35 ms* — 1 만 root constants 호출 + 1 만 draw + 1 만 PSO set.
-- *Instanced 의 CPU 0.3 ms* — 1 호출. 60 배 감소.
+- *Instanced 의 CPU 0.3 ms* — 1 호출. 약 117 배 감소.
 - *Per-Material 의 효과 작음* — 두 PSO 뿐이라.
 - *PSO 변경의 GPU 비용* — Per-Draw 가 *2 → 5 ms* (cache invalidate).
 

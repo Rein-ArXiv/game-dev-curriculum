@@ -236,8 +236,9 @@ void TestQuaternionSlerpUniformSpeed() {
     CHECK(Near(mathlab::QuatNorm(mathlab::QuatNlerp(a, b, 0.5f)), 1.0f, 1e-5f));
 }
 
-// 짐벌락의 실제 불변식: 가운데 축(yaw)이 ±90° 면 바깥 두 축(pitch/roll)이
-// 한 자유도로 축약된다 — 둘을 같은 양만큼 밀어도 회전이 변하지 않는다.
+// 짐벌락의 실제 불변식: 가운데 축(yaw)이 +90° 면 회전이 (pitch-roll) 에만
+// 의존해 바깥 두 축이 한 자유도로 축약된다 — 둘을 같은 양만큼 밀어도 회전이
+// 변하지 않는다. (-90° 는 (pitch+roll) 의존이라 반대 부호로 밀어야 불변이다.)
 // M02(QuatFromEulerXYZ 곱 순서 반전)를 함께 잡는다.
 void TestQuaternionGimbalLock() {
     constexpr float halfPi = 1.57079632679f;

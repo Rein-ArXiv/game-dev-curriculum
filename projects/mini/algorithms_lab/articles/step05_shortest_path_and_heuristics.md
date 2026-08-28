@@ -238,7 +238,7 @@ inline bool ValidateGridPath(const Grid& grid, const std::vector<uint32_t>& path
 
 밀도가 승자를 바꾼다. 2%에서는 힙 판이 dense 판의 4배 빠르고, 50%에서는 dense 판이 힙 판보다 1.7배 빠르다. 힙 판이 미는 항목 수(pushes)가 간선 수에 비례하는 반면 dense 판은 V²로 고정이기 때문이다.
 
-stale pop이 push의 80% 이상이라는 점이 눈에 띈다. lazy deletion의 대가가 이만큼이고, 그것이 우선순위 감소를 지원하는 힙(Fibonacci 등)이 존재하는 이유다. 다만 그 힙의 상수가 커서 실측에서 이기는 경우는 드물다.
+stale pop이 push의 60% 이상이라는 점이 눈에 띈다. lazy deletion의 대가가 이만큼이고, 그것이 우선순위 감소를 지원하는 힙(Fibonacci 등)이 존재하는 이유다. 다만 그 힙의 상수가 커서 실측에서 이기는 경우는 드물다.
 
 Bellman-Ford의 `settled` 칸은 라운드 수다. 조기 종료가 있어서 이 그래프에서는 8~9 라운드 만에 끝난다 — 최악인 n-1 = 1,199 라운드와는 거리가 멀다. 밀도 2%에서 Bellman-Ford가 가장 빠른 것은 그 때문이고, 이는 "Bellman-Ford는 느리다"는 요약이 워크로드에 따라 틀릴 수 있음을 보여 준다.
 

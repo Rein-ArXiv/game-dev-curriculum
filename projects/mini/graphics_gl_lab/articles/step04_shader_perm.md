@@ -264,6 +264,6 @@ uber 의 *uniform branch* + static 의 *프로그램 전환 비용* 트레이드
 
 ## 더 읽을거리
 
-- Brandon Jones 외, ["The Shader Permutation Problem"](https://therealmjp.github.io/posts/shader-permutations-part1/) (MJP) — 변형 폭발 문제의 실무 정리 2부작.
+- Matt Pettineo (MJP), ["The Shader Permutation Problem"](https://therealmjp.github.io/posts/shader-permutations-part1/) — 변형 폭발 문제의 실무 정리 2부작.
 - [Vulkan/GLSL Specialization Constants](https://docs.vulkan.org/guide/latest/mapping_data_to_shaders.html#specialization-constants) — 런타임 압축의 표준 메커니즘.
 - Unreal Engine, [Shader Permutation 문서](https://dev.epicgames.com/documentation/en-us/unreal-engine/shaders-in-plugins-unreal-engine) — 프로덕션 쿠킹 파이프라인의 실물.

@@ -458,7 +458,7 @@ int main() {
 
 `cbench.Init` 이 시작 시 한 번 + container 토글 변경 시마다 호출된다. Init이 내부에서 `Shutdown()` 을 먼저 호출해 이전 데이터를 정리하므로 *재초기화* 가 안전하다.
 
-`cbench.RunFrame()` 은 `timer.BeginUpdate()`/`EndUpdate()` 밖에 있다. 컨테이너 순회는 시뮬 update가 아니므로 update ms를 오염시키면 안 되고, 자체 `steady_clock` 으로 이미 재고 있다. `containerPool` 은 `cbench` 보다 먼저 선언되어 `cbench.Shutdown()` 이 노드를 돌려줄 때까지 살아 있다 — 순서가 뒤집히면 Pool이 먼저 파괴되어 Shutdown이 죽은 allocator를 건드린다.
+`cbench.RunFrame()` 은 `timer.BeginUpdate()`/`EndUpdate()` 밖에 있다. 컨테이너 순회는 시뮬 update가 아니므로 update ms를 오염시키면 안 되고, 자체 `steady_clock` 으로 이미 재고 있다. `containerPool` 은 `cbench.Shutdown()` 이 노드를 돌려줄 때까지 살아 있어야 한다 — `Shutdown()` 이 `main` 반환 전에 명시적으로 호출되므로 그 시점에는 두 객체 모두 살아 있고, 선언 순서는 이 흐름의 안전에 영향을 주지 않는다.
 
 ### HUD 표시
 
