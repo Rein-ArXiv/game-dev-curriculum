@@ -1084,7 +1084,9 @@ class sbo_shared {
     alignas(control_block) char inline_storage_[BufferSize];
 
 public:
+    // 인자가 sbo_shared 자신 하나뿐이면 제외해, 복사 생성자를 가로채지 않게 한다
     template<typename... Args>
+        requires (!(sizeof...(Args) == 1 && (std::is_same_v<std::decay_t<Args>, sbo_shared> && ...)))
     sbo_shared(Args&&... args) {
         if constexpr (use_sbo) {
             control_ = new(inline_storage_) control_block();
@@ -1227,13 +1229,13 @@ Sean Parent의 표현을 빌리자면, 좋은 C++ 코드는 복잡한 상속 계
 - [cppreference: std::function](https://en.cppreference.com/w/cpp/utility/functional/function)
 - [cppreference: std::any](https://en.cppreference.com/w/cpp/utility/any)
 - [cppreference: std::variant](https://en.cppreference.com/w/cpp/utility/variant)
-- [P0088R3: Variant Design Review](http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0088r3.html)
+- [P0088R3: Variant: a type-safe union for C++17](http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0088r3.html)
 - Klaus Iglberger, ["Breaking Dependencies: Type Erasure - A Design Analysis"](https://www.youtube.com/watch?v=4eeESJQk-mw), CppCon 2021
-- Arthur O'Dwyer, ["std::function and Beyond"](https://www.youtube.com/watch?v=PpMbRk_FyIU), CppCon 2019
+- Arthur O'Dwyer, ["Back to Basics: Type Erasure"](https://www.youtube.com/watch?v=tbUCHifyT24), CppCon 2019
 - Kevlin Henney, "Valued Conversions", *C++ Report* 12(7), 2000
-- Andrei Alexandrescu, "Modern C++ Design", Addison-Wesley, 2001 - Chapter 8: Functors
+- Andrei Alexandrescu, "Modern C++ Design", Addison-Wesley, 2001 - Chapter 5: Generalized Functors
 - Sean Parent, ["Inheritance Is The Base Class of Evil"](https://www.youtube.com/watch?v=bIhUE5uUFOA), GoingNative 2013
-- Sean Parent, ["Value Semantics and Concepts-based Polymorphism"](https://www.youtube.com/watch?v=_BpMYeUFXv8), Code::dive 2017
+- Sean Parent, ["Value Semantics and Concepts-based Polymorphism"](https://www.youtube.com/watch?v=_BpMYeUFXv8), C++Now 2012
 - Sean Parent, ["Better Code: Runtime Polymorphism"](https://www.youtube.com/watch?v=QGcVXgEVMJg), NDC 2017
 - Chandler Carruth, ["There Are No Zero-cost Abstractions"](https://www.youtube.com/watch?v=rHIkrotSwcc), CppCon 2019
 - [LLVM libc++ std::function](https://github.com/llvm/llvm-project/blob/main/libcxx/include/__functional/function.h)

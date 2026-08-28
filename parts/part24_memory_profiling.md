@@ -219,7 +219,7 @@ shadow_addr = (addr >> 3) + kShadowOffset;
 // 일부 x86-64 Linux ASan 매핑의 예시. 실제 offset은 runtime/PIE/플랫폼에 따라 다름:
 // kShadowOffset = 0x00007fff8000
 // Main:   0x0000000000000000 - 0x00007fffffffffff (128TB)
-// Shadow: 0x00007fff8000      - 0x00008000ffffffff (16TB)
+// Shadow: 0x00007fff8000      - 0x000010007fff7fff (16TB)
 ```
 
 우측 시프트 3비트(`>> 3`)는 8로 나누는 것과 같다. 즉, 8바이트마다 1바이트로 압축한다.
@@ -323,17 +323,17 @@ Before ASan:          After ASan:
 +------------+        +------------------+
 | buf[10]    |        | Left RZ (32B)    |  shadow: 0xF1
 | other vars |        | buf[10]          |  shadow: 2 (10 mod 8)
-| ret addr   |        | Padding (6B)     |  shadow: 0xF2
+| ret addr   |        | Padding (6B)     |  shadow: 2 (buf의 마지막 granule 공유)
 +------------+        | Right RZ (32B)   |  shadow: 0xF3
                       | other vars       |
                       | ret addr         |
                       +------------------+
 ```
 
-`buf[15] = 'x'`를 시도하면:
+`buf[20] = 'x'`를 시도하면:
 
-1. `__asan_store1(buf+15)` 호출
-2. `shadow[buf+15]` 확인 → `0xF3` (right redzone)
+1. `__asan_store1(buf+20)` 호출
+2. `shadow[buf+20]` 확인 → `0xF3` (right redzone)
 3. 즉시 에러 리포트
 
 **힙 할당:**

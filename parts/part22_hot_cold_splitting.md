@@ -391,7 +391,7 @@ int parse(const char* str) {
 
 ### LLVM의 자동 아웃라이닝
 
-LLVM은 `-Oz` (크기 최적화) 옵션에서 자동으로 아웃라이닝을 수행한다[^4]:
+LLVM은 `-Oz` (크기 최적화) 옵션에서 자동으로 아웃라이닝을 수행한다:
 
 ```bash
 clang -Oz -c code.c
@@ -937,7 +937,7 @@ NP-hard 문제이므로 휴리스틱 사용 (탐욕 알고리즘 + 지역 최적
 
 ### HFSort (Hot Function Sorting)
 
-HFSort 계열은 profile의 call graph에서 함께 호출되는 함수들을 가까이 배치하여 iTLB와 instruction-cache locality를 개선한다. 단순 실행 횟수 내림차순은 직관을 보여 주는 baseline일 뿐이며, 실제 알고리즘은 caller-callee affinity와 cluster 병합 점수를 사용한다.
+HFSort 계열은 profile의 call graph에서 함께 호출되는 함수들을 가까이 배치하여 iTLB와 instruction-cache locality를 개선한다. 단순 실행 횟수 내림차순은 직관을 보여 주는 baseline일 뿐이며, 실제 알고리즘은 caller-callee affinity와 cluster 병합 점수를 사용한다[^4].
 
 ```python
 def hotness_baseline(functions):

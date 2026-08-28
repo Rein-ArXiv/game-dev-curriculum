@@ -701,7 +701,7 @@ BTB 계층, history 길이, 간접 분기 predictor와 return stack의 세부 �
 `__builtin_expect_with_probability` 같은 확률 힌트는 지원 compiler의 중간 표현에 edge probability를 전달할 수 있다.
 
 ```c
-if (__builtin_expect_with_probability(rare_case, 0, 0.01)) {
+if (__builtin_expect_with_probability(rare_case, 1, 0.01)) {
     // 1% 확률임을 명시
 }
 ```

@@ -125,7 +125,7 @@ std::cout << sizeof(Both)        << "\n";  // 16
 
 대부분의 컴파일러는 vptr을 객체의 시작 위치에 배치한다. Itanium C++ ABI(GCC, Clang이 따르는 사실상의 표준)는 다음과 같이 명시한다.
 
-> "The virtual table pointer is located at offset 0 in the object."
+> "If C has no primary base class, allocate the virtual table pointer for C at offset zero..."
 
 ```cpp
 class Base {
@@ -398,7 +398,7 @@ delete b;
 
 이 원칙은 [C++ Core Guidelines C.35](https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#Rc-dtor-virtual)에 다음과 같이 정리되어 있다.
 
-> "Make base class destructors public and virtual, or protected and nonvirtual."
+> "A base class destructor should be either public and virtual, or protected and non-virtual."
 
 ## 5. 다중 상속의 복잡성
 
@@ -941,7 +941,7 @@ C++의 가상 함수는 우아한 추상화이지만, 공짜가 아니다. 핵�
 - Bjarne Stroustrup, "The Design and Evolution of C++", Addison-Wesley, 1994
 - Scott Meyers, "Effective C++", 3rd Edition, Addison-Wesley, 2005
 - [C++ Core Guidelines C.35: base class destructor contract](https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#Rc-dtor-virtual)
-- Agner Fog, ["Optimizing C++"](https://www.agner.org/optimize/optimizing_cpp.pdf)
+- Agner Fog, ["Optimizing software in C++"](https://www.agner.org/optimize/optimizing_cpp.pdf)
 - Mike Acton, ["Data-Oriented Design and C++"](https://www.youtube.com/watch?v=rX0ItVEVjHc), CppCon 2014
 - Chandler Carruth, ["Efficiency with Algorithms, Performance with Data Structures"](https://www.youtube.com/watch?v=fHNmRkzxHWs), CppCon 2014
 - Stoyan Nikolov, ["OOP Is Dead, Long Live Data-oriented Design"](https://www.youtube.com/watch?v=yy8jQgmhbAU), CppCon 2018
