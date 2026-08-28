@@ -272,6 +272,6 @@ TAA가 어려운 이유는 품질 목표가 서로 충돌하기 때문이다. �
 ## 더 읽을거리
 
 - Nathan Reed, ["Depth Precision Visualized"](https://www.reedbeta.com/blog/depth-precision-visualized/) — 깊이 비선형성과 reverse-Z 의 시각적 분석. (NVIDIA 재게재판: ["Visualizing Depth Precision"](https://developer.nvidia.com/blog/visualizing-depth-precision/))
-- Matt Pettineo, ["A Sampling of Anti-Aliasing Techniques"](https://therealmjp.github.io/posts/msaa-overview/) — MSAA 동작 원리와 한계의 깊은 정리.
+- Matt Pettineo, ["A Quick Overview of MSAA"](https://therealmjp.github.io/posts/msaa-overview/) — MSAA 동작 원리와 한계의 깊은 정리.
 - Morgan McGuire 외, "Weighted Blended Order-Independent Transparency" (JCGT 2013) — 실시간 OIT 의 대표 기법.
 - *Real-Time Rendering, 4th Edition*, Ch.5 (앨리어싱), Ch.19 (가시성·컬링).

@@ -522,7 +522,8 @@ std::vector<uint16_t> indices = {
 ```cpp
 // rasterization state
 rs.cullMode = VK_CULL_MODE_BACK_BIT;
-rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+// 정점은 CCW로 작성했지만 proj y-flip이 framebuffer winding을 뒤집으므로 CW가 앞면이 된다
+rs.frontFace = VK_FRONT_FACE_CLOCKWISE;
 ```
 
 ### 정점/인덱스 버퍼 업로드

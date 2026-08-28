@@ -310,6 +310,6 @@ CHECK(!msaa.TakeFallbackNotice());
 
 ## 더 읽을거리
 
-- Matt Pettineo, ["A Sampling of Anti-Aliasing Techniques"](https://therealmjp.github.io/posts/msaa-overview/) — MSAA 비용 구조의 깊은 해설.
+- Matt Pettineo, ["A Quick Overview of MSAA"](https://therealmjp.github.io/posts/msaa-overview/) — MSAA 비용 구조의 깊은 해설.
 - ARM, [Mali GPU Best Practices](https://developer.arm.com/documentation/101897/latest/) — 타일 GPU 에서 MSAA 가 싼 이유.
 - [LearnOpenGL: Anti Aliasing](https://learnopengl.com/Advanced-OpenGL/Anti-Aliasing) — Multisample FBO + resolve 실습.

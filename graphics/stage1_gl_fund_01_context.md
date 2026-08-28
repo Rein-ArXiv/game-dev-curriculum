@@ -738,7 +738,7 @@ int main() {
 }
 ```
 
-`<glad/glad.h>`를 `<GLFW/glfw3.h>`보다 *먼저* 포함해야 한다. GLFW의 헤더는 OpenGL 헤더를 자체적으로 가져오는데, 두 곳에서 같은 함수 시그니처가 정의되면 충돌한다. `glad.h`가 먼저 들어가면 `GLFW_INCLUDE_NONE` 매크로가 활성화되어 GLFW가 OpenGL 헤더를 다시 가져오지 않는다.
+`<glad/glad.h>`를 `<GLFW/glfw3.h>`보다 *먼저* 포함해야 한다. GLFW의 헤더는 OpenGL 헤더를 자체적으로 가져오는데, 두 곳에서 같은 함수 시그니처가 정의되면 충돌한다. `glad.h`가 먼저 들어가면 glad가 정의하는 `__gl_h_` 같은 OpenGL 헤더 가드를 GLFW가 감지해 OpenGL 헤더를 다시 가져오지 않는다(`GLFW_INCLUDE_NONE`을 직접 정의해 포함을 아예 막는 방법도 있다).
 
 ### GLEW 사용
 

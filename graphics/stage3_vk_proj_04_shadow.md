@@ -192,17 +192,17 @@ Vulkan의 NDC 깊이 범위는 OpenGL의 [-1, 1]이 아니라 [0, 1]이다. 위 
         maxV = glm::max(maxV, lc);
     }
 
-    // 5. z 범위는 절두체 밖 투사체까지 담도록 뒤로 확장한다.
+    // 5. z 범위는 절두체 밖 투사체까지 담도록 빛 쪽으로 확장한다.
     constexpr float zExtend = 50.0f;
-    minV.z -= zExtend;
+    maxV.z += zExtend;
 
     glm::mat4 lightProj = glm::ortho(
-        minV.x, maxV.x, minV.y, maxV.y, 0.0f, maxV.z - minV.z);
+        minV.x, maxV.x, minV.y, maxV.y, -maxV.z, -minV.z);
     return lightProj * lightView;
 }
 ```
 
-`minV.z`를 뒤로 확장하는 이유가 그림자 매핑의 흔한 함정 하나다. 절두체 안에는 없지만 절두체 안의 표면에 그림자를 드리우는 객체(예: 화면 밖에 선 큰 나무)는 빛 공간 AABB의 z 범위 밖에 있어 그림자 맵에 기록되지 않는다. near 평면을 빛 방향 쪽으로 충분히 당겨 이런 *그림자 투사체* 를 포함시켜야 화면 가장자리에서 그림자가 갑자기 사라지는 현상을 막는다. `glm::ortho`의 z 인자가 [near, far] 거리 형태인 점에 주의한다. Vulkan은 깊이 [0,1]을 쓰므로 직교 z도 0에서 (maxV.z - minV.z)로 둔다.
+`maxV.z`를 빛 쪽으로 확장하는 이유가 그림자 매핑의 흔한 함정 하나다. 절두체 안에는 없지만 절두체 안의 표면에 그림자를 드리우는 객체(예: 화면 밖에 선 큰 나무)는 빛 공간 AABB의 z 범위 밖에 있어 그림자 맵에 기록되지 않는다. near 평면을 빛 방향 쪽으로 충분히 당겨 이런 *그림자 투사체* 를 포함시켜야 화면 가장자리에서 그림자가 갑자기 사라지는 현상을 막는다. `glm::ortho`의 z 인자가 [near, far] 거리 형태인 점에 주의한다. 빛 공간에서 정면 점의 z는 음수이므로 `-maxV.z`가 가까운 평면, `-minV.z`가 먼 평면으로 들어간다.
 
 ### 텍셀 스냅으로 떨림 제거
 

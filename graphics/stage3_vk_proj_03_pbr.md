@@ -26,15 +26,15 @@ OpenGL과 달리 Vulkan은 셰이더가 읽는 모든 자원을 디스크립터 
 
 | Set | 변경 빈도 | 자원 |
 |---|---|---|
-| 0 | per-frame | viewProj, cameraPos, light data |
-| 1 | per-material | albedo, normal, metallic-roughness, AO, emissive (5종) |
-| 2 | per-object | model matrix (push constant 권장) |
-| 3 | global | irradianceMap, prefilterMap, brdfLUT (cubemap×2 + 2D) |
+| 0 | global | irradianceMap, prefilterMap, brdfLUT (cubemap×2 + 2D) |
+| 1 | per-frame | viewProj, cameraPos, light data |
+| 2 | per-material | albedo, normal, metallic-roughness, AO, emissive (5종) |
+| 3 | per-object | model matrix (push constant 권장) |
 
-IBL 세 텍스처는 환경이 바뀌지 않는 한 불변이라 global 세트(3)가 적합하다. per-material 세트는 fragment 단계에 텍스처 5종을 노출한다.
+IBL 세 텍스처는 환경이 바뀌지 않는 한 불변이라 가장 낮은 번호인 global 세트(0)가 적합하다. per-material 세트는 fragment 단계에 텍스처 5종을 노출한다.
 
 ```cpp
-VkDescriptorSetLayoutBinding set1Bindings[] = {
+VkDescriptorSetLayoutBinding set2Bindings[] = {
     { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
     { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
     { 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
@@ -305,6 +305,6 @@ Vulkan에서 PBR/IBL의 본체는 수식 자체보다 *명시적 자원 관리* 
 ## 더 읽을거리
 
 - Brian Karis, ["Real Shading in Unreal Engine 4"](https://cdn2.unrealengine.com/Resources/files/2013SiggraphPresentationsNotes-26915738.pdf) — split-sum 근사의 원전.
-- Christophe Kulla, Alejandro Conty, "Revisiting Physically Based Shading at Imageworks" (SIGGRAPH 2017) — 다중 산란 에너지 보정.
+- Christopher Kulla, Alejandro Conty, "Revisiting Physically Based Shading at Imageworks" (SIGGRAPH 2017) — 다중 산란 에너지 보정.
 - [Sascha Willems, Vulkan glTF-PBR](https://github.com/SaschaWillems/Vulkan-glTF-PBR) — 본문과 같은 IBL 전처리의 완성 구현.
 - [Khronos glTF Sample Renderer](https://github.com/KhronosGroup/glTF-Sample-Renderer) — 표준 PBR 셰이더 레퍼런스.

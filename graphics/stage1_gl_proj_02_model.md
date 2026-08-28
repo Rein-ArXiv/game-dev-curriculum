@@ -109,7 +109,7 @@ std::vector<Mesh> LoadModel(const std::string& path) {
 
 ### 좌표계 변환 후처리
 
-Assimp가 보고하는 좌표계는 포맷에 따라 다르다. OBJ는 OpenGL 식으로 Y가 위, -Z가 앞, 오른손 좌표계다. FBX는 종종 Z가 위인 3ds Max/Maya 컨벤션으로 저장되고, glTF는 Y가 위, -Z가 앞인 오른손 좌표계를 표준으로 명시한다. 모델 파일에 up axis 메타데이터가 들어 있으면 Assimp가 이를 읽고, `aiProcess_ConvertToLeftHanded`(DirectX용)나 별도 후처리로 일관된 좌표계로 맞출 수 있다.
+Assimp가 보고하는 좌표계는 포맷에 따라 다르다. OBJ는 OpenGL 식으로 Y가 위, -Z가 앞, 오른손 좌표계다. FBX는 종종 Z가 위인 3ds Max/Maya 컨벤션으로 저장되고, glTF는 Y가 위, +Z가 앞(자산의 정면)인 오른손 좌표계를 표준으로 명시한다. 모델 파일에 up axis 메타데이터가 들어 있으면 Assimp가 이를 읽고, `aiProcess_ConvertToLeftHanded`(DirectX용)나 별도 후처리로 일관된 좌표계로 맞출 수 있다.
 
 좌표계 문제의 핵심은 임포트 시점이 아니라 엔진 전체에 있다. 엔진의 내부 좌표계 컨벤션을 먼저 한 가지로 못 박고, 모든 임포트가 그 컨벤션으로 들어오도록 변환을 거는 흐름이 표준이다. 컨벤션을 정하지 않고 모델마다 다른 좌표계로 들어오게 두면, 어떤 모델은 누워서 들어오고 어떤 모델은 뒤집혀 들어온다. OpenGL 학습용으로는 Y가 위, -Z가 앞, 오른손 좌표계를 내부 컨벤션으로 두는 방식이 흔하다.
 

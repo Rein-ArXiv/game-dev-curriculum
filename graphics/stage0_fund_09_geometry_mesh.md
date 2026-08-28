@@ -279,5 +279,5 @@ flowchart LR
 - [meshoptimizer](https://github.com/zeux/meshoptimizer) — 정점 캐시·오버드로·페치 최적화의 실전 표준 라이브러리.
 - *Real-Time Rendering, 4th Edition*, Ch.16 (Polygonal Techniques).
 - [OpenGL Wiki: Tessellation](https://www.khronos.org/opengl/wiki/Tessellation) — 헐/테셀레이터/도메인 단계의 명세 수준 정리.
-- NVIDIA, ["Mesh Shaders: The Next Step in Geometry Processing"](https://developer.nvidia.com/blog/introduction-turing-mesh-shaders/) — 메시 셰이더 도입 배경과 메시렛 모델.
+- NVIDIA, ["Introduction to Turing Mesh Shaders"](https://developer.nvidia.com/blog/introduction-turing-mesh-shaders/) — 메시 셰이더 도입 배경과 메시렛 모델.
 - Microsoft, [Direct3D 12 Mesh Shader 명세](https://microsoft.github.io/DirectX-Specs/d3d/MeshShader.html) — amplification/mesh 셰이더의 공식 정의.

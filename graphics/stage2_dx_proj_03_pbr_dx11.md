@@ -178,8 +178,10 @@ void IrradianceCS(uint3 tid : SV_DispatchThreadID) {
 프리필터 맵(정반사): roughness별로 밉 체인에 GGX 중요도 표집 결과를 담는다.
 
 ```hlsl
+cbuffer PrefilterCB : register(b0) { uint mip; uint maxMipLevels; }  // 밉마다 갱신 후 재디스패치
+
 [numthreads(8, 8, 1)]
-void SpecularCS(uint3 tid : SV_DispatchThreadID, uint mip : MIPLEVEL) {
+void SpecularCS(uint3 tid : SV_DispatchThreadID) {
     float  roughness = mip / float(maxMipLevels - 1);
     float3 R = GetCubeDirection(tid.z, /* uv */);
     float3 N = R, V = R;                  // N=V=R 가정으로 적분 1차원 축소
