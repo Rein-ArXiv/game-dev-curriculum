@@ -898,6 +898,6 @@ C++26 작업 초안의 static reflection은 선언에서 serializer와 런타임
 - [Boost.Describe](https://www.boost.org/doc/libs/release/libs/describe/) - 매크로 기반 간단한 리플렉션
 - [metapp](https://github.com/wqking/metapp) - 경량 리플렉션 라이브러리
 - Tim Sweeney, "Core Technology of Unreal Engine 3", GDC 2005 - UObject 시스템 설계 철학
-- "Destiny's Multithreaded Rendering Architecture", GDC 2015 - Bungie의 자체 리플렉션 시스템
+- Chris Butcher, "Lessons from the Core Engine Architecture of Destiny", GDC 2015 - Bungie 엔진의 오브젝트 시스템 설계
 - Jason Gregory, "Game Engine Architecture", 3rd Edition - Chapter 16: Runtime Gameplay Foundation Systems
 - Martin Reddy, "API Design for C++" - Chapter 11: Scripting
