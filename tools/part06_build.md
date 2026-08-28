@@ -324,7 +324,7 @@ void WriteToCacheChecked(const std::string& key, const Artifact& art) {
 // 나쁜 예: 매 빌드마다 다른 시각이 박혀 비결정적
 const char* kBuildTime = __DATE__ " " __TIME__;
 
-// 좋은 예: 커밋의 author date를 빌드 시 주입 (SOURCE_DATE_EPOCH)
+// 좋은 예: 커밋의 committer date를 빌드 시 주입 (SOURCE_DATE_EPOCH)
 // 빌드 스크립트: export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
 const char* kBuildTime = BUILD_EPOCH_STR;   // -D로 고정 주입
 ```
