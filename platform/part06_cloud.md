@@ -213,9 +213,15 @@ ABR의 추정이 틀리면 *버퍼블로트* 가 생긴다 — 보내는 양이 
 // 지터 버퍼: 지연 안정성 vs 추가 지연의 절충
 class JitterBuffer {
     int targetDepthMs_ = 20;          // 버퍼 목표 깊이
+    int64_t prevArrivalUs_ = -1;      // 직전 패킷 도착 시각
 public:
     void OnPacket(Packet p, int64_t arrivalUs) {
-        observedJitter_.Add(arrivalUs / 1000);   // us → ms 로 단위를 통일해 누적
+        if (prevArrivalUs_ >= 0) {
+            // 지터 = 도착 간격이 송신 주기(kFrameIntervalUs, 60fps면 ≈16667us)에서 벗어난 정도
+            const int64_t devUs = (arrivalUs - prevArrivalUs_) - kFrameIntervalUs;
+            observedJitter_.Add(std::abs(devUs) / 1000);   // us → ms 로 단위를 통일해 누적
+        }
+        prevArrivalUs_ = arrivalUs;
         // 지터가 크면 버퍼를 늘려 안정성↑(지연↑)
         // 지터가 작으면 버퍼를 줄여 지연↓
         targetDepthMs_ = Clamp(static_cast<int>(observedJitter_.P95() * 1.5f), kMin, kMax);
