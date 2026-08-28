@@ -568,7 +568,7 @@ flowchart LR
 
 ## 더 읽을거리
 
-- Anitescu, Potra, "Formulating Dynamic Multi-Rigid-Body Contact Problems with Friction as Complementarity Problems" (1997) — 마찰의 LCP 정식.
+- Anitescu, Potra, "Formulating Dynamic Multi-Rigid-Body Contact Problems with Friction as Solvable Linear Complementarity Problems" (1997) — 마찰의 LCP 정식.
 - Erin Catto, "Modeling and Solving Constraints" (GDC 2009) — sequential impulse + 마찰.
 - PhysX SDK Guide, "Friction Patches" — patch friction 산업 구현.
 - Bullet manual, "Solving Sequentially" — pyramid 마찰 옵션.

@@ -513,7 +513,7 @@ $$
 
 연속 시간에서 *상수*. 이산 적분에서:
 
-- *Explicit Euler*: 매 step $E_{n+1} \approx E_n (1 + k \Delta t^2)$ — 지수 증가.
+- *Explicit Euler*: 매 step $E_{n+1} \approx E_n (1 + \tfrac{k}{m} \Delta t^2)$ — 지수 증가.
 - *Semi-implicit Euler / Verlet*: 평균적으로 일정, 미세 진동.
 
 긴 시뮬에서 *E(t) 곡선* 이 적분기의 안정성을 *정량적으로 드러내는* 신호. 곡선이 *상승* 하면 발산, *bounded* 면 symplectic 동작.

@@ -393,7 +393,7 @@ constexpr float kCorrectionPercent = 0.2f;   // 20% 씩
 float correctionAmount = effectiveDepth * kCorrectionPercent;
 ```
 
-매 step 20% — *5 step 후 거의 해소*. 부드럽고 안정.
+매 step 20% — *잔여 침투가 $0.8^n$ 으로 감쇠, 약 11 step 후 90% 해소*. 부드럽고 안정.
 
 ### 5.5 결합
 
@@ -481,7 +481,7 @@ float bias = std::min((kBaumgarte * std::max(depth - kSlop, 0.0f)) / dt,
 | Baumgarte bias | 운동량 모델 충실 | 튜닝 어려움 |
 | Pseudo-velocity (Bullet) | 둘의 절충 | 코드 복잡 |
 
-Box2D 는 *NGS + Baumgarte* 혼합. PhysX 는 *주로 NGS*. 엔진별 다른 선택.
+Box2D 는 *NGS + Baumgarte* 혼합. PhysX 는 *bias 기반 PGS + substep 기반 TGS*. 엔진별 다른 선택.
 
 ### 6.6 산업 채택
 
