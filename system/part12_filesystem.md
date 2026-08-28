@@ -833,4 +833,4 @@ VFS는 이 정보를 `mount` 시스템 콜로 관리한다.
 - Linux 커널 소스: `fs/`, `include/linux/fs.h`, `fs/ext4/`, `Documentation/filesystems/`
 - Ext4 설계 문서: https://ext4.wiki.kernel.org/
 - Stephen Tweedie, "Journaling the Linux ext2fs Filesystem" (LinuxExpo, 1998)
-- Marshall Kirk McKusick, George V. Neville-Neil, *The Design and Implementation of the FreeBSD Operating System* (Addison-Wesley, 2014)
+- Marshall Kirk McKusick, George V. Neville-Neil, Robert N. M. Watson, *The Design and Implementation of the FreeBSD Operating System* (Addison-Wesley, 2014)

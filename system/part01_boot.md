@@ -302,7 +302,7 @@ asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
 
 ### 64비트 모드 전환
 
-압축이 해제되면, CPU를 64비트 롱 모드로 전환한다.
+압축을 해제하기 전에, `startup_32`는 CPU를 64비트 롱 모드로 전환한다.
 
 ```asm
     /* 페이지 테이블 설정 (identity mapping) */

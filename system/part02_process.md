@@ -146,7 +146,7 @@ struct mm_struct {
     unsigned long arg_start, arg_end;     /* 인자 */
     unsigned long env_start, env_end;     /* 환경 변수 */
 
-    atomic_long_t mm_users;          /* 사용자 수 */
+    atomic_t mm_users;               /* 사용자 수 */
     atomic_t mm_count;               /* 참조 카운터 */
 };
 ```
@@ -2525,8 +2525,8 @@ int main() {
 - Maurice J. Bach, *The Design of the UNIX Operating System* (1986)
 - Daniel P. Bovet, Marco Cesati, *Understanding the Linux Kernel* (2005)
 - Robert Love, *Linux Kernel Development* (2010)
-- W. Richard Stevens, *Advanced Programming in the UNIX Environment* (2013)
-- Remzi H. Arpaci-Dusseau, *Operating Systems: Three Easy Pieces* (2018)
+- W. Richard Stevens, Stephen A. Rago, *Advanced Programming in the UNIX Environment* (2013)
+- Remzi H. Arpaci-Dusseau, Andrea C. Arpaci-Dusseau, *Operating Systems: Three Easy Pieces* (2018)
 - Dennis M. Ritchie, Ken Thompson, "The UNIX Time-Sharing System" (1974)
 - Marshall K. McKusick et al., "A Fast File System for UNIX" (1984)
 - Linux 커널 소스: `kernel/fork.c`, `kernel/exit.c`, `fs/exec.c`

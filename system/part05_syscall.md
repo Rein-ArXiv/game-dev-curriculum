@@ -359,7 +359,7 @@ __kernel_vsyscall:
 
 ### AMD의 대안: syscall/sysret
 
-AMD는 AMD64 아키텍처(2003년)에서 **syscall/sysret** 명령어를 도입했다. Intel도 나중에 이를 채택했다.
+AMD는 K6 프로세서(1997년)에서 **syscall/sysret** 명령어를 처음 도입했고, AMD64 아키텍처(2003년)에서 이를 64비트 롱 모드로 확장했다. Intel도 나중에 이를 채택했다.
 
 `syscall`은 `sysenter`보다 더 우아한 설계를 가진다:
 - 복귀 주소를 RCX에 자동 저장
@@ -2352,8 +2352,8 @@ MODULE_LICENSE("GPL");
 
 **1) LWN.net 기사**
 - "Anatomy of a system call" (2014): https://lwn.net/Articles/604287/
-- "Adding a new system call" (2016): https://lwn.net/Articles/604515/
-- "The vDSO on arm64" (2015): https://lwn.net/Articles/615809/
+- "Anatomy of a system call, part 2" (2014): https://lwn.net/Articles/604515/
+- "Implementing virtual system calls" (2014): https://lwn.net/Articles/615809/
 
 **2) Brendan Gregg's Blog**
 - Linux Performance: http://www.brendangregg.com/linuxperf.html

@@ -1711,7 +1711,7 @@ if (requested_feature_needs_privilege_or_policy_check(params))
     return -EPERM;
 ```
 
-초기 커널에서는 SQPOLL에 특권이 필요했지만 Linux 5.11 이후에는 일반적으로 SQPOLL 자체에 특별한 capability가 필요하지 않다. 다만 SQ thread CPU affinity 같은 옵션, resource limit, sysctl과 배포판 보안 정책은 별도 제약을 둘 수 있다. IOPOLL은 direct I/O와 polling을 지원하는 파일·장치 등 데이터 경로 제약을 먼저 만족해야 한다.
+초기 커널에서는 SQPOLL에 특권이 필요했지만 Linux 5.11부터는 CAP_SYS_NICE capability가 있으면 비root로 사용할 수 있게 되었고, Linux 5.13 이후에는 일반적으로 SQPOLL 자체에 특별한 capability가 필요하지 않다. 다만 SQ thread CPU affinity 같은 옵션, resource limit, sysctl과 배포판 보안 정책은 별도 제약을 둘 수 있다. IOPOLL은 direct I/O와 polling을 지원하는 파일·장치 등 데이터 경로 제약을 먼저 만족해야 한다.
 
 **Credential 체크**
 
@@ -2077,7 +2077,7 @@ io_uring은 리눅스 I/O의 패러다임을 바꾸었다. 핵심 정리는 다�
 - liburing documentation: `man io_uring_setup`, `man io_uring_enter`, `man io_uring_register`
 
 ### 논문 및 발표
-- Axboe, J. (2019). *Efficient IO with io_uring*. Kernel Recipes. https://kernel.dk/io_uring.pdf
+- Axboe, J. (2019). *Efficient IO with io_uring*. https://kernel.dk/io_uring.pdf
 - Axboe, J. (2020). *io_uring and BPF*. Linux Plumbers Conference.
 - Corbet, J. (2019). *Ringing in a new asynchronous I/O API*. LWN.net. https://lwn.net/Articles/776703/
 - Corbet, J. (2020). *The rapid growth of io_uring*. LWN.net. https://lwn.net/Articles/810414/

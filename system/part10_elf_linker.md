@@ -424,6 +424,7 @@ $ objdump -d main
 0000000000001149 <main>:
     1149:   55                      push   %rbp
     114a:   48 89 e5                mov    %rsp,%rbp
+    114d:   b8 00 00 00 00          mov    $0x0,%eax
     1152:   e8 08 00 00 00          call   115f <foo>
     1157:   b8 00 00 00 00          mov    $0x0,%eax
     115c:   5d                      pop    %rbp

@@ -412,11 +412,11 @@ memcpy((void *)region.userspace_addr, guest_code, sizeof(guest_code));
 ```text
 GVA 0x400000 (게스트 가상 주소)
   ↓
-Guest PML4[0] → Guest PDPT[2] → Guest PD[0] → Guest PT[0]
+Guest PML4[0] → Guest PDPT[0] → Guest PD[2] → Guest PT[0]
   ↓
 GPA 0x12345000 (게스트 물리 주소)
   ↓
-EPT PML4[0] → EPT PDPT[0] → EPT PD[18] → EPT PT[69]
+EPT PML4[0] → EPT PDPT[0] → EPT PD[145] → EPT PT[325]
   ↓
 HPA 0x5ABCD000 (호스트 물리 주소)
 ```
