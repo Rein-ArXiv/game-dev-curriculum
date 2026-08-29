@@ -232,9 +232,11 @@ inline bool ValidateGridPath(const Grid& grid, const std::vector<uint32_t>& path
 | 2% | dijkstra(heap) | 0.33 | 1,200 | 3,322 | 2,122 |
 | 2% | dijkstra(dense) | 1.38 | 1,200 | 0 | 0 |
 | 2% | bellman-ford | 0.23 | 9 라운드 | 0 | 0 |
+| 2% | dijkstra(re-expand) | 0.37 | 3,322 | 3,322 | 2,122 |
 | 50% | dijkstra(heap) | 3.28 | 1,200 | 6,872 | 5,672 |
 | 50% | dijkstra(dense) | 1.91 | 1,200 | 0 | 0 |
 | 50% | bellman-ford | 6.06 | 8 라운드 | 0 | 0 |
+| 50% | dijkstra(re-expand) | 5.12 | 6,872 | 6,872 | 5,672 |
 
 밀도가 승자를 바꾼다. 2%에서는 힙 판이 dense 판의 4배 빠르고, 50%에서는 dense 판이 힙 판보다 1.7배 빠르다. 힙 판이 미는 항목 수(pushes)가 간선 수에 비례하는 반면 dense 판은 V²로 고정이기 때문이다.
 

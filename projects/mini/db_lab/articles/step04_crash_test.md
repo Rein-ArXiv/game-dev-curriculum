@@ -188,7 +188,7 @@ static uint64_t ExpectedCommits(const std::vector<long long>& commit_ends, long 
 // 복구본의 불변식 검사. 실패 시 false.
 static bool CheckInvariants(const std::unordered_map<std::string, std::string>& idx,
                             uint64_t committed, uint64_t expected, std::string& why) {
-    // (3) 복구된 트랜잭션 수는 절단 길이가 허용하는 접두사와 정확히 같아야 한다.
+    // (3) 복구된 트랜잭션 수는 유효 경계가 허용하는 접두사와 정확히 같아야 한다.
     if (committed != expected) {
         why = "committed=" + std::to_string(committed) +
               " expected=" + std::to_string(expected);
@@ -635,7 +635,7 @@ static void TestGarbageLengthRejected() {
         CHECK(rs.committed_txns == 1);
         CHECK(rs.discarded_bytes == 8);
         CHECK(idx.size() == 1);
-        // 40바이트짜리 로그의 재생은 마이크로초 규모다. 2초를 넘겼다면 len 가드가
+        // 37바이트짜리 로그의 재생은 마이크로초 규모다. 2초를 넘겼다면 len 가드가
         // 없어 4GB 버퍼를 잡으려 한 것이다.
         CHECK(ms < 2000.0);
     }

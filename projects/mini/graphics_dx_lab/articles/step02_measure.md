@@ -475,7 +475,8 @@ DirectX contract tests passed
 - 완료값이 slot fence 값보다 작으면 `Poll`이 `Map`을 *한 번도* 부르지 않고 slot도 소비하지 않는다.
 - 완료 후에는 정확히 한 번 `Map`/`Unmap` 하고, 주입한 tick 차와 주파수로 계산한 ms가 나온다.
 - 링을 완료 없이 가득 채운 뒤 `Begin`을 부르면 slot을 잡지 않고(`activeSlot == -1`) `EndQuery`도 기록하지 않는다. 완료를 알리면 그때 다시 같은 slot을 잡는다.
-- `App::Shutdown()` 에서 `ctx_.Flush()` 가 ImGui 백엔드 종료·`gpuTimer_.Shutdown()`·`ctx_.Shutdown()` 보다 앞에 온다. `D3D12Context::Flush()` 가 `Signal` 뒤에 실제로 기다린다.
+
+종료 순서 — `App::Shutdown()` 에서 `ctx_.Flush()` 가 ImGui 백엔드 종료·`gpuTimer_.Shutdown()`·`ctx_.Shutdown()` 보다 앞에 오고 `D3D12Context::Flush()` 가 `Signal` 뒤에 실제로 기다리는 것 — 은 이 세 그룹이 아니라 step01 의 `shutdown_waits_for_gpu` 그룹이 검사한다.
 
 앞의 두 항목은 이렇게 판정한다. 주파수를 1 MHz 로 주입했으므로 tick 차 2000 은 정확히 2 ms 여야 한다.
 

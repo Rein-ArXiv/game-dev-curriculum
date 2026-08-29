@@ -188,7 +188,7 @@ add_executable(graphics_vk_contract_tests
 | Swapchain 협상 | 1 | present mode fallback(MAILBOX → IMMEDIATE → FIFO)과 surface format 선호 규칙 |
 | Push constant 예산 | 1 | PC 블록이 84 bytes 이고 보장 한도 128 bytes 안에 있으며, 프레임 데이터를 합치면 넘는다 |
 | Timestamp ring | 2 | full ring 가드와 가장 오래된 슬롯 수확 인덱스 |
-| Layout 전이 | 3 | 세 전이(color 진입 / present / depth 초기화)의 `image`·`oldLayout`·`newLayout`·`subresourceRange`·네 mask 를 Minimal·Over-sync 양쪽에서 단언 |
+| Layout 전이 | 3 | 세 전이(color 진입 / present / depth 초기화)의 `image`·`oldLayout`·`newLayout`·`subresourceRange`·네 mask 를 단언 — 두 color 전이는 Minimal·Over-sync 양쪽에서, depth 초기화 전이는 Minimal 에서 |
 | 기록 경로 | 3 | `vkCmdPipelineBarrier2` 를 함수 포인터 seam 으로 가로채 `VkDependencyInfo` 의 barrier 개수와 내용이 빌더 결과와 일치하는지 확인 |
 | 정책 fallback | 3 | Minimal 이 모르는 layout 쌍에서 Over-sync 와 비트 단위로 같은 값이 나온다는 계약 |
 | 실패 주입 | 3 | skip 토글이 켜지면 기록된 배리어 수가 0, wrong 토글은 `srcAccessMask` 만 0 으로 만든다 |

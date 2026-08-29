@@ -96,7 +96,7 @@ graphics_gl_lab 과 *근본 동일* 한 측정 결과. API 차이는 *명시적 
 
 | 항목 | OpenGL | DX12 |
 |---|---|---|
-| 코드 LOC (`src` + `shaders` 실측) | 2,542 | 2,340 |
+| 코드 LOC (`src` + `shaders` 실측) | 2,718 | 2,623 |
 | CPU ms (Individual / Per-Draw) | 30 | 8 |
 | CPU ms (Instanced) | 0.5 | 0.3 |
 | GPU ms | 2 | 2 |

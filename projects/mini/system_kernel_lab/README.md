@@ -46,7 +46,7 @@ GUI는 눈으로 읽는 경로라 인용도 대조도 되지 않는다. 같은 �
 
 ```text
 backend_req,backend,sync,sched,sched_applied,ctx,workers,files,file_bytes,cycle,cycle_ms,mb_per_s,ctx_sw,page_faults
-io_uring,io_uring,mutex,default,1,pthread,4,16,1048576,0,1.732844,9682.317,32,0
+io_uring,io_uring,mutex,default,1,pthread,4,16,1048576,0,1.732844,9681.896,32,0
 ```
 
 - 조합 정보를 **행마다** 싣는다. 실행이 다른 파일을 그대로 이어 붙여 한 표로

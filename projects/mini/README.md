@@ -31,11 +31,11 @@
 | [`math_lab`](math_lab/) | 회전, 보간·곡선, 노이즈, SAT/GJK, SDF, BVH, 투영·수치 오차 시각화 | 쿼터니언·곡선 경계·충돌·SDF·BVH·noise 고정 사례에 더해 시드 무작위 property 층 13종(`tests/property.h` — 생성기·축소기·반례 보고). 쿼터니언 항등식과 이중 덮개, Perlin/Simplex 범위 상계(그라디언트 조합 256 가지를 세는 독립 오라클), SAT⇔GJK 일치와 분리면 실증·강체 불변, 행렬 역행렬 왕복(조건수 규칙)과 합성 일치 |
 | [`physics_lab`](physics_lab/) | 적분기, 힘, broad/narrow phase, 충돌 응답, 거리 제약, 에너지·반복성 관찰 | 적분기 오차 차수·normal impulse·퇴화 법선 테스트. broad phase 는 brute 와의 쌍 집합 대조, narrow phase 와 접촉 솔버는 고정 사례에 더해 불변식 property 배터리(무작위 볼록쌍의 깊이 일치와 `(normal, depth)` 계약, 무작위 강체 장면의 에너지 비증가·관통 상계·bit 결정성) |
 | [`ai_lab`](ai_lab/) | A*/Dijkstra/Greedy/JPS, flow field, steering, boids, influence map | 최단 경로·도달 불가·휴리스틱 계약 테스트. 나머지 장면 테스트 보강 필요 |
-| [`graphics_gl_lab`](graphics_gl_lab/) | individual/instanced/MDI, shader permutation, uniform/UBO/SSBO, BC 포맷, MSAA | 빌드 검증 완료. GL 상태·렌더 캡처 회귀 보강 필요 |
+| [`graphics_gl_lab`](graphics_gl_lab/) | individual/instanced/MDI, shader permutation, uniform/UBO/SSBO, BC 포맷, MSAA | CTest 12개(전체 2개: 계약·렌더 + step별 10개) 통과. 렌더 테스트는 실제 GL 4.5 컨텍스트에서 세 드로우 모드 픽셀 해시·Rebuild 핸들 수명·MSAA 폴백을 단언 |
 | [`graphics_dx_lab`](graphics_dx_lab/) | per-draw/instanced, PSO·RootSig 정책, descriptor write 수명, barrier 기록 형태, fence-safe timestamp | 빌드 검증 완료. 순수 상태 계약 테스트와 캡처 회귀 보강 필요 |
 | [`graphics_vk_lab`](graphics_vk_lab/) | per-draw/instanced, barrier mask, fence/timeline 완료 추적, timestamp, validation | 빌드 검증 완료. 동기화 상태 테스트와 validation smoke 보강 필요 |
-| [`game_network_lab`](game_network_lab/) | 실제 TCP control, Windows IOCP/Linux epoll, UDP endpoint binding, 권위 tick·snapshot | Windows Release·protocol CTest·별도 server/client socket smoke 통과. Linux 실행 검증 필요 |
-| [`live_service_lab`](live_service_lab/) | HTTP login, match queue, server registration·drain, game token, 멱등 result | .NET Release 빌드·core contract test 통과. 교차 언어 HTTP·UDP smoke는 mega 항목에서 실행. token audience·capacity·heartbeat timeout 실패 주입 테스트 보강 필요 |
+| [`game_network_lab`](game_network_lab/) | 실제 TCP control, Windows IOCP/Linux epoll, UDP endpoint binding, 권위 tick·snapshot | Windows(IOCP)와 WSL2 Ubuntu 26.04(epoll) 양쪽에서 CTest 12개(실행 파일 전체 5 + step 단위 7) 통과 |
+| [`live_service_lab`](live_service_lab/) | HTTP login, match queue, server registration·drain, game token, 멱등 result | .NET Release 빌드·core contract test 통과. 교차 언어 HTTP·UDP smoke는 mega 항목에서 실행. token audience·capacity·heartbeat timeout 실패 주입은 contract test 18개에 포함 |
 | [`db_lab`](db_lab/) | WAL KV, fsync·batch·replay 벤치, 로그 절단 crash injection | 단위 테스트와 crash test 통과 |
 
 이 표의 “보강 필요”는 실행 코드가 없다는 뜻이 아니다. 시각화 구현은 존재하지만,

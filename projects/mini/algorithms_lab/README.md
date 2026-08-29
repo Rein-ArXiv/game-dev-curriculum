@@ -66,7 +66,7 @@ algorithms_lab/
 
 | 영역 | 팔 | 통제 변수 | 관측 |
 |---|---|---|---|
-| 정렬 | introsort · 안정 merge · counting · radix8 · radix11 | 같은 입력 복사본, 모양 10종 | 비교·이동 바이트·P50/P95/P99·임시 peak |
+| 정렬 | introsort · 안정 merge · counting · radix8 · radix11 | 같은 입력 복사본, 모양 7종 | 비교·이동 바이트·P50/P95/P99·임시 peak |
 | 선택 | quickselect · median-of-medians · 크기 제한 힙 · 전체 정렬 | 같은 배열, k/n 3점 | 시간·비교 |
 | 우선순위 큐 | 이진 힙 · 정렬 배열 | 같은 키 열 | 시간·비교·이동 |
 | 구간 질의 | 선형 스캔 · Fenwick · segment tree | 같은 연산 열, n 4점 × 질의비율 2점 | 시간 |

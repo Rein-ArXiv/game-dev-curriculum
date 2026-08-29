@@ -49,7 +49,7 @@
 | 동기화 | 드라이버 자동 | *Fence* 명시 |
 | 셰이더 | runtime GLSL 컴파일 | 별도 *PSO* + HLSL |
 
-이 저장소의 두 lab 실측(`src` + `shaders`)은 `graphics_gl_lab` 2,542 줄, `graphics_dx_lab` 2,340 줄로 코드량 자체는 비슷하다. 명시적 모델의 대가는 줄 수가 아니라 *앱이 직접 다뤄야 하는 개념 수* — PSO / RootSig / Descriptor Heap / Resource Barrier / Fence 가 모두 앱 코드로 올라온다.
+이 저장소의 두 lab 실측(`src` + `shaders`)은 `graphics_gl_lab` 2,718 줄, `graphics_dx_lab` 2,623 줄로 코드량 자체는 비슷하다. 명시적 모델의 대가는 줄 수가 아니라 *앱이 직접 다뤄야 하는 개념 수* — PSO / RootSig / Descriptor Heap / Resource Barrier / Fence 가 모두 앱 코드로 올라온다.
 
 ## 2. 빌드 설정과 진입점
 

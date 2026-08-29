@@ -75,9 +75,9 @@ domain exception을 모두 같은 status로 바꾸면 client가 재시도 가능
 | 조건 | HTTP 의미 |
 |---|---|
 | token 또는 server key 실패 | 401 Unauthorized |
-| 식별자·rating·payload 형식 오류 | 400 Bad Request |
+| 식별자·rating·payload 형식 오류 (`/servers/register` 제외 — 아래 409 행) | 400 Bad Request |
 | ticket·match·server 없음 | 404 Not Found |
-| register 충돌, idempotency payload 충돌, 이중 완료 | 409 Conflict |
+| register 실패(충돌뿐 아니라 서버 식별자·region 형식 오류도 `RegisterServer`의 같은 `false`로 합쳐진다), idempotency payload 충돌, 이중 완료 | 409 Conflict |
 | 정상 최초·중복 결과 | 200 OK와 receipt |
 
 중복 result는 409가 아니다. 같은 idempotency key와 같은 payload는 성공한 작업의 receipt를 다시

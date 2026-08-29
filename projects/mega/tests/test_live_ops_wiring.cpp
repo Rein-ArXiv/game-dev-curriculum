@@ -151,7 +151,7 @@ static void TestFlagAssignmentReachesSwitches(const EventTimes& times) {
         DefenseApp app;
         CHECK(app.Init(HeadlessOptions(kProfile, times.quiet)));
 
-        // 27개 스위치 **전부**를 한 줄로 대조한다. 어느 하나가 배정대로 잡히지
+        // 30개 스위치 **전부**를 한 줄로 대조한다. 어느 하나가 배정대로 잡히지
         // 않으면 여기서 갈린다.
         CHECK_EQ(app.Options().switches.Assignments(), expected.Assignments());
         // 그중에서도 팔이 실제로 도는 축 하나를 이름으로 못박는다. 이 줄이

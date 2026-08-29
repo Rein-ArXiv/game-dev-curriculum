@@ -67,8 +67,8 @@ CLRS의 분석·증명 체계와 *The Algorithm Design Manual*의 문제 모델�
 |---|---|---|
 | 02 순서·선택 | `articles/step01_ordering_and_selection.md` | 비교 정렬 ⇔ radix, 이진 탐색 경계 4종, quickselect ⇔ 전체 정렬. 계약은 multiset 보존·비내림차순·안정성 |
 | 03 온라인·구간·스트림 | `articles/step02_online_range_stream.md` | Fenwick ⇔ 접두합 ⇔ 직접 합산, lazy segment tree의 tag 대수, 단조 덱 슬라이딩 최대, 이진 힙 ⇔ 정렬 배열 |
-| 04 사전·문자열 | `articles/step03_dictionary_and_string_search.md` | chaining ⇔ open addressing(선형·이중 해시), Bloom 필터의 거짓 양성률, KMP ⇔ rolling hash ⇔ 직접 비교, Aho-Corasick ⇔ 패턴별 개별 탐색 |
-| 05 그래프 구조 | `articles/step04_graph_structure.md` | SCC 두 팔(Tarjan ⇔ Kosaraju), 절단점·다리의 low-link ⇔ **정점을 실제로 지우고 BFS 재실행**, DSU 4조합(경로 압축 × 랭크), Kruskal ⇔ Prim ⇔ 간선 부분집합 전수 열거 |
+| 04 사전·문자열 | `articles/step03_dictionary_and_string_search.md` | chaining ⇔ open addressing(선형 탐사 × 삭제 정책 3종: tombstone·backward-shift·Robin Hood), Bloom 필터의 거짓 양성률, KMP ⇔ rolling hash ⇔ 직접 비교, Aho-Corasick ⇔ 패턴별 개별 탐색 |
+| 05 그래프 구조 | `articles/step04_graph_structure.md` | SCC 두 팔(Tarjan ⇔ Kosaraju), 절단점·다리의 low-link ⇔ **정점을 실제로 지우고 BFS 재실행**, DSU 4조합(경로 압축 × union by size), Kruskal ⇔ Prim ⇔ 간선 부분집합 전수 열거 |
 | 06 최단 경로 | `articles/step05_shortest_path_and_heuristics.md` | Dijkstra 두 팔 ⇔ Bellman-Ford ⇔ Floyd-Warshall, 음수 간선이 Dijkstra를 깨는 자리, A\*의 휴리스틱·가중·재개방 토글이 최적성과 확장 수를 바꾸는 교환 |
 | 07 탐욕 | `articles/step06_greedy_and_dynamic_programming.md` | 교환 논증이 서는 동전계 ⇔ 무너지는 동전계, 집합 덮개의 탐욕 근사비를 전수 최적과 대조 |
 | 08 동적 계획 | 같은 step | 0/1 배낭 ⇔ 전수 열거, 상태 정의 방향이 문제를 바꾸는 사례, LCS·편집 거리·LIS, metamorphic 관계 |
@@ -92,7 +92,7 @@ CLRS의 분석·증명 체계와 *The Algorithm Design Manual*의 문제 모델�
 | §9 비신뢰 입력과 자원 상한 | `projects/mini/languages_lab/src/fuzz.hpp` + `src/tests.cpp` | fuzz 배터리 4개 · 표본 80,000개. 문법 유도 생성 · 토큰/opcode 변형. 실행 예산·스택 상한·검증기 거부 어휘·진단 위치를 친다 |
 | §10 지속 가능한 검증 절차 | `projects/mega` — `tests/test_profile_isolation.cpp` | 검증이 실행 순서에 의존하지 않게 만드는 자리. 누적이 제품 기능임을 확인하고, `--profile PATH --fresh-profile`이 실행 횟수와 무관하게 같은 결과를 내는지, **그 인자를 빼면 실제로 갈리는지**(음성 대조)까지 본다 |
 
-**여기에 없는 것.** §4 상태 기계·model-based testing과 §6 coverage-guided fuzzing은 이 저장소에 실행 자산이 없다. 세 lab의 하네스는 coverage 되먹임도 sanitizer corpus도 쓰지 않고 고정 시드에서 결정론적으로 입력을 만들 뿐이다 — `math_lab/tests/property.h`가 자기 주석에 그렇게 못박아 두었다. §8 mutation testing은 자동화 도구가 아니라 **손으로 도는 규율**로 있다. 각 step 문서의 `### 무력화 변이` 절이 그 기록이다 — 어떤 한 줄을 어떻게 망가뜨렸고 어느 검사가 어떤 메시지로 죽었는지가 적혀 있다(예: `math_lab/articles/step05_collision.md`, `languages_lab/articles/step03_bytecode_verifier.md`). 변이는 확인 뒤 복원하고 SHA-256으로 대조한다.
+**여기에 없는 것.** §4 상태 기계·model-based testing과 §6 coverage-guided fuzzing은 이 저장소에 실행 자산이 없다. 세 lab의 하네스는 coverage 되먹임도 sanitizer corpus도 쓰지 않고 고정 시드에서 결정론적으로 입력을 만들 뿐이다 — `math_lab/tests/property.h`가 자기 주석에 그렇게 못박아 두었다. §8 mutation testing은 자동화 도구가 아니라 **손으로 도는 규율**로 있다. step 문서의 `### 무력화 변이` 절이 그 기록이다 — 어떤 한 줄을 어떻게 망가뜨렸고 어느 검사가 어떤 메시지로 죽었는지가 적혀 있다(예: `languages_lab/articles/step03_bytecode_verifier.md`). `math_lab`은 그 절 없이 `articles/step05_collision.md`의 「8. 빌드와 실행 결과」 본문 문단으로 기록한다. 변이는 확인 뒤 복원하고 SHA-256으로 대조한다.
 
 ## 완료 기준
 

@@ -120,7 +120,7 @@ live_service_tests: step03 6/6 checks passed
 상한, 음수 경과 시간 clamp, ticket 중복 억제, fingerprint 비교와 정렬, ticket 소유자 검사,
 player 집합 검사, 이중 완료 검사, 신규 result owner 검사, region 일치 두 곳, active match 감소,
 admission token ID 생성, endpoint 전달, game token audience·만료·공백 claim 가드, 식별자 길이
-상한, rating 상한, `X-Server-Id` 공백 가드, `/results`의 status code 매핑을 각각 무력화하면
+상한, rating 상한, `/results`의 status code 매핑을 각각 무력화하면
 대응하는 검사가 실패한다.
 
 ## 실행

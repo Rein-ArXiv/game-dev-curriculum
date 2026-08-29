@@ -43,7 +43,7 @@ io_uring -ECANCELED 경로뿐이며 인수인계 문서에 정리돼 있다.
 | `algorithms_lab` | 통과 | CTest 11개. 전체 1개 + step별 8개(`algo_tests --step=NN`) + property 층 1개 + bench smoke 1개. 고정 사례 45개(52만 CHECK)가 느린 독립 오라클과 대조하고, property 11종이 6,950 표본을 돈다. 무력화 변이 15건 중 14건 검출 | 8 |
 | `math_lab` | 통과 | CTest 10개. 전체 1개 + step별 8개(실행 파일이 첫 인자를 step 필터로 받는다) + property 층 1개. 사례 26개 중 13개가 시드 무작위 property(기본 42,300 표본, 고정 시드, 반례 축소) | 8 |
 | `physics_lab` | 통과 | CTest 23개. 실행 파일 전체 9개 + step별 14개(실행 파일이 첫 인자를 step 필터로 받는다). 아홉 번째는 불변식 property 층 — 사례 5개(볼록쌍 1500 표본 · 에너지 소산 · 침투 상계 · Measure⇔Response 프레임 동일 · bit 결정성)를 고정 시드에서 돌리고, 실패하면 입력을 shrink 해 시드·재현 명령과 함께 찍는다 | 8 |
-| `ai_lab` | 통과 | CTest 9개. 전체 2개(pathfinder·model) + step별 7개 | 6 |
+| `ai_lab` | 통과 | CTest 9개. 전체 3개(chrome·pathfinder·model) + step별 6개 | 6 |
 | `graphics_gl_lab` | 통과 | CTest 12개. 전체 2개(계약·렌더) + step별 10개(실행 파일이 첫 인자를 step 필터로 받는다) | 7 |
 | `graphics_dx_lab` | 통과 | CTest 8개. 전체 1개 + step별 7개(실행 파일이 첫 인자를 step 필터로 받는다) | 7 |
 | `graphics_vk_lab` | 통과 | CTest 8개. 전체 1개 + step별 7개(실행 파일이 첫 인자를 step 필터로 받는다) | 7 |

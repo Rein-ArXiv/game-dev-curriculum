@@ -51,9 +51,10 @@ Commands
 배치 미리보기는 편의 기능이고 권한 검사가 아니다. 실제 배치는 월드가 골드, 경기 상태,
 타일 타입, 중복, 타워 상한을 다시 검사한다.
 
-타워는 Cannon, Gatling, Splash, Sniper 네 종류이며 공격력, 사거리, 발사 간격, 광역
-반경, 가격이 다르다. 적은 Normal, Fast, Tank, Swarm, Boss 다섯 종류이며 체력·속도·
-코어 피해·보상 배율이 다르다. 강화와 판매는 누적 투자 비용을 기준으로 계산하고,
+타워는 Cannon, Gatling, Splash, Sniper, Frost, Radar 여섯 종류이며 공격력, 사거리, 발사
+간격, 광역 반경, 가격이 다르다 — Frost 는 명중한 적을 재우고, Radar 는 쏘지 않는 대신
+은신 개체를 드러낸다. 적은 Normal, Fast, Tank, Swarm, Boss, Stalker(은신) 여섯 종류이며
+체력·속도·코어 피해·보상 배율이 다르다. 강화와 판매는 누적 투자 비용을 기준으로 계산하고,
 Nearest, First, Strongest 타게팅은 같은 적 집합에 서로 다른 점수 함수를 적용한다.
 
 ## 3. 시뮬레이션 시간과 프레임 시간을 분리했다

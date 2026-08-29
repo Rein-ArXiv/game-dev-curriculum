@@ -909,8 +909,8 @@ timer.EndCycle(bytes,
 
 ```text
 backend_req,backend,sync,sched,sched_applied,ctx,workers,files,file_bytes,cycle,cycle_ms,mb_per_s,ctx_sw,page_faults
-io_uring,io_uring,mutex,default,1,pthread,4,16,1048576,0,1.732844,9682.317,32,0
-io_uring,io_uring,mutex,default,1,pthread,4,16,1048576,1,1.688201,9938.383,32,0
+io_uring,io_uring,mutex,default,1,pthread,4,16,1048576,0,1.732844,9681.896,32,0
+io_uring,io_uring,mutex,default,1,pthread,4,16,1048576,1,1.688201,9937.926,32,0
 ```
 
 조합 정보를 행마다 반복해서 싣는다. 용량은 낭비지만 여러 실행의 파일을 그대로 이어 붙여 하나의 표로 읽을 수 있고(헤더 한 줄만 지우면 된다), 행 하나만 봐도 그것이 어떤 조합의 수치인지 알 수 있다. 파일 이름에 조합을 인코딩하는 방식은 파일이 옮겨지거나 이름이 바뀌는 순간 메타데이터를 잃는다.

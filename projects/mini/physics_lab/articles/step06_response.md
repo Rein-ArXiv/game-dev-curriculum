@@ -329,6 +329,9 @@ ctest --test-dir build -C Release -R step06 --output-on-failure
 `ctest` 는 두 실행 파일의 통과 / 실패만 알려 준다. 직접 돌리면 그래프가 보여 주던 곡선이 숫자 다섯 개로 나온다.
 
 ```text
+[step06] degenerate_normal
+  degenerate fallback: (1,0) (0,1)  (3,4) -> (0.6,0.8)
+  ok
 [step06] normal_impulse
   restitution target=1 impulse=1.5 -> vi=-0.5 vj=0.5
   ok

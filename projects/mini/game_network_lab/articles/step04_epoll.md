@@ -162,18 +162,21 @@ game_network_lifecycle_tests: 1 case(s) passed [step04 1]
 ```text
 [step04] oversized_datagram_recovery  connected: id=1
 ...
-complete: input_ticks=60 snapshots=22 predicted=(0,8)
-game_server: TCP 52485, UDP 48640
-clients=1 ticks=60 control=1 datagrams=102 snapshots=14 rejected=64
-clients=0 ticks=120 control=1 datagrams=125 snapshots=22 rejected=64
+complete: input_ticks=60 snapshots=20 predicted=(-12,4)
+game_server: TCP 52665, UDP 60410
+clients=1 ticks=60 control=1 datagrams=82 snapshots=14 rejected=39
+clients=0 ticks=120 control=1 datagrams=100 snapshots=20 rejected=39
 ok  64 x 4KiB datagrams first, then handshake, endpoint binding and snapshots over loopback: client=0 server=0 within the time limit
 game_network_process_tests: 1 case(s) passed [step04 1]
 ```
 
-`rejected=64`가 이 case의 관측값이다. 정상 client보다 먼저 protocol 최대 크기를 넘는
-데이터그램 64개가 도착했고, 서버는 그것을 전부 버렸으며, 그 뒤에도 handshake와 22개의
-snapshot이 정상으로 흘렀다. 잘린 데이터그램을 부분 메시지로 취급하거나 오류 뒤 receive를
-멈추는 구현이면 `rejected`가 아니라 `snapshots`가 0이 되고 client가 0이 아닌 code로 끝난다.
+`rejected=39`가 이 실행의 관측값이다. 정상 client보다 먼저 protocol 최대 크기를 넘는
+데이터그램 64개를 보냈고, 서버는 `recvfrom`에 실제로 도달한 것을 전부 버렸으며, 그 뒤에도
+handshake와 20개의 snapshot이 정상으로 흘렀다. `rejected` 뒤의 숫자는 판정 대상이 아니다 —
+64개 중 몇 개가 커널 수신 buffer를 통과해 서버까지 오는지는 buffer 크기에 따라 달라진다.
+판정은 `ok` 줄의 `client=0 server=0`이다. 잘린 데이터그램을 부분 메시지로 취급하거나 오류 뒤
+receive를 멈추는 구현이면 `rejected`가 아니라 `snapshots`가 0이 되고 client가 0이 아닌 code로
+끝난다.
 
 <!-- snippet: tests/process_tests.cpp#SendOversizedDatagrams -->
 ```cpp

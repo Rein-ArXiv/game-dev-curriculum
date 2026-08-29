@@ -73,6 +73,7 @@ physics_lab/
     core/
       physics_core.h            Scene 공용 계산 코어 (적분기 / restitution target /
                                  누적 impulse / AABB / 거리 projection / 안전 법선)
+      contact_solver.h          접촉 파이프라인 (접촉 수집 / Sequential Impulse / 위치 보정)
     scenes/
       iscene.h                  HandleInput / Step(dt) / Draw* 분리
       welcome_scene.{h,cpp}     Step 1

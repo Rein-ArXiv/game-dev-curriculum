@@ -150,7 +150,7 @@ step03: 5 test(s), 137 checks, 0 failed
 
 다섯 이름이 각각 고정하는 것은 다음과 같다.
 
-- `minimal_barriers` / `oversync_barriers` — 세 전이(UNDEFINED→COLOR_ATTACHMENT_OPTIMAL, COLOR_ATTACHMENT_OPTIMAL→PRESENT_SRC_KHR, UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL) 각각의 `image` / `oldLayout` / `newLayout` / `subresourceRange` / 네 mask 를 양쪽 정책에서 단언한다. Minimal 이 정확한 mask 를 아는 layout 쌍은 그 셋뿐이고 그 밖의 조합에서는 Over-sync 와 비트 단위로 같은 값이 나온다는 fallback 계약도 `oversync_barriers` 쪽에 있다.
+- `minimal_barriers` / `oversync_barriers` — 세 전이(UNDEFINED→COLOR_ATTACHMENT_OPTIMAL, COLOR_ATTACHMENT_OPTIMAL→PRESENT_SRC_KHR, UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL) 각각의 `image` / `oldLayout` / `newLayout` / `subresourceRange` / 네 mask 를 단언한다 — 두 color 전이는 양쪽 정책에서, depth 초기화 전이는 Minimal 에서다. Minimal 이 정확한 mask 를 아는 layout 쌍은 그 셋뿐이고 그 밖의 조합에서는 Over-sync 와 비트 단위로 같은 값이 나온다는 fallback 계약도 `oversync_barriers` 쪽에 있다.
 - `barrier_record_path` — `ImageLayoutTransition` 이 실제로 채워 넘기는 `VkDependencyInfo` 를 함수 포인터 seam 으로 가로채, barrier 개수가 1 이고 그 내용이 `BuildImageBarrier` 결과와 완전히 같은지 확인한다.
 - `barrier_injection` — 아래 실패 주입 토글의 headless 계약. 자세한 것은 이어지는 절에 있다.
 - `barrier_policy_names` — 패널 콤보에 뜨는 두 정책 이름.

@@ -335,7 +335,7 @@ Step 5 에서 추가한 것.
 4. **EPA 구현** — GJK 의 collision simplex 를 확장. 원점에 가장 가까운 edge 의 법선이 답.
 5. **Cross-check (매 frame 둘 다 실행)** — SAT 와 GJK+EPA 의 hit / depth 차이가 1.5 px 이상이면 *DISAGREE* 빨간 띠. 부동소수 hostile 케이스 (경계 접촉) 를 *우연히* 만났을 때 즉시 보임.
 6. **4 핸들 (중심 × 2, 회전 × 2)** — 회전 핸들은 *고정 거리* 로 자동 유지.
-7. **`physics_collision_tests` 타깃** — GUI 없이 SAT / GJK+EPA 를 돌리는 두 번째 ctest 실행 파일. 테스트 전용 사본을 두지 않도록 *제품이 쓰는 `narrow_phase_scene.cpp` 를 그대로 컴파일* 한다.
+7. **`physics_collision_tests` 타깃** — GUI 없이 SAT / GJK+EPA 를 돌리는 전용 ctest 실행 파일. 테스트 전용 사본을 두지 않도록 *제품이 쓰는 `narrow_phase_scene.cpp` 를 그대로 컴파일* 한다.
 
 ```cmake
 add_executable(physics_collision_tests

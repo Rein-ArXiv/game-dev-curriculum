@@ -24,7 +24,7 @@
 2. ucontext_t 기반 stackful coroutine 패턴
 3. driver-중심 round-robin 모델
 4. CoroBody — 작업 한 개 처리 + yield
-5. trampoline의 register pass-through 트릭
+5. trampoline과 idx 전달
 6. workload 통합과 시작/종료
 7. Toggles 확장과 HUD
 8. 빌드와 측정 결과

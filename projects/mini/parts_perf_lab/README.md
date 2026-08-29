@@ -7,7 +7,7 @@
 ## 짝 시리즈
 
 - **parts** — 메모리 할당자 내부, 메모리 레이아웃, STL 컨테이너의 비용, SIMD, 분기 예측 같은 저레벨 성능 주제를 다루는 시리즈다. 이 lab이 측정으로 다루는 범위는 parts/03·04(할당자), parts/08·09(vector·intrusive list), parts/11·18(ECS·데이터 지향 레이아웃), parts/19(SIMD), parts/21(분기 예측) 여덟 편이다. 나머지 편은 이 lab의 측정 축에 대응하지 않는다.
-- **algorithms** — 정렬·그래프·DP·압축·property 검증 같은 알고리즘 주제는 이 lab이 다루지 않는다. 대응 lab이 아직 없다.
+- **algorithms** — 정렬·그래프·DP·압축·property 검증 같은 알고리즘 주제는 이 lab이 다루지 않는다. 그 축의 소유 lab은 `projects/mini/algorithms_lab`이다.
 
 ## 토글 항목
 
@@ -73,7 +73,7 @@ parts_perf_lab/
       container_benchmark.{h,cpp}
       event_benchmark.{h,cpp}
       frame_timer.{h,cpp}
-    ui/  hud.{h,cpp}  toggles.h  raygui_impl.cpp
+    ui/  hud.{h,cpp}  hud_layout.h  toggles.h  raygui_impl.cpp
   tests/
     core_tests.cpp             정렬 헬퍼·4종 할당자·컨테이너/이벤트 워크로드 계약·
                                레이아웃 x SIMD x branchless 결과 동등성·경계 반사 불변식
