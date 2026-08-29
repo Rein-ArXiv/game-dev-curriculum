@@ -447,7 +447,7 @@ Closes #142
 | Staging 취소 (Working Dir 보존) | `git restore --staged <file>` |
 | 마지막 커밋 메시지 수정 | `git commit --amend` |
 | 마지막 커밋 취소 (변경 보존) | `git reset --soft HEAD~1` |
-| 마지막 커밋 취소 (Staging 보존) | `git reset HEAD~1` |
+| 마지막 커밋 취소 (Working Dir 보존) | `git reset HEAD~1` |
 | 마지막 커밋 취소 (전부 폐기) | `git reset --hard HEAD~1` |
 | 푸시한 커밋 안전하게 되돌림 | `git revert <commit>` |
 

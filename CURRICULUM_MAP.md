@@ -100,7 +100,7 @@ Raft 구현과 합의 증명처럼 게임 서버 인프라 전문 직무에만 �
 
 ## 현재 상태와 보강 우선순위
 
-구조 재편은 완료됐다. `parts/`에서 GC·JIT·reflection·GPU memory·network buffer·compression을 실제 소유 축으로 옮겼고, `system/`은 기능별 파편을 공통 핵심 16장과 선택 심화 5장으로 통합했다. `algorithms/`는 정확성·상각 분석과 계산 복잡도의 경계뿐 아니라 순서·구간·문자열, 그래프·최단 경로, Greedy·DP·조합 탐색, flow·matching의 표준 설계 도구를 포함한다. `languages/`는 프런트엔드, 실행 런타임, GC, 최적화·ABI, JIT, 엔진 스크립팅, reflection을 하나의 구현 흐름으로 갖춘다.
+구조 재편은 완료됐다. `parts/`에서 GC·JIT·reflection·GPU memory·network buffer·compression을 실제 소유 축으로 옮겼고, `system/`은 기능별 파편을 공통 핵심 16장과 선택 심화 6장으로 통합했다. `algorithms/`는 정확성·상각 분석과 계산 복잡도의 경계뿐 아니라 순서·구간·문자열, 그래프·최단 경로, Greedy·DP·조합 탐색, flow·matching의 표준 설계 도구를 포함한다. `languages/`는 프런트엔드, 실행 런타임, GC, 최적화·ABI, JIT, 엔진 스크립팅, reflection을 하나의 구현 흐름으로 갖춘다.
 
 남은 우선순위는 문서 수를 늘리는 작업이 아니다.
 

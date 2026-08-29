@@ -115,7 +115,7 @@
 | part26 EASTL | 통합 완료·제외 | allocator 인스턴스와 고정 용량·intrusive 컨테이너는 part04·10~12가 소유한다. N2271의 역사적 요구만 근거로 남기고 제품 소개 중심의 독립 장은 제외했다. |
 | part27 serialization | 유지 | 바이트 표현, 스키마 진화, 안정적 ID를 소유한다. |
 | part28 GPU memory | 이동·재작성 완료 | `graphics/stage0_adv_04_gpu_memory_system.md`가 API 중립 자원 배치·상주·전송·동기화·스트리밍을 소유한다. 셰이더 실행 계층과 API 호출 문법의 중복은 제거했다. |
-| part29 network buffer | 이동·재작성 완료 | `network/part06_packet_io_backpressure.md`가 패킷 소유권·batch I/O·buffer pool·bounded queue·backpressure를 소유한다. DPDK·HFT 제품 나열과 커널 내부 중복은 제거했다. |
+| part29 network buffer | 이동·재작성 완료 | `network/part04_socket_server_runtime.md`가 패킷 소유권·batch I/O·buffer pool·bounded queue·backpressure를 소유한다. DPDK·HFT 제품 나열과 커널 내부 중복은 제거했다. |
 | part30 compression | 이동·재작성 완료 | `algorithms/part10_lossless_compression.md`가 엔트로피 부호화·LZ·파싱·블록·안전한 복호화를 소유한다. 텍스처·에셋 제품 선택과 시스템 기능 나열은 제거했다. |
 | part31 memory profiling | 유지 | 할당 추적, 누수·단편화 검증, sanitizer 경계를 소유한다. |
 | part32 JIT | 이동 완료 | `languages/part05_jit_compilation.md`로 이동해 실행 런타임과 최적화 흐름에 배치했다. |
