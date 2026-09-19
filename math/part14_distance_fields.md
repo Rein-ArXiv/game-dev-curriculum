@@ -234,7 +234,7 @@ Inigo Quilez 의 *Distance Functions* 페이지가 *수십 가지 도형* 의 SD
 | Sphere | 1 sqrt | 가장 빠름 |
 | Box | abs + max + length | OBB 도 같은 비용 |
 | Plane | 1 dot | 무한 평면 |
-| Cylinder | 1 length | 절단 실린더 |
+| Cylinder | 2 length | 절단 실린더 |
 | Capsule | 1 dot + 1 length | 캐릭터 콜라이더 |
 | Torus | 2 length | 도넛 |
 | Cone | 더 복잡 | 끝이 뾰족 |
@@ -317,7 +317,7 @@ float opSubtract(float a, float b) { return max(a, -b); }
 
 ### 3.7 합성의 한계
 
-*min/max 합성* 의 결과는 *진짜 SDF 가 아님*. *경계 근처의 거리는 정확*, 하지만 *내부 깊은 곳에서 Eikonal 깨짐*. 단순 합성은 *근사 SDF (bound on distance)*.
+*min/max 합성* 의 결과는 *진짜 SDF 가 아님*. *합성 이음매에서 떨어진 곳의 거리는 정확*, 하지만 *두 형상이 만나는 오목 이음매 근처* 에서는 경계 바로 옆에서도 실제 거리보다 작게 나온다 (예: 두 반평면의 교집합 밖 모서리 근처에서 max 는 참거리의 약 0.71 배). 단순 합성은 *근사 SDF (거리의 하한, bound on distance)*.
 
 게임 응용에서 대부분 *경계 근처만 중요* (레이 마칭이 표면을 향해 진행) → 실용적으로 OK.
 
@@ -325,7 +325,7 @@ float opSubtract(float a, float b) { return max(a, -b); }
 flowchart TD
     Two[두 SDF a, b] --> Union[min — 합집합]
     Two --> Inter[max — 교집합]
-    Two --> Sub[max(a, -b) — 차집합]
+    Two --> Sub["max(a, -b) — 차집합"]
 ```
 
 이 boolean 합성 + smooth 합성으로 *수십 가지 도형* 만 가지고 *복잡한 객체* 만들기.
@@ -657,7 +657,7 @@ vec3 ClosestPointOnTriangle(vec3 p, vec3 a, vec3 b, vec3 c) {
 
 거리가 *음수 (내부)* 인지 *양수 (외부)* 인지 결정.
 
-방법 1: *법선 기반*. 가장 가까운 점에서의 *삼각형 법선* 과 *복셀→점 벡터* 내적. 양수면 외부, 음수면 내부. *간단하지만 취약* — closed/watertight mesh 에서도 *모서리 (변·정점이 가장 가까운 케이스)* 와 *비정상 normal* 에서 자주 틀린다. 학습용으로만.
+방법 1: *법선 기반*. 가장 가까운 점에서의 *삼각형 법선* 과 *최근접점→복셀 벡터* 내적. 양수면 외부, 음수면 내부. *간단하지만 취약* — closed/watertight mesh 에서도 *모서리 (변·정점이 가장 가까운 케이스)* 와 *비정상 normal* 에서 자주 틀린다. 학습용으로만.
 
 방법 2 (실전 표준): *광선 카운트 (ray casting)*. 복셀에서 *임의 방향* 으로 광선 쏴 *메쉬와 교차 횟수* 카운트. 홀수면 내부, 짝수면 외부 (*Jordan curve theorem*). 비싸지만 *강건*.
 
@@ -753,7 +753,7 @@ void CSParticleStep(uint id : SV_DispatchThreadID) {
 
 벡터 폰트를 *SDF 텍스처* 로 굽기. 작은 텍스처에서 *큰 화면 크기* 까지 *날카로운* 글자.
 
-원형: Chris Green (Valve), "Improved Alpha-Tested Magnification for Vector Textures" (2007). 알파 테스트 + bilinear → *매끄러운 외곽선*.
+원형: Chris Green (Valve), "Improved Alpha-Tested Magnification for Vector Textures and Special Effects" (2007). 알파 테스트 + bilinear → *매끄러운 외곽선*.
 
 진화형: *Multi-channel SDF (MSDF)*. RGB 채널 각각 다른 SDF. *모서리 (corner)* 에서 *날카로움 보존*. 일반 SDF 가 모서리에서 *둥글게* 되는 단점 해결.
 
@@ -824,4 +824,4 @@ SDF 는 *형상을 거리 함수로 표현* 한다는 시점 변화로 게임 �
 - Christer Ericson, *Real-Time Collision Detection*, Ch. 5 — Closest point on triangle.
 - ShaderToy (https://shadertoy.com) — SDF 데모의 표준 라이브러리.
 - Unreal Engine 5 *Mesh Distance Fields* 문서 — 산업 통합 사례.
-- Karras, Aila, "Fast Parallel Construction of High-Quality Bounding Volume Hierarchies" — SDF 가속 구조와 BVH 비교.
+- Karras, Aila, "Fast Parallel Construction of High-Quality Bounding Volume Hierarchies" — GPU 에서의 고품질 BVH 병렬 구축 (트리렛 재구조화).

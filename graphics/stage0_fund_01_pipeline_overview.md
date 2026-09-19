@@ -106,7 +106,7 @@ flowchart LR
 래스터화는 두 가지를 결정한다.
 
 1. **커버리지**: 삼각형이 어떤 샘플 위치를 덮는가? 엣지 함수의 부호와 경계 포함 규칙으로 판정한다. MSAA에서는 픽셀 중심 하나가 아니라 여러 샘플 위치를 검사한다.
-2. **보간**: 덮인 각 픽셀에서, 정점 3개의 속성(색·텍스처 좌표·깊이·법선)을 *무게중심 좌표(barycentric)* 로 섞어 그 픽셀의 값을 구한다. 단, 원근 투영 때문에 단순 선형 보간이 아니라 *원근 보정 보간* 이 필요하다.
+2. **보간**: 덮인 각 픽셀에서, 정점 3개의 속성(색·텍스처 좌표·깊이·법선)을 *무게중심 좌표(barycentric)* 로 섞어 그 픽셀의 값을 구한다. 단, 원근 투영 때문에 NDC 깊이를 제외한 속성에는 단순 선형 보간이 아니라 *원근 보정 보간* 이 필요하다.
 
 전통 파이프라인에서 커버리지 생성은 고정 함수이며, 응용은 컬·필·샘플·깊이 바이어스 상태를 지정한다. 정확한 경계 포함 규칙과 subpixel 정밀도는 API 계약을 따라야 인접 삼각형 사이의 균열과 이중 커버리지를 피할 수 있다.
 
@@ -180,7 +180,7 @@ flowchart TB
 
 | 추상 단계 | OpenGL | DirectX 11 | DirectX 12 | Vulkan |
 |---|---|---|---|---|
-| 정점 데이터 기술 | VAO + VBO | Input Layout + Vertex Buffer | Input Layout | `VkVertexInputState` |
+| 정점 데이터 기술 | VAO + VBO | Input Layout + Vertex Buffer | Input Layout | `VkPipelineVertexInputStateCreateInfo` |
 | 정점 처리 | Vertex Shader (GLSL) | Vertex Shader (HLSL) | 〃 | Vertex Shader (SPIR-V) |
 | 프래그먼트 처리 | Fragment Shader | **Pixel** Shader | Pixel Shader | Fragment Shader |
 | 파이프라인 상태 | 산재한 `glEnable`/상태 함수 | 상태 객체(Rasterizer/Blend/DepthStencil State) | **PSO**(파이프라인 상태 객체) | **`VkPipeline`** |

@@ -89,7 +89,8 @@ inline float GenerateParam(Rng& rng, const ParamSpec& spec) {
 
     const float anchors[4] = {spec.lo, spec.hi, spec.simplest, 0.0f};
     if (bucket < 75u) {
-        const float value = anchors[rng.Next() & 3u];
+        // 상위 2비트 — LCG 하위 비트는 직전 bucket 과 결정론적으로 얽힌다.
+        const float value = anchors[rng.Next() >> 30];
         return (value < spec.lo || value > spec.hi) ? spec.simplest : value;
     }
     if (bucket < 85u) {
@@ -99,7 +100,7 @@ inline float GenerateParam(Rng& rng, const ParamSpec& spec) {
         if (value > spec.hi) value = spec.hi;
         return value;
     }
-    float base = anchors[rng.Next() & 3u];
+    float base = anchors[rng.Next() >> 30];
     if (base < spec.lo || base > spec.hi) base = spec.simplest;
     float value = base + span * 1e-4f * (rng.Unit() * 2.0f - 1.0f);
     if (value < spec.lo) value = spec.lo;
@@ -113,7 +114,7 @@ inline float GenerateParam(Rng& rng, const ParamSpec& spec) {
 // property 본문이 채우는 관측 기록.
 //   Bound()      관측값이 상계 이하인지. 상계 대비 비율을 누적해 최악을 남긴다.
 //   interesting  이 표본이 *비퇴화* 인가. 자명하게 통과하는 표본만 모이면
-//                property 는 아무것도 강제하지 않는다(part11 의 vacuity).
+//                property 는 아무것도 강제하지 않는다(vacuity).
 //   skipped      사전조건 밖이라 판정하지 않는다. 축소기는 skipped 로 바뀌는
 //                후보를 거부하므로 반례가 사전조건을 유지한 채 작아진다.
 struct Observation {

@@ -459,6 +459,7 @@ void OpenSafeLibraries(lua_State* L) {
     // base에서도 위험 함수 개별 제거
     lua_pushnil(L); lua_setglobal(L, "loadstring");
     lua_pushnil(L); lua_setglobal(L, "dofile");
+    lua_pushnil(L); lua_setglobal(L, "loadfile");   // dofile(f)는 loadfile(f)()와 같으므로 함께 지운다
     lua_pushnil(L); lua_setglobal(L, "load");
 }
 ```
@@ -478,7 +479,7 @@ void InstallExecutionLimit(lua_State* L, int maxInstructions) {
 }
 ```
 
-- *명령 수 제한*: VM이 일정 바이트코드 명령마다 훅을 부르게 해, 한 호출이 정해진 명령 수를 넘으면 강제 중단. 무한 루프를 잡는다.
+- *명령 수 제한*: VM이 일정 바이트코드 명령마다 훅을 부르게 해, 정해진 명령 수를 넘으면 강제 중단. 무한 루프를 잡는다. 카운터는 호출 경계에서 리셋되지 않으므로 호출당 예산을 원하면 진입점마다 훅을 다시 건다.
 - *메모리 제한*: VM의 할당자를 가로채 누적 할당이 상한을 넘으면 할당을 거부. 메모리 폭탄을 막는다.
 - *시간 예산*: 스크립트 한 틱이 프레임 예산의 일부를 넘으면 다음 프레임으로 미룬다(협조적 양보가 가능한 경우).
 
@@ -515,7 +516,8 @@ void InstallDebugHook(lua_State* L) {
 ```cpp
 // 멈춘 지점에서 로컬 변수 열거 — 워치 패널·변수 검사에 사용
 void DumpLocals(lua_State* L, int level) {
-    lua_Debug ar; lua_getstack(L, level, &ar);
+    lua_Debug ar;
+    if (!lua_getstack(L, level, &ar)) return;   // 그 깊이의 프레임이 없으면 ar은 채워지지 않는다
     const char* name;
     for (int i = 1; (name = lua_getlocal(L, &ar, i)) != nullptr; ++i) {
         LogVar(name, DescribeValue(L, -1));   // 변수명·값 표시

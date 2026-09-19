@@ -167,7 +167,7 @@ inline HuffmanLengths BuildHuffmanLengths(const uint64_t freq[256], uint8_t limi
         return out;
     }
     while (live.size() > 1) {
-        // 가장 가벼운 둘. 동점은 노드 번호가 작은 쪽 — 결과가 결정적이어야
+        // 가장 가벼운 둘. 동점은 live 목록에서 앞선 쪽(병합 노드는 병합한 자리에 들어간다) — 결과가 결정적이어야
         // 같은 입력이 같은 바이트를 낸다.
         size_t a = 0, b = 1;
         if (node[live[b]].weight < node[live[a]].weight) std::swap(a, b);
@@ -335,6 +335,7 @@ inline bool HuffmanDecompress(const Bytes& frame, Bytes* out) {
     if (frame[4] != FrameHeader::kVersion) return false;
     const uint32_t raw_size = GetU32(frame.data() + 6);
     const uint32_t want_sum = GetU32(frame.data() + 10);
+    if (raw_size > (1u << 28)) return false;            // 자원 상한 — 형제 복호기와 같은 상한
 
     HuffmanLengths lengths;
     for (int s = 0; s < 256; ++s) {
@@ -391,7 +392,8 @@ public:
     static const uint32_t kMaxMatch = 258;
 
     explicit MatchFinder(const Bytes& data, uint32_t window = 4096, uint32_t depth = 32)
-        : data_(data), window_(window), depth_(depth), head_(kHashSize, kNone),
+        : data_(data), window_(window > 65535u ? 65535u : window),   // distance 는 u16 으로 직렬화된다
+          depth_(depth), head_(kHashSize, kNone),
           prev_(data.size(), kNone) {}
 
     void Insert(uint32_t at) {
@@ -427,7 +429,7 @@ public:
     }
 
 private:
-    static const uint32_t kNone = uint32_t(-1);
+    static constexpr uint32_t kNone = uint32_t(-1);   // constexpr 라야 odr-use(vector 생성자의 const& 인자)에 정의가 붙는다
     static const uint32_t kHashSize = 1 << 15;
 
     uint32_t Hash(uint32_t at) const {

@@ -20,7 +20,7 @@
 1. [도구의 성격: 측정 + 시각화](#1-도구의-성격-측정--시각화)
 2. [기술 스택: raylib + raygui](#2-기술-스택-raylib--raygui)
 3. [프로젝트 구조와 CMakeLists.txt](#3-프로젝트-구조와-cmakeliststxt)
-4. [Scene 인터페이스](#4-scene-인터페이스)
+4. [Scene 인터페이스 + fixed dt accumulator](#4-scene-인터페이스--fixed-dt-accumulator)
 5. [DragHandle 위젯](#5-draghandle-위젯)
 6. [화면 chrome (탭 / 패널 / 푸터)](#6-화면-chrome-탭--패널--푸터)
 7. [Welcome Scene 과 main 루프](#7-welcome-scene-과-main-루프)
@@ -82,6 +82,8 @@ physics_lab/
     measure/
       frame_timer.h
       frame_timer.cpp
+  tests/
+    physics_chrome_tests.cpp  ComputeLayout 분할 규약 검사 (ctest 타깃)
   articles/
     step01_skeleton.md
 ```
@@ -135,7 +137,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE raylib)
 
 ## 4. Scene 인터페이스 + fixed dt accumulator
 
-`physics_lab` 의 모든 토픽이 *한 Scene* 으로 구현된다. 인터페이스가 *입력 / 시뮬 / 그리기 세 단계로 분리* 되어 있다 — 6 개 함수.
+`physics_lab` 의 모든 토픽이 *한 Scene* 으로 구현된다. 인터페이스가 *입력 / 시뮬 / 그리기 세 단계로 분리* 되어 있다 — 7 개 함수.
 
 ```cpp
 namespace physlab {
@@ -190,7 +192,7 @@ while (running) {
 
 - **적분기 비교가 의미를 가지려면 dt 가 일정해야 한다.** 가변 dt 면 Explicit Euler 가 발산하는 임계 dt 를 *측정* 할 수 없다 — 매 프레임 dt 가 다르니까.
 - **결정성 측정의 전제.** 같은 입력 시퀀스 → 같은 시뮬 결과. fixed dt + 같은 substep 수라면 부동소수 결정성까지 비교 가능.
-- **프레임 드랍이 시뮬을 왜곡하지 않는다.** 한 프레임이 50 ms 걸려도 다음 프레임에서 6 번 substep 돌면 *실제 시간만큼* 따라잡음 (단, `kMaxAccum` 으로 cap — 한 프레임이 너무 길어졌을 때 *다음 프레임에서 30 번 substep* 같은 spiral of death 방지).
+- **프레임 드랍이 시뮬을 왜곡하지 않는다.** 한 프레임이 50 ms 걸려도 다음 프레임에서 6 번 substep 돌면 *실제 시간만큼* 따라잡음 (단, `kMaxAccum` 으로 cap — 한 프레임이 너무 길어졌을 때 *다음 프레임에서 100 번 substep* 같은 spiral of death 방지).
 
 `kFixedDt = 1/120 s` 는 *이 단계의 고정값*. dt 를 바꾸는 UI 는 이 단계에 없다.
 

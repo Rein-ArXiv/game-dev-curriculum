@@ -327,7 +327,7 @@ for (int i = 0; i < n; i += 8) {
 
 이는 분기가 거의 50/50일 때 유리하다. 분기 예측이 잘 되는 상황(99% 한쪽)이라면 스칼라 버전이 더 빠를 수 있다.
 
-### 정렬되지 않은 접근
+### 불규칙한 stride 접근
 
 ```c
 // 벡터화 어려움: stride 접근
@@ -340,7 +340,7 @@ for (int i = 0; i < n; i++) {
 
 ## 6. 레이아웃과 lane 적재 비용
 
-앞 절의 장벽들은 모두 컴파일러가 루프의 **의미**를 확신하지 못해 생겼다. 마지막 장벽은 성격이 다르다. 의미가 명확해도 **레지스터를 채우는 데 드는 명령 수**가 이득을 먹어 버리는 경우다.
+앞 절의 장벽들은 대부분 컴파일러가 루프의 **의미**를 확신하지 못해 생겼다. 마지막에 본 불규칙한 stride 접근은 성격이 다르다. 의미가 명확해도 **레지스터를 채우는 데 드는 명령 수**가 이득을 먹어 버리는 경우다.
 
 벡터 레지스터 하나를 채우는 방법은 세 가지뿐이다. 연속된 메모리에서 한 번에 읽거나, 흩어진 주소에서 lane별로 모으거나, 이미 읽어 둔 레지스터들을 섞어 재배치하거나. 어느 쪽이 되는지는 필드가 메모리에 어떤 간격으로 놓여 있는지가 정한다. 구조체 배열에서 한 필드만 뽑으면 그 필드는 `sizeof(struct)` 간격으로 떨어져 있고, 필드별로 배열을 나눠 두면 4바이트 간격으로 붙어 있다.
 
@@ -589,7 +589,7 @@ SIMD는 공짜 점심이 아니다. 하드웨어는 가능성을 제공하지만
 - [Intel Intrinsics Guide](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/) - 모든 인트린직의 바이블.
 - Fog, A. (2023). "Optimizing software in C++". https://www.agner.org/optimize/
 - Fog, A. "The microarchitecture of Intel, AMD and VIA CPUs".
-- ARM. (2019). "ARM Scalable Vector Extension".
+- Stephens, N. et al. (2017). "The ARM Scalable Vector Extension". IEEE Micro 37(2), 26-39.
 - Lemire, D. https://lemire.me/ - SIMD 최적화 블로그.
 - [Godbolt Compiler Explorer](https://godbolt.org/) - 컴파일러가 실제로 무엇을 생성하는지 확인.
 - Ulrich Drepper, "What Every Programmer Should Know About Memory" (2007).

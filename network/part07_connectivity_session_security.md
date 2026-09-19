@@ -89,7 +89,7 @@ Hole punching은 직접 연결 가능성을 높이지만 보장하지 않는다.
 
 ## 4. ICE: 후보 수집과 동시 시도
 
-실전 NAT traversal은 단일 기법이 아니라 *후보들의 경쟁* 이다 — WebRTC가 표준화한 ICE(Interactive Connectivity Establishment)의 골격이고, 게임 자체 구현도 같은 모양이 된다.
+실전 NAT traversal은 단일 기법이 아니라 *후보들의 경쟁* 이다 — IETF가 표준화하고 WebRTC가 채택한 ICE(Interactive Connectivity Establishment)의 골격이고, 게임 자체 구현도 같은 모양이 된다.
 
 1. **후보 수집**: 각 클라이언트가 연결 가능한 주소 후보를 모은다 — 로컬(사설) 주소, STUN으로 알아낸 공인 주소(server-reflexive), relay 주소.
 2. **교환**: 시그널링 채널(매치메이커)로 후보 목록을 교환한다.

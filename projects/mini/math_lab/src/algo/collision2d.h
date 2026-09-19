@@ -68,7 +68,9 @@ inline SATAxisInfo SATEvaluateAxis(const std::array<Vector2, 4>& a,
         if (pa < r.minA) r.minA = pa; if (pa > r.maxA) r.maxA = pa;
         if (pb < r.minB) r.minB = pb; if (pb > r.maxB) r.maxB = pb;
     }
-    float overlap = std::min(r.maxA, r.maxB) - std::max(r.minA, r.minB);
+    // 겹침 양: b 를 이 축의 ± 방향으로 밀어 분리하는 두 거리 중 작은 쪽.
+    // 단순 교집합 길이는 한 구간이 다른 구간을 포함할 때 실제 분리 거리보다 작다.
+    float overlap = std::min(r.maxA - r.minB, r.maxB - r.minA);
     r.overlap    = overlap;
     r.separating = (overlap < 0);
     return r;
@@ -184,8 +186,8 @@ inline std::vector<GJKStep> GJK2DTraced(const OBB2D& A, const OBB2D& B,
             if (Dot2(perp, ao) < 0) perp = {ab.y, -ab.x};
             d = perp;
             if (d.x * d.x + d.y * d.y < 1e-12f) {
-                // ab 와 ao 가 평행 — 임의 수직축
-                d = {-ab.y, ab.x};
+                // ab 가 영벡터 (지원점 중복) — 수직축이 없으므로 임의 축
+                d = {1, 0};
             }
         } else if (S.size() == 3) {
             // 삼각형 — 원점 포함 검사. 표준 2D GJK 형태:
@@ -252,11 +254,11 @@ inline std::vector<GJKStep> GJK2DTraced(const OBB2D& A, const OBB2D& B,
         s.iter      = i;
         trace.push_back(s);
     }
-    // 최대 반복 도달 — 안전 종료
+    // 반복 한도는 분리 증거가 아니다. done=false로 미확정 결과를 남긴다.
     GJKStep last{};
     last.simplex   = S;
     last.direction = d;
-    last.done      = true;
+    last.done      = false;
     last.intersect = false;
     last.iter      = maxIter;
     trace.push_back(last);

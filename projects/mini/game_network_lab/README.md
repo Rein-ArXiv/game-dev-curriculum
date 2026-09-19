@@ -8,7 +8,7 @@
 
 | 이론 주장 | 조작 변수 | 통제 변수 | 관측값 | 기대 결과 | 실패 주입 | 자동 테스트 |
 |---|---|---|---|---|---|---|
-| TCP는 byte stream이다. 길이 prefix frame decoder가 header·payload 분할과 여러 frame 병합을 처리한다. | Push 조각 분할(3 / 7 / 나머지), 한 Push에 담긴 frame 수(1 vs 2) | 같은 encoder가 만든 동일 frame byte 열 | 조각 사이 `Pop()` 유무, 완성 frame의 type과 payload | frame이 완성되기 전에는 `Pop()`이 비고 완성 뒤 payload가 원본과 같다 | header만 3byte 넣고 Pop, payload 미완성 상태에서 Pop | `game_network_protocol` |
+| TCP는 byte stream이다. 길이 prefix frame decoder가 header·payload 분할과 여러 frame 병합을 처리한다. | Push 조각 분할(3 / 7 / 나머지), 한 Push에 담긴 frame 수(1 vs 2) | 같은 encoder가 만든 동일 frame byte 열 | 조각 사이 `Pop()` 유무, 완성 frame의 type과 payload | frame이 완성되기 전에는 `Pop()`이 비고 완성 뒤 payload가 원본과 같다 | header만 3byte 넣고 Pop, header 10byte 상태에서 Pop | `game_network_protocol` |
 | wire format은 encoder가 아니라 명세가 정한다. control frame 12byte header와 datagram 24byte header는 고정 byte 열이다. | 없음(고정 vector) | 손으로 적은 기대 byte 배열 | `EncodeControl(Hello, {1..5})` 17byte, `EncodeDatagram(Input, 42, 99, {1..5})` 29byte 전 byte | magic `47 4E 4C 31`, version·type·길이·reserved가 big-endian으로 명세와 일치한다 | encoder와 decoder가 같은 상수를 공유하도록 바꿔도 golden 배열이 먼저 깨진다 | `game_network_protocol` |
 | 손상된 header는 복구 대상이 아니라 종료 사유다. | 변조 위치(magic, version, 선언 길이, reserved), 누적 push byte 수 | 나머지 byte는 정상 frame·datagram 그대로 | `DecodeDatagram` 반환, `FrameDecoder::Pop`과 `Failed()`, `BufferedBytes()` | 네 종류 모두 거부되고 stream decoder는 영구 실패 상태로 남는다 | 마지막 byte 제거, 선언 길이 ±1, reserved 1, magic 1byte 반전, version 2, 선언 길이 65537, 상한 +1 byte push | `game_network_protocol` |
 | 오류 데이터그램이 preposted receive capacity를 영구 소비하지 않는다. | 정상 client 앞에 보내는 oversized UDP 개수(64) | 같은 서버 설정, oversized 뒤 정상 client 1명 | client exit code, decode한 snapshot 수 | `WSAEMSGSIZE` 완료 뒤에도 handshake·binding·snapshot이 성공한다 | 4KiB UDP 데이터그램 64개 | `game_network_process` |
@@ -111,6 +111,7 @@ projects/mini/game_network_lab/build/Release/game_client.exe --ticks 300
 --udp-port <1..65535>
 --workers <count>
 --duration <seconds>
+--loopback            (127.0.0.1 에만 bind. 자동 테스트는 항상 이 옵션으로 서버를 띄운다 — 방화벽 알림 없음)
 ```
 
 클라이언트는 snapshot마다 서버가 마지막으로 적용한 input sequence, 권위 위치, 로컬 prediction correction을 출력한다. correction이 항상 0일 필요는 없다. client input 전송 시점, 60Hz simulation tick, 20Hz snapshot tick이 서로 다른 시계이므로 snapshot 사이의 미확정 입력이 존재한다.
@@ -222,7 +223,7 @@ Wait-Process $server.Id
 - UDP reliable channel — reliable ordered 전달과 중복 억제는 `projects/mega`에서 검증
 - congestion control과 pacing — 어디서도 검증되지 않음
 - 손실·고정 지연·재정렬 주입 — `projects/mega`에서 검증
-- delta snapshot, baseline, AOI — 어디서도 검증되지 않음
+- delta snapshot, baseline, AOI — delta snapshot과 baseline은 `projects/mega`에서 검증, AOI는 어디서도 검증되지 않음
 - 입력 history replay 기반 server reconciliation — 어디서도 검증되지 않음
 - NAT traversal과 relay — 어디서도 검증되지 않음
 - reconnect와 host migration — 어디서도 검증되지 않음

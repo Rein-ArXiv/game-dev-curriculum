@@ -65,3 +65,20 @@ scripts/link_report.txt
 Thumbs.db
 .DS_Store
 desktop.ini
+
+# Local review reports and superseded proposals (keep files on disk)
+REVIEW_*.md
+REDESIGN_*.md
+/GRAPHICS_CONSOLIDATION.md
+/projects/mini/VERIFY.md
+
+# Scratch work, archived implementations, and local API responses
+/temp/
+/resp.json
+/resp2.json
+
+# Reproducible Mermaid exports; keep Markdown sources and export scripts
+**/diagrams/*_diagram_*.png
+
+# DB lab benchmark/test output, not source fixtures
+/projects/mini/db_lab/*.wal

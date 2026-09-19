@@ -56,6 +56,7 @@ void TestChainSetup() {
     }
     // snippet-begin: anchor-invariant
     // 한 스텝 뒤에도 anchor 는 제자리 — invMass 0 은 어떤 보정도 받지 않는다.
+    // (Step 은 솔버 뒤에 anchor 를 다시 고정하지 않으므로 이 검사가 솔버를 본다.)
     const Vector2 anchor = scene.Particles()[0].pos;
     scene.Step(1.0f / 120.0f);
     CHECK(scene.Particles()[0].pos.x == anchor.x);

@@ -19,8 +19,8 @@ void OnSignal(int) {
 
 std::uint32_t ParseUnsigned(const char* text, std::uint32_t fallback) {
     char* end = nullptr;
-    unsigned long value = std::strtoul(text, &end, 10);
-    if (end == text || *end != '\0' || value > 0xfffffffful) return fallback;
+    unsigned long long value = std::strtoull(text, &end, 10);
+    if (end == text || *end != '\0' || value > 0xffffffffull) return fallback;
     return static_cast<std::uint32_t>(value);
 }
 
@@ -29,12 +29,17 @@ std::uint32_t ParseUnsigned(const char* text, std::uint32_t fallback) {
 int main(int argc, char** argv) {
     gnl::ServerConfig config;
     std::uint32_t durationSeconds = 0;
-    for (int i = 1; i + 1 < argc; i += 2) {
+    for (int i = 1; i < argc; ++i) {
         std::string_view option = argv[i];
-        std::uint32_t value = ParseUnsigned(argv[i + 1], 0);
-        if (option == "--tcp-port" && value <= 65535) {
+        if (option == "--loopback") {
+            config.loopbackOnly = true;
+            continue;
+        }
+        if (i + 1 >= argc) break;
+        std::uint32_t value = ParseUnsigned(argv[++i], 0);
+        if (option == "--tcp-port" && value >= 1 && value <= 65535) {
             config.tcpPort = static_cast<std::uint16_t>(value);
-        } else if (option == "--udp-port" && value <= 65535) {
+        } else if (option == "--udp-port" && value >= 1 && value <= 65535) {
             config.udpPort = static_cast<std::uint16_t>(value);
         } else if (option == "--workers") {
             config.workerCount = value;

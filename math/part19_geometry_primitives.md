@@ -325,7 +325,7 @@ vec3 ClosestPointOnLine(vec3 p0, vec3 dir, vec3 point) {
 
 ### 3.5 점-삼각형 거리
 
-7개 Voronoi 영역 분류는 최근접점 계산과 Möller-Trumbore 보조 계산에 쓰인다. 정점 3 + 변 3 + 면 1.
+7개 Voronoi 영역 분류는 최근접점 계산에 쓰인다. 정점 3 + 변 3 + 면 1.
 
 ```cpp
 float PointTriangleDistance(vec3 p, vec3 v0, vec3 v1, vec3 v2) {
@@ -532,7 +532,7 @@ bool PointInTriangle(vec3 p, vec3 v0, vec3 v1, vec3 v2) {
 }
 ```
 
-세 좌표가 *모두 비음수* 면 내부. 모서리 위 (한 좌표 0) 도 내부로 봄.
+세 좌표가 *모두 비음수* 면 내부. 모서리 위 (한 좌표 0) 도 내부로 봄. `Barycentric` 은 p 를 삼각형 평면에 정사영한 점의 좌표를 돌려주므로 평면 밖의 p 도 통과한다 — 3D 점은 먼저 평면 거리로 거른다.
 
 ### 5.5 perspective-correct 보간
 
@@ -584,14 +584,16 @@ $O(n \log n)$ — 정렬이 dominant.
 A. Andrew (1979). 더 단순한 구현.
 
 1. 점들을 x, y 순으로 정렬.
-2. *upper hull* (왼쪽 → 오른쪽, 위쪽) 만들기.
-3. *lower hull* (오른쪽 → 왼쪽, 아래쪽) 만들기.
+2. *lower hull* (왼쪽 → 오른쪽, 아래쪽) 만들기.
+3. *upper hull* (오른쪽 → 왼쪽, 위쪽) 만들기.
 4. 둘을 합침.
 
 ```cpp
 // 교육용 코드. 산업 구현은 추가로 (1) 중복점 제거,
 // (2) collinear 케이스의 strict / non-strict 정책,
 // (3) float 비교를 epsilon 기반으로 등이 필요.
+float Cross2D(vec2 o, vec2 a, vec2 b);   // 정의는 아래
+
 std::vector<vec2> ConvexHull2D(std::vector<vec2> points) {
     int n = (int)points.size();
     if (n <= 1) return points;             // 0 또는 1 점 — 그대로 반환
@@ -848,8 +850,8 @@ flowchart LR
 - Christer Ericson, *Real-Time Collision Detection* — 점-도형 거리, closest point 의 종합.
 - Eric Lengyel, *Foundations of Game Engine Development*, Vol. 1 — 게임 수학의 기하 부분.
 - Inigo Quilez, "Distance functions" — closest point 함수의 카탈로그.
-- Mikola Lysenko, "Implementing Multidimensional Spatial Indexing in Computational Geometry" — 알고리즘 공학.
+- Mikola Lysenko, "Collision detection (part 1~3)" (0fps.net, 2015) — 박스 교차 알고리즘 공학과 벤치마크.
 - CGAL (https://www.cgal.org/) — C++ 계산 기하 라이브러리.
 - Triangle (https://www.cs.cmu.edu/~quake/triangle.html) — 산업 표준 2D Delaunay.
 - Recast & Detour — 게임 내비메쉬의 표준.
-- "Lloyd's Algorithm for Stippling and Object Distribution" — Lloyd 의 균등 분포.
+- Adrian Secord, "Weighted Voronoi Stippling" (NPAR 2002) — Lloyd 이완의 균등 분포 응용.

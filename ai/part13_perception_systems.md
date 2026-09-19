@@ -295,8 +295,8 @@ $$
 |---|---|---|
 | 0.0 ~ 0.3 | Idle | 정상 순찰, 미세한 자극 무시 |
 | 0.3 ~ 0.7 | Suspicious | 멈춰 두리번, 자극원 응시 |
-| 0.7 ~ 1.0 | Investigating | 자극원으로 이동해 확인 |
-| 1.0 | Detected | 완전 발각, Alert/Combat 전이 |
+| 0.7 ~ 1.0 | Alert | 적을 확실히 인지, 동료에게 알리고 전투 준비 |
+| 1.0 | Alert(포화) | 완전 발각, 교전 거리에 들면 Combat 전이 |
 
 이 노출도 + 누적 + 단계 모델이 잠입 게임의 핵심 메커니즘이다. 플레이어는 어둠과 엄폐로 노출도를 낮춰 발각을 늦추고, 게이지가 임계를 넘는 순간 경계 단계가 올라간다. 0/1 가시성으로는 만들 수 없는 그라데이션이다. 게이지를 *UI로 시각화* (Splinter Cell의 광량계, 다수 게임의 발각 인디케이터)하면 메커니즘이 플레이어의 손에 직접 들어온다.
 
@@ -419,7 +419,7 @@ $$
 \ln q_{\text{fused}} = \sum_i \ln q_i
 $$
 
-오즈가 가법적인 나이브 베이즈와 달리, noisy-OR에서 가법적인 양은 *로그 의심* 이다. 이 형태에서 두 성질이 곧장 나온다.
+로그-오즈가 가법적인 나이브 베이즈와 달리, noisy-OR에서 가법적인 양은 *로그 의심* 이다. 이 형태에서 두 성질이 곧장 나온다.
 
 - *단조성*: $q_i < 1$ 인 인자를 곱할수록 $q_{\text{fused}}$ 는 줄기만 하므로 $c_{\text{fused}} \ge \max_i c_i$ 다. 융합은 *어느 단일 감각보다 약해질 수 없다*. 등호는 다른 감각이 모두 $c_j = 0$ 이거나, 이미 어떤 감각이 $c_i = 1$ 로 포화된 경우다.
 - *포화와 체감*: 감각이 하나 늘 때마다 의심에 $q_i < 1$ 이 곱해져 의심이 *기하적으로* 감소한다. 그래서 신뢰도는 1로 다가가되 절대 증가폭은 점점 줄어든다. 시각 0.6·청각 0.5에 진동 감지 0.4를 더하면 $q = 0.4 \times 0.5 \times 0.6 = 0.12$, 융합 0.88 — 세 번째 증거의 기여(0.8→0.88)가 두 번째(0.6→0.8)보다 작다. "이미 거의 확신할 때 한 증거 더는 별로 안 보탠다"가 곱 구조의 필연이다.
@@ -621,6 +621,6 @@ Splinter Cell·Thief 같은 잠입 게임은 빛, 소리, 엄폐와 적의 경�
 - Ian Millington, *AI for Games*, 3rd Ed., "World Interfacing"·"Sensory Systems" — 감지 관리(sense management)와 폴링 스케줄.
 - Damián Isla, "Third Eye Crime: Building a Stealth Game Around Occupancy Maps" (AIIDE 2013) — 점유 맵 기반 적 위치 확률 추정과 외삽.
 - Splinter Cell·Thief·Metal Gear Solid 디자인 분석 (GDC/postmortem) — 인지 기반 잠입 게임플레이와 공정성.
-- Mark Brown, "What Makes a Good Stealth Game?" (Game Maker's Toolkit) — 인지 시스템의 게임플레이 영향과 발각 피드백.
+- Mark Brown, "How Stealth Game Guards See and Hear" (Game Maker's Toolkit, School of Stealth Part 1) — 인지 시스템의 게임플레이 영향과 발각 피드백.
 - Judea Pearl, *Probabilistic Reasoning in Intelligent Systems* (Morgan Kaufmann, 1988), §4 — noisy-OR 인과 모델과 독립 원인 결합.
 - Richard O. Duda, Peter E. Hart, David G. Stork, *Pattern Classification*, 2nd ed. (Wiley, 2001), Ch.2 — 조건부 독립 관측의 우도비 결합과 나이브 베이즈.

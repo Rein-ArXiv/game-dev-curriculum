@@ -87,7 +87,7 @@ if (!scene
 }
 ```
 
-플래그 사이에는 미묘한 상호작용이 있다. `aiProcess_GenSmoothNormals`는 메시에 법선이 *전혀 없을 때만* 동작하고, 이미 법선이 있으면 무시된다. 반대로 강제로 다시 계산하고 싶으면 `aiProcess_ForceGenNormals`와 함께 기존 법선을 지우는 처리가 필요하다. `aiProcess_CalcTangentSpace`는 메시에 법선과 UV가 모두 있어야 의미가 있다. 탄젠트 공간은 표면의 UV 미분으로 정의되므로 UV가 없으면 계산할 수 없고, `aiProcess_GenSmoothNormals`보다 뒤에 적용되도록 플래그 순서가 내부적으로 정렬된다. 한편 `aiProcess_JoinIdenticalVertices`는 위치·법선·UV가 *모두* 같은 정점만 병합하므로, 같은 위치라도 UV 솔기(seam)에서 갈라진 정점은 그대로 둔다. 큐브의 경우 8개 꼭짓점이 각 면마다 다른 법선과 UV를 가지므로 병합 후에도 24개로 남는 식이다.
+플래그 사이에는 미묘한 상호작용이 있다. `aiProcess_GenSmoothNormals`는 메시에 법선이 *전혀 없을 때만* 동작하고, 이미 법선이 있으면 무시된다. 반대로 강제로 다시 계산하고 싶으면 `aiProcess_GenSmoothNormals`에 `aiProcess_ForceGenNormals`를 더하면 되고, 기존 법선은 후처리 단계가 스스로 지우고 다시 만든다. `aiProcess_CalcTangentSpace`는 메시에 법선과 UV가 모두 있어야 의미가 있다. 탄젠트 공간은 표면의 UV 미분으로 정의되므로 UV가 없으면 계산할 수 없고, `aiProcess_GenSmoothNormals`보다 뒤에 적용되도록 플래그 순서가 내부적으로 정렬된다. 한편 `aiProcess_JoinIdenticalVertices`는 위치·법선·UV가 *모두* 같은 정점만 병합하므로, 같은 위치라도 UV 솔기(seam)에서 갈라진 정점은 그대로 둔다. 큐브의 경우 8개 꼭짓점이 각 면마다 다른 법선과 UV를 가지므로 병합 후에도 24개로 남는 식이다.
 
 `aiProcessPreset_TargetRealtime_Quality` 같은 프리셋도 있다. 이 프리셋은 Triangulate, GenSmoothNormals, JoinIdenticalVertices, CalcTangentSpace, 그리고 메시 검증과 인덱스 개선 같은 여러 플래그를 묶은 것이다. 무엇이 켜지는지 모르고 쓰면 디버깅이 어려워지므로, 학습 단계에서는 필요한 플래그를 명시적으로 OR 하는 편이 낫다.
 
@@ -159,7 +159,7 @@ ProcessNode(scene->mRootNode, scene, glm::mat4(1.0f));
 
 가장 흔한 함정이 행렬 메모리 레이아웃의 불일치다. Assimp의 `aiMatrix4x4`는 행 우선으로 저장되어 메모리상 첫 네 원소가 첫 번째 *행*이다. 반면 GLM은 OpenGL과 동일하게 열 우선이라 첫 네 원소가 첫 번째 *열*이다. `glm::make_mat4`는 메모리를 그대로 읽어 열 우선으로 해석하므로, Assimp 행렬을 그대로 넘기면 전치된 행렬이 만들어진다. `glm::transpose`로 한 번 뒤집어 줘야 의도한 변환이 된다. 이 전치를 빠뜨리면 회전 부분이 전치되고 이동 성분이 엉뚱한 자리에 들어가, 모델이 회전이 어긋난 채로 화면 밖 어딘가로 날아가는 증상이 나타난다. 디버깅할 때 회전·이동이 동시에 이상하면 이 전치를 먼저 의심한다.
 
-루트 노드 자체의 변환도 무시하면 안 된다. glTF나 FBX는 루트에 단위로 변환(예: 미터/센티미터 스케일 보정, Z-up → Y-up 회전)을 실어 두는 경우가 많다. `ProcessNode`를 단위 행렬이 아니라 루트 변환부터 시작하도록 한 위 코드가 이 변환을 자연스럽게 포함한다.
+루트 노드 자체의 변환도 무시하면 안 된다. glTF나 FBX는 루트에 단위로 변환(예: 미터/센티미터 스케일 보정, Z-up → Y-up 회전)을 실어 두는 경우가 많다. 단위 행렬에서 시작해 루트 노드에도 `world = parentXform * local`을 적용하는 위 코드가 이 변환을 자연스럽게 포함한다.
 
 ### 정적 베이크 vs 런타임 계층
 
@@ -196,11 +196,14 @@ struct MeshData {
     std::vector<Vertex> vertices;
     std::vector<unsigned> indices;
     unsigned materialIndex;
+    glm::mat4 world;                 // 노드 트리에서 누적한 월드 변환
 };
 
-MeshData ProcessMesh(const aiMesh* mesh, const aiScene* scene) {
+MeshData ProcessMesh(const aiMesh* mesh, const aiScene* scene,
+                     const glm::mat4& world) {
     MeshData out;
     out.materialIndex = mesh->mMaterialIndex;
+    out.world = world;
     out.vertices.reserve(mesh->mNumVertices);
 
     for (unsigned i = 0; i < mesh->mNumVertices; ++i) {
@@ -449,7 +452,7 @@ OBJ는 1992년에 등장한 포맷으로, 정적 메시와 단순 텍스처 정�
 | `aiNode` 깊이 | 1~2 단계 | 깊은 트리 |
 | `aiMaterial` 텍스처 슬롯 | DIFFUSE / SPECULAR / NORMALS | + BASE_COLOR / METALNESS / ROUGHNESS / AO / EMISSIVE |
 | `aiAnimation` | 없음 | 있음 |
-| `aiBone` / `aiSkeleton` | 없음 | 있음 |
+| `aiBone` | 없음 | 있음 |
 
 ### 압축 텍스처
 
@@ -471,7 +474,7 @@ glTF의 KTX2와 Basis Universal은 GPU 네이티브 블록 압축 포맷으로 �
 
 ## 6. Mesh와 Model 클래스 구성
 
-위에서 만든 데이터 흐름을 재사용 가능한 클래스로 묶는다. 책임을 두 계층으로 나눈다. `Mesh`는 한 메시 단위로 VAO/VBO/EBO와 텍스처 슬롯 묶음을 소유하고 `Draw(program)`으로 자기 자신을 그린다. `Model`은 한 모델 파일 전체를 표현하며, 노드를 평탄화한 `std::vector<Mesh>`를 들고 `Draw(program)`이 모든 메시를 순회한다.
+위에서 만든 데이터 흐름을 재사용 가능한 클래스로 묶는다. 책임을 두 계층으로 나눈다. `Mesh`는 한 메시 단위로 VAO/VBO/EBO와 텍스처 슬롯 묶음, 그리고 노드 순회로 누적한 월드 변환을 소유하고 `Draw(program, modelXform)`으로 자기 자신을 그린다. `Model`은 한 모델 파일 전체를 표현하며, 노드를 평탄화한 `(메시, 월드 변환)` 쌍의 배열 `std::vector<Mesh>`를 들고 `Draw(program, modelXform)`이 모든 메시를 순회한다.
 
 ### Mesh 클래스
 
@@ -479,19 +482,21 @@ glTF의 KTX2와 Basis Universal은 GPU 네이티브 블록 압축 포맷으로 �
 class Mesh {
 public:
     Mesh(std::vector<Vertex> verts, std::vector<unsigned> indices,
-         std::vector<Texture> textures);
+         std::vector<Texture> textures, const glm::mat4& world);
     ~Mesh();
     Mesh(const Mesh&)            = delete;
     Mesh& operator=(const Mesh&) = delete;
     Mesh(Mesh&& o) noexcept;
     Mesh& operator=(Mesh&& o) noexcept;
 
-    void Draw(GLuint program) const;
+    // uModel에 modelXform * world_를 올리고 텍스처를 바인딩한 뒤 glDrawElements를 부른다
+    void Draw(GLuint program, const glm::mat4& modelXform) const;
 
 private:
     GLuint vao_ = 0, vbo_ = 0, ebo_ = 0;
     std::vector<Texture> textures_;
     size_t indexCount_ = 0;
+    glm::mat4 world_{1.0f};   // 노드 순회로 누적한 월드 변환
 
     void Setup(const std::vector<Vertex>& v, const std::vector<unsigned>& i);
 };
@@ -501,8 +506,8 @@ private:
 
 ```cpp
 Mesh::Mesh(std::vector<Vertex> v, std::vector<unsigned> i,
-           std::vector<Texture> t)
-    : textures_(std::move(t)), indexCount_(i.size()) {
+           std::vector<Texture> t, const glm::mat4& world)
+    : textures_(std::move(t)), indexCount_(i.size()), world_(world) {
     Setup(v, i);   // 이 안에서 VAO/VBO/EBO를 만들고 업로드한다
 }
 
@@ -514,7 +519,8 @@ Mesh::~Mesh() {
 
 Mesh::Mesh(Mesh&& o) noexcept
     : vao_(o.vao_), vbo_(o.vbo_), ebo_(o.ebo_),
-      textures_(std::move(o.textures_)), indexCount_(o.indexCount_) {
+      textures_(std::move(o.textures_)), indexCount_(o.indexCount_),
+      world_(o.world_) {
     o.vao_ = o.vbo_ = o.ebo_ = 0;   // 원본 핸들을 0으로 비운다
 }
 ```
@@ -527,7 +533,7 @@ Mesh::Mesh(Mesh&& o) noexcept
 class Model {
 public:
     explicit Model(const std::string& path);
-    void Draw(GLuint program) const;
+    void Draw(GLuint program, const glm::mat4& modelXform) const;
 
 private:
     std::vector<Mesh> meshes_;
@@ -535,15 +541,17 @@ private:
     TextureCache textureCache_;
 
     void LoadModel(const std::string& path);
-    void ProcessNode(const aiNode* node, const aiScene* scene);
-    Mesh ProcessMesh(const aiMesh* mesh, const aiScene* scene);
+    void ProcessNode(const aiNode* node, const aiScene* scene,
+                     const glm::mat4& parentXform);
+    Mesh ProcessMesh(const aiMesh* mesh, const aiScene* scene,
+                     const glm::mat4& world);
     std::vector<Texture> LoadMaterialTextures(const aiMaterial* mat,
                                               aiTextureType type,
                                               const std::string& typeName);
 };
 
-void Model::Draw(GLuint program) const {
-    for (const auto& m : meshes_) m.Draw(program);
+void Model::Draw(GLuint program, const glm::mat4& modelXform) const {
+    for (const auto& m : meshes_) m.Draw(program, modelXform);
 }
 ```
 
@@ -553,10 +561,9 @@ void Model::Draw(GLuint program) const {
 Model backpack("assets/backpack/backpack.obj");
 // ... 매 프레임:
 shader.Use();
-shader.SetMat4("uModel", modelXform);
 shader.SetMat4("uView",  view);
 shader.SetMat4("uProj",  proj);
-backpack.Draw(shader.id);
+backpack.Draw(shader.id, modelXform);   // uModel = modelXform * 메시별 world_
 ```
 
 `Draw` 한 번으로 모델의 모든 메시와 모든 텍스처가 자동으로 바인딩되어 그려진다. 게임 로직 쪽에서는 VAO나 `glActiveTexture` 같은 OpenGL API를 거의 보지 않는다. 모델 로딩의 복잡함이 두 클래스 안쪽에 갇히고, 바깥은 변환 행렬 세 개와 `Draw` 한 줄만 다룬다.
@@ -603,5 +610,5 @@ flowchart LR
 ## 더 읽을거리
 
 - [Assimp 공식 문서](https://the-asset-importer-lib-documentation.readthedocs.io/en/latest/) — 후처리 플래그·임포트 파이프라인.
-- [LearnOpenGL: Model Loading](https://learnopengl.com/Model-Loading/Assimp) — 같은 Mesh/Model 패턴의 구현 예제.
+- [LearnOpenGL: Model Loading](https://learnopengl.com/Model-Loading/Assimp) — 같은 Mesh/Model 패턴을 다루는 시리즈의 도입 장(구현 코드는 이어지는 Mesh·Model 장에 있다).
 - [glTF 2.0 Specification](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html) — 런타임 친화 모델 포맷의 표준(OBJ 다음 단계).

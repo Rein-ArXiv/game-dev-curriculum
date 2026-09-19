@@ -265,7 +265,7 @@ flowchart LR
 가장 단순한 구현은 각 셀에서 *integration 값이 가장 작은 이웃* 을 찾아 그쪽을 가리키는 것이다.
 
 ```cpp
-void BuildFlowMinNeighbor(const IntegrationField& f, FlowField& flow) {
+void BuildFlowMinNeighbor(const CostField& cf, const IntegrationField& f, FlowField& flow) {
     for (int y = 0; y < flow.height; ++y)
     for (int x = 0; x < flow.width; ++x) {
         float here = f.value[Idx(x,y)];
@@ -275,8 +275,11 @@ void BuildFlowMinNeighbor(const IntegrationField& f, FlowField& flow) {
         for (auto [dx,dy] : kNeighbors8) {
             int nx=x+dx, ny=y+dy;
             if (!flow.InBounds(nx,ny)) continue;
-            float v = f.value[Idx(nx,ny)];
-            if (v < best) { best = v; bestDir = Normalize(Vec2{(float)dx,(float)dy}); }
+            // 이웃 값만 비교하면 안 된다 — 이 셀을 떠나는 간선 비용(대각 ×√2)을 더해야
+            // 최단경로 선행 셀이 뽑힌다. BuildIntegration과 같은 식이라 선행 셀은 v == here.
+            float step = cf.At(x,y) * StepLen(Cell{x,y}, Cell{nx,ny});
+            float v = f.value[Idx(nx,ny)] + step;
+            if (v <= best) { best = v; bestDir = Normalize(Vec2{(float)dx,(float)dy}); }
         }
         flow.dir[Idx(x,y)] = bestDir;   // 최소값 이웃이 없으면 {0,0} (목표/우물)
     }
@@ -318,10 +321,10 @@ void BuildFlowGradient(const IntegrationField& f, FlowField& flow) {
 | 방식 | 만드는 방향 | 이상과의 오차 |
 |---|---|---|
 | 4방향 최소 이웃 | 동(0°) 또는 북(90°) | 최대 45° |
-| 8방향 최소 이웃 | 동 또는 북동(45°) | 최대 22.5° |
+| 8방향 최소 이웃 | 동(0°) 또는 북동(45°) | 16.7° 또는 28.3° |
 | 중심 차분 | $\approx -16.7°$ | 거의 0 |
 
-최소 이웃의 22.5° 양자화 오차는 좁은 통로에서는 통로 방향에 가려질 수 있지만, 넓은 평지에서는 유닛 무리가 사선 대신 "동→북동→동"으로 지그재그 이동하는 원인이 된다. 중심 차분도 *integration field 자체의 격자 오차* 를 물려받으므로, 방향 샘플링과 거리장 이산화는 따로 평가해야 한다.
+최소 이웃의 양자화 오차(위 예에서 16.7° 또는 28.3°)는 좁은 통로에서는 통로 방향에 가려질 수 있지만, 넓은 평지에서는 유닛 무리가 사선 대신 "동→북동→동"으로 지그재그 이동하는 원인이 된다. 중심 차분도 *integration field 자체의 격자 오차* 를 물려받으므로, 방향 샘플링과 거리장 이산화는 따로 평가해야 한다.
 
 이렇게 만든 flow field는 한 장의 "이 격자 위 어디서든 목표로 흐르는 방향 지도"다. 유닛은 어느 셀에 있든 자기 셀 벡터만 읽으면 된다.
 
@@ -508,7 +511,7 @@ Vec2 Separation(const Unit& u, const SpatialHash& hash, float radius) {
     return count ? Normalize(push) : Vec2{0, 0};
 }
 
-Vec2 desired = Normalize(flowDir * wFlow + Separation(u, hash, sepR) * wSep);
+Vec2 desired = Normalize(flowDir * wFlow + Separation(u, hash, sepR) * wSep) * u.maxSpeed;
 ```
 
 flow field(전역 방향) + separation(국소 회피)의 결합이 대량 유닛 이동의 표준 조합이다. 가중치 $w_\text{flow}$, $w_\text{sep}$로 "목표 추종 대 충돌 회피"의 균형을 맞춘다. separation의 이웃 질의는 *공간 해시(spatial hash)* 로 $O(1)$ 근처에서 처리해야 한다 — 전수 비교는 $O(N^2)$로 무리 규모에서 폭발한다.
@@ -697,7 +700,7 @@ Supreme Commander의 수천 유닛, 타워 디펜스의 끝없는 적 물결이 
 - James A. Sethian, "A fast marching level set method for monotonically advancing fronts" (*PNAS* 93(4), 1996) — FMM 원전, 힙 기반 단조 전파.
 - Elisabeth Rouy & Agnès Tourin, "A Viscosity Solutions Approach to Shape-from-Shading" (*SIAM Journal on Numerical Analysis* 29(3), 1992) — Eikonal의 업윈드 Godunov 이산화와 점성해 수렴.
 - John N. Tsitsiklis, "Efficient Algorithms for Globally Optimal Trajectories" (*IEEE Transactions on Automatic Control* 40(9), 1995) — Dijkstra형 연속 최단시간(FMM과 독립 발견).
-- Leif Erkenbrach, "Flow Field Pathfinding for Tower Defense" (2013) — cost/integration/flow 단계별 구현.
+- Leif Erkenbrach, "Flow Field Pathfinding" (leifnode.com, 2013) — cost/integration/flow 단계별 구현.
 - Craig Reynolds, "Steering Behaviors for Autonomous Characters" (GDC 1999) — separation·arrival 등 조향 행동의 원전.
 - Ian Millington, *AI for Games*, 3rd Ed. — Dijkstra/A* 비교와 격자 길찾기 기반.
 - Supreme Commander 길찾기 GDC 발표 자료 — 대규모 유닛 이동 사례.

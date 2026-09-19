@@ -171,8 +171,12 @@ void GameServerRuntime::RunTick() {
     ++metrics_.ticks;
     for (auto& [id, client] : clients_) {
         static_cast<void>(id);
-        client.positionX += client.moveX;
-        client.positionY += client.moveY;
+        // int32 += int16 overflows (UB) after ~65k ticks of a peer-chosen
+        // extreme move; saturate at the int32 edge instead.
+        client.positionX = static_cast<std::int32_t>(std::clamp<std::int64_t>(
+            std::int64_t{client.positionX} + client.moveX, INT32_MIN, INT32_MAX));
+        client.positionY = static_cast<std::int32_t>(std::clamp<std::int64_t>(
+            std::int64_t{client.positionY} + client.moveY, INT32_MIN, INT32_MAX));
     }
     if (metrics_.ticks % kSnapshotEveryTicks == 0) BroadcastSnapshots();
 }

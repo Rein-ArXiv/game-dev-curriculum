@@ -193,9 +193,8 @@ Thread 1: LOAD refCount (값: 1)
 Thread 2: LOAD refCount (값: 1)
 Thread 1: ADD 1 (결과: 2)
 Thread 2: SUB 1 (결과: 0)
-Thread 1: STORE refCount = 2
 Thread 2: STORE refCount = 0 → free(obj)
-Thread 1: 이미 해제된 메모리에 쓰기 (Use-After-Free)
+Thread 1: STORE refCount = 2 → 이미 해제된 메모리에 쓰기 (Use-After-Free)
 ```
 
 **문제 2: 포인터 로드와 카운트 증가의 비원자성**
@@ -278,7 +277,7 @@ weak_ptr에서 shared_ptr로 승격할 때 더 복잡한 문제가 발생한다.
 ```c
 // 잘못된 구현
 SharedPtr SharedPtr_Lock(const WeakPtr* weak) {
-    SharedPtr result = {NULL, weak->control};
+    SharedPtr result = {NULL, NULL};
 
     if (weak->control == NULL)
         return result;
@@ -289,6 +288,9 @@ SharedPtr SharedPtr_Lock(const WeakPtr* weak) {
 
     InterlockedIncrement(&weak->control->strongRefs);  // (2)
     // 문제: (1)과 (2) 사이에 0으로 변할 수 있음
+    result.ptr = weak->ptr;
+    result.control = weak->control;
+    return result;
 }
 ```
 
@@ -672,7 +674,7 @@ void Lock_Optimized(Spinlock* lock) {
             _mm_pause();  // CPU에게 스핀 루프임을 알림
         }
 
-        // 2. CAS 시도
+        // 2. test-and-set 시도
         if (!lock->locked.exchange(true, std::memory_order_acquire)) {
             return;  // 성공
         }
@@ -781,6 +783,6 @@ Memory Ordering 선택은 다음과 같이 정리된다.
 - Maged Michael, Michael Scott, "Simple, Fast, and Practical Non-Blocking and Blocking Concurrent Queue Algorithms": https://www.cs.rochester.edu/~scott/papers/1996_PODC_queues.pdf
 - Maurice Herlihy, Nir Shavit, *The Art of Multiprocessor Programming* (Chapter 3, Chapter 7)
 - Herb Sutter, "atomic Weapons: The C++ Memory Model and Modern Hardware": https://herbsutter.com/2013/02/11/atomic-weapons-the-c-memory-model-and-modern-hardware/
-- Intel, "Intel 64 and IA-32 Architectures Software Developer Manual, Volume 3A" (Chapter 8: Multiple-Processor Management)
+- Intel, "Intel 64 and IA-32 Architectures Software Developer's Manual, Volume 3A" (325384-092US 기준 11장: Multiple-Processor Management)
 - ARM, "ARM Barrier Litmus Tests and Cookbook": https://developer.arm.com/documentation/genc007826/latest/
 - cppreference, "std::memory_order": https://en.cppreference.com/w/cpp/atomic/memory_order

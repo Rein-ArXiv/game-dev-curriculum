@@ -100,13 +100,13 @@ void RotationScene::DrawWorld(int cx, int cy, int cw, int ch) {
 
     // 캔버스 안에만 텍스트 (3D viewport 는 화면 전체였음).
     DrawText(mode_ == Mode::Euler
-                ? "Mode: Euler XYZ — gimbal lock at yaw ≈ ±90° (middle axis)"
+                ? "Mode: Euler XYZ - gimbal lock at yaw ~ ±90° (middle axis)"
                 : "Mode: Slerp (green, top) vs Nlerp (red, bottom)",
               cx + 10, cy + 10, 14, Color{200, 200, 200, 255});
 
     // snippet-begin: gimbal-warning
     if (mode_ == Mode::Euler && EulerNearGimbalLock(yaw_)) {
-        DrawText("GIMBAL LOCK — pitch and roll collapsed onto same axis",
+        DrawText("GIMBAL LOCK - pitch and roll collapsed onto same axis",
                   cx + 10, cy + 30, 14, Color{255, 100, 100, 255});
     }
     // snippet-end: gimbal-warning

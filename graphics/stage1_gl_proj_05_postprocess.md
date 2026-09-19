@@ -89,7 +89,7 @@ if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
 glBindFramebuffer(GL_FRAMEBUFFER, 0);
 ```
 
-`GL_TEXTURE_MIN_FILTER`와 `GL_TEXTURE_MAG_FILTER`를 `GL_LINEAR`로 두는 이유는 이후 후처리 패스가 이 텍스처를 화면 크기와 다른 해상도로 샘플링하거나, 블러에서 텍셀 사이를 보간해 읽기 때문이다. 부동소수 텍스처에 대한 bilinear 필터링은 데스크톱 GPU에서 기본 지원되지만, 일부 OpenGL ES 환경에서는 `GL_OES_texture_float_linear` 확장이 있어야 한다.
+`GL_TEXTURE_MIN_FILTER`와 `GL_TEXTURE_MAG_FILTER`를 `GL_LINEAR`로 두는 이유는 이후 후처리 패스가 이 텍스처를 화면 크기와 다른 해상도로 샘플링하거나, 블러에서 텍셀 사이를 보간해 읽기 때문이다. 부동소수 텍스처에 대한 bilinear 필터링은 데스크톱 GPU에서 기본 지원되지만, 일부 OpenGL ES 환경에서는 half-float용 `GL_OES_texture_half_float_linear` 확장이 있어야 한다(`GL_OES_texture_float_linear`는 32비트 float 전용이다).
 
 깊이는 텍스처가 아니라 renderbuffer로 잡았다. 깊이 버퍼를 셰이더에서 다시 읽을 필요가 없다면 renderbuffer가 더 가볍다. 깊이를 후처리 단계(예: SSAO, depth of field)에서 샘플링하려면 `GL_DEPTH_COMPONENT24` 텍스처로 바꿔 첨부한다.
 
@@ -199,7 +199,7 @@ void main() {
 
 위의 `if` 분기는 임계값에서 밝기를 칼같이 잘라낸다. 이 *하드 임계(hard threshold)*는 임계 근처에서 밝기가 흔들리는 픽셀들이 프레임마다 켜졌다 꺼졌다 하면서 *깜빡임(flickering)*을 만든다. 특히 작은 밝은 점(스펙큘러 하이라이트)이 카메라가 움직일 때 어른거린다.
 
-실무에서는 임계 근처를 부드럽게 넘기는 *소프트 knee*를 쓴다. 임계값 아래에서 0, 임계값 위에서 완전 통과로 가는 사이를 2차 곡선으로 잇는다.
+실무에서는 임계 근처를 부드럽게 넘기는 *소프트 knee*를 쓴다. 임계값 아래에서 0, 임계값 위에서 초과분(`brightness - uThreshold`)만 통과시키는 두 구간 사이를 2차 곡선으로 잇는다.
 
 ```glsl
 // 소프트 knee 버전
@@ -359,7 +359,7 @@ void main() {
 
 ### 선형 샘플링 트릭
 
-GPU의 하드웨어 bilinear 샘플링을 이용하면 5탭 가우시안을 3탭으로 줄일 수 있다. bilinear 필터는 인접한 두 텍셀의 가중 평균을 한 번의 페치로 반환하는데, UV offset을 정확히 두 텍셀 사이의 적절한 위치로 잡으면 그 가중 평균이 곧 두 탭의 가우시안 합이 되도록 만들 수 있다. 두 텍셀당 한 번의 페치로 줄어 페치 횟수가 거의 절반이 된다. 이 트릭은 Sigg와 Hadwiger의 GPU Gems / GPU Pro 계열 글에서 정리되었고, 게임 엔진 블룸 코드의 표준 최적화다. offset과 가중치를 다시 계산해야 하므로 구현이 조금 까다롭지만, 화면 전체를 여러 번 블러하는 비용을 줄이는 효과가 크다.
+GPU의 하드웨어 bilinear 샘플링을 이용하면 5탭 가우시안을 3탭으로 줄일 수 있다. bilinear 필터는 인접한 두 텍셀의 가중 평균을 한 번의 페치로 반환하는데, UV offset을 정확히 두 텍셀 사이의 적절한 위치로 잡으면 그 가중 평균이 곧 두 탭의 가우시안 합이 되도록 만들 수 있다. 두 텍셀당 한 번의 페치로 줄어 페치 횟수가 거의 절반이 된다. 이 트릭의 원리(두 텍셀의 선형 결합을 bilinear 페치 한 번으로 얻기)는 Sigg와 Hadwiger의 GPU Gems 2 20장에서 정리되었고, 가우시안 블러에 적용한 형태는 게임 엔진 블룸 코드의 표준 최적화다. offset과 가중치를 다시 계산해야 하므로 구현이 조금 까다롭지만, 화면 전체를 여러 번 블러하는 비용을 줄이는 효과가 크다.
 
 ## 4. 톤 매핑 함수 비교
 

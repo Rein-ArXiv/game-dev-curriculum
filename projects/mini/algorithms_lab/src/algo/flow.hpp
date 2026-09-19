@@ -329,8 +329,8 @@ inline Matching BipartiteMatchingDfs(size_t left, size_t right,
 // snippet-end: flow-matching
 
 inline bool LayeredDfs(uint32_t u, const std::vector<std::vector<uint32_t>>& adj,
-                       std::vector<int64_t>& dist, std::vector<uint8_t>& used,
-                       Matching& m, measure::Counters* c);
+                       std::vector<int64_t>& dist, int64_t dist_nil,
+                       std::vector<uint8_t>& used, Matching& m, measure::Counters* c);
 
 // snippet-begin: flow-hopcroft-karp
 // Hopcroft-Karp. 한 phase 에서 *서로소인 최단 증가 경로를 모두* 찾는다.
@@ -346,9 +346,12 @@ inline Matching HopcroftKarp(size_t left, size_t right,
     std::vector<int64_t> dist(left, kNone);
 
     for (;;) {
-        // BFS: 매칭 안 된 왼쪽에서 시작해 층을 매긴다.
+        // BFS: 매칭 안 된 왼쪽에서 시작해 층을 매긴다. 자유 오른쪽 정점은 가상의
+        // NIL 하나로 합쳐 그 층 `dist_nil` 을 기록한다 — 그것이 이 phase 의 최단
+        // 증가 경로 길이다. dist_nil 을 안 재면 DFS 가 자유 정점을 아무 층에서나
+        // 받아 더 긴 경로를 쓰고, "phase 마다 최단" 이라는 전제가 깨진다.
         std::deque<uint32_t> q;
-        bool found = false;
+        int64_t dist_nil = kNone;
         for (uint32_t u = 0; u < left; ++u) {
             if (m.right_of[u] == -1) { dist[u] = 0; q.push_back(u); }
             else                      dist[u] = kNone;
@@ -356,38 +359,46 @@ inline Matching HopcroftKarp(size_t left, size_t right,
         while (!q.empty()) {
             const uint32_t u = q.front();
             q.pop_front();
+            if (dist_nil != kNone && dist[u] >= dist_nil) continue;  // 더 깊은 층은 안 연다
             if (c) ++c->visited;
             for (uint32_t v : adj[u]) {
                 const int32_t w = m.left_of[v];
-                if (w == -1) { found = true; continue; }
+                if (w == -1) {
+                    if (dist_nil == kNone) dist_nil = dist[u] + 1;   // 처음 만난 층
+                    continue;
+                }
                 if (dist[uint32_t(w)] != kNone) continue;
                 dist[uint32_t(w)] = dist[u] + 1;
                 q.push_back(uint32_t(w));
             }
         }
-        if (!found) break;
+        if (dist_nil == kNone) break;
         ++m.phases;
 
         // DFS: 층을 정확히 한 칸씩 올라가는 경로만 쓴다.
         std::vector<uint8_t> used(right, 0);
         for (uint32_t u = 0; u < left; ++u) {
             if (m.right_of[u] != -1) continue;
-            if (LayeredDfs(u, adj, dist, used, m, c)) { ++m.size; ++m.augments; }
+            if (LayeredDfs(u, adj, dist, dist_nil, used, m, c)) { ++m.size; ++m.augments; }
         }
     }
     return m;
 }
 
 inline bool LayeredDfs(uint32_t u, const std::vector<std::vector<uint32_t>>& adj,
-                       std::vector<int64_t>& dist, std::vector<uint8_t>& used,
-                       Matching& m, measure::Counters* c) {
+                       std::vector<int64_t>& dist, int64_t dist_nil,
+                       std::vector<uint8_t>& used, Matching& m, measure::Counters* c) {
     for (uint32_t v : adj[u]) {
         if (used[v]) continue;
         const int32_t w = m.left_of[v];
-        if (w != -1 && dist[uint32_t(w)] != dist[u] + 1) continue;
+        if (w == -1) {
+            if (dist[u] + 1 != dist_nil) continue;   // 자유 정점도 층을 지켜야 한다
+        } else if (dist[uint32_t(w)] != dist[u] + 1) {
+            continue;
+        }
         used[v] = 1;
         if (c) ++c->visited;
-        if (w == -1 || LayeredDfs(uint32_t(w), adj, dist, used, m, c)) {
+        if (w == -1 || LayeredDfs(uint32_t(w), adj, dist, dist_nil, used, m, c)) {
             m.left_of[v] = int32_t(u);
             m.right_of[u] = int32_t(v);
             return true;
@@ -444,6 +455,7 @@ inline MinCostResult MinCostMaxFlow(Residual& g, uint32_t s, uint32_t t) {
             }
         }
         if (!changed) break;
+        if (round + 1 == n) return r;   // n 라운드째에도 완화되면 음수 순환 — 잠재가 정의되지 않으므로 빈 결과로 거부
     }
 
     for (;;) {

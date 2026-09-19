@@ -79,12 +79,8 @@ glDepthRange(0.0, 1.0);          // NDC z를 깊이 버퍼 범위로 (기본 0~1
 사용자 정의 클립 평면이 필요하면 `gl_ClipDistance[]`에 평면까지의 부호 있는 거리를 출력하고 대응하는 `GL_CLIP_DISTANCEi`를 활성화한다. GPU는 음의 영역을 잘라낸다. 물 반사나 단면 표시에 쓴다.
 
 ```glsl
-out gl_PerVertex {
-    vec4 gl_Position;
-    float gl_PointSize;
-    float gl_ClipDistance[1];
-};
-
+// gl_ClipDistance는 상수 인덱스로만 접근하면 크기가 암묵적으로 정해진다
+// (gl_PerVertex 블록 재선언은 GLSL 4.10+ 전용이라 3.30 기준에서는 쓰지 않는다)
 void main() {
     vec4 worldPos = uModel * vec4(localPos, 1.0);
     gl_ClipDistance[0] = dot(worldPos, uClipPlane);

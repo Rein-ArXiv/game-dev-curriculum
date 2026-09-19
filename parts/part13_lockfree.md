@@ -120,7 +120,7 @@ while (!value.compare_exchange_weak(old, new_val,
 
 ### 기본 구조 (안전하지 않은 예제)
 
-가장 간단한 lock-free 자료구조는 스택이다. 다음 코드는 CAS 기반 push/pop 골격을 보여주는 교육용 예제이며, **노드 메모리를 안전한 규약 없이 회수하면 use-after-free와 ABA 문제가 발생한다**. 이 문서의 메모리 회수 절에서 설명하는 Hazard Pointer, Epoch-based reclamation, RCU 같은 기법을 결합하기 전에는 동작 원리를 보여주는 골격일 뿐 실제 노드를 즉시 해제하면 안 된다.
+가장 간단한 lock-free 자료구조는 스택이다. 다음 코드는 CAS 기반 push/pop 골격을 보여주는 교육용 예제이며, **노드 메모리를 안전한 규약 없이 회수하면 use-after-free와 ABA 문제가 발생한다**. 이 문서의 메모리 회수 절에서 설명하는 Hazard Pointer, Epoch-based reclamation 같은 기법을 결합하기 전에는 동작 원리를 보여주는 골격일 뿐 실제 노드를 즉시 해제하면 안 된다.
 
 ```cpp
 template<typename T>
@@ -157,8 +157,8 @@ public:
                !head.compare_exchange_weak(
                    old_head, old_head->next,
                    std::memory_order_acquire,
-                   std::memory_order_relaxed)) {
-            // old_head는 실패 시 자동 갱신
+                   std::memory_order_acquire)) {
+            // old_head는 실패 시 자동 갱신되고 다음 반복에서 다시 역참조된다
         }
 
         return old_head;  // 실제 시스템에서는 즉시 delete가 안전하지 않다.
@@ -185,7 +185,7 @@ push에서 새 노드의 데이터는 다른 스레드가 노드 포인터를 ac
 
 pop의 성공 경로는 `acquire`다. 이 load 이후 노드의 데이터를 읽으면, 다른 스레드의 push가 release한 시점의 데이터가 보인다.
 
-실패 경로는 어차피 재시도하므로 `relaxed`를 쓸 수 있다.
+pop의 실패 경로도 갱신된 `old_head`를 다시 역참조하므로 `acquire`여야 한다. 반면 push의 실패 경로는 얻은 포인터를 역참조하지 않으므로 `relaxed`로 충분하다.
 
 ## 4. ABA 문제
 
@@ -406,8 +406,8 @@ new_node → [A]
 
 Step 1: CAS(last->next, nullptr, A)
 head → [D] → [A]
-tail ------→ ↑
-             (뒤처짐)
+tail ---↑
+        (뒤처짐)
 
 Step 2: CAS(tail, D, A)
 head → [D] → [A]
@@ -476,6 +476,26 @@ class HazardPointerManager {
     HPRecord records[MAX_THREADS];
 
 public:
+    // 스레드는 자신의 record를 먼저 등록해야 한다. active를 세우지 않으면
+    // 아래 스캔이 그 슬롯을 건너뛰어 보호 중인 노드까지 회수한다.
+    HPRecord& acquire_record() {
+        for (auto& rec : records) {
+            bool expected = false;
+            if (rec.active.compare_exchange_strong(
+                    expected, true, std::memory_order_seq_cst)) {
+                return rec;
+            }
+        }
+        throw std::runtime_error("HP record 고갈");
+    }
+
+    void release_record(HPRecord& rec) {
+        for (auto& hp : rec.hazards) {
+            hp.store(nullptr, std::memory_order_seq_cst);
+        }
+        rec.active.store(false, std::memory_order_seq_cst);
+    }
+
     class HPGuard {
         HPRecord* rec;
         size_t index;
@@ -709,14 +729,14 @@ Folly (Facebook):
 
 ```cpp
 #include <folly/ProducerConsumerQueue.h>  // Lock-free SPSC
-#include <folly/MPMCQueue.h>               // Lock-free MPMC
+#include <folly/MPMCQueue.h>               // MPMC (folly 문서 기준 lock-free는 아님; 대기 시 futex로 블로킹)
 ```
 
 Boost.Lockfree:
 
 ```cpp
 #include <boost/lockfree/queue.hpp>
-boost::lockfree::queue<int> q(128);  // Fixed-size, 메모리 회수 불필요
+boost::lockfree::queue<int> q(128);  // 가변 크기(freelist 초기 노드 128개), 메모리 회수 불필요
 ```
 
 Linux Kernel:

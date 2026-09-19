@@ -652,7 +652,7 @@ static void TestDsuArms() {
     for (int ci = 0; ci < 2; ++ci) {
         for (int si = 0; si < 2; ++si) {
             Dsu dsu(2000, ci == 1, si == 1);
-            for (uint32_t i = 1; i < 2000; ++i) dsu.Union(i - 1, i);
+            for (uint32_t i = 1; i < 2000; ++i) dsu.Union(i, i - 1);   // 새 정점을 뿌리로 — 이 순서라야 사슬이 자란다
             dsu.ResetStats();
             for (uint32_t i = 0; i < 2000; ++i) dsu.Find(i);
             depth[ci][si] = dsu.AverageFindDepth();
@@ -964,7 +964,7 @@ static void TestDpKnapsackArms() {
         // 밀도 탐욕은 절대 최적을 넘지 못한다.
         CHECK(DensityGreedyKnapsack(items, capacity) <= brute);
         // 분기 한정이 실제로 가지를 쳤는가 — 전수 2^n 보다 노드가 적어야 한다.
-        if (n >= 8) CHECK(bb.nodes < (uint64_t(1) << (n + 1)));
+        if (n >= 8) CHECK(bb.nodes < (uint64_t(1) << n));
     }
 }
 
@@ -1029,7 +1029,7 @@ static void TestDpSequencesAndStructures() {
     CHECK(MatrixChain(dims) == 15125);
     CHECK(MatrixChain({10, 20}) == 0);
 
-    // 트리 DP. 사슬 트리에서 최대 가중 독립 집합.
+    // 트리 DP. 작은 분기 트리(0→{1,2}, 1→{3,4})에서 최대 가중 독립 집합.
     std::vector<std::vector<uint32_t>> children = {{1, 2}, {3, 4}, {}, {}, {}};
     const std::vector<int64_t> weight = {10, 5, 6, 4, 4};
     CHECK(TreeMaxWeightIndependentSet(children, weight, 0) == 18);   // {0, 3, 4}
@@ -1208,17 +1208,32 @@ static void TestMinCostAndAssignment() {
 }
 
 static void TestCspApplyUndo() {
-    // 5 정점 사이클의 3색 칠하기. 홀수 사이클이라 2색으로는 불가능하다.
+    // (가) 5 정점 사이클의 3색 칠하기. 홀수 사이클이라 2색으로는 불가능하다.
+    // 후향 검사가 빠지면 3^5 = 243 이 나오는 자리 — 그 회귀는 여기서 잡는다.
+    CspProblem c5;
+    c5.variables = 5;
+    c5.full_domain = 0b111;
+    for (uint32_t i = 0; i < 5; ++i) c5.not_equal.push_back({i, (i + 1) % 5});
+    CspSolver c5_base(c5, CspOptions{});
+    CHECK(c5_base.CountSolutions() == 30);   // (3-1)^5 - (3-1) = 30
+    CHECK(c5_base.HashStable());
+
+    // (나) 가지치기의 *효과* 를 재는 인스턴스. C5·3색은 도메인이 좁아 전방 검사와
+    // AC-3 가 한 번도 발동하지 않는다 — 어느 팔이든 노드 수가 기준과 똑같이 나온다.
+    // 그래서 값 4개·차수 4인 순환 그래프 C9(1,2) 를 쓴다(bench 의 CSP 표와 같은 문제).
     CspProblem p;
-    p.variables = 5;
-    p.full_domain = 0b111;
-    for (uint32_t i = 0; i < 5; ++i) p.not_equal.push_back({i, (i + 1) % 5});
+    p.variables = 9;
+    p.full_domain = 0b1111;
+    for (uint32_t i = 0; i < p.variables; ++i) {
+        p.not_equal.push_back({i, uint32_t((i + 1) % p.variables)});
+        p.not_equal.push_back({i, uint32_t((i + 2) % p.variables)});
+    }
 
     CspOptions plain;
     CspSolver base(p, plain);
     const size_t all = base.CountSolutions();
     CHECK(base.HashStable());      // Apply/Undo 가 서로의 역이다
-    CHECK(all == 30);              // 홀수 사이클 5개 정점, 3색: (3-1)^5 - (3-1) = 30
+    CHECK(all == 528);             // C9(1,2) 의 고유 4색 칠하기 528개 (전수 열거로 확인)
 
     // 가지치기를 켜도 해 *집합* 이 같아야 한다. 개수만 같은 것으로는 부족하다.
     std::vector<std::vector<int32_t>> base_set;
@@ -1240,10 +1255,11 @@ static void TestCspApplyUndo() {
         CHECK(count == all);
         std::sort(got.begin(), got.end());
         CHECK(got == base_set);
-        // 가지치기가 실제로 노드를 줄였는가
-        CHECK(solver.Stats().nodes <= base.Stats().nodes);
+        // 가지치기가 실제로 노드를 줄였는가. 등호를 허용하면 "켰는데 아무 일도
+        // 일어나지 않음" 이 통과한다 — 각 팔이 단독으로 기준보다 적어야 한다.
+        CHECK(solver.Stats().nodes < base.Stats().nodes);
     }
-    // 2색으로는 해가 없다
+    // 2색으로는 해가 없다 (i, i+1, i+2 가 삼각형을 이룬다)
     CspProblem two = p;
     two.full_domain = 0b11;
     CspSolver none(two, plain);
@@ -1937,7 +1953,7 @@ static int RunProperties(int argc, char** argv) {
             ++failed;
             continue;
         }
-        if (interest_pct < p.min_interest_pct) {
+        if (config.only_sample < 0 && interest_pct < p.min_interest_pct) {   // 비퇴화 하한은 표본 집단의 판정 — --sample 재현(표본 1개)에는 걸지 않는다
             // 자명하게 통과하는 표본만 모이면 property 는 아무것도 강제하지 않는다.
             std::printf("  FAIL %-28s 비퇴화 표본 %d%% < 하한 %d%%\n",
                         p.name, interest_pct, p.min_interest_pct);

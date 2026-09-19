@@ -119,7 +119,7 @@ class GpuTimer {
 };
 ```
 
-3 프레임 ring 이면 *결과가 2~3 프레임 늦게 도착* — 실시간 그래프 입장에선 *눈에 안 보일 정도*. `GL_QUERY_RESULT_AVAILABLE` 을 먼저 확인하므로 CPU 를 강제로 기다리지 않는다. GPU 가 아주 많이 밀려 ring 이 꽉 차면 *그 프레임의 GPU 측정만 건너뛰고* 마지막 값을 유지한다.
+3 프레임 ring 이면 *결과가 1~3 프레임 늦게 도착* — 실시간 그래프 입장에선 *눈에 안 보일 정도*. `GL_QUERY_RESULT_AVAILABLE` 을 먼저 확인하므로 CPU 를 강제로 기다리지 않는다. GPU 가 아주 많이 밀려 ring 이 꽉 차면 *그 프레임의 GPU 측정만 건너뛰고* 마지막 값을 유지한다.
 
 ### 셰이더 stage 별 시간은 불가
 
@@ -333,7 +333,7 @@ const int newest =
 CHECK(debug.Get(newest).text == "msg" + std::to_string(kOverflow - 1));
 ```
 
-`Push` 를 `std::vector::push_back` 으로 바꾸면 `Count()` 가 266 이 되어 첫 단언이, 덮어쓰기를 없애면 마지막 단언이 갈린다. `PushAppMessage` 로 넣은 항목의 `source` 가 `GL_DEBUG_SOURCE_APPLICATION` 인지도 같은 함수가 함께 확인한다 — 앱 메시지와 드라이버 메시지가 같은 창에 섞여도 출처가 구분되어야 하기 때문이다.
+`Push` 를 `std::vector::push_back` 으로 바꾸면 `Count()` 가 268 이 되어 첫 단언이, 덮어쓰기를 없애면 마지막 단언이 갈린다. `PushAppMessage` 로 넣은 항목의 `source` 가 `GL_DEBUG_SOURCE_APPLICATION` 인지도 같은 함수가 함께 확인한다 — 앱 메시지와 드라이버 메시지가 같은 창에 섞여도 출처가 구분되어야 하기 때문이다.
 
 ---
 

@@ -35,7 +35,7 @@ FrameDecoder decoder;
 Require(decoder.Push(std::span(frame).first(3)), "push first fragment");
 Require(!decoder.Pop().has_value(), "partial header must wait");
 Require(decoder.Push(std::span(frame).subspan(3, 7)), "push second fragment");
-Require(!decoder.Pop().has_value(), "partial payload must wait");
+Require(!decoder.Pop().has_value(), "partial header must still wait");
 Require(decoder.Push(std::span(frame).subspan(10)), "push final fragment");
 auto decodedFrame = decoder.Pop();
 ```
@@ -229,9 +229,9 @@ if (filter != nullptr && std::strcmp(filter, item.step) != 0 &&
 
 필터가 없으면 전체가 돌고, 있으면 태그나 case 이름 하나로 좁혀진다. 어느 case가 어느 글에
 속하는지는 각 실행 파일의 `main`에 있는 표가 정하며, 기준은 "그 글이 무엇을 추가했는가"다.
-그래서 `game_network_step02_send_queue`가 실패하면 송신 queue 상한을 고정한 판정이 깨진
-것이고, `game_network_step05_authority`가 실패하면 권위 tick과 snapshot 계약이 깨진 것이다.
-전체 타깃만 있을 때는 두 실패가 같은 한 줄로 보인다.
+그래서 `game_network_step02_tick_clock`이 실패하면 tick 시계의 catch-up 상한을 고정한 판정이
+깨진 것이고, `game_network_step05_authority`가 실패하면 권위 tick과 snapshot 계약이 깨진 것이다.
+전체 타깃 `game_network_runtime`만 있을 때는 두 실패가 같은 한 줄로 보인다.
 
 실제 동작을 별도로 관측할 때는 서버를 숨김 프로세스로 실행하고 클라이언트 exit code를 보존한다.
 

@@ -293,29 +293,32 @@ int global_var = 2;               /* GLOBAL */
 extern int extern_var;            /* GLOBAL UNDEF */
 
 static void local_func() {        /* LOCAL */
-    printf("Local\n");
+    printf("Local %d\n", local_var);
 }
 
 void global_func() {              /* GLOBAL */
-    printf("Global\n");
+    global_var += extern_var;
+    printf("Global %d\n", global_var);
     local_func();
 }
 ```
+
+서식 지정자가 없고 개행으로 끝나는 `printf`는 컴파일러가 `puts`로 접고, 참조되지 않는 `extern` 선언은 심볼 테이블에 아예 남지 않는다. 위처럼 실제로 사용해야 두 심볼이 `UND`로 나타난다.
 
 ```bash
 $ gcc -c symbols.c
 $ readelf -s symbols.o
 
-Symbol table '.symtab' contains 14 entries:
+Symbol table '.symtab' contains 11 entries:
    Num:    Value          Size Type    Bind   Vis      Ndx Name
      0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND
      1: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS symbols.c
      4: 0000000000000000     4 OBJECT  LOCAL  DEFAULT    3 local_var
-     5: 0000000000000000    21 FUNC    LOCAL  DEFAULT    1 local_func
-     6: 0000000000000004     4 OBJECT  GLOBAL DEFAULT    3 global_var
-     7: 0000000000000000     0 NOTYPE  GLOBAL DEFAULT  UND extern_var
+     6: 0000000000000000    39 FUNC    LOCAL  DEFAULT    1 local_func
+     7: 0000000000000004     4 OBJECT  GLOBAL DEFAULT    3 global_var
      8: 0000000000000000     0 NOTYPE  GLOBAL DEFAULT  UND printf
-     9: 0000000000000015    37 FUNC    GLOBAL DEFAULT    1 global_func
+     9: 0000000000000027    64 FUNC    GLOBAL DEFAULT    1 global_func
+    10: 0000000000000000     0 NOTYPE  GLOBAL DEFAULT  UND extern_var
 ```
 
 `local_var`, `local_func`은 `LOCAL` 바인딩이고, `global_var`, `global_func`은 `GLOBAL`이다. `extern_var`, `printf`는 `UND`(undefined)로, 다른 오브젝트 파일에서 해결해야 한다. `ET_REL`에서 정의된 심볼의 `st_value`는 보통 해당 섹션 시작에 대한 오프셋이고, undefined 심볼은 0이다.
@@ -324,11 +327,11 @@ Symbol table '.symtab' contains 14 entries:
 
 ```bash
 $ nm symbols.o
+                 U extern_var
+0000000000000027 T global_func
+0000000000000004 D global_var
 0000000000000000 t local_func
 0000000000000000 d local_var
-0000000000000015 T global_func
-0000000000000004 D global_var
-                 U extern_var
                  U printf
 ```
 
@@ -504,7 +507,7 @@ $ ldd hello_static
         not a dynamic executable
 ```
 
-`printf` 하나를 위해 libc 전체가 들어가서 872KB가 된다. 정적 링킹의 단점은 다음과 같다.
+`printf` 하나를 위해 libc에서 끌려 들어온 오브젝트들이 쌓여 872KB가 된다. 정적 링킹의 단점은 다음과 같다.
 
 - 실행 파일 크기 증가
 - 라이브러리 업데이트 시 재컴파일 필요
@@ -516,14 +519,15 @@ ELF 정적 구조 안에 PLT와 GOT가 어떻게 배치되는지를 본다. 런�
 
 ### 정적 빌드 시 생성되는 PLT 엔트리
 
-`gcc -o hello hello.c`로 동적 링크된 실행 파일을 빌드하면, 링커는 `printf` 같은 외부 함수마다 PLT 엔트리와 GOT 엔트리를 생성한다.
+동적 링크된 실행 파일에서 링커는 `printf` 같은 외부 함수마다 PLT 엔트리와 GOT 엔트리를 생성한다. 다만 `gcc -o hello hello.c`가 그대로 만든 바이너리에서는 이 예제의 `printf` 호출이 `puts`로 접히고, 배포판 기본값인 CET와 `-z now` 때문에 `.plt.sec` 스텁이 대신 쓰인다. 고전적인 지연 바인딩 PLT를 보려면 세 가지를 함께 꺼야 한다.
 
 ```bash
-$ objdump -d hello | grep -A3 '<printf@plt>'
-0000000000001040 <printf@plt>:
-    1040:   ff 25 d2 2f 00 00       jmp    *0x2fd2(%rip)        # 4018 <printf@GLIBC_2.2.5>
-    1046:   68 00 00 00 00          push   $0x0
-    104b:   e9 e0 ff ff ff          jmp    1030 <_init+0x20>
+$ gcc -fno-builtin -fcf-protection=none -Wl,-z,lazy -o hello_lazy hello.c
+$ objdump -d hello_lazy | grep -A3 '<printf@plt>'
+0000000000001030 <printf@plt>:
+    1030:   ff 25 ca 2f 00 00       jmp    *0x2fca(%rip)        # 4000 <printf@GLIBC_2.2.5>
+    1036:   68 00 00 00 00          push   $0x0
+    103b:   e9 e0 ff ff ff          jmp    1020 <_init+0x20>
 ```
 
 이 PLT 엔트리는 컴파일/링킹 단계에서 만들어진 정적 코드다. 첫 명령은 GOT 엔트리로 점프하고, 둘째 명령은 인덱스를 푸시하며, 셋째 명령은 첫 PLT 슬롯으로 점프한다.
@@ -533,8 +537,8 @@ $ objdump -d hello | grep -A3 '<printf@plt>'
 링커는 GOT에 재배치 항목을 만들어 둔다. 동적 링커가 런타임에 이 항목을 채울 것이라는 약속이다.
 
 ```bash
-$ readelf -r hello | grep printf
-000000004018  000100000007 R_X86_64_JUMP_SLO 0000000000000000 printf@GLIBC_2.2.5 + 0
+$ readelf -r hello_lazy | grep printf
+000000004000  000300000007 R_X86_64_JUMP_SLO 0000000000000000 printf@GLIBC_2.2.5 + 0
 ```
 
 `R_X86_64_JUMP_SLOT` 타입은 동적 링커에게 "이 GOT 엔트리를 `printf` 주소로 채우라"고 지시한다. 정적 링커가 만들어 둔 슬롯과, 동적 링커가 런타임에 채우는 값이 분리되어 있는 구조다.
@@ -949,7 +953,7 @@ ELF 포맷과 정적 링킹 과정을 추적하면, 컴파일러가 생성한 �
 
 ## 더 읽을거리
 
-- System V Application Binary Interface — ELF 공식 명세: https://refspecs.linuxfoundation.org/elf/elf.pdf
+- Tool Interface Standard (TIS), *Executable and Linking Format (ELF) Specification, Version 1.2* (1995) — ELF 명세: https://refspecs.linuxfoundation.org/elf/elf.pdf
 - John R. Levine, *Linkers and Loaders*
 - Bryant & O'Hallaron, *Computer Systems: A Programmer's Perspective* (3rd ed.) Chapter 7: Linking
 - Ulrich Drepper, "How To Write Shared Libraries": https://www.akkadia.org/drepper/dsohowto.pdf

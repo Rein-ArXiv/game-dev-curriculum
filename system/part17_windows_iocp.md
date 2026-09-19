@@ -40,7 +40,7 @@ for (;;) {
         for (;;) {
             ssize_t n = recv(fd, buffer, sizeof(buffer), 0);
             if (n > 0) Consume(buffer, static_cast<size_t>(n));
-            else if (n == 0) Close(fd);
+            else if (n == 0) { Close(fd); break; }
             else if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             else { Fail(fd, errno); break; }
         }
@@ -537,5 +537,5 @@ Linux의 `epoll`은 readiness 모델이고 `io_uring`은 completion 모델이다
 - Microsoft, [`GetQueuedCompletionStatus`](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getqueuedcompletionstatus)
 - Microsoft, [`AcceptEx`](https://learn.microsoft.com/en-us/windows/win32/api/mswsock/nf-mswsock-acceptex)
 - Microsoft, [Overlapped I/O](https://learn.microsoft.com/en-us/windows/win32/winsock/overlapped-i-o-2)
-- Michael Kerrisk, [`io_uring(7)`](https://man7.org/linux/man-pages/man7/io_uring.7.html)
+- liburing 프로젝트(Jens Axboe), [`io_uring(7)`](https://man7.org/linux/man-pages/man7/io_uring.7.html)
 - Michael Kerrisk, [`epoll(7)`](https://man7.org/linux/man-pages/man7/epoll.7.html)

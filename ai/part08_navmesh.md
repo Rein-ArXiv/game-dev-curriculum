@@ -81,7 +81,7 @@ struct NavMesh {
 
 폴리곤이 *볼록* 이어야 하는 이유는 폴리곤 내부 이동을 단순화하기 위해서다. 볼록 폴리곤 내부에서는 *임의의 두 점이 폴리곤을 벗어나지 않는 직선으로 연결* 된다. 에이전트 반지름만큼 경계를 erosion했고 폴리곤 내부에 별도의 동적 장애물이나 위치별 비용이 없다면, 진입점과 진출점을 직선으로 연결해도 정적 기하를 침범하지 않는다. 볼록성만으로 동적 충돌 회피나 비용 최적화까지 해결되는 것은 아니다.
 
-오목(concave) 폴리곤이면 이 성질이 깨진다. ㄷ자 모양 방의 한쪽 끝에서 다른 쪽 끝으로 가는 직선은 벽을 관통한다. 그러면 폴리곤 내부에서도 다시 길찾기가 필요해지고, "폴리곤 = 직진 가능 영역"이라는 전제가 무너진다. 그래서 Recast 파이프라인의 마지막 단계가 *볼록 분할* 이다 — 어떤 오목한 walkable 영역이든 볼록 조각들로 쪼개야 한다.
+오목(concave) 폴리곤이면 이 성질이 깨진다. ㄷ자 모양 방의 한쪽 끝에서 다른 쪽 끝으로 가는 직선은 벽을 관통한다. 그러면 폴리곤 내부에서도 다시 길찾기가 필요해지고, "폴리곤 = 직진 가능 영역"이라는 전제가 무너진다. 그래서 Recast 파이프라인의 폴리곤화 단계가 *볼록 분할* 이다 — 어떤 오목한 walkable 영역이든 볼록 조각들로 쪼개야 한다.
 
 이 성질의 귀결로, 길찾기 문제가 두 층으로 분리된다.
 
@@ -194,7 +194,7 @@ void FilterLowCeiling(Heightfield& hf, int walkableHeight) {
 
 ### Compact Heightfield
 
-필터링 후 Recast는 span 리스트를 *compact heightfield* 로 변환한다. walkable 표면(span의 윗면)만 모아 셀 인덱스로 압축하고, 각 셀에 인접 셀로의 연결 정보를 미리 계산해 둔다. 이후 region 분할과 contour 추출이 이 compact 표현 위에서 이웃 순회를 $O(1)$로 한다. 연결 리스트를 매번 따라가는 대신, "이 셀의 동쪽 이웃은 인덱스 k"가 배열에 박혀 있다.
+높이 간격·오르기 필터링 후 Recast는 span 리스트를 *compact heightfield* 로 변환하고, 반지름 침식은 이 compact 표현 위에서 수행한다. walkable 표면(span의 윗면)만 모아 셀 인덱스로 압축하고, 각 셀에 인접 셀로의 연결 정보를 미리 계산해 둔다. 이후 region 분할과 contour 추출이 이 compact 표현 위에서 이웃 순회를 $O(1)$로 한다. 연결 리스트를 매번 따라가는 대신, "이 셀의 동쪽 이웃은 인덱스 k"가 배열에 박혀 있다.
 
 이 필터들이 에이전트의 물리적 크기(키, 반지름, 오르기 능력)를 NavMesh에 반영한다. 큰 적과 작은 적이 *다른 NavMesh* 를 쓰는 이유가 여기 있다 — 거인은 좁은 문을 못 지나가야 하므로 더 큰 반지름으로 침식한 별도 mesh가 필요하다.
 
@@ -354,13 +354,7 @@ struct PolyDetail {
 NavMesh가 완성되면 길찾기는 *폴리곤 그래프 위의 A\** 다. A\*의 골격 — open list(우선순위 큐), closed set, $f = g + h$ 평가 — 은 그리드와 완전히 동일하다. 달라지는 것은 노드가 셀이 아니라 폴리곤이고, 간선이 격자 인접이 아니라 portal(공유 변)이라는 점뿐이다.
 
 ```cpp
-// 노드 = 폴리곤, 간선 = 공유 변(portal)
-struct NavPoly {
-    std::vector<int> verts;        // 정점 인덱스
-    std::vector<int> neighbors;    // i번째 변을 공유하는 인접 폴리곤
-    uint8_t area;                  // 영역 타입 (비용 가중에 사용)
-};
-
+// 노드 = 폴리곤(1절의 NavPoly 그대로), 간선 = 공유 변(portal)
 struct AStarNode {
     int    poly;        // 폴리곤 인덱스
     float  g, f;        // 누적 비용, f = g + h
@@ -725,6 +719,6 @@ Recast 파이프라인은 임의의 3D 메시를 복셀로 rasterize해 문제�
 - Greg Snook, "Simplified 3D Movement and Pathfinding Using Navigation Meshes" (*Game Programming Gems*) — NavMesh 개념의 고전.
 - Douglas & Peucker, "Algorithms for the reduction of the number of points required to represent a digitized line" (1973) — 윤곽 단순화의 원전.
 - Steve Rabin (ed.), *Game AI Pro* 1권, "Tactical Pathfinding on a NavMesh" — NavMesh 위 전술 길찾기와 영역 비용.
-- Elijah Emerson, "Crowd Pathfinding and Steering Using Flow Field Tiles" (*Game AI Pro* 1권) — NavMesh와 군중 이동·국소 회피의 결합.
+- Elijah Emerson, "Crowd Pathfinding and Steering Using Flow Field Tiles" (*Game AI Pro* 1권) — 포털로 연결한 격자 섹터 위의 flow field 타일로 군중 길찾기·조향을 푼 사례(NavMesh가 아닌 격자 표현과의 대조).
 - Jur van den Berg et al., "Reciprocal n-body Collision Avoidance" (ORCA, 2011) — Detour Crowd가 쓰는 속도 공간 국소 회피의 이론.
 - Recast 기반 GDC 발표들(Halo·Killzone 등) — 상용 NavMesh 운용 사례와 파이프라인 튜닝.

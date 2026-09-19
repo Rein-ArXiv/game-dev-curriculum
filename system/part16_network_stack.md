@@ -125,7 +125,7 @@ non-linear payload의 `frags[]`와 GSO metadata는 데이터 버퍼 끝에 놓�
 **송신 경로 (헤더 추가):**
 ```c
 // net/ipv4/tcp_output.c
-struct sk_buff *skb = alloc_skb(MAX_TCP_HEADER, GFP_ATOMIC);
+struct sk_buff *skb = alloc_skb(MAX_TCP_HEADER + len, GFP_ATOMIC);
 
 // 공간 예약 (복사 없음)
 skb_reserve(skb, MAX_TCP_HEADER);
@@ -319,8 +319,8 @@ int ip_rcv(struct sk_buff *skb, struct net_device *dev, ...) {
     if (ip_fast_csum((u8 *)iph, iph->ihl))
         goto drop;
 
-    // 3. TTL 체크
-    if (iph->ttl == 0)
+    // 3. 길이 검증 (TTL 만료 판정·ICMP Time Exceeded는 수신 경로가 아니라 ip_forward의 몫이다)
+    if (skb->len < ntohs(iph->tot_len))
         goto drop;
 
     // 4. Netfilter (NF_INET_PRE_ROUTING)
@@ -412,6 +412,7 @@ static int tcp_queue_rcv(struct sock *sk, struct sk_buff *skb) {
 ```c
 // net/ipv4/tcp.c
 int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, ...) {
+    int copied = 0;
     lock_sock(sk);
 
     while (len > 0) {
@@ -428,6 +429,8 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, ...) {
         int chunk = min_t(unsigned int, skb->len, len);
         if (skb_copy_datagram_msg(skb, 0, msg, chunk))
             break;
+        copied += chunk;
+        len -= chunk;
 
         // 다 읽었으면 제거
         if (chunk == skb->len)
@@ -435,6 +438,7 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, ...) {
     }
 
     release_sock(sk);
+    return copied;  // 읽은 바이트 수
 }
 ```
 
@@ -672,7 +676,7 @@ Netfilter는 패킷 경로 중 5개 지점에 **훅(hook)**을 제공한다:
       App              [POST_ROUTING] → NIC
 
 송신 패킷:
-  App → [LOCAL_OUT] → routing decision →
+  App → routing decision → [LOCAL_OUT] →
                            ↓
                       [POST_ROUTING] → NIC
 ```
@@ -714,12 +718,13 @@ static inline int nf_hook(u_int8_t pf, unsigned int hook, struct sk_buff *skb, .
 
 ### iptables 테이블
 
-**4개 테이블, 각자 다른 목적:**
+**5개 테이블, 각자 다른 목적:**
 ```c
 1. filter  : 패킷 필터링 (ACCEPT/DROP)
 2. nat     : 주소 변환 (SNAT/DNAT)
 3. mangle  : 패킷 수정 (TOS, TTL)
 4. raw     : 연결 추적 우회
+5. security: MAC(SELinux 등) 보안 마크(SECMARK) 규칙
 ```
 
 **체인(chain) 구조:**
@@ -766,11 +771,6 @@ struct ipt_ip {
 ```c
 // include/net/netfilter/nf_conntrack.h
 struct nf_conn {
-    struct nf_conntrack_tuple_hash tuplehash[IP_CT_DIR_MAX];
-
-    unsigned long status;  // IPS_CONFIRMED, IPS_SEEN_REPLY 등
-    u32 timeout;
-
     struct nf_conntrack_tuple_hash {
         struct {
             __be32 src, dst;
@@ -780,7 +780,10 @@ struct nf_conn {
             };
             u_int8_t protonum;
         } tuple;
-    };
+    } tuplehash[IP_CT_DIR_MAX];  // ORIGINAL, REPLY 방향별 tuple
+
+    unsigned long status;  // IPS_CONFIRMED, IPS_SEEN_REPLY 등
+    u32 timeout;
 };
 ```
 
@@ -858,22 +861,31 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb) {
 
     case TCP_ESTABLISHED:
         tcp_data_queue(sk, skb);  // 데이터 처리
-        tcp_ack(sk, skb);         // ACK 전송
+        tcp_ack(sk, skb);         // 수신한 ACK 처리 (ACK 전송은 tcp_send_ack)
         break;
 
     case TCP_FIN_WAIT_1:
-        if (th->fin) {
-            // FIN 수신
-            tcp_set_state(sk, TCP_CLOSING);
-        } else if (th->ack) {
+        if (th->ack)  // 우리 FIN에 대한 ACK
             tcp_set_state(sk, TCP_FIN_WAIT_2);
+        if (th->fin) {  // 상대 FIN 수신: ACK가 함께 왔으면 TIME_WAIT, 아니면 CLOSING(동시 종료)
+            tcp_send_ack(sk);
+            if (th->ack)
+                tcp_time_wait(sk, TCP_TIME_WAIT, 0);
+            else
+                tcp_set_state(sk, TCP_CLOSING);
         }
         break;
 
-    case TCP_TIME_WAIT:
-        // 2*MSL (보통 60초) 타임아웃 대기
-        tcp_time_wait(sk, TCP_TIME_WAIT, TCP_TIMEWAIT_LEN);
+    case TCP_FIN_WAIT_2:
+        if (th->fin) {  // 상대 FIN 수신 → ACK 보내고 TIME_WAIT
+            tcp_send_ack(sk);
+            tcp_time_wait(sk, TCP_TIME_WAIT, 0);
+        }
         break;
+
+    // TIME_WAIT 소켓은 inet_timewait_sock으로 바뀌어 이 함수에 오지 않는다.
+    // tcp_v4_rcv가 do_time_wait로 분기해 tcp_timewait_state_process가 처리하며,
+    // 2*MSL(TCP_TIMEWAIT_LEN, 60초) 뒤 소멸한다.
     }
 }
 ```
@@ -898,7 +910,7 @@ sysctl -w net.ipv4.tcp_fin_timeout=30  # FIN-WAIT-2 타임아웃
 # NAT 뒤의 클라이언트와 호환성 문제(타임스탬프 기반 빠른 재활용이
 # 같은 외부 IP에서 들어오는 여러 클라이언트를 구분하지 못함)로 폐기되었으며,
 # 4.12 이상의 커널에서 sysctl로 설정해도 효과가 없다.
-# tcp_tw_reuse 또한 5.1부터 outgoing 연결에 한정되도록 의미가 명확히 정리되었다.
+# tcp_tw_reuse는 처음부터 outgoing(connect) 경로에만 적용되며, 4.18부터 값이 0/1(전역)/2(loopback 한정, 기본값)로 나뉘었다.
 ```
 
 ## 7. 소켓 버퍼와 흐름 제어
@@ -946,19 +958,22 @@ static u16 tcp_select_window(struct sock *sk) {
     u32 cur_win = tcp_receive_window(tp);
     u32 free_space = tcp_space(sk);  // 수신 버퍼 여유 공간
 
-    // 윈도우 크기 = min(버퍼 여유, 광고 가능 최대)
-    return min(cur_win, free_space);
+    // 버퍼 여유로 새 윈도우를 정하되, 이미 광고한 윈도우보다 줄이지는 않는다 (RFC 1122)
+    return max(cur_win, free_space);
 }
 ```
 
 **송신측 윈도우 준수:**
 ```c
 static unsigned int tcp_window_allows(struct tcp_sock *tp, struct sk_buff *skb) {
-    u32 win = tp->snd_wnd;  // 상대방이 광고한 윈도우
-    u32 cwnd = tp->snd_cwnd;  // 혼잡 윈도우
+    u32 win = tp->snd_wnd;  // 상대방이 광고한 윈도우(바이트)
+    u32 cwnd = tp->snd_cwnd * tp->mss_cache;  // 혼잡 윈도우(세그먼트 수 → 바이트)
+    u32 in_flight = tcp_packets_in_flight(tp) * tp->mss_cache;  // 아직 ACK되지 않은 바이트
 
-    // min(흐름 제어 윈도우, 혼잡 윈도우)
-    return min(win, cwnd) - tcp_packets_in_flight(tp);
+    // min(흐름 제어 윈도우, 혼잡 윈도우) - 이미 보낸 양 (언더플로 방지)
+    if (min(win, cwnd) <= in_flight)
+        return 0;
+    return min(win, cwnd) - in_flight;
 }
 ```
 
@@ -1256,6 +1271,6 @@ sysctl -w net.ipv4.tcp_tw_reuse=1
  - `net/netfilter/` - Netfilter 구현
 - Documentation:
  - `Documentation/networking/` in kernel source
- - `Documentation/networking/scaling.txt` - 멀티코어 확장
+ - `Documentation/networking/scaling.rst` - 멀티코어 확장
 - Cardwell, N., Cheng, Y., Gunn, C. S., Yeganeh, S. H., & Jacobson, V. (2016). *BBR: Congestion-Based Congestion Control*. ACM Queue.
 - Jacobson, V. (1988). *Congestion Avoidance and Control*. ACM SIGCOMM.

@@ -117,11 +117,12 @@ void HeapSort(T* a, size_t n, Less less, measure::Counters* c) {
 template <class T, class Less>
 void MedianOfThree(T* a, size_t lo, size_t hi, Less less, measure::Counters* c) {
     const size_t mid = lo + (hi - lo) / 2;
-    if (c) c->comparisons += 3;
     T x = a[lo], y = a[mid], z = a[hi];
     size_t pick = mid;
-    if (less(x, y)) { if (less(y, z)) pick = mid; else pick = less(x, z) ? hi : lo; }
-    else            { if (less(x, z)) pick = lo;  else pick = less(y, z) ? hi : mid; }
+    // 비교자 호출을 한 번씩 센다 — 경로에 따라 2회 또는 3회다.
+    auto lt = [&](const T& p, const T& q) { if (c) ++c->comparisons; return less(p, q); };
+    if (lt(x, y)) { if (lt(y, z)) pick = mid; else pick = lt(x, z) ? hi : lo; }
+    else          { if (lt(x, z)) pick = lo;  else pick = lt(y, z) ? hi : mid; }
     if (pick != hi) {
         T tmp = a[pick]; a[pick] = a[hi]; a[hi] = tmp;
         if (c) c->moved_bytes += 3 * sizeof(T);
@@ -328,7 +329,8 @@ private:
 
 // snippet-begin: order-quickselect
 // quickselect. k 번째(0-based)를 제자리에 놓고 돌아온다. 평균 O(n) 이지만
-// 적대 입력 + 고정 pivot 이면 O(n^2) 다 — pivot 을 무작위로 고르는 이유.
+// 적대 입력 + 고정 pivot 이면 O(n^2) 다 — pivot 을 무작위로 고르는 이유. 다만 키가 전부 같은
+// 입력은 Lomuto 분할이 pivot 과 무관하게 한쪽으로 쏠려 무작위화로도 O(n^2) 를 벗어나지 못한다.
 inline Rec Quickselect(std::vector<Rec> a, size_t k, uint32_t seed,
                        measure::Counters* c = nullptr) {
     if (a.empty()) return Rec{};

@@ -65,7 +65,7 @@ for (auto& mesh : model.meshes) {
 }
 ```
 
-머티리얼이 N개면 N번의 디스크립터 바인딩이 일어난다. 각 `vkCmdBindDescriptorSets`는 드라이버가 셰이더가 참조할 리소스 테이블을 갱신하도록 명령 버퍼에 기록하므로, 비용이 무시할 수 없다. 더 큰 문제는 이 패턴이 명령 버퍼를 정렬된 상태 변경의 연속으로 만든다는 데 있다. 드로우 순서를 머티리얼별로 정렬해 재바인딩을 줄이는 최적화가 필요하고, 이 정렬 자체가 CPU 부담이 된다.
+메시가 M개면 머티리얼 종류 수와 무관하게 M번의 디스크립터 바인딩이 일어난다. 각 `vkCmdBindDescriptorSets`는 드라이버가 셰이더가 참조할 리소스 테이블을 갱신하도록 명령 버퍼에 기록하므로, 비용이 무시할 수 없다. 더 큰 문제는 이 패턴이 명령 버퍼를 정렬된 상태 변경의 연속으로 만든다는 데 있다. 드로우 순서를 머티리얼별로 정렬해 재바인딩을 줄이는 최적화가 필요하고, 이 정렬 자체가 CPU 부담이 된다.
 
 ### Bindless 모델
 
@@ -260,7 +260,7 @@ Task Shader(앰플리피케이션 셰이더라고도 한다)는 선택적이다.
 
 ### Mesh Shader 예제
 
-Mesh Shader는 워크그룹 하나가 메시릿(meshlet) 하나를 처리한다. 정점을 생성해 클립 공간 위치를 쓰고, 삼각형 인덱스를 출력한 뒤, `SetMeshOutputsEXT`로 출력 개수를 확정한다.
+Mesh Shader는 워크그룹 하나가 메시릿(meshlet) 하나를 처리한다. `SetMeshOutputsEXT`로 출력 개수를 먼저 선언한 뒤, 정점을 생성해 클립 공간 위치를 쓰고 삼각형 인덱스를 출력한다.
 
 ```glsl
 #version 460
@@ -369,7 +369,7 @@ struct Meshlet {
 };
 ```
 
-64 정점과 124 프리미티브라는 한계가 자주 보이는 이유는 Mesh Shader 명세가 이 근처를 권장하기 때문이다. 정점 수를 64로 잡으면 인덱스를 8비트로 표현할 수 있어 메모리가 절약되고, 워크그룹 단위 처리가 캐시에 잘 들어맞는다. 프리미티브 수 124는 일부 하드웨어가 4의 배수에 정렬된 크기를 선호하는 점과, 정점 대비 적당한 삼각형 밀도를 고려한 값이다. 정확한 최적 값은 하드웨어마다 다르므로, `VkPhysicalDeviceMeshShaderPropertiesEXT`의 `maxMeshOutputVertices`와 `maxMeshOutputPrimitives`로 상한을 조회해 맞춘다.
+64 정점과 124 프리미티브라는 한계가 자주 보이는 이유는 Mesh Shader 명세의 권장이 아니라 NVIDIA 의 하드웨어 가이드(64 정점·126 프리미티브)와 meshoptimizer 의 관례가 이 근처를 쓰기 때문이다. 정점 수를 64로 잡으면 인덱스를 8비트로 표현할 수 있어 메모리가 절약되고, 워크그룹 단위 처리가 캐시에 잘 들어맞는다. 프리미티브 수 124는 meshoptimizer v0.25 이하가 `max_triangles` 를 4의 배수로 요구했기 때문에 NVIDIA 권장값 126 대신 쓰이던 값이고, 정점 대비 적당한 삼각형 밀도를 고려한 값이다. 정확한 최적 값은 하드웨어마다 다르므로, `VkPhysicalDeviceMeshShaderPropertiesEXT`의 `maxMeshOutputVertices`와 `maxMeshOutputPrimitives`로 상한을 조회해 맞춘다.
 
 ### meshoptimizer 라이브러리
 

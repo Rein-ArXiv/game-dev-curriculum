@@ -76,7 +76,7 @@ struct ParticleSystem {
 
 ```cpp
 // SoA + AVX2 (8 float 동시)
-for (int i = 0; i < N; i += 8) {
+for (int i = 0; i + 8 <= N; i += 8) {   // 나머지 N % 8 개는 스칼라 루프로 처리
     __m256 px_vec = _mm256_loadu_ps(&px[i]);
     __m256 vx_vec = _mm256_loadu_ps(&vx[i]);
     px_vec = _mm256_fmadd_ps(vx_vec, dt_vec, px_vec);
@@ -264,7 +264,7 @@ void main() {
 
 ### 3.3 Double buffer
 
-읽기·쓰기 동시 buffer 면 *race condition*. 두 buffer (in / out) — 한 프레임이 *in 에서 읽고 out 에 씀*, 다음 프레임이 *swap*.
+이웃 등 *다른 인덱스* 를 읽는 커널이 같은 buffer 에 쓰면 *race condition* (위처럼 인덱스 i 만 읽고 쓰면 in-place 도 안전). 두 buffer (in / out) — 한 프레임이 *in 에서 읽고 out 에 씀*, 다음 프레임이 *swap*.
 
 ```cpp
 GLuint particleBuffers[2];
@@ -395,7 +395,7 @@ GPU에서도 atomic append를 사용할 수 있지만 고정 `maxPerCell`은 ove
 
 ```glsl
 // GPU 의 atomic insertion
-uint cellIdx = HashCell(int(p.position.x / cellSize), ...);
+uint cellIdx = CellIndex(int(floor(p.position.x / cellSize)), ...);   // CPU 와 같은 floor. 조밀 배열 첨자 — int64 packing key 가 아님
 uint slot = atomicAdd(cellCounts[cellIdx], 1);
 cellEntries[cellIdx * maxPerCell + slot] = particleId;
 ```
@@ -476,7 +476,7 @@ PBD 루프 — 거리 제약 project + Verlet 적분.
 void StepCloth(Cloth& c, vec3 gravity, float dt) {
     // 1. Predict
     for (auto& p : c.particles) {
-        if (p.invMass <= 0) continue;
+        if (p.invMass <= 0) { p.predicted = p.position; continue; }   // 고정 입자도 predicted 가 있어야 제약이 앵커로 읽는다
         p.velocity += gravity * dt;
         p.predicted = p.position + p.velocity * dt;
     }
@@ -658,7 +658,7 @@ SDF sampling은 형상별 분기를 줄일 수 있지만 위 코드에도 접촉
 
 ### 7.3 환경 → 입자
 
-환경 강체가 *입자 시뮬에 영향* 안 받음 (one-way). 차량이 *지나가도 입자 시뮬이 안 흔들리는* 자연.
+환경 강체가 *입자 시뮬에 영향* 안 받음 (one-way). 차량이 *지나가도 입자 시뮬에 안 흔들리는* 자연.
 
 one-way coupling은 시각 입자가 권위 강체에 영향을 주지 않게 만드는 비용·소유권 선택이다. 물리적으로 자연스러운 것은 양방향 운동량 전달이지만, 이를 쓰려면 입자 contact impulse를 강체별로 안정하게 누적하고 질량비와 동기화를 처리해야 한다.
 
@@ -751,7 +751,7 @@ capacity를 넘으면 메모리를 침범하지 않고 오래된 시각 입자�
 3. **GPU compute shader** — 큰 batch 병렬 처리와 pass 간 barrier.
 4. **Grid hash** — 입자 간 상호작용 O(N) 평균.
 5. **Cloth = 입자 + 거리 제약** — PBD 기반의 가장 흔한 응용.
-6. **Self-collision** — 비싸지만 필수. grid hash + sphere 근사.
+6. **Self-collision** — 비싸서 눈에 띄게 접히는 천에만 선택 활성. grid hash + sphere 근사.
 7. **약결합** — 강체 → 입자 (one-way) 통합. SDF 환경.
 8. **시스템 경계** — 시각·권위 상태 분리, capacity와 overflow 정책.
 
@@ -764,6 +764,6 @@ capacity를 넘으면 메모리를 침범하지 않고 오래된 시각 입자�
 - NVIDIA Flex 논문 + 문서 — GPU 통합 솔버.
 - Unity Manual, "VFX Graph" — 산업 GPU 파티클.
 - Unreal, "Niagara" 문서 — 모던 파티클 시스템.
-- Macklin et al., "Position-Based Fluids" (2013) — PBD + fluid.
+- Macklin, Müller, "Position-Based Fluids" (2013) — PBD + fluid.
 - Müller et al., "Position-Based Dynamics" (2007) — cloth 의 학술 토대.
 - Houdini documentation, "POPs" — 오프라인 파티클 reference.

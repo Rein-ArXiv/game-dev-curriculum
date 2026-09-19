@@ -108,7 +108,11 @@ bool ParseEnum(const std::string& text, const Alias (&table)[N], int* out) {
 }
 
 bool ParseSize(const std::string& text, std::size_t* out) {
-    if (text.empty()) return false;
+    // strtoull 은 선행 공백과 부호를 받아들여 "-1" 을 2^64-1 로 wrap 한다.
+    // 첫 글자가 숫자가 아니면 거부한다.
+    if (text.empty() || !std::isdigit(static_cast<unsigned char>(text[0]))) {
+        return false;
+    }
     char* end = nullptr;
     const unsigned long long value = std::strtoull(text.c_str(), &end, 10);
     if (end == text.c_str() || *end != '\0') return false;

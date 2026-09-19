@@ -139,13 +139,14 @@ inline std::vector<size_t> BmhSearch(const std::string& text, const std::string&
 
 // snippet-begin: text-trie
 // 자식 표현 두 가지를 한 클래스에 담고 토글한다. 소문자 26 자면 고정 배열이
-// 노드당 104 바이트를 쓰지만 분기가 O(1) 이고, 정렬 소배열은 실제 자식 수만큼만
+// 노드당 208 바이트(size_t 26 칸)를 쓰지만 분기가 O(1) 이고, 정렬 소배열은 실제 자식 수만큼만
 // 쓰지만 이진 탐색이 붙는다. 어느 쪽이 이기는지는 *분기 계수* 가 정한다.
 class Trie {
 public:
     explicit Trie(bool dense_children) : dense_(dense_children) { node_.push_back(Node{}); }
 
     void Insert(const std::string& word) {
+        for (char ch : word) if (Index(ch) < 0) return;   // 알파벳 밖 문자는 노드를 만들기 전에 거부
         size_t at = 0;
         for (char ch : word) {
             const int k = Index(ch);
@@ -241,7 +242,7 @@ private:
 //   failure  불일치했을 때 "지금 읽은 접미사 중 trie 에 있는 가장 긴 것" 으로 옮긴다.
 //   output   그 상태에서 끝나는 *다른* 패턴들로 이어지는 사슬.
 // failure link 를 전부 root 로 두면 여전히 컴파일되고 대부분의 입력에서 답이
-// 맞는다 — 패턴이 서로의 접미사인 입력에서만 틀린다. 그래서 검사가 그 입력을
+// 맞는다 — root 가 아닌 failure link 가 실제로 쓰이는 입력(패턴이 서로의 접미사이거나 한 패턴 안에 자기 겹침이 있을 때)에서만 틀린다. 그래서 검사가 그 입력을
 // 반드시 포함해야 한다.
 class AhoCorasick {
 public:

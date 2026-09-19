@@ -162,7 +162,7 @@ extent header의 `eh_depth`는 root에서 leaf까지의 깊이를 저장하고 �
 $ stat report.txt
   File: report.txt
   Size: 4096            Blocks: 8          IO Block: 4096   regular file
-Device: 802h/2050d      Inode: 1234567     Links: 1
+Device: 801h/2049d      Inode: 1234567     Links: 1
 Access: (0644/-rw-r--r--)  Uid: ( 1000/   user)   Gid: ( 1000/   user)
 Access: 2025-12-23 10:30:00.000000000 +0900
 Modify: 2025-12-23 10:25:00.000000000 +0900
@@ -226,7 +226,7 @@ inode=14    name="subdir"
 
 `/home/user/report.txt`를 열 때 커널이 하는 일은 다음과 같다.
 
-1. 현재 mount namespace의 루트 path에서 탐색을 시작한다. ext 계열 on-disk 형식의 root inode 번호는 2지만, VFS pathname resolution의 보편 규칙이 “모든 파일시스템의 inode 2”인 것은 아니다.
+1. 현재 프로세스의 루트 디렉토리(`current->fs->root`, `chroot`로 바뀔 수 있다)에서 탐색을 시작한다. ext 계열 on-disk 형식의 root inode 번호는 2지만, VFS pathname resolution의 보편 규칙이 “모든 파일시스템의 inode 2”인 것은 아니다.
 2. `/`의 디렉토리 엔트리에서 `"home"`을 찾아 inode 번호를 얻는다.
 3. `home`의 inode를 읽고, 디렉토리 데이터를 읽는다.
 4. `home`의 디렉토리 엔트리에서 `"user"`를 찾아 inode 번호를 얻는다.
@@ -382,7 +382,7 @@ const struct file_operations ext4_file_operations = {
 사용자가 `read(fd, buf, size)`를 호출하면 다음 흐름이 일어난다.
 
 1. VFS가 `fd`에서 `file` 구조체를 찾는다.
-2. VFS는 `file->f_op->read_iter`(있으면)를 우선 호출하고, 없을 때만 `file->f_op->read`로 떨어진다. 현대 파일시스템은 거의 모두 `read_iter`/`write_iter`를 구현하므로 ext4의 경우 `ext4_file_read_iter`로 곧장 들어간다.
+2. VFS는 `file->f_op->read`가 있으면 그것을 호출하고, 없을 때만 `file->f_op->read_iter`로 떨어진다(`new_sync_read` 경유). 현대 파일시스템은 거의 모두 `read`를 구현하지 않고 `read_iter`/`write_iter`만 구현하므로 ext4의 경우 `ext4_file_read_iter`로 곧장 들어간다.
 3. `read_iter`는 `iov_iter`(scatter-gather + 사용자/커널/매핑 추상화)를 인자로 받아 page cache 또는 direct I/O 경로로 데이터를 옮긴다.
 4. ext4가 실제 읽기를 수행한다.
 
@@ -431,7 +431,6 @@ struct super_block {
     struct dentry   *s_root;
 
     struct list_head s_inodes;
-    struct list_head s_dirty;
 
     void            *s_fs_info;
 };
@@ -484,7 +483,7 @@ struct file {
 - `f_flags`: `open` 시 전달한 플래그(`O_RDONLY`, `O_WRONLY`, `O_APPEND` 등)
 - `f_op`: 이 파일에 대한 연산 함수들
 
-File 객체는 프로세스별로 존재한다. 같은 파일을 두 프로세스가 열면 두 개의 File 객체가 생성된다. 각자 독립적인 `f_pos`를 가진다. 반면 inode는 공유된다. 여러 프로세스가 같은 파일을 열어도 inode는 하나다.
+File 객체는 `open` 호출마다 존재한다(open file description). 같은 파일을 두 프로세스가 각각 `open`하면 두 개의 File 객체가 생성된다. 각자 독립적인 `f_pos`를 가진다. 반면 inode는 공유된다. 여러 프로세스가 같은 파일을 열어도 inode는 하나다.
 
 ## 6. 파일 디스크립터 테이블
 
@@ -654,7 +653,7 @@ Btrfs(B-tree File System)는 Oracle이 주도하여 개발한 차세대 파일�
 5. 부모 디렉토리에 엔트리 추가
 6. 슈퍼블록의 빈 블록 카운터 갱신
 
-3번과 4번 사이에 전원이 꺼지면 inode는 데이터 블록을 가리키지만 데이터 블록은 쓰이지 않은 쓰레기 데이터 상태가 된다. 슈퍼블록은 그 블록이 사용 중이라고 기록하지만 디렉토리는 그 inode를 가리키지 않는다. 고아 inode(orphan inode)가 발생한다. 파일시스템이 불일치(inconsistency) 상태가 된다.
+3번과 4번 사이에 전원이 꺼지면 inode는 데이터 블록을 가리키지만 데이터 블록은 쓰이지 않은 쓰레기 데이터 상태가 된다. 블록 비트맵은 그 블록이 사용 중이라고 기록하지만 디렉토리는 그 inode를 가리키지 않는다. 고아 inode(orphan inode)가 발생한다. 파일시스템이 불일치(inconsistency) 상태가 된다.
 
 ### fsck
 

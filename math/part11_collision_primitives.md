@@ -271,9 +271,10 @@ AABBContact AABBAABBContact(AABB a, AABB b) {
     AABBContact c;
     c.isColliding = false;
 
-    float overlapX = std::min(a.max.x, b.max.x) - std::max(a.min.x, b.min.x);
-    float overlapY = std::min(a.max.y, b.max.y) - std::max(a.min.y, b.min.y);
-    float overlapZ = std::min(a.max.z, b.max.z) - std::max(a.min.z, b.min.z);
+    // 축별 겹침 = 두 방향 분리 거리 중 작은 쪽 — 한 구간이 다른 구간을 포함해도 맞다.
+    float overlapX = std::min(a.max.x - b.min.x, b.max.x - a.min.x);
+    float overlapY = std::min(a.max.y - b.min.y, b.max.y - a.min.y);
+    float overlapZ = std::min(a.max.z - b.min.z, b.max.z - a.min.z);
 
     // 침투 응답용: 겹침 0 (접촉) 은 분리로 본다 (트리거는 AABBIntersect 사용)
     if (overlapX <= 0 || overlapY <= 0 || overlapZ <= 0) return c;
@@ -283,13 +284,13 @@ AABBContact AABBAABBContact(AABB a, AABB b) {
     // 가장 작은 겹침의 축이 분리 방향. normal 은 a → b 방향.
     if (overlapX < overlapY && overlapX < overlapZ) {
         c.depth  = overlapX;
-        c.normal = vec3(a.center().x < b.center().x ? 1 : -1, 0, 0);
+        c.normal = vec3((a.min.x + a.max.x) < (b.min.x + b.max.x) ? 1 : -1, 0, 0);
     } else if (overlapY < overlapZ) {
         c.depth  = overlapY;
-        c.normal = vec3(0, a.center().y < b.center().y ? 1 : -1, 0);
+        c.normal = vec3(0, (a.min.y + a.max.y) < (b.min.y + b.max.y) ? 1 : -1, 0);
     } else {
         c.depth  = overlapZ;
-        c.normal = vec3(0, 0, a.center().z < b.center().z ? 1 : -1);
+        c.normal = vec3(0, 0, (a.min.z + a.max.z) < (b.min.z + b.max.z) ? 1 : -1);
     }
     return c;
 }
@@ -347,7 +348,7 @@ AABB TransformAABB(AABB a, mat4 M) {
 }
 ```
 
-8개 코너 변환. 더 빠른 *행렬 절대값 트릭* 도 있지만 *회전된 AABB는 원본보다 항상 크다* — *정확하지 않은 컬링* 의 시작점.
+8개 코너 변환. 더 빠른 *행렬 절대값 트릭* 도 있지만 *회전된 AABB는 원본보다 작아지지 않는다* (박스를 다시 축 정렬로 보내는 회전만 같고, 그 외에는 더 크다) — *정확하지 않은 컬링* 의 시작점.
 
 ## 4. Sphere-AABB
 

@@ -40,7 +40,7 @@ algorithms_lab/
       text.hpp       trie(자식 표현 2종), KMP, Z, BMH, Aho-Corasick, rolling hash
       graph.hpp      CSR, BFS, 반복 DFS, 순환 판정, Kahn 위상 정렬, Tarjan/Kosaraju SCC,
                      절단점·다리, DSU(최적화 2종 토글), Kruskal, Prim
-      paths.hpp      BFS 거리, 0-1 BFS, DAG 완화, Dijkstra(힙/dense), Bellman-Ford,
+      paths.hpp      0-1 BFS, DAG 완화, Dijkstra(힙/dense), Bellman-Ford,
                      격자 A*, 임의 그래프 A*, 일관성 검사기
       greedy.hpp     활동 선택, EDD, 분할 가능/밀도 배낭, 집합 덮개, 동전 교환, 스키 대여
       dp.hpp         0/1 배낭(2D·1D), LCS+복원, 편집 거리, LIS 2판, 행렬 연쇄,
@@ -159,7 +159,7 @@ algo_tests[step04]: 6/6 passed (349 check(s))
 기대 출력:
 
 ```text
-algo_tests: all passed (45 case(s), 520876 check(s))
+algo_tests: all passed (45 case(s), 520927 check(s))
 algo_tests[properties]: 11/11 passed (총 6950 표본, seed 20260824)
 100% tests passed out of 11
 ```

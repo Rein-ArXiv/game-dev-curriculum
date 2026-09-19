@@ -76,6 +76,7 @@ inline PathResult ZeroOneBfs(const Csr& g, uint32_t source, measure::Counters* c
 // 순환이 있으면 위상 순서가 없으므로 이 알고리즘 자체가 정의되지 않는다.
 inline PathResult DagRelax(const Csr& g, uint32_t source) {
     PathResult r = MakeResult(g.n);
+    if (g.n == 0) return r;
     const TopoResult topo = TopoSortKahn(g);
     if (!topo.acyclic) { r.negative_cycle = false; r.settled = 0; return r; }
     r.dist[source] = 0;
@@ -413,8 +414,9 @@ inline HeuristicAudit AuditHeuristic(const Grid& grid, uint32_t goal,
                                      const std::vector<int64_t>& h,
                                      const std::vector<int64_t>& true_cost) {
     HeuristicAudit a;
-    const int dx4[4] = {1, -1, 0, 0};
-    const int dy4[4] = {0, 0, 1, -1};
+    const int dx8[8] = {1, -1, 0, 0, 1, 1, -1, -1};
+    const int dy8[8] = {0, 0, 1, -1, 1, -1, 1, -1};
+    const int dirs = grid.diagonal ? 8 : 4;   // AStarGrid 와 같은 이웃 집합·비용으로 검사한다
     for (size_t y = 0; y < grid.h; ++y) {
         for (size_t x = 0; x < grid.w; ++x) {
             if (!grid.Free(x, y)) continue;
@@ -423,11 +425,12 @@ inline HeuristicAudit AuditHeuristic(const Grid& grid, uint32_t goal,
                 a.admissible = false;
                 ++a.violations;
             }
-            for (int k = 0; k < 4; ++k) {
-                const int64_t nx = int64_t(x) + dx4[k], ny = int64_t(y) + dy4[k];
+            for (int k = 0; k < dirs; ++k) {
+                const int64_t nx = int64_t(x) + dx8[k], ny = int64_t(y) + dy8[k];
                 if (nx < 0 || ny < 0 || !grid.Free(size_t(nx), size_t(ny))) continue;
                 const uint32_t v = grid.Id(size_t(nx), size_t(ny));
-                if (h[u] > kOrtho + h[v]) { a.consistent = false; ++a.violations; }
+                const int64_t cost = (k < 4) ? kOrtho : kDiag;
+                if (h[u] > cost + h[v]) { a.consistent = false; ++a.violations; }
             }
         }
     }

@@ -77,7 +77,7 @@ SDL(Simple DirectMedia Layer)은 윈도우·컨텍스트·오디오·입력·네
 | 입력 모델 | 콜백 중심 | 큐 + 폴링 |
 | 이벤트 펌프 | 명시적 폴링 | 큐 자동 누적 |
 | 컨텍스트 핸들 | `GLFWwindow*` 내부 | 분리된 `SDL_GLContext` |
-| 모바일 지원 | 부분적 | 전면 지원 |
+| 모바일 지원 | 미지원 | 전면 지원 |
 | 멀티 윈도우 | 지원 | 지원 |
 | Vulkan 지원 | `glfwCreateWindowSurface` | `SDL_Vulkan_*` |
 
@@ -188,7 +188,7 @@ Core에서 제거된 주요 기능은 다음과 같다.
 
 ### 왜 분리했는가
 
-성능과 단순성이다. 1992년 OpenGL 1.0의 즉시 모드는 한 번의 `glVertex` 호출이 곧 *드라이버 → 커널 → GPU* 의 한 번 왕복이었다. 현대 GPU는 수십만 정점을 한 번에 처리하기 때문에, 매 정점을 함수 호출로 보내는 모델은 드라이버 오버헤드가 99% 이상을 차지한다. Core Profile은 이런 패턴 자체를 봉쇄한다.
+성능과 단순성이다. 1992년 OpenGL 1.0의 즉시 모드는 정점 하나마다 함수 호출과 드라이버의 상태 검증·마샬링을 거쳐야 했다. 현대 GPU는 수십만 정점을 한 번에 처리하기 때문에, 매 정점을 함수 호출로 보내는 모델은 드라이버 오버헤드가 GPU 작업 시간을 압도한다. Core Profile은 이런 패턴 자체를 봉쇄한다.
 
 또한 드라이버 입장에서도 두 모드를 동시에 지원하면 상태 추적 코드가 복잡해진다. Core 전용 드라이버는 단순화된 상태 머신만 다루면 된다.
 
@@ -201,7 +201,7 @@ Core에서 제거된 주요 기능은 다음과 같다.
 | Intel | 최소 지원 | (해당 없음) |
 | Apple (macOS) | OpenGL 4.1까지 Core 전용 | Compatibility 미지원 |
 
-macOS는 OpenGL 4.1까지만 지원하고 그 위 버전은 Apple Silicon 시점부터 deprecated다. Apple은 자사 Metal로의 전환을 강하게 유도한다. 따라서 macOS 호환을 원하면 OpenGL 3.3 또는 4.1 Core를 타깃으로 잡아야 한다.
+macOS는 OpenGL 4.1까지만 지원하고, Apple은 macOS 10.14 Mojave(2018)부터 OpenGL 전체를 deprecated로 선언했다. Apple은 자사 Metal로의 전환을 강하게 유도한다. 따라서 macOS 호환을 원하면 OpenGL 3.3 또는 4.1 Core를 타깃으로 잡아야 한다.
 
 NVIDIA가 Compatibility Profile을 적극 최적화하는 이유는 Maya·3ds Max·CATIA 같은 CAD/DCC 도구가 여전히 즉시 모드를 사용하는 레거시 코드 베이스를 가지고 있기 때문이다. 게임 개발에서는 거의 의미가 없다.
 
@@ -482,7 +482,7 @@ glfwSwapInterval(1);  // 기본은 V-Sync 활성
 
 OpenGL의 오류 보고 모델은 두 가지였다.
 
-1. **glGetError 폴링**: 매 호출 후 `glGetError`를 부르면 마지막 오류 코드를 반환한다. 어느 호출이 실패했는지 정확히 알기 어렵고, 호출마다 폴링하면 성능 저하가 크다.
+1. **glGetError 폴링**: `glGetError`는 플래그에 처음 기록된 오류 코드 하나를 반환하고, 그 뒤에 난 오류는 플래그가 리셋될 때까지 기록되지 않는다. 어느 호출이 실패했는지 정확히 알기 어렵고, 호출마다 폴링하면 성능 저하가 크다.
 2. **디버그 출력**: `GL_KHR_debug` 확장(또는 ARB_debug_output 전신)이 콜백 모델을 추가한다.
 
 콜백 방식이 압도적으로 편하다. OpenGL 4.3에서 코어로 승격됐고, 3.3에서도 확장이 지원되면 사용 가능하다.
@@ -581,7 +581,7 @@ void GLAPIENTRY DebugCallback(GLenum source, GLenum type, GLuint id,
                                GLenum severity, GLsizei length,
                                const GLchar* msg, const void* user)
 {
-    // GL_DEBUG_TYPE_PUSH_GROUP / POP_GROUP은 RenderDoc 등이 내는 마커라 무시
+    // GL_DEBUG_TYPE_PUSH_GROUP / POP_GROUP은 앱이 glPush/PopDebugGroup으로 넣은 마커 알림이라 무시
     if (type == GL_DEBUG_TYPE_PUSH_GROUP || type == GL_DEBUG_TYPE_POP_GROUP)
         return;
 
@@ -683,7 +683,7 @@ PFNGLDRAWARRAYSPROC glDrawArrays =
     (PFNGLDRAWARRAYSPROC)wglGetProcAddress("glDrawArrays");
 ```
 
-OpenGL 1.1까지의 함수는 `opengl32.dll`(Windows) / `libGL.so.1`(Linux)에 정적으로 링크되어 있다. OpenGL 1.2 이상의 모든 함수는 동적 로딩이다. 즉 `glGenBuffers`(1.5), `glCreateProgram`(2.0), `glBindVertexArray`(3.0) 모두 동적 로딩 대상이다.
+Windows의 `opengl32.dll`은 OpenGL 1.1까지, Linux의 `libGL.so.1`은 ABI 규정상 OpenGL 1.2(+`ARB_multitexture`)까지의 함수만 정적으로 export한다. 그 위의 함수는 동적 로딩이다. 즉 `glGenBuffers`(1.5), `glCreateProgram`(2.0), `glBindVertexArray`(3.0) 모두 동적 로딩 대상이다.
 
 ### 직접 로딩의 부담
 
@@ -786,10 +786,14 @@ GLAD2는 *컨텍스트별 함수 포인터 테이블* 을 제공한다.
 
 ```cpp
 GladGLContext ctx1, ctx2;
+glfwMakeContextCurrent(window1);   // 로딩은 current 컨텍스트 기준
 gladLoadGLContext(&ctx1, glfwGetProcAddress);
+glfwMakeContextCurrent(window2);
 gladLoadGLContext(&ctx2, glfwGetProcAddress);
 
+glfwMakeContextCurrent(window1);
 ctx1.GenBuffers(1, &buf1);
+glfwMakeContextCurrent(window2);
 ctx2.GenBuffers(1, &buf2);
 ```
 
@@ -1107,7 +1111,7 @@ glClear(0xDEAD);  // 잘못된 enum
 다음과 같은 메시지가 매 프레임 출력되어야 한다.
 
 ```text
-[GL API/ERROR/HIGH id=1280] GL_INVALID_VALUE error generated.
+[GL API/ERROR/HIGH id=1281] GL_INVALID_VALUE error generated.
 Mask is invalid.
 ```
 

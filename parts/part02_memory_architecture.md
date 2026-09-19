@@ -154,7 +154,7 @@ $$\text{sets} = \frac{32{,}768}{64 \times 8} = 64$$
 
 ### 주소 분해
 
-64비트 가상 주소는 캐시 접근 시 세 부분으로 나뉜다.
+캐시 접근에 쓰이는 주소는 세 부분으로 나뉜다. x86-64의 L1 데이터 캐시는 변환이 필요 없는 페이지 오프셋 비트에서 index와 offset을 뽑고 tag는 물리 주소로 비교하며(VIPT), L2 이후는 전 구간이 물리 주소다.
 
 ```mermaid
 flowchart LR
@@ -183,7 +183,7 @@ for (int i = 0; i < N; i++) {
 
 이런 접근 패턴은 같은 set 안의 8개 way를 모두 채우고도 9번째 주소가 들어오면 way 하나를 evict한다. LRU 정책에 의해 막 들어왔던 라인이 다시 쫓겨나는 thrashing이 발생한다. 이 패턴이 set-associative 캐시 설계의 약점이다.
 
-해결책은 데이터 레이아웃을 다시 설계해 stride를 캐시 set 개수의 배수에서 멀어지게 하는 것이다.
+해결책은 데이터 레이아웃을 다시 설계해 stride를 `set 개수 × 라인 크기`(이 예에서는 64 × 64 = 4096바이트)의 배수에서 멀어지게 하는 것이다.
 
 
 ## 4. 캐시 일관성과 MESI 프로토콜
@@ -395,7 +395,7 @@ flowchart LR
 
 ### NUMA-aware 할당자
 
-jemalloc과 tcmalloc은 노드별 arena를 두고, 스레드가 위치한 노드의 arena에서 할당받게 한다.
+jemalloc은 스레드가 올라간 CPU를 기준으로 arena를 나누는 `opt.percpu_arena` 모드를 제공하고(기본값은 비활성), tcmalloc은 빌드 옵션으로 NUMA 노드를 size class partition에 매핑한다. 어느 쪽도 노드별 arena를 기본 전략으로 두지는 않으므로, 노드 지역성은 first-touch 정책과 명시적 노드 지정으로 확보해야 한다.
 
 | 전략 | 설명 |
 |------|------|
@@ -533,7 +533,7 @@ set-associative 캐시와 MESI 프로토콜은 캐시가 단순한 배열이 아
 - Ulrich Drepper, "What Every Programmer Should Know About Memory" (2007): <https://people.freebsd.org/~lstewart/articles/cpumemory.pdf>
 - Intel 64 and IA-32 Architectures Optimization Reference Manual
 - Linux Kernel Documentation, Memory Management: <https://www.kernel.org/doc/html/latest/admin-guide/mm/index.html>
-- jemalloc internals: <https://github.com/jemalloc/jemalloc/wiki/Background>
+- jemalloc 배경과 채택 사례: <https://github.com/jemalloc/jemalloc/wiki/Background> (내부 구조 요약은 jemalloc(3) 매뉴얼: <https://jemalloc.net/jemalloc.3.html>)
 - tcmalloc design: <https://google.github.io/tcmalloc/design.html>
 - Christoph Lameter, "NUMA (Non-Uniform Memory Access): An Overview", ACM Queue 2013
 - Sutter, H., "Eliminate False Sharing", Dr. Dobb's Journal 2009

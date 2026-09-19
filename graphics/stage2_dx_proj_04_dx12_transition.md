@@ -44,7 +44,7 @@ flowchart TB
     C --> D[CreateCommandQueue x3 - Direct/Compute/Copy]
     D --> E[CreateSwapChainForHwnd - FlipDiscard]
     E --> F[CreateDescriptorHeap - RTV/DSV/CBV-SRV-UAV]
-    F --> G[CreateCommandAllocator + CreateCommandList x N프레임]
+    F --> G[CreateCommandAllocator x N프레임 + CreateCommandList x1]
     G --> H[CreateFence + CreateEvent]
     H --> I[Backbuffer RTV 생성 + Depth 텍스처 + DSV]
 ```
@@ -329,7 +329,7 @@ params[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 // 총 4 + 2 + 2 + 1 + 1 = 10 DWORD (64 예산 안)
 ```
 
-머티리얼 텍스처 다섯 장(알베도·노멀·메탈릭·러프니스·AO)을 `t0`부터 `t4`에 묶어 슬롯 3의 디스크립터 테이블에 둔다. IBL 텍스처 세 장(조도 큐브맵·프리필터 큐브맵·BRDF LUT)을 `t10`부터 `t12`에 묶어 슬롯 4에 둔다. 텍스처 여덟 장을 디스크립터 테이블 두 개, 즉 2 DWORD로 노출한 셈이다. 만약 이 여덟 장을 전부 루트 SRV로 노출했다면 16 DWORD를 소비했을 것이다.
+머티리얼 텍스처 다섯 장(알베도·노멀·메탈릭·러프니스·AO)을 `t0`부터 `t4`에 묶어 슬롯 3의 디스크립터 테이블에 둔다. IBL 텍스처 세 장(조도 큐브맵·프리필터 큐브맵·BRDF LUT)을 `t10`부터 `t12`에 묶어 슬롯 4에 둔다. 텍스처 여덟 장을 디스크립터 테이블 두 개, 즉 2 DWORD로 노출한 셈이다. 루트 SRV는 버퍼 자원만 가리킬 수 있으므로 텍스처는 애초에 디스크립터 테이블을 거쳐야 하며, 설령 버퍼 여덟 개를 루트 SRV로 노출했다면 16 DWORD를 소비했을 것이다.
 
 전체 합은 10 DWORD다. 64 예산의 6분의 1만 사용했으므로 여유가 충분하다. 예산이 빠듯해지면 변경이 가장 잦은 슬롯을 우선 유지하고, 정적인 것을 디스크립터 테이블로 합친다.
 
@@ -364,7 +364,7 @@ device->CreateRootSignature(0,
     IID_PPV_ARGS(&rootSig));
 ```
 
-루트 시그니처 버전 1.1을 쓰는 이유는 디스크립터 가시성(volatility) 플래그 때문이다. 1.1은 디스크립터가 드로우 도중 변하지 않는다는 약속을 드라이버에 전달해 추가 최적화를 가능케 한다. `ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT` 플래그는 입력 어셈블러 단계를 쓴다는 표시로, 정점 버퍼를 입력 레이아웃으로 읽는 일반적인 그래픽스 PSO에 필요하다. 컴퓨트 전용 루트 시그니처는 이 플래그를 빼서 미세하게 비용을 줄인다.
+루트 시그니처 버전 1.1을 쓰는 이유는 디스크립터 휘발성(volatility) 플래그 때문이다. 1.1은 디스크립터가 드로우 도중 변하지 않는다는 약속을 드라이버에 전달해 추가 최적화를 가능케 한다. `ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT` 플래그는 입력 어셈블러 단계를 쓴다는 표시로, 정점 버퍼를 입력 레이아웃으로 읽는 일반적인 그래픽스 PSO에 필요하다. 컴퓨트 전용 루트 시그니처는 이 플래그를 빼서 미세하게 비용을 줄인다.
 
 루트 시그니처는 직렬화된 블롭(blob)을 거쳐 생성된다. 이 블롭은 HLSL 셰이더에 `[RootSignature(...)]` 속성으로 임베드할 수도 있어, 셰이더와 루트 시그니처를 한 곳에서 관리하는 패턴이 가능하다.
 
@@ -394,7 +394,7 @@ ID3D12DescriptorHeap* heaps[] = { cbvSrvHeap.Get(), samplerHeap.Get() };
 cmdList->SetDescriptorHeaps(_countof(heaps), heaps);   // 종류당 하나씩만
 ```
 
-프레임 도중 다른 힙으로 전환하는 것은 가능하지만 비용이 크다. GPU가 캐시를 플러시하고 새 힙 베이스를 다시 잡아야 하기 때문이다. 표준 패턴은 충분히 큰 힙 하나를 만들어 모든 디스크립터를 그 안에 집중시키는 것이다. 기능 수준 11_1 하드웨어는 CBV/SRV/UAV 힙에 최대 1,000,000개의 디스크립터를 둘 수 있으므로, 십만 개 규모의 힙은 부담이 아니다.
+프레임 도중 다른 힙으로 전환하는 것은 가능하지만 비용이 크다. GPU가 캐시를 플러시하고 새 힙 베이스를 다시 잡아야 하기 때문이다. 표준 패턴은 충분히 큰 힙 하나를 만들어 모든 디스크립터를 그 안에 집중시키는 것이다. 리소스 바인딩 Tier 1·2 하드웨어도 CBV/SRV/UAV 힙에 최대 1,000,000개의 디스크립터를 둘 수 있고 Tier 3는 그 이상도 허용하므로, 십만 개 규모의 힙은 부담이 아니다.
 
 ### Heap 생성
 
@@ -660,9 +660,9 @@ f.frameCB->Map(0, nullptr, &f.frameCBMapped);    // 영구 Map
 
 상수 버퍼 뷰는 256바이트 경계에 정렬되어야 하므로 크기를 올림한다. 이 정렬을 어기면 CBV 생성이 실패한다.
 
-DX11에서는 `Map(D3D11_MAP_WRITE_DISCARD)`로 매 프레임 버퍼를 새로 잡고 `Unmap`으로 닫는 페어를 반복했다. 드라이버는 이 DISCARD 힌트를 받아 내부적으로 버퍼를 여러 벌 돌려쓰는 명명(naming) 최적화를 했다. DX12에서는 이 일을 프로그래머가 직접 한다. 업로드 힙 버퍼를 한 번 영구 Map해 두고, 매 프레임 그 포인터에 `memcpy`만 한다. frame in flight 슬롯마다 별개의 버퍼를 두는 것이 곧 DX11이 자동으로 하던 버전 관리를 명시화한 것이다.
+DX11에서는 `Map(D3D11_MAP_WRITE_DISCARD)`로 매 프레임 버퍼를 새로 잡고 `Unmap`으로 닫는 페어를 반복했다. 드라이버는 이 DISCARD 힌트를 받아 내부적으로 버퍼를 여러 벌 돌려쓰는 버퍼 리네이밍(buffer renaming) 최적화를 했다. DX12에서는 이 일을 프로그래머가 직접 한다. 업로드 힙 버퍼를 한 번 영구 Map해 두고, 매 프레임 그 포인터에 `memcpy`만 한다. frame in flight 슬롯마다 별개의 버퍼를 두는 것이 곧 DX11이 자동으로 하던 버전 관리를 명시화한 것이다.
 
-업로드 힙은 PCIe를 통해 CPU에서 GPU로 읽히는 메모리라 대역폭이 제한적이다. 매 프레임 바뀌는 작은 상수 버퍼에는 적합하지만, 정적인 큰 정점·텍스처 데이터는 업로드 힙에 임시로 올린 뒤 `CopyBufferRegion`으로 기본 힙(Default Heap, GPU 전용 비디오 메모리)에 복사하는 것이 정석이다.
+업로드 힙은 PCIe를 통해 CPU에서 GPU로 읽히는 메모리라 대역폭이 제한적이다. 매 프레임 바뀌는 작은 상수 버퍼에는 적합하지만, 정적인 큰 정점·텍스처 데이터는 업로드 힙에 임시로 올린 뒤 `CopyBufferRegion`(버퍼)이나 `CopyTextureRegion`(텍스처)으로 기본 힙(Default Heap, GPU 전용 비디오 메모리)에 복사하는 것이 정석이다.
 
 ## 7. DX11과의 1:1 매핑 표
 
@@ -683,7 +683,7 @@ DX11 코드를 DX12로 옮길 때 각 호출이 어디로 가는지 한눈에 �
 | `PSSetShaderResources` | `SetGraphicsRootDescriptorTable` (SRV 부분) |
 | `PSSetSamplers` | Static Sampler 또는 별도 Sampler Heap |
 | `PSSetConstantBuffers` | `SetGraphicsRootConstantBufferView` |
-| `UpdateSubresource` | Upload Heap + `CopyBufferRegion` |
+| `UpdateSubresource` | Upload Heap + `CopyBufferRegion`(버퍼) / `CopyTextureRegion`(텍스처) |
 | `Map(DISCARD)` | Upload Heap의 영구 Map |
 | `ClearRenderTargetView` | `ClearRenderTargetView` (동일) |
 | `ClearDepthStencilView` | `ClearDepthStencilView` (동일) |
@@ -725,6 +725,6 @@ GPU가 그래픽스 외의 일반 계산을 수행하는 컴퓨트 셰이더, �
 ## 더 읽을거리
 
 - Microsoft Learn, [Important Changes from Direct3D 11 to Direct3D 12](https://learn.microsoft.com/en-us/windows/win32/direct3d12/important-changes-from-directx-11-to-directx-12) — 이행 관점의 공식 정리.
-- Microsoft Learn, [Root Signatures](https://learn.microsoft.com/en-us/windows/win32/direct3d12/root-signatures) — 64 DWORD 예산과 루트 파라미터 비용.
+- Microsoft Learn, [Root Signature Limits](https://learn.microsoft.com/en-us/windows/win32/direct3d12/root-signature-limits) — 64 DWORD 예산과 루트 파라미터 비용.
 - [PIX on Windows](https://devblogs.microsoft.com/pix/) — DX12 프로파일링·디버깅의 1차 도구.
 - [DirectX Graphics Samples](https://github.com/microsoft/DirectX-Graphics-Samples) — frame-in-flight·배리어 패턴의 공식 예제.

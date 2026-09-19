@@ -232,6 +232,8 @@ std::unique_ptr<ppl::IAllocator> CreateAllocator(ppl::Allocator type) {
 
 Pool/Slab은 *고갈* 이 측정 자체를 무효화하므로 *목표 노드 수보다 충분히 큰* 값으로 잡는다. Arena는 일괄 회수라 한 프레임 안에서만 안 넘으면 된다.
 
+고갈 검사 자체의 정수 오버플로도 막아야 한다. Arena는 `used + padding + size`를 더해서 비교하지 않고, 남은 용량에서 padding을 뺀 값과 요청 크기를 비교한다. Malloc 래퍼는 정렬 배수로 올리기 전에 `size <= SIZE_MAX - (alignment - 1)`을 확인한다. 두 구현 모두 크기 0 요청을 거부하며, 거부한 요청은 사용량과 통계를 바꾸지 않는다. `TestMallocAndArena`는 최대 정수 크기 요청과 Arena의 정확한 용량 끝점을 검사한다.
+
 ### Slab의 노드 라우팅
 
 Slab은 8개 크기 클래스(16/32/64/128/256/512/1024/2048 byte)를 가진 PoolAllocator의 묶음이다. 24 byte 노드 요청은 *32 byte 클래스* 로 라우팅된다.
@@ -244,7 +246,7 @@ SizeToClass(max(24, 8)) = SizeToClass(24) = 1 (32 byte 클래스)
 pools_[1]->Allocate(24, 8)  // 32 byte 슬롯 한 개 차지
 ```
 
-내부 단편화로 *8 byte가 슬롯당 낭비* 된다. Pool은 정확히 24 byte 블록이라 단편화가 없다. 측정에서 Slab이 Pool보다 *살짝 더 메모리* 를 쓴다는 결과가 나오는 게 정상이다.
+내부 단편화로 *8 byte가 슬롯당 낭비* 된다. Pool은 정확히 24 byte 블록이라 단편화가 없다. 다만 이 낭비는 측정값에 나타나지 않는다. `alloc bytes`·`live bytes` 는 슬롯 크기가 아니라 요청 크기로 기록하므로 Pool과 Slab의 표시 바이트는 똑같고, 차이는 전체 백킹 메모리에서만 드러난다.
 
 Deallocate는 한 가지 주의점이 있다. Allocate는 `max(size, alignment)` 로 class를 고르지만, `IAllocator::Deallocate(ptr, size)` 는 alignment를 받지 않는다. 그래서 SlabAllocator는 size만으로 class를 역산하지 않고, 각 PoolAllocator에 `Owns(ptr)` 를 물어 실제 포인터가 속한 class를 찾은 뒤 반환한다. 이러면 `Allocate(8, 64)` 처럼 alignment가 size보다 큰 요청도 잘못된 class로 반환되지 않는다.
 
@@ -405,7 +407,7 @@ void Hud::DrawStats(const FrameTimer& timer, std::size_t entityCount,
 | **alloc bytes** | 이번 프레임 alloc 누적 byte |
 | **live bytes** | 현재 살아 있는 메모리 (Reset 후 0이 정상) |
 
-`live bytes` 가 `0` 으로 표시되는 이유: `RunFrame` 끝에 `Reset` 호출로 모든 라이브 메모리가 회수된 직후 측정이라 0이다. 만약 0이 아니면 *누수* 또는 *Reset 미동작* 의 신호다 (디버그 가치).
+`live bytes` 가 `0` 으로 표시되는 이유: `RunFrame` 이 그 프레임에 잡은 노드를 전부 `Deallocate` 한 뒤 측정하기 때문이다. 만약 0이 아니면 *Deallocate 누락*, 즉 누수의 신호다 (디버그 가치). `Reset` 이 되돌리는 것은 이 카운터가 아니라 `ArenaAllocator::Used()` 같은 할당자 고유 상태다.
 
 ### allocator 콤보박스 활성화
 
@@ -450,7 +452,7 @@ cmake --build build --config Release
 
 `alloc bytes` 는 모든 allocator에서 동일(`2000 × 24 = 48000 byte`). 알고리즘 차이가 *바이트 수* 가 아닌 *호출 비용* 에 있다는 것을 보여 준다.
 
-`live bytes` 는 모든 프레임 끝에서 0이어야 정상이다. malloc은 Deallocate가 실제 free라 0, Arena는 Reset이 일괄 회수라 0, Pool/Slab은 Reset이 free list 재구성이라 0.
+`live bytes` 는 모든 프레임 끝에서 0이어야 정상이다. 네 allocator 모두 노드별 `Deallocate` 에서 카운터가 되돌아오기 때문이다. `Reset` 의 일괄 회수는 그와 별개로 Arena의 `Used()` 나 Pool/Slab의 free list 같은 할당자 고유 상태를 되돌린다.
 
 ### 자동 검증: `parts_allocator_tests`
 
@@ -590,5 +592,5 @@ allocator 토글을 바꾸면 `alloc ms` 만 주로 움직이고 `update ms` 는
 - [tcmalloc 설계 문서](https://google.github.io/tcmalloc/) — Thread-cache 할당자
 - [mimalloc 논문 (Microsoft)](https://www.microsoft.com/en-us/research/uploads/prod/2019/06/mimalloc-tr-v1.pdf)
 - Chandler Carruth, "Tuning C++: Benchmarks, and CPUs, and Compilers! Oh My!" (CppCon 2015) — 마이크로 벤치마크의 함정
-- [Linux 커널 SLUB 할당자](https://www.kernel.org/doc/html/latest/mm/slub.html) — 운영체제 측 Slab
+- [Linux 6.7: Short users guide for SLUB](https://docs.kernel.org/6.7/mm/slub.html) — 운영체제 측 Slab 할당자의 관측·디버깅. 설명 기준 버전을 고정한 자료.
 - Jason Gregory, *Game Engine Architecture*, 3rd ed., Ch. 5 "Engine Support Systems" — 게임 엔진의 메모리 관리(할당자·단편화) 패턴

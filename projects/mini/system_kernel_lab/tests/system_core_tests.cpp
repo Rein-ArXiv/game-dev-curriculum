@@ -487,9 +487,10 @@ void TestQueueHandoffStress() {
 
     // 감시 스레드. 아래 루프가 매달리면 이 스레드만이 카운터를 읽을 수 있다.
     // 정상 경로에서는 1ms 마다 원자 load 한 번이라 워커 타이밍에 영향이 없다.
-    // 데드라인은 정상 소요(수백 ms)의 100배 이상으로 잡아 부하 걸린 머신에서
+    // 데드라인은 정상 소요(1초 안팎)의 30배 이상을 사이클 수에 비례해 잡아 부하 걸린 머신에서
     // 오탐이 나지 않게 한다. ctest TIMEOUT(60s)보다는 확실히 앞선다.
-    constexpr auto kStressBudget = std::chrono::seconds(30);
+    const auto kStressBudget =
+        std::chrono::seconds(30) * ((kCycles + kCyclesFloor - 1) / kCyclesFloor);
     std::thread monitor([&] {
         const auto deadline = std::chrono::steady_clock::now() + kStressBudget;
         while (!queue_stress::loopDone.load(std::memory_order_acquire)) {

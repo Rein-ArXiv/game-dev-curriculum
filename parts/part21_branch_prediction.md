@@ -19,7 +19,7 @@ if문 순서가 성능을 바꿀 수 있는가?
 5. [Profile-Guided Optimization](#5-profile-guided-optimization)
 6. [Branchless Programming](#6-branchless-programming)
 7. [실전 벤치마크](#7-실전-벤치마크)
-8. [하드웨어별 분기 예측 특성](#8-하드웨어별-분기-예측-특성)
+8. [하드웨어별 차이를 다루는 법](#8-하드웨어별-차이를-다루는-법)
 9. [실전 체크리스트](#9-실전-체크리스트)
 10. [미래: 분기 예측의 진화](#10-미래-분기-예측의-진화)
 
@@ -203,8 +203,10 @@ Prediction = sign(w0 + w1*h1 + w2*h2 + ... + wN*hN)
 
 ```c
 if (misprediction) {
-    for (int i = 0; i < N; i++) {
-        weights[i] += (actual == Taken ? 1 : -1) * history[i];
+    int t = (actual == Taken ? 1 : -1);
+    weights[0] += t;                    // bias는 h0 = 1이므로 history를 곱하지 않는다
+    for (int i = 1; i <= N; i++) {
+        weights[i] += t * history[i];
     }
 }
 ```
@@ -250,7 +252,7 @@ perf stat -e branches,branch-misses ./program
 
 # 출력:
 #  100,523,421  branches
-#   15,234,567  branch-misses  # 15.15% miss rate
+#   15,234,567  branch-misses  # 15.16% miss rate
 ```
 
 15%라는 비율만으로 심각도를 판정할 수 없다. 분기 수가 적으면 영향이 작을 수 있고, hot loop의 매 iteration 분기라면 큰 frontend 손실이 될 수 있다. `branch-misses / branches`와 함께 miss로 잃은 cycles, 함수별 실행 비중과 전체 wall time을 본다.
@@ -777,7 +779,7 @@ if (unlikely(coin_flip())) {
 
 ```c
 // 2000년대에는 유용했지만 지금은?
-int divide_by_2(int x) {
+unsigned divide_by_2(unsigned x) {
     return x >> 1;  // 컴파일러가 x / 2를 이미 이렇게 바꿈
 }
 ```
@@ -833,7 +835,7 @@ Mike Acton이 반복해서 강조하는 원칙을 다시 새긴다. 갖고 싶�
 
 ### 공식 문서 및 매뉴얼
 
-- Intel. "Intel 64 and IA-32 Architectures Optimization Reference Manual". https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html
+- Intel. "Intel 64 and IA-32 Architectures Optimization Reference Manual". https://www.intel.com/content/www/us/en/developer/articles/technical/intel64-and-ia32-architectures-optimization.html
 - AMD. "Software Optimization Guide for AMD Family 19h Processors". https://www.amd.com/en/support/tech-docs
 - ARM. "Arm Cortex-A78 Core Technical Reference Manual". https://developer.arm.com/documentation/
 
@@ -848,7 +850,7 @@ Mike Acton이 반복해서 강조하는 원칙을 다시 새긴다. 갖고 싶�
 
 - Fog, A. (2023). "The microarchitecture of Intel, AMD, and VIA CPUs". https://www.agner.org/optimize/
 - Fog, A. (2023). "Optimizing software in C++". https://www.agner.org/optimize/optimizing_cpp.pdf
-- Lemire, D. (2019). "Faster sorted array unions by reducing branches". https://lemire.me/blog/
+- Lemire, D. (2021). "Faster sorted array unions by reducing branches". https://lemire.me/blog/
 - Preshing, J. (2012). "A Look Back at Single-Threaded CPU Performance". https://preshing.com/
 
 ### 도구와 관찰

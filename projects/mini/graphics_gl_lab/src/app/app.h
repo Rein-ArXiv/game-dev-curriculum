@@ -80,7 +80,7 @@ private:
 
     // Step 7 토글.
     int         objectCount_   = 10000;     // 100 / 1000 / 10000 / 100000
-    int         pendingCount_  = 10000;     // 사용자가 슬라이더 변경 — Apply 시 적용.
+    int         pendingCount_  = 10000;     // 사용자가 콤보로 변경 — 다음 프레임 시작 시 적용.
     MsaaSamples msaa_samples_  = MsaaSamples::Off;
 };
 

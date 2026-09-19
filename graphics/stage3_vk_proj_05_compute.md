@@ -546,6 +546,17 @@ VkSubgroupFeatureFlags ops = sub.supportedOperations; // 산술/투표/볼롯/�
 
 `supportedOperations`에 `VK_SUBGROUP_FEATURE_ARITHMETIC_BIT`, `VK_SUBGROUP_FEATURE_BALLOT_BIT` 같은 비트가 켜져 있는지로 어떤 인트린식을 쓸 수 있는지 확인한다. `supportedStages`에 `VK_SHADER_STAGE_COMPUTE_BIT`가 있어야 컴퓨트에서 쓸 수 있다. RDNA처럼 웨이브 크기가 32 또는 64로 가변인 하드웨어에서는 `VK_EXT_subgroup_size_control`로 셰이더가 원하는 크기를 요청할 수도 있다.
 
+```cpp
+VkPipelineShaderStageRequiredSubgroupSizeCreateInfo reqSize{};
+reqSize.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO;
+reqSize.requiredSubgroupSize = 32;  // wave32 요청 (지원 범위 내에서)
+
+// VkPipelineShaderStageCreateInfo 의 pNext에 연결한다
+shaderStage.pNext = &reqSize;
+```
+
+다만 폭을 강제하면 하드웨어가 자연스럽게 고를 폭을 막아 occupancy나 명령 패킹이 나빠질 수 있으므로 측정 없이 강제하지 않는다.
+
 ### 주요 인트린식
 
 서브그룹 연산은 종류별로 GLSL 확장이 나뉘어 있어, 쓰는 만큼만 활성화한다.
@@ -565,7 +576,7 @@ void main() {
     uvec4 mask  = subgroupBallot(v > 0.0);          // 조건 참인 레인의 비트마스크
     uint  cnt   = subgroupBallotBitCount(mask);     // 그 개수
 
-    float nb = subgroupShuffle(v, gl_SubgroupInvocationID + 1);  // 옆 레인 값
+    float nb = subgroupShuffle(v, (gl_SubgroupInvocationID + 1) % gl_SubgroupSize);  // 옆 레인 값(마지막 레인은 0번으로 감는다)
 
     if (subgroupElect()) {                // 서브그룹에서 단 하나의 레인만 참
         atomicAdd(globalCount, cnt);
@@ -612,9 +623,9 @@ float incl = subgroupInclusiveAdd(v);   // 자신까지의 누적 (자신 포함
 
 이 글의 코드는 100만 파티클이 GPU 측에서 시뮬레이션되고 렌더링되는 시스템을 만든다. CPU는 디스패치 명령과 간접 드로우 인자의 포인터만 발급하고, 활성 파티클 수의 결정과 데이터 수집은 모두 GPU에서 일어난다. 컴퓨트 파이프라인, 스토리지 버퍼, 컴퓨트와 그래픽 사이의 배리어, 간접 드로우, 아토믹, 서브그룹 인트린식이 합쳐져, 그래픽 파이프라인 바깥의 범용 GPU 연산을 다루는 토대가 모였다.
 
-세 가지 트레이드오프가 이 글의 핵심이다. 첫째는 동기화의 정밀도다. 컴퓨트에서 그래픽으로 넘기는 배리어의 dst 스테이지를 정확히 좁히면 드라이버가 작업을 겹쳐 실행할 여지를 얻지만, 넓게 잡으면 안전한 대신 GPU가 멈춰 선다. 둘째는 데이터 구조의 크기다. 파티클 한 개의 바이트가 곧 매 프레임 대역폭이며, 64바이트 정렬이 캐시 합치기와 메모리 효율의 균형점이다. 셋째는 아토믹 경합이다. 단일 전역 카운터는 정확하지만 직렬화되고, 서브그룹 단위 집계로 호출 횟수를 줄이면 정확성을 유지한 채 경합을 푼다.
+세 가지 트레이드오프가 이 글의 핵심이다. 첫째는 동기화의 정밀도다. 컴퓨트에서 그래픽으로 넘기는 배리어의 dst 스테이지를 정확히 좁히면 드라이버가 작업을 겹쳐 실행할 여지를 얻지만, 넓게 잡으면 안전한 대신 독립 작업을 겹칠 여지를 잃는다. 둘째는 데이터 구조의 크기다. 파티클 한 개의 바이트가 곧 매 프레임 대역폭이며, 64바이트 정렬이 캐시 합치기와 메모리 효율의 균형점이다. 셋째는 아토믹 경합이다. 단일 전역 카운터는 정확하지만 직렬화되고, 서브그룹 단위 집계로 호출 횟수를 줄이면 정확성을 유지한 채 경합을 푼다.
 
-남은 함정은 이식성이다. 서브그룹 크기는 32과 64 사이에서 하드웨어마다 다르고, 모바일에서는 일부 인트린식과 64비트 아토믹이 빠진다. 디바이스 기능 질의로 확인한 뒤 분기하고, 서브그룹 경로가 없을 때 공유 메모리 리덕션으로 폴백하는 두 갈래를 함께 두는 것이 프로덕션 코드의 형태다. 동기화 검증 레이어와 벤더 프로파일러로 측정하면서 배리어와 점유율을 조율하는 과정이 컴퓨트 셰이더 성능 작업의 실제 모습이다.
+남은 함정은 이식성이다. 서브그룹 크기는 8에서 64까지 하드웨어마다 다르고, 모바일에서는 일부 인트린식과 64비트 아토믹이 빠진다. 디바이스 기능 질의로 확인한 뒤 분기하고, 서브그룹 경로가 없을 때 공유 메모리 리덕션으로 폴백하는 두 갈래를 함께 두는 것이 프로덕션 코드의 형태다. 동기화 검증 레이어와 벤더 프로파일러로 측정하면서 배리어와 점유율을 조율하는 과정이 컴퓨트 셰이더 성능 작업의 실제 모습이다.
 
 ## 더 읽을거리
 

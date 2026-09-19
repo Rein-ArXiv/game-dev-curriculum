@@ -345,13 +345,13 @@ ctx::fiber f(std::allocator_arg, stack_alloc, worker);
 ```text
 High Address
 ┌────────────┐ ← stack_base (0x01010000)
-│ Guard Page │ 보호 페이지
-├────────────┤
 │            │
 │  64KB      │ ← 실제 스택 영역
 │  Stack     │
 │            │
 ├────────────┤ ← stack_limit (0x01000000)
+│ Guard Page │ 보호 페이지
+├────────────┤
 │ Allocator  │ 인접 매핑 또는 미매핑 영역
 └────────────┘
 Low Address
@@ -722,22 +722,28 @@ struct Job {
 
 struct JobSystem {
     ConcurrentQueue<Job*> job_queue;  // 실제 구현은 동기화된 큐
-    std::vector<LPVOID> worker_fibers;
+    std::vector<LPVOID> free_fibers;  // 대기 시 전환해 갈 여유 fiber 풀
+
+    // scheduler가 counter 주소를 키로 대기 fiber 목록을 관리한다(구현 생략)
+    void park_current_fiber_on(std::atomic<int>& counter);
+    void wake_fibers_waiting_on(std::atomic<int>* counter);
+    LPVOID acquire_free_fiber();
 
     void run_job(Job* job) {
         job->func(job->data);
-        job->completion->fetch_sub(1, std::memory_order_release);
+        // 마지막 감소가 카운터를 0으로 만들면 대기 fiber를 다시 runnable로 만든다
+        if (job->completion->fetch_sub(1, std::memory_order_release) == 1)
+            wake_fibers_waiting_on(job->completion);
     }
 
     void wait_for_counter(std::atomic<int>& counter) {
         while (counter.load(std::memory_order_acquire) > 0) {
-            // 다른 작업 실행
-            Job* job = nullptr;
-            if (job_queue.try_pop(job)) {
-                run_job(job);
-            } else {
-                SuspendCurrentFiberUntilWorkOrCompletion(counter);
-            }
+            // 현재 fiber를 counter의 대기 목록에 넣고 여유 fiber로 전환한다.
+            // worker OS thread는 그 fiber 위에서 계속 다른 job을 실행한다.
+            park_current_fiber_on(counter);
+            SwitchToFiber(acquire_free_fiber());
+            // counter가 0이 되면 scheduler가 이 fiber를 다시 runnable로 만들고
+            // 여기서 재개된다. 재개된 스레드는 park 직전의 스레드와 다를 수 있다.
         }
     }
 };
@@ -1125,7 +1131,7 @@ void on_texture_load_completed(GameObject* obj) {
 
 게임 엔진과 서버는 문제에 따라 Fiber, C++20 코루틴, callback, future를 조합한다. 이 도구들은 대기 중인 논리 작업이 worker thread를 점유하지 않게 만들 수 있지만, 동기 I/O를 비동기로 바꾸거나 데이터 레이스를 자동으로 제거하지는 않는다.
 
-Melvin Conway가 1963년에 발명한 코루틴은 60년이 지나 마침내 주류 언어의 일부가 되었다. 그리고 그 핵심 아이디어는 여전히 같다.
+Melvin Conway가 1958년에 고안하고 1963년 논문으로 처음 발표한 코루틴은 60여 년이 지나 마침내 주류 언어의 일부가 되었다. 그리고 그 핵심 아이디어는 여전히 같다.
 
 > "함수는 반드시 끝까지 실행되어야 한다는 법은 없다."
 
@@ -1145,4 +1151,4 @@ Melvin Conway가 1963년에 발명한 코루틴은 60년이 지나 마침내 주
 - Daan Leijen, "Structured Asynchrony with Algebraic Effects", MSR Technical Report, 2017
 - TaskFlow: https://github.com/taskflow/taskflow
 - marl (Google): https://github.com/google/marl
-- Dale Weiler, "Fibers, Oh My!", 2016: https://graphitemaster.github.io/fibers/
+- Dale Weiler, "Fibers, Oh My!", 2020: https://graphitemaster.github.io/fibers/

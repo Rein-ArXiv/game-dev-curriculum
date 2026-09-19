@@ -97,7 +97,7 @@ flowchart LR
 
 워크로드의 가공이 *페이지 단위 sampled checksum* (4 KB stride 한 바이트씩) 인 게 핵심이다.
 
-- read/pread: 유저 버퍼에서 4 KB 간격으로 한 바이트 읽음. 16 MB 중 4096개 바이트만 만진다.
+- read/pread: 유저 버퍼에서 4 KB 간격으로 한 바이트 읽음. 16 MB 중 4112개 바이트(파일마다 4 KB 간격 256개 + 마지막 바이트 1개)만 만진다.
 - mmap: 매핑된 주소에서 4 KB 간격으로 한 바이트 읽음. *페이지를 처음 만지는 순간* 페이지 폴트로 그 페이지가 채워진다.
 
 mmap의 페이지 폴트 패턴이 *측정 결과에 직접 영향* 을 준다. 현재 구현은 매 사이클 `mmap → onRead → munmap` 을 반복하므로, 두 번째 사이클 이후에도 새 매핑의 PTE를 채우기 위한 minor page fault는 다시 발생한다. 달라지는 것은 디스크 IO다. 파일 페이지가 페이지 캐시에 있으면 major fault가 아니라 minor fault로 끝나고, read·pread처럼 16 MB를 유저 버퍼로 복사하지 않는다.
@@ -212,7 +212,7 @@ read 코드와 한 줄만 다르다 — `read(fd, buf, count)` → `pread(fd, bu
 
 이 lab의 워크로드는 단일 스레드라 read와 pread의 차이가 시스템 콜 자체의 비용에서만 나온다. 두 시스템 콜은 *커널 내부에서 거의 같은 코드 경로* 를 타고 (fd offset 갱신 여부만 차이), 측정 결과로는 *cycle ms 차이가 측정 노이즈 안* 이 흔하다.
 
-이게 *기대된 결과* 다. pread의 가치는 *다중 스레드 동시 호출 안전성* 에 있고, 단일 스레드 측정에서는 그 가치가 안 보인다. 현재 범위 밖의 확장에서 worker pool이 들어오면 그때 차이가 드러난다 (워커들이 같은 fd에 동시 접근하는 시나리오).
+이게 *기대된 결과* 다. pread의 가치는 *다중 스레드 동시 호출 안전성* 에 있고, 단일 스레드 측정에서는 그 가치가 안 보인다. 그 가치는 *여러 스레드가 같은 fd 를 공유* 하는 시나리오에서만 드러나며, 워커마다 파일을 따로 여는 worker pool 에서는 다중 스레드라도 read ≈ pread 가 유지된다.
 
 이 단계의 측정에서 read ≈ pread 가 나오는 게 *옳은 결과* 다. 차이가 없는 것 자체가 시스템 콜의 *코드 경로가 거의 같다는* 정보다.
 
@@ -247,22 +247,53 @@ read/pread와 달리 *임시 버퍼 멤버가 없다*. 매핑된 주소에서 �
 
 ### 구현
 
+<!-- snippet: src/io/mmap_backend.cpp#MmapBackend::RunCycle -->
 ```cpp
-// src/io/mmap_backend.cpp 핵심부
-
 std::uint64_t MmapBackend::RunCycle(const std::vector<std::string>& paths,
                                       std::size_t fileBytes,
                                       const OnFileRead& onRead) {
     std::uint64_t totalBytes = 0;
 
     for (const auto& path : paths) {
-        const int fd = ::open(path.c_str(), O_RDONLY);
+        const int fd = SklOpen(path.c_str(), O_RDONLY);
         if (fd < 0) {
             throw std::runtime_error(std::string("open failed: ") + path
                                      + ": " + std::strerror(errno));
         }
 
-        void* p = ::mmap(nullptr, fileBytes, PROT_READ, MAP_PRIVATE, fd, 0);
+        struct stat st {};
+        if (SklFstat(fd, &st) != 0) {
+            const std::string msg = std::string("fstat failed: ") + path
+                                  + ": " + std::strerror(errno);
+            ::close(fd);
+            throw std::runtime_error(msg);
+        }
+        // mmap 기반 읽기는 *정규 파일에만* 정의된다. FIFO·소켓·문자 장치는
+        // st_size 가 0 이라 "빈 파일" 과 구분되지 않으므로 조용히 0 바이트를
+        // 돌려주는 대신 명시적으로 거부한다.
+        if (!S_ISREG(st.st_mode)) {
+            const std::string msg =
+                std::string("mmap backend requires a regular file: ") + path;
+            ::close(fd);
+            throw std::runtime_error(msg);
+        }
+
+        // 파일이 fileBytes 보다 짧은 것은 EOF 이지 오류가 아니다
+        // (io_backend.h 의 short read 계약). 파일 끝을 넘겨 매핑하면 그 영역
+        // 접근이 SIGBUS 이므로 매핑 길이 자체를 파일 크기로 자른다.
+        const std::size_t available = static_cast<std::size_t>(st.st_size);
+        const std::size_t mapBytes  = fileBytes < available ? fileBytes : available;
+
+        if (mapBytes == 0) {
+            // mmap(length=0) 은 EINVAL 이다. 빈 파일은 매핑 없이 0 바이트로
+            // 관측시킨다 — 다른 backend 와 같은 결과.
+            static const unsigned char kEmpty = 0;
+            ::close(fd);
+            onRead(&kEmpty, 0);
+            continue;
+        }
+
+        void* p = SklMmap(nullptr, mapBytes, PROT_READ, MAP_PRIVATE, fd, 0);
         if (p == MAP_FAILED) {
             const std::string msg = std::string("mmap failed: ") + path
                                   + ": " + std::strerror(errno);
@@ -272,18 +303,27 @@ std::uint64_t MmapBackend::RunCycle(const std::vector<std::string>& paths,
 
         // 매핑된 주소를 그대로 onRead에 넘긴다.
         // 워크로드의 sampled checksum이 페이지를 만지면서 *페이지 폴트가 발생*
-        // 하고 커널이 페이지 캐시에서 매핑을 채운다.
-        onRead(static_cast<const unsigned char*>(p), fileBytes);
+        // 하고 커널이 페이지 캐시에서 매핑을 채운다. read와 달리 유저 공간으로의
+        // 명시적 복사가 없다.
+        try {
+            onRead(static_cast<const unsigned char*>(p), mapBytes);
+        } catch (...) {
+            ::munmap(p, mapBytes);
+            ::close(fd);
+            throw;
+        }
 
-        if (::munmap(p, fileBytes) != 0) {
+        if (SklMunmap(p, mapBytes) != 0) {
             const std::string msg = std::string("munmap failed: ") + path
                                   + ": " + std::strerror(errno);
+            // The fault hook may have skipped the real unmap.
+            ::munmap(p, mapBytes);
             ::close(fd);
             throw std::runtime_error(msg);
         }
         ::close(fd);
 
-        totalBytes += fileBytes;
+        totalBytes += mapBytes;
     }
 
     return totalBytes;
@@ -298,7 +338,7 @@ std::uint64_t MmapBackend::RunCycle(const std::vector<std::string>& paths,
 
 ### mmap이 short read 계약을 지키려면 fstat이 필요하다
 
-위 핵심부는 mmap 자체를 보여 주려고 줄인 것이고, 실제 구현에는 `fstat` 이 앞에 하나 더 있다. step02가 정한 계약("파일이 요청보다 짧은 것은 EOF이지 오류가 아니다")을 mmap이 지키려면 그렇게 될 수밖에 없다.
+위 메서드는 실제 구현이며, `Skl*` 호출은 오류 주입이 없으면 해당 시스템 API를 호출하는 래퍼다. 매핑 전에 `fstat`으로 크기를 확인하는 이유는 파일이 요청보다 짧아도 EOF로 처리하기 위해서다. 콜백이 예외를 던지면 매핑과 fd를 정리한 뒤 전파한다.
 
 `mmap` 은 *파일 크기를 넘겨서도 성공한다*. 길이는 페이지 단위로 올림되고, 마지막 페이지의 파일 끝 이후 바이트는 0으로 읽힌다. 그러나 **파일 끝을 완전히 넘어간 페이지를 만지면 `SIGBUS`** 다. read·pread는 짧은 파일에서 그냥 적게 돌려주지만, mmap은 매핑이 성공한 뒤에는 EOF를 관측할 방법이 없어 그대로 죽는다. 그래서 매핑 *길이 자체* 를 `min(fileBytes, st_size)` 로 자른다.
 
@@ -307,11 +347,11 @@ std::uint64_t MmapBackend::RunCycle(const std::vector<std::string>& paths,
 - `st_size == 0` 이면 매핑을 아예 하지 않는다. `mmap(length=0)` 은 `EINVAL` 이다. 빈 파일은 매핑 없이 `onRead(ptr, 0)` 으로 관측시켜 다른 backend와 같은 결과를 낸다.
 - `S_ISREG` 가 아니면 거부한다. FIFO·소켓·문자 장치는 `st_size` 가 0이라 "빈 파일"과 구분되지 않는다. 조용히 0바이트를 돌려주는 대신 명시적으로 throw 한다 — mmap 기반 읽기는 정규 파일에만 정의된다.
 
-`fstat` 자체의 *실패* 는 여전히 오류다(throw). "파일이 짧다"와 "크기를 못 읽었다"는 다른 사건이다.
+`fstat` 자체의 *실패* 는 여전히 오류다(throw). "파일이 짧다"와 "크기를 못 읽었다"는 다른 사건이다. 크기를 확인한 뒤 다른 프로세스가 파일을 줄이면 여전히 `SIGBUS`가 가능하므로 이 backend는 사이클 중 fixture 파일 크기가 변하지 않는다는 전제가 있다.
 
 ### 페이지 폴트의 측정 시점
 
-mmap 호출 자체는 매핑 *생성* 만 한다. 실제 페이지를 읽어 들이는 건 *매핑된 주소를 처음 만지는 순간* 이다. 우리 워크로드는 4 KB stride sampled checksum이라 *각 4 KB 페이지마다 한 번씩* 폴트가 발생한다 (1 MB 파일 → 256 페이지 → 256 페이지 폴트).
+mmap 호출 자체는 매핑을 생성한다. 페이지 테이블 항목은 매핑된 주소에 접근할 때 채워질 수 있다. 4 KB 기본 페이지 환경에서 1 MiB 파일은 256페이지지만, fault-around가 인접한 캐시 페이지를 함께 매핑하면 폴트 횟수는 그보다 적을 수 있다. 범위와 성공 여부는 커널 설정, 정렬, 페이지 캐시 상태 등에 의존하므로 1 MiB당 16회 이하라고 보장할 수 없다.
 
 페이지 캐시가 따뜻한 상태(콜드 read 이후)에서는 *minor page fault* 만 발생한다. 디스크 IO 없이 커널이 페이지 캐시 항목을 새 VMA의 PTE에 연결한다. 현재 구현은 사이클마다 `munmap` 후 다시 `mmap` 하므로 warm cache에서도 이 minor fault 비용은 매 사이클 다시 든다.
 
@@ -533,7 +573,7 @@ cmake --build build -j
 
 이 단계의 결과를 일반화하지 않는다.
 
-- **read ≈ pread** 는 *단일 스레드 워크로드* 에서만 그렇다. 다중 스레드라면 fd offset 동시 갱신 vs offset 인자 차이가 측정에 들어온다.
+- **read ≈ pread** 는 *단일 스레드 워크로드* 에서만 그렇다. 여러 스레드가 *같은 fd* 를 공유할 때만 fd offset 동시 갱신 vs offset 인자 차이가 측정에 들어온다 — 워커마다 파일을 따로 여는 이 lab 의 worker pool 에서는 그 차이가 생기지 않는다.
 - **mmap이 read보다 빠른가** 는 워크로드 크기·캐시 상태·실제 가공 패턴에 따라 다르다. 16 MB가 모두 페이지 캐시에 들어가는 시나리오에서는 mmap이 *데이터 복사 비용 0* 이라 유리한데, 가공이 *모든 바이트* 를 만지는 패턴이면 cache miss 위주가 되어 차이가 줄어든다.
 - **첫 사이클의 spike** 는 mmap만의 특성이 아니다. read도 콜드 캐시 첫 사이클에서 디스크 IO로 spike가 나는데, 우리 fixture는 시작 직후 디스크에 막 쓰여진 상태라 이미 페이지 캐시에 있다. 그래서 read의 첫 사이클은 spike가 *상대적으로 작다*.
 
@@ -566,7 +606,7 @@ void TestMmapErrorPaths() {
     CHECK(OpenFdCount() == fdBefore);
     // ...
     {
-        // munmap 실패는 매핑을 회수하지 못한 채 던진다. fd 는 그래도 닫혀야 한다.
+        // 주입이 실제 unmap을 건너뛰어도 정리 경로는 매핑과 fd를 회수한다.
         ScopedFault fault("munmap:0:EINVAL:1");
         const CycleOutcome bad = RunOne(*backend, fixture);
         CHECK(bad.threw);
@@ -622,7 +662,7 @@ ctest --test-dir build -R skl_step03 --output-on-failure
 system_fault_tests --step=3: 4/17 check(s) run, 0 failed
 ```
 
-`fds back to 5` 가 반복해서 나오는 것이 이 절의 핵심 관측값이다. 네 번째 파일의 open이 실패한 시점에 backend는 이미 fd를 세 개 열었다 닫은 상태이고, 예외가 그 위로 지나갔는데도 열린 fd 수가 시작값으로 돌아왔다. `20 clean cycles, open fds 5 -> 5` 는 오류가 없는 경로에서의 같은 질문 — 사이클을 스무 번 돌려도 누적되지 않는다.
+`fds back to 5` 가 반복해서 나오는 것이 이 절의 핵심 관측값이다. 세 번째 파일의 open이 실패한 시점에 backend는 이미 fd를 두 개 열었다 닫은 상태이고, 예외가 그 위로 지나갔는데도 열린 fd 수가 시작값으로 돌아왔다. `20 clean cycles, open fds 5 -> 5` 는 오류가 없는 경로에서의 같은 질문 — 사이클을 스무 번 돌려도 누적되지 않는다.
 
 ---
 

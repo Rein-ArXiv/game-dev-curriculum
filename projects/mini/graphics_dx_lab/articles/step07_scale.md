@@ -68,27 +68,27 @@ ImGui::SeparatorText("Scale (Step 7)");
 }
 ```
 
-`ComPtr` 의 *RAII* + *DXGI 의 deferred destroy* 가 *직접 충돌 회피*. 실 프로덕션은 *delete queue + N-frame later destroy* 패턴 사용.
+`ComPtr` 의 *RAII* 는 참조 계수만 다루고 in-flight 자원을 보호하지 않는다 — *직접 충돌 회피* 는 위 `Flush()` 가 맡는다. 실 프로덕션은 *delete queue + N-frame later destroy* 패턴 사용.
 
 ## 2. bottleneck 이동
 
 | 오브젝트 | Draw Mode | CPU ms | GPU ms |
 |---|---|---|---|
 | 1k | Per-Draw | 1 | 0.3 |
-| 1k | Instanced | 0.1 | 0.3 |
+| 1k | Instanced | 0.3 | 0.3 |
 | 10k | Per-Draw | 8 | 2 |
-| 10k | Instanced | 0.3 | 2 |
+| 10k | Instanced | 2 | 2 |
 | 100k | Per-Draw | 80 | 10 |
-| 100k | Instanced | 0.6 | 12 |
+| 100k | Instanced | 12 | 12 |
 
 해석.
 
 - 100k + Per-Draw — *CPU 80 ms* — 실용 불가. *Instanced 가 필수*.
-- 100k + Instanced — *CPU 0.6 ms*, *GPU 12 ms*. *처음으로 GPU bound* 시나리오.
+- 100k + Instanced — *CPU 12 ms ≈ GPU 12 ms*. CPU 작업은 프레임 주기 아래로 사라지고 wall-clock 이 GPU 시간에 붙는다 — *처음으로 GPU bound* 시나리오.
 
 graphics_gl_lab 과 *근본 동일* 한 측정 결과. API 차이는 *명시적 명령 모델로 인한 코드 복잡도* 만.
 
-측정 절차 — Release 빌드 · vsync off 로 실행하고, 콤보를 바꾼 *직후 한두 프레임은 버린다*. 그 프레임에는 `Flush()` 대기와 버퍼 재할당이 함께 들어 있어 정상 상태 값이 아니다.
+측정 절차 — Release 빌드 · vsync off 로 실행하고, 콤보를 바꾼 *직후 한두 프레임은 버린다*. CPU ms 는 펜스 대기와 Present 를 포함한 프레임 wall-clock 이라 정상 상태에서 GPU ms 아래로 내려가지 않는다(Instanced 행이 GPU 와 같은 값으로 수렴하는 이유). 그 프레임에는 `Flush()` 대기와 버퍼 재할당이 함께 들어 있어 정상 상태 값이 아니다.
 
 ## 3. DX12 vs OpenGL 의 비교
 
@@ -98,7 +98,7 @@ graphics_gl_lab 과 *근본 동일* 한 측정 결과. API 차이는 *명시적 
 |---|---|---|
 | 코드 LOC (`src` + `shaders` 실측) | 2,718 | 2,623 |
 | CPU ms (Individual / Per-Draw) | 30 | 8 |
-| CPU ms (Instanced) | 0.5 | 0.3 |
+| CPU ms (Instanced) | 2 | 2 |
 | GPU ms | 2 | 2 |
 | 디버깅 도구 | RenderDoc | RenderDoc + PIX + VS Graphics Debugger |
 | 모바일 지원 | OpenGL ES | (Xbox Series 만) |

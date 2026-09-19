@@ -316,7 +316,7 @@ void TestBenchProgramInvariants() {
     CHECK(run.instructions == 1612);
 
     // 캐시 경로: 같은 Program을 새 VM으로 다시 실행해도 명령 수와 결과가 같아야
-    // 한다. 실행 사이에 전역이나 스택이 새면 두 번째 실행이 달라진다.
+    // 한다. 실행이 `Program`을 변경하거나 결과가 VM 인스턴스에 묶여 있으면 두 번째 실행이 달라진다.
     lab::lang::VirtualMachine second;
     const auto cached = second.Run(*compiled.program);
     CHECK(cached.ok);
@@ -454,9 +454,9 @@ std::string ViolationClass(const std::string& detail) {
 std::string GrammarCompileViolation(const std::string& source) {
     const auto first = lab::lang::Compiler{}.Compile(source);
     if (!first.program) {
-        return "컴파일 실패: " + (first.diagnostics.empty()
-                                      ? std::string("(진단조차 없다)")
-                                      : lab::lang::FormatDiagnostic(first.diagnostics.front()));
+        if (first.diagnostics.empty()) return "컴파일 실패(진단조차 없다)";
+        return "컴파일 실패(" + first.diagnostics.front().message + "): " +  // 메시지가 부류, 위치는 가변부
+               lab::lang::FormatDiagnostic(first.diagnostics.front());
     }
     if (!first.diagnostics.empty()) return "프로그램과 진단이 동시에 나왔다";
 
@@ -653,7 +653,7 @@ void TestFuzzBytecodeMutationVerifier() {
         // 읽는다. 실행 결과를 보기 전에 그 사실 자체를 단언한다 — 릴리스 빌드에서는 빈
         // 스택 접근이 조용히 지나갈 수 있어 결과만 봐서는 구멍이 보이지 않는다.
         for (const auto& instruction : mutated.code)
-            if (!lab::lang::IsKnownOpCode(instruction.op)) ++unknownOpcodeAccepted;
+            if (static_cast<uint8_t>(instruction.op) > static_cast<uint8_t>(lab::lang::OpCode::Halt)) ++unknownOpcodeAccepted;  // 제품 술어를 되부르지 않는 독립 판정
 
         lab::lang::VirtualMachine vm;
         fz::BindStandardNatives(vm);
@@ -878,6 +878,10 @@ int main(int argc, char** argv) {
             masterSeed = std::strtoull(argument + 7, nullptr, 0);
         } else if (std::strncmp(argument, "--samples=", 10) == 0) {
             sampleOverride = std::strtoll(argument + 10, nullptr, 0);
+            if (sampleOverride <= 0) {  // 0이나 오타(`--samples=abc`)는 "검사를 안 한 통과"가 된다
+                std::fprintf(stderr, "표본 수는 양수여야 한다: %s\n", argument);
+                return EXIT_FAILURE;
+            }
         } else if (std::strncmp(argument, "--only=", 7) == 0) {
             onlyIndex = std::strtoll(argument + 7, nullptr, 0);
         } else if (std::strncmp(argument, "--", 2) == 0) {

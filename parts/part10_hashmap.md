@@ -389,9 +389,9 @@ size_t find_slot_quadratic(const K& key) {
 }
 ```
 
-탐색 패턴이 `0, 1, 4, 9, 16, 25,...` 이므로 1차 클러스터링은 피한다. 하지만 **Secondary Clustering (2차 클러스터링)** 이 발생한다. 동일한 초기 해시 값을 가진 키들이 동일한 탐색 순서를 따르기 때문이다.
+탐색 패턴이 `0, 1, 3, 6, 10, 15,...` 이므로 1차 클러스터링은 피한다. 하지만 **Secondary Clustering (2차 클러스터링)** 이 발생한다. 동일한 초기 해시 값을 가진 키들이 동일한 탐색 순서를 따르기 때문이다.
 
-주의: 테이블 크기가 2의 거듭제곱이면 모든 슬롯을 방문하지 못할 수 있다. 이를 해결하려면 테이블 크기를 소수로 설정하거나, 특별한 계수를 선택해야 한다.
+주의: 순수 제곱 오프셋($c_1=0, c_2=1$)은 2의 거듭제곱 테이블에서 모든 슬롯을 방문하지 못한다. $m=8$이면 서로 다른 오프셋이 0, 1, 4 세 개뿐이다. 반면 위 삼각수 오프셋은 2의 거듭제곱 테이블의 모든 슬롯을 정확히 한 번씩 방문한다. 테이블 크기를 소수로 잡아도 전수 방문은 얻지 못하고, 적재율이 1/2 미만일 때 빈 슬롯을 반드시 찾는다는 보장만 얻는다.
 
 ### Double Hashing: 클러스터링 최소화
 
@@ -489,6 +489,12 @@ void insert(const K& key, const V& value) {
             return;
         }
 
+        // 같은 키면 값만 갱신한다.
+        if (slots[index].key == current_key) {
+            slots[index].value = current_value;  // Update
+            return;
+        }
+
         // Robin Hood 교환: 현재 요소가 "더 가난함" (PSL이 더 큼)
         if (current_psl > slots[index].psl) {
             std::swap(current_key, slots[index].key);
@@ -547,8 +553,8 @@ PSL:   0   0   2   3   0
 
 Robin Hood (같은 키들):
 Index: 0   1   2   3   4   5
-      [A] [C] [B] [D] [E] [ ]
-PSL:   0   1   1   2   1
+      [A] [C] [D] [B] [E] [ ]
+PSL:   0   1   2   2   0
 최대 PSL: 2 (불행이 고르게 분배됨; 총합 5는 동일)
 ```
 
@@ -613,7 +619,7 @@ while (slots[index].state != EMPTY) {
         slots[index].key == key) {
         return &slots[index].value;
     }
-    index++;
+    index = (index + 1) & (slots.size() - 1);
 }
 ```
 
@@ -877,7 +883,7 @@ class flat_hash_map {
 enum ControlByte : int8_t {
     kEmpty = -128,    // 10000000: 빈 슬롯
     kDeleted = -2,    // 11111110: 삭제된 슬롯
-    kSentinel = -1,   // 11111111: 그룹 끝
+    kSentinel = -1,   // 11111111: 제어 바이트 배열의 끝(반복자 종료 표식)
     // 0~127: H2(hash) - 해시의 하위 7비트 fingerprint
 };
 ```
@@ -1001,12 +1007,12 @@ class Entity {
 std::vector<Entity> entities;
 for (int i = 0; i < 10000; i++) {
     Entity enemy;
-    enemy.tag = "Enemy";  // 메모리 할당!
+    enemy.tag = "Enemy";  // 태그마다 std::string 객체 하나
     entities.push_back(enemy);
 }
 ```
 
-"Enemy" 문자열이 10,000번 복제된다. 각각 힙 메모리를 차지하며, std::string의 오버헤드(보통 24-32바이트)까지 더해진다.
+"Enemy" 문자열이 10,000번 복제된다. 5자라 주요 구현에서는 SSO에 들어가 별도 힙 블록이 생기지는 않지만, std::string 객체의 오버헤드(보통 24-32바이트)가 10,000번 그대로 쌓인다. SSO 한도를 넘는 태그라면 여기에 힙 할당까지 더해진다.
 
 더 심각한 문제는 비교이다:
 
@@ -1644,7 +1650,7 @@ Abseil의 Swiss Table은 제어 바이트 묶음을 word/SIMD 연산으로 비�
 
 ## 더 읽을거리
 
-- [Programming.Guide — Robin Hood Hashing](https://programming.guide/robin-hood-hashing.html)
+- [Emmanuel Goossaert — Robin Hood hashing](https://codecapsule.com/2013/11/11/robin-hood-hashing/)
 - Sebastian Sylvan, "Robin Hood Hashing should be your default Hash Table implementation" (2013)
 - [Abseil — Swiss Tables Design Notes](https://abseil.io/about/design/swisstables); Matt Kulukundis, "Designing a Fast, Efficient, Cache-friendly Hash Table, Step by Step" (CppCon 2017)
 - [Tessil/robin-map](https://github.com/Tessil/robin-map): 프로덕션 품질의 Robin Hood 구현

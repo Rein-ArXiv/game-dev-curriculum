@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -87,7 +88,8 @@ void TestFrameTimerWindow() {
     timer.EndDraw();
     CHECK(timer.LastUpdateMs() >= 0.0f);
     CHECK(timer.LastDrawMs() >= 0.0f);
-    // total 은 두 구간의 합이다 — 어느 한쪽만 재거나 겹쳐 재면 이 등식이 깨진다.
+    // LastTotalMs 는 두 값을 더해 돌려주는 파생 값이라 이 등식은 항상 참이다.
+    // 구간이 어긋났는지가 아니라 합산 경로가 바뀌지 않았는지만 고정한다.
     CHECK(timer.LastTotalMs() == timer.LastUpdateMs() + timer.LastDrawMs());
 
     // CommitFrame 은 현재 값을 head 자리에 쓰고 head 를 한 칸 민다.
@@ -175,6 +177,10 @@ void TestMallocAndArena() {
     mallocAllocator.Deallocate(m, 37);
     CHECK(mallocAllocator.LiveBytes() == 0);
     CHECK(mallocAllocator.Allocate(8, 3) == nullptr);
+    CHECK(mallocAllocator.Allocate(0, 16) == nullptr);
+    CHECK(mallocAllocator.Allocate(
+        std::numeric_limits<std::size_t>::max(), 64) == nullptr);
+    CHECK(mallocAllocator.LiveBytes() == 0);
 
     ppl::ArenaAllocator arena(512);
     void* a = arena.Allocate(13, 16);
@@ -183,9 +189,18 @@ void TestMallocAndArena() {
     CHECK(b != nullptr && IsAligned(b, 64));
     CHECK(arena.Allocate(8, 3) == nullptr);
     CHECK(arena.Used() >= 42);
+    const auto usedBeforeFailure = arena.Used();
+    const auto liveBeforeFailure = arena.LiveBytes();
+    CHECK(arena.Allocate(std::numeric_limits<std::size_t>::max(), 64) == nullptr);
+    CHECK(arena.Allocate(0, 16) == nullptr);
+    CHECK(arena.Used() == usedBeforeFailure);
+    CHECK(arena.LiveBytes() == liveBeforeFailure);
     arena.Reset();
     CHECK(arena.Used() == 0);
     CHECK(arena.LiveBytes() == 0);
+    CHECK(arena.Allocate(512, 1) != nullptr);
+    CHECK(arena.Allocate(1, 1) == nullptr);
+    CHECK(arena.Used() == 512);
 }
 
 void TestPoolAndSlab() {
@@ -561,7 +576,8 @@ void TestBranchlessEquivalence() {
 
         // SIMD 경로는 이미 마스크 select 라 이 토글에 영향받지 않는다.
         // "체크박스를 켜도 SSE 그래프는 평평하다" 는 관측의 근거가 이 등식이다.
-        // 비트까지 같아야 한다 — 같은 함수가 같은 인자로 도는 것이기 때문이다.
+        // 비트까지 같아야 한다 — SoA·Archetype 은 두 경우 모두 같은 SSE 함수를 돌고,
+        // AoS 는 scalar 로 폴백해 서로 다른 루프를 돌지만 위의 clamp 항등성이 값을 지킨다.
         auto simdOff = MakeAndInit(layout);
         auto simdOn  = MakeAndInit(layout);
         for (int i = 0; i < kFrames; ++i) {

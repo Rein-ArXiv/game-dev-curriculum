@@ -312,7 +312,7 @@ binding version     = exposed native API hash
 - Robert Nystrom, *Crafting Interpreters* (2021) — 트리 순회 인터프리터와 스택 바이트코드 VM의 완성 구현. https://craftinginterpreters.com
 - Roberto Ierusalimschy, Luiz Henrique de Figueiredo, Waldemar Celes, "The Implementation of Lua 5.0" (Journal of Universal Computer Science, 2005) — 레지스터 VM과 open/closed upvalue 클로저 구현의 산업 사례.
 - Richard Jones, Antony Hosking, Eliot Moss, *The Garbage Collection Handbook*, 2nd ed. (2023) — 참조 카운팅·추적형·세대별·동시 수집의 종합 참고서.
-- C. J. Cheney, "A Nonrecursive List Compacting Algorithm" (CACM 1970) — copying GC의 원전.
-- David Ungar, "Generation Scavenging: A Non-Disruptive High Performance Storage Reclamation Algorithm" (1984) — 세대별 GC의 원전.
+- C. J. Cheney, "A Nonrecursive List Compacting Algorithm" (CACM 1970) — semispace copying GC(Fenichel & Yochelson, CACM 1969)를 비재귀 너비 우선 복사로 만든 원전.
+- David Ungar, "Generation Scavenging: A Non-Disruptive High Performance Storage Reclamation Algorithm" (1984) — 세대별 GC의 초기 실용 구현(세대 개념의 원전은 Lieberman & Hewitt, CACM 26(6), 1983).
 - Ana Lúcia de Moura, Roberto Ierusalimschy, "Revisiting Coroutines" (TOPLAS 2009) — 코루틴의 표현력과 구현 방식 분류.
 - Mark S. Miller, *Robust Composition: Towards a Unified Approach to Access Control and Concurrency Control* (PhD thesis, 2006) — object-capability 기반 샌드박스의 이론적 토대.

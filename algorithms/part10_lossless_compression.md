@@ -281,7 +281,7 @@ Adaptive 모델:
 
 Asymmetric Numeral Systems는 하나의 정수 상태 $x$에 정보를 누적한다. 심볼 확률이 높을수록 상태 증가가 작고, 상태가 범위를 벗어나면 하위 bit를 출력하여 renormalize한다.
 
-ANS의 중요한 성질은 arithmetic coding에 가까운 압축률과 table 기반의 빠른 상태 전이를 결합할 수 있다는 점이다. 다만 stack과 유사하게 encoding 역순으로 symbol이 복원되는 변형이 있어 입력을 역방향으로 encode하거나 stream interleaving을 설계해야 한다.
+ANS의 중요한 성질은 arithmetic coding에 가까운 압축률과 table 기반의 빠른 상태 전이를 결합할 수 있다는 점이다. 다만 어느 변형이든 stack과 유사하게 encoding 역순으로 symbol이 복원되므로 입력을 역방향으로 encode하거나 stream interleaving을 설계해야 한다.
 
 Huffman, range, ANS 중 하나가 항상 우월한 것은 아니다.
 

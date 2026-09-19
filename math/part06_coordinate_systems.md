@@ -132,7 +132,7 @@ flowchart TD
     Hand --> Sword[검]
 ```
 
-검의 *월드 변환* = 플레이어 × 척추 × 어깨 × 손 × 검 (각 로컬). 5번의 행렬 곱.
+검의 *월드 변환* = 플레이어 × 척추 × 어깨 × 손 × 검 (각 로컬). 4번의 행렬 곱.
 
 ### 2.3 변환의 캐싱
 
@@ -164,7 +164,7 @@ struct Transform {
 };
 ```
 
-부모가 dirty면 자식도 *전이적으로 dirty*. 부모의 캐시가 무효화되면 자식들도 다시 계산.
+부모가 dirty면 자식도 *전이적으로 dirty* 여야 한다. 위 코드는 자기 `dirty` 만 검사하므로 부모만 바뀐 프레임에는 자식이 stale 캐시를 돌려준다 — 부모의 캐시를 무효화할 때 자식들의 `dirty` 도 함께 세워야 한다 (8.4).
 
 ### 2.4 인스턴싱
 
@@ -504,13 +504,13 @@ $$
 
 ### 7.2 손잡이별 부호
 
-DirectX 관례 (왼손, 카메라 +Z 방향 forward) 에서는 세 번째 행이 *forward 그대로* 부호 양수.
+DirectX 관례 (왼손, 카메라 +Z 방향 forward) 에서는 세 번째 행이 *forward 그대로* 부호 양수이고, right 도 외적 순서가 바뀐다 — $\vec{r}_{\text{LH}} = \vec{up} \times \vec{f} / |\vec{up} \times \vec{f}| = -\vec{r}$, $\vec{u} = \vec{f} \times \vec{r}_{\text{LH}}$ (위의 $\vec{u}$ 와 같다).
 
 $$
-V_{\text{LH}} = \begin{pmatrix} r_x & r_y & r_z & -\vec{r} \cdot \vec{eye} \\ u_x & u_y & u_z & -\vec{u} \cdot \vec{eye} \\ f_x & f_y & f_z & -\vec{f} \cdot \vec{eye} \\ 0 & 0 & 0 & 1 \end{pmatrix}
+V_{\text{LH}} = \begin{pmatrix} -r_x & -r_y & -r_z & \vec{r} \cdot \vec{eye} \\ u_x & u_y & u_z & -\vec{u} \cdot \vec{eye} \\ f_x & f_y & f_z & -\vec{f} \cdot \vec{eye} \\ 0 & 0 & 0 & 1 \end{pmatrix}
 $$
 
-손잡이가 다르면 *부호 한 줄* 차이. 이 차이가 *코드를 잘못 옮길 때* 카메라가 *뒤를 보는* 흔한 버그.
+손잡이가 다르면 *첫째·셋째 행의 부호 두 줄* 차이 — 셋째 행만 뒤집으면 행렬식이 $-1$ 인 반사가 되어 좌우가 바뀐다. 이 차이가 *코드를 잘못 옮길 때* 카메라가 *뒤를 보거나 좌우가 뒤집히는* 흔한 버그.
 
 ### 7.3 코드 예
 
@@ -704,7 +704,7 @@ for (auto* obj : visible) {
 
 ## 결론
 
-게임의 정점 변환 파이프라인은 *Local → World → View → Clip → NDC → Screen* 의 다섯 좌표계 변환이다. 각 단계가 *행렬 한 번* 으로 처리되고, 셋의 곱 (MVP) 이 *정점 셰이더의 핵심 한 줄* 을 만든다.
+게임의 정점 변환 파이프라인은 *Local → World → View → Clip → NDC → Screen* 의 다섯 좌표계 변환이다. 앞의 세 단계가 각각 *행렬 한 번* 으로 처리되고, 셋의 곱 (MVP) 이 *정점 셰이더의 핵심 한 줄* 을 만든다.
 
 이 글에서 정리한 핵심.
 
@@ -723,8 +723,8 @@ for (auto* obj : visible) {
 - Eric Lengyel, *Foundations of Game Engine Development*, Vol. 1, Ch. 2 — 좌표계와 변환의 게임 엔진 표준.
 - Tomas Akenine-Möller et al., *Real-Time Rendering*, 4th ed., Ch. 4 "Transforms" — 그래픽스 관점.
 - Joey de Vries, *Learn OpenGL — Coordinate Systems* — 정점 변환 파이프라인의 시각적 입문.
-- Tom Forsyth, "Matrix Storage" — 메모리 레이아웃과 변환 파이프라인의 실전.
+- Tom Forsyth, "Matrix maths and names" — 변환 행렬의 이름 짓기 관례 (a_from_b) 로 좌표계 버그를 막는 실전.
 - Microsoft DirectXMath 문서 — `XMMatrixLookAtRH`, `XMMatrixPerspectiveFovLH` 등.
 - glm 소스 — `glm/ext/matrix_transform.hpp` 의 LookAt 구현.
 - Khronos Vulkan 1.x 명세 — 좌표계와 NDC 정의.
-- Aras Pranckevičius, "Coordinate System Conventions" 블로그 — 엔진별 관례 비교.
+- Freya Holmér, "Coordinate System Chart" (Mastodon, 2022, https://mastodon.social/@acegikmo/109429307211544506) — 엔진별 (Unity·Unreal·Maya·Blender 등) 손잡이와 Y-up/Z-up 관례 비교 도표.

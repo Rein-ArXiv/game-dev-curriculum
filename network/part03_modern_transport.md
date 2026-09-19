@@ -105,7 +105,7 @@ ACK ranges: [108,108], [104,105], [100,102]
 
 ### RTT 표본
 
-ACK된 가장 큰 ack-eliciting packet의 송신 시각으로 latest RTT를 얻는다.
+새로 ACK된 packet 가운데 ack-eliciting packet이 하나 이상 있을 때, ACK된 가장 큰 packet(largest acknowledged)의 송신 시각으로 latest RTT를 얻는다.
 
 $$
 \operatorname{latestRTT}=t_{\text{ackReceived}}-t_{\text{sent}}
@@ -131,7 +131,7 @@ $$
 
 packet threshold와 time threshold를 함께 사용한다.
 
-- 더 큰 packet이 충분히 많이 ACK되었으면 이전 packet을 손실로 판정
+- 번호가 threshold(기본 3) 이상 앞선 packet이 ACK되었으면 이전 packet을 손실로 판정
 - RTT에 비례한 시간이 지났으면 손실로 판정
 
 재정렬이 심한 경로에서 너무 작은 threshold는 불필요한 재전송을 만든다. 너무 큰 threshold는 recovery를 늦춘다.

@@ -46,7 +46,7 @@ PRNG의 품질을 평가하는 다섯 축.
 
 | 축 | 의미 |
 |---|---|
-| 주기 | 같은 수가 다시 나오기까지 호출 수 |
+| 주기 | 내부 상태 (따라서 수열 전체) 가 처음으로 되풀이되기까지 호출 수 |
 | 통계 품질 | 분포 균일성, 자기상관 (autocorrelation), 비트 패턴 |
 | 속도 | 한 호출의 명령 수 |
 | 상태 크기 | 시드와 내부 상태의 byte |
@@ -302,7 +302,7 @@ C++ 표준 라이브러리에 포함. 시뮬레이션·통계 용도의 표준.
 MT의 큰 상태를 작은 seed 공간에서 초기화하면 도달 가능한 초기 상태가 제한되고, 선형 generator 특성도 남는다. 앞의 출력을 임의 개수 버리는 “워밍업”은 이를 일반적으로 해결하지 않는다. 재현 가능한 seed expander로 필요한 entropy를 상태에 분산하고, application seed 공간과 stream 분리 요구를 별도로 설계한다.
 
 ```cpp
-// 잘못된 패턴: 단일 시드만 → 624워드 중 일부만 다양함
+// 잘못된 패턴: 32비트 시드 하나 → 도달 가능한 초기 상태가 2^32개뿐
 std::mt19937 rng(seed);
 
 // 옳음: seed_seq로 전체 상태를 풍부하게 채움
@@ -783,7 +783,7 @@ PRNG 선택과 별개로 seed 위계, unbiased mapping, 호출 순서와 상태 
 
 - Melissa O'Neill, "PCG: A Family of Simple Fast Space-Efficient Statistically Good Algorithms for Random Number Generation" (2014) — PCG의 원전.
 - George Marsaglia, "Xorshift RNGs" (Journal of Statistical Software, 2003) — Xorshift의 원전.
-- Sebastiano Vigna, *xoshiro / xoroshiro* 페이지 (vigna.di.unimi.it) — Xorshift 후속 알고리즘.
+- Sebastiano Vigna, *xoshiro / xoroshiro* 페이지 (prng.di.unimi.it) — Xorshift 후속 알고리즘.
 - Pierre L'Ecuyer & Richard Simard, "TestU01: A C Library for Empirical Testing of Random Number Generators" — 통계 검증 표준.
 - *Numerical Recipes*, 3rd ed., Ch. 7 — PRNG와 분포 샘플링의 종합.
 - Donald Knuth, *The Art of Computer Programming*, Vol. 2 — 난수의 고전 레퍼런스.

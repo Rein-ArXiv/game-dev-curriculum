@@ -54,7 +54,8 @@ void LightingBindings::Init(int maxLights) {
     // 광원 초기 위치 — 구 표면에 균등 분포.
     for (int i = 0; i < maxLights_; ++i) {
         float phi   = (float)i / (float)maxLights_ * glm::two_pi<float>();
-        float theta = (float)((i * 13) % 31) / 31.0f * glm::pi<float>();
+        // 면적 기준 균등이 되려면 theta 가 아니라 cos(theta) 를 균등하게 뽑아야 한다.
+        float theta = std::acos(1.0f - 2.0f * ((float)((i * 13) % 31) + 0.5f) / 31.0f);
         float r     = 40.0f;
         glm::vec3 p(
             r * std::sin(theta) * std::cos(phi),

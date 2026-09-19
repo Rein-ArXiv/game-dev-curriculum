@@ -674,6 +674,12 @@ add_custom_command(TARGET mega_defense_server POST_BUILD
             ${CMAKE_CURRENT_SOURCE_DIR}/games/defense/assets
             $<TARGET_FILE_DIR:mega_defense_server>/assets)
 
+add_executable(mega_live_admission_probe tools/live_admission_probe.cpp)
+target_link_libraries(mega_live_admission_probe PRIVATE mega_core)
+add_dependencies(mega_live_admission_probe mega_defense_server)
+add_dependencies(test_external_assignment mega_defense_server)
+set_tests_properties(test_external_assignment PROPERTIES TIMEOUT 30)
+
 # The final executable can present the same framebuffer through Vulkan. This is
 # a backend choice, not a second game or a second source snapshot.
 # 정의·링크는 mega_core 가 PUBLIC 으로 갖는다(위). 여기 남은 것은 셰이더 컴파일뿐.

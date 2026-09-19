@@ -53,7 +53,7 @@ public:
 };
 ```
 
-짝 갱신을 빼면 유량은 그럴듯한 값을 낸다. 증가 경로를 찾고 병목만큼 밀어 넣는 절차 자체는 그대로 돌아가기 때문이다. 깨지는 것은 정점 보존이다.
+짝 갱신을 빼면 유량은 그럴듯한 값을 낸다. 증가 경로를 찾고 병목만큼 밀어 넣는 절차 자체는 그대로 돌아가기 때문이다. 이 변이에서 깨지는 것은 정점 보존이 아니라 최대성이다 — 역간선이 열리지 않아 모든 증가 경로가 정방향 경로가 되므로 보존식은 구성상 항상 참이고, 되돌리기가 필요한 그래프에서 min-cut 증명서와 매칭·최소비용 할당이 틀린다. 반대로 짝의 인덱스 조회(`id ^ 1`)가 어긋나는 변이는 값은 맞으면서 보존식만 깨뜨린다.
 
 그래서 결과 객체가 스스로를 검사할 수 있어야 한다.
 
@@ -174,16 +174,33 @@ for (const Residual* g : {&a, &b, &c}) {
 // Hopcroft-Karp. 한 phase 에서 *서로소인 최단 증가 경로를 모두* 찾는다.
 // phase 수가 O(sqrt(V)) 로 묶이는 것이 이 알고리즘의 전부다 —
 // 증가 한 번의 비용은 같고, 횟수의 상계가 달라진다.
-        if (!found) break;
+        // ...
+            for (uint32_t v : adj[u]) {
+                const int32_t w = m.left_of[v];
+                if (w == -1) {
+                    if (dist_nil == kNone) dist_nil = dist[u] + 1;   // 처음 만난 층
+                    continue;
+                }
+        // ...
+        if (dist_nil == kNone) break;
         ++m.phases;
 
         // DFS: 층을 정확히 한 칸씩 올라가는 경로만 쓴다.
         std::vector<uint8_t> used(right, 0);
         for (uint32_t u = 0; u < left; ++u) {
             if (m.right_of[u] != -1) continue;
-            if (LayeredDfs(u, adj, dist, used, m, c)) { ++m.size; ++m.augments; }
+            if (LayeredDfs(u, adj, dist, dist_nil, used, m, c)) { ++m.size; ++m.augments; }
+        }
+        // ...
+        const int32_t w = m.left_of[v];
+        if (w == -1) {
+            if (dist[u] + 1 != dist_nil) continue;   // 자유 정점도 층을 지켜야 한다
+        } else if (dist[uint32_t(w)] != dist[u] + 1) {
+            continue;
         }
 ```
+
+BFS가 자유 오른쪽 정점을 처음 만난 층이 `dist_nil`이고, 그 값이 이 phase의 최단 증가 경로 길이다. DFS가 자유 정점을 아무 층에서나 받으면 같은 phase 안에 더 긴 경로가 섞여 "phase마다 최단"이라는 전제가 깨진다 — 매칭 크기는 여전히 맞지만 phase 수의 O(√V) 상계 논증이 서지 않는다.
 
 적대 입력은 Hall 조건을 정확히 한 subset에서만 위반하는 그래프다.
 
@@ -266,13 +283,23 @@ CSP 탐색의 상태는 변수별 도메인 비트마스크다. 가지치기가 
             if (conflict) { ++stats_.pruned_conflict; continue; }
 ```
 
-첫 판본에는 이 검사가 없었다. 그러자 5정점 사이클의 3색 칠하기가 30개가 아니라 3⁵ = 243개를 냈다 — 제약을 전혀 확인하지 않았기 때문이다. 검사가 `all == 30`을 단언한 덕에 즉시 드러났다.
+첫 판본에는 이 검사가 없었다. 그러자 5정점 사이클의 3색 칠하기가 30개가 아니라 3⁵ = 243개를 냈다 — 제약을 전혀 확인하지 않았기 때문이다. 검사가 5정점 사이클 팔에서 `== 30`을 단언한 덕에 즉시 드러났다.
 
 ## 6. 가지치기는 해를 잃지 않는다
 
 가지치기 팔이 옳다는 것은 "개수가 같다"로는 부족하다. **해 집합이 같아야** 한다.
 
 ```cpp
+// C5·3색은 도메인이 좁아 전방 검사도 AC-3도 발동하지 않는다.
+// 효과를 재려면 값 4개·차수 4인 인스턴스가 필요하다 — bench의 CSP 표와 같은 C9(1,2).
+CspProblem p;
+p.variables = 9;
+p.full_domain = 0b1111;
+for (uint32_t i = 0; i < p.variables; ++i) {
+    p.not_equal.push_back({i, uint32_t((i + 1) % p.variables)});
+    p.not_equal.push_back({i, uint32_t((i + 2) % p.variables)});
+}
+
 const CspOptions variants[] = {
     CspOptions{true, false, false, false},
     CspOptions{false, true, false, false},
@@ -284,15 +311,15 @@ for (const CspOptions& opt : variants) {
     CspSolver solver(p, opt);
     const size_t count = solver.CountSolutions(&got);
     CHECK(solver.HashStable());
-    CHECK(count == all);
+    CHECK(count == all);            // all == 528
     std::sort(got.begin(), got.end());
     CHECK(got == base_set);
-    // 가지치기가 실제로 노드를 줄였는가
-    CHECK(solver.Stats().nodes <= base.Stats().nodes);
+    // 가지치기가 실제로 노드를 줄였는가 — 등호는 허용하지 않는다
+    CHECK(solver.Stats().nodes < base.Stats().nodes);
 }
 ```
 
-마지막 줄이 없으면 "가지치기를 켰는데 아무 일도 안 일어남"이 통과한다. 옳음과 효과를 함께 단언해야 한다.
+마지막 줄이 없으면 "가지치기를 켰는데 아무 일도 안 일어남"이 통과한다. 그런데 부등호가 `<=`면 그 줄은 있으나 마나다 — 그래서 이 검사는 5정점 3색이 아니라 값 4개·차수 4인 순환 그래프 C9(1,2)에서 돈다. 5정점 3색에서는 도메인이 좁아 전방 검사도 AC-3도 한 번도 발동하지 않아 네 팔 모두 기준과 똑같은 76 노드를 쓰고, C9(1,2)에서는 기준 1,841 노드가 전방 검사만으로 1,721, AC-3만으로 1,649로 줄어 각 팔을 단독으로 `<`로 물을 수 있다. 실제로 `ForwardCheck` 본문을 `return true;`로 바꾸면 이 CHECK 하나만 FAIL한다 — 해 개수 528도, 해 집합도, 상태 해시도 그대로 통과한다. `Ac3`를 같은 식으로 무력화해도 마찬가지다. 옳음과 효과는 서로를 대신하지 못한다.
 
 ## 7. 대칭 깨기와 canonical 집합
 
@@ -379,10 +406,10 @@ Ford-Fulkerson이 증가를 181회 하는데 Edmonds-Karp는 120회다. DFS로 �
 | arm | ms | size | augments | phases |
 |---|---|---|---|---|
 | dfs augmenting | 3.76 | 900 | 900 | — |
-| hopcroft-karp | 0.24 | 900 | 900 | 4 |
+| hopcroft-karp | 0.24 | 900 | 900 | 5 |
 | flow reduction | 2.04 | 900 | — | — |
 
-증가 횟수는 900으로 같은데 시간이 15배 다르다. Hopcroft-Karp가 하는 일은 증가를 덜 하는 것이 아니라 **phase를 4번으로 묶는 것**이다. 각 phase에서 서로소인 최단 경로를 한꺼번에 찾으므로 BFS 층 계산이 900번이 아니라 4번이다.
+증가 횟수는 900으로 같은데 시간이 15배 다르다. Hopcroft-Karp가 하는 일은 증가를 덜 하는 것이 아니라 **phase를 5번으로 묶는 것**이다. 각 phase에서 서로소인 최단 경로를 한꺼번에 찾으므로 BFS 층 계산이 900번이 아니라 5번이다.
 
 유량 환원 팔은 DFS 판보다 빠르고 Hopcroft-Karp보다 느리다. 같은 문제를 더 일반적인 도구로 푸는 대가가 이 정도라는 것이 이 행의 뜻이다.
 
@@ -413,12 +440,12 @@ Ford-Fulkerson이 증가를 181회 하는데 Edmonds-Karp는 120회다. DFS로 �
 ```text
   ok   flow_maxflow_arms
   FAIL flow_matching_arms
-  ok   flow_min_cost_assignment
+  FAIL flow_min_cost_assignment
   ok   csp_apply_undo
   ok   csp_symmetry_breaking
 ```
 
-`flow_maxflow_arms`가 살아남고 매칭이 죽는다. 이 결함은 역간선을 통한 "되돌리기"를 없애므로, 되돌릴 필요가 없는 그래프에서는 답이 그대로다. 매칭 환원 그래프는 되돌리기가 반드시 필요한 구조(왼쪽 정점이 이미 잡은 오른쪽을 양보해야 하는 경우)라 거기서 먼저 드러난다.
+`flow_maxflow_arms`가 살아남고 매칭과 최소비용 할당이 죽는다(할당도 이분 매칭을 유량으로 환원한 그래프라 재배정이 필요하다). 이 결함은 역간선을 통한 "되돌리기"를 없애므로, 되돌릴 필요가 없는 그래프에서는 답이 그대로다. 매칭 환원 그래프는 되돌리기가 반드시 필요한 구조(왼쪽 정점이 이미 잡은 오른쪽을 양보해야 하는 경우)라 거기서 먼저 드러난다.
 
 **변이 2 — CSP 되돌리기에서 지운 값을 복원하지 않기.** `domain_[u.var] |= u.removed;`를 지웠다. `csp_apply_undo`가 죽는다 — 상태 해시가 탐색 전후로 달라지고, 해 개수도 30보다 적게 나온다.
 
@@ -437,7 +464,7 @@ cmake --build build --config Release
   ok   flow_min_cost_assignment
   ok   csp_apply_undo
   ok   csp_symmetry_breaking
-algo_tests[step07]: 5/5 passed (354 check(s))
+algo_tests[step07]: 5/5 passed (356 check(s))
 ```
 
 ```powershell

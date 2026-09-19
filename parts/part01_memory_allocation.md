@@ -374,6 +374,7 @@ Microsoft Learn의 [CRT Debug Heap 문서](https://learn.microsoft.com/en-us/vis
 void* debug_malloc(size_t size) {
     size_t total = sizeof(Header) + size + 2 * NO_MANS_LAND;
     void* ptr = HeapAlloc(GetProcessHeap(), 0, total);
+    if (!ptr) return NULL;
 
     Header* header = (Header*)ptr;
     header->size = size;
@@ -395,7 +396,7 @@ void* debug_malloc(size_t size) {
 
 ### 0xCC의 특별한 의미
 
-x86 아키텍처에서 `0xCC`는 **INT 3** 명령어(디버거 breakpoint)다. 초기화되지 않은 함수 포인터가 `0xCCCCCCCC`를 가리키고 호출되면, CPU는 즉시 디버거 트랩을 발생시킨다.
+x86 아키텍처에서 `0xCC`는 **INT 3** 명령어(디버거 breakpoint)다. 그래서 제어 흐름이 `0xCC`로 채워진 실행 가능한 영역으로 흘러들어가면 CPU가 그 바이트를 명령어로 인출해 즉시 디버거 트랩을 낸다. 반면 함수 포인터의 값 자체가 `0xCCCCCCCC`인 채로 호출되면 그 주소는 매핑되어 있지 않으므로 트랩이 아니라 접근 위반으로 드러난다.
 
 ## 5. 메모리 누수 추적: `__FILE__`과 `__LINE__` 매크로
 
@@ -455,11 +456,11 @@ void* tracked_new(
 auto p = tracked_new(100);  // 매크로 없이 위치 추적!
 ```
 
-`std::source_location::current`는 **기본 인자**로 평가되므로, 호출 지점의 정보를 자동으로 캡처한다. cppreference는 이를 "매크로의 타입 안전한 대안"이라고 설명한다.
+`std::source_location::current`는 **기본 인자**로 평가되므로, 호출 지점의 정보를 자동으로 캡처한다. cppreference는 이를 매크로보다 "더 나은 대안(better alternative)"이라고 설명한다.
 
 ### 실전 메모리 프로파일러
 
-Arjun Sreedharan의 "Memory Allocators 101"에서 제안하는 방식의 간단한 프로파일러:
+표준 `malloc`을 감싸 할당 지점을 기록하는 간단한 프로파일러:
 
 ```c
 typedef struct {

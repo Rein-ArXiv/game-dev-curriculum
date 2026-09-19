@@ -18,7 +18,7 @@
 4. Slerp vs Nlerp 트레이드오프와 작은 각도 함정의 Taylor 보정.
 5. 누적 곱의 단위성 손실 속도, 정규화 빈도, 부호 일치, 압축 표현 (smallest-three) 패턴.
 
-*네 표현의 비교 지도* 였다면, 이 글은 *쿼터니언 한 표현의 깊이*. 게임 엔진의 회전·애니메이션 코드 위에 깔린 수학적 토대를 다진다.
+이 글은 *쿼터니언 한 표현의 깊이* 를 다룬다. 게임 엔진의 회전·애니메이션 코드 위에 깔린 수학적 토대를 다진다.
 
 
 ---
@@ -220,7 +220,7 @@ $$
 \|q\| = 1 \implies q^{-1} = q^*
 $$
 
-분모가 1이라 *부호 반전 셋만으로 역*. 행렬의 역 (가우스 소거) 보다 훨씬 단순.
+분모가 1이라 *부호 반전 셋만으로 역*. 일반 행렬의 역 (가우스 소거) 보다 훨씬 단순하고, 회전 행렬의 역 (전치) 과는 같은 급이다.
 
 회전 쿼터니언이 단위 길이라는 불변식을 유지하면 역은 네 성분의 켤레로 계산할 수 있어 일반적인 $q^{-1}=q^*/\lVert q\rVert^2$ 의 norm 계산과 나눗셈을 피한다. 이 단순한 역 연산이 회전 표현으로서의 장점 중 하나다.
 
@@ -323,8 +323,8 @@ $w \approx 1$, 벡터 부분이 $\frac{\theta}{2} \hat{u}$ 로 작다. 작은 �
 
 ```mermaid
 flowchart LR
-    Real[w 축<br/>cos(θ/2)] -->|항등 회전 q=(1,0)| RealOne[1]
-    Imag[i 축<br/>sin(θ/2)] -->|180° 회전 q=(0,1)| ImagOne[i]
+    Real["w 축<br/>cos(θ/2)"] -->|"항등 회전 q=(1,0)"| RealOne[1]
+    Imag["i 축<br/>sin(θ/2)"] -->|"180° 회전 q=(0,1)"| ImagOne[i]
     Real -.->|θ/2 만큼 진행| Imag
 ```
 
@@ -558,19 +558,20 @@ $$
 ```cpp
 quat Power(quat q, float t) {
     // q를 단위 쿼터니언 가정.
-    float phi = std::acos(std::clamp(q.w, -1.0f, 1.0f));
-    if (phi < 1e-6f) {
-        // 거의 항등 회전 — 작은 각도 근사로 처리.
+    float vlen = std::sqrt(q.x*q.x + q.y*q.y + q.z*q.z);
+    float phi  = std::atan2(vlen, q.w);   // acos(q.w)는 q.w ≈ ±1에서 조건수가 발산
+    if (vlen < 1e-6f) {
+        // 거의 항등 회전 (q ≈ ±1) — 작은 각도 근사로 처리.
         // t = 0이면 (1, 0, 0, 0), t = 1이면 q에 가깝다.
         return Normalize(quat{1.0f, q.x * t, q.y * t, q.z * t});
     }
     float newPhi = t * phi;
-    float scale  = std::sin(newPhi) / std::sin(phi);
+    float scale  = std::sin(newPhi) / vlen;
     return {std::cos(newPhi), q.x * scale, q.y * scale, q.z * scale};
 }
 ```
 
-`acos` 입력 clamp가 NaN 방어. 작은 각도 분기가 0/0 함정 방어.
+`atan2(|v|, w)` 가 `acos(w)` 의 $w \approx \pm 1$ 조건수 발산과 $\sin\phi \approx 0$ 나눗셈을 피하고, 작은 각도 분기가 0/0 함정 방어.
 
 ### 5.4 각속도와 미분
 
@@ -703,7 +704,7 @@ $$
 \frac{d}{dt} \text{Slerp} = \theta \cdot \frac{-\cos((1-t)\theta) q_0 + \cos(t\theta) q_1}{\sin\theta}
 $$
 
-이 미분식 자체는 $\cos((1-t)\theta)$ 와 $\cos(t\theta)$ 를 포함해 *t에 따라 방향이 변한다* — 4D 구면 위 측지선이라 접벡터가 *t 위치에 따라 다른 방향* 을 가리키는 게 자연스럽다. 다만 *그 접벡터의 크기 (= 회전 각속도) 는 t에 무관* — $\theta$ 로 일정. 이게 *등각속도* 의 정확한 의미.
+이 미분식 자체는 $\cos((1-t)\theta)$ 와 $\cos(t\theta)$ 를 포함해 *t에 따라 방향이 변한다* — 4D 구면 위 측지선이라 접벡터가 *t 위치에 따라 다른 방향* 을 가리키는 게 자연스럽다. 다만 *그 접벡터의 크기는 t에 무관* — $\theta$ 로 일정 (반각 규약이라 3D 회전 각속도는 그 두 배인 $2\theta$, 역시 일정). 이게 *등각속도* 의 정확한 의미.
 
 이 사실이 *Slerp가 자연스러운 회전 보간* 인 이유. 캐릭터 관절이 키 사이를 *균등한 각속도* 로 진행해 *자연스러운 모션* 을 만든다.
 
@@ -903,11 +904,11 @@ Insomniac Games 등 AAA 스튜디오의 발표에 자주 등장하는 패턴.
 
 ## 더 읽을거리
 
-- Ken Shoemake, "Animating Rotation with Quaternion Curves" (SIGGRAPH 1985) — Slerp와 Squad의 원전.
+- Ken Shoemake, "Animating Rotation with Quaternion Curves" (SIGGRAPH 1985) — Slerp의 원전. Squad는 같은 저자의 SIGGRAPH 1987 코스노트 "Quaternion Calculus and Fast Animation" 에서 나왔다.
 - Erik B. Dam, Martin Koch, Martin Lillholm, "Quaternions, Interpolation and Animation" (1998) — 보간 알고리즘 종합 분석 (DIKU 기술 보고서).
 - Eric Lengyel, *Foundations of Game Engine Development*, Vol. 1, Ch. 2.7 — 쿼터니언의 게임 엔진 적용.
 - John Vince, *Quaternions for Computer Graphics* (Springer, 2nd ed., 2021) — 쿼터니언 입문서.
-- Insomniac Games, "Quaternion Compression" (GDC 발표) — smallest-three 패턴의 산업 사례.
+- Glenn Fiedler, "Snapshot Compression" (gafferongames.com, Networked Physics 시리즈, 2015) — smallest-three 패턴의 설명과 네트워크 동기화 적용 사례.
 - William Rowan Hamilton, *Lectures on Quaternions* (1853) — 원전.
 - 3Blue1Brown, "Quaternions and 3D rotation, explained interactively" — 4D 단위 구의 시각적 직관 영상.
 - DirectXMath / glm 소스 — `XMQuaternionSlerp`, `glm::quat` 의 산업 표준 구현.

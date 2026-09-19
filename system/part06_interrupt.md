@@ -1,7 +1,7 @@
 ## 들어가며
 
-> "An interrupt is an event that alters the sequence of instructions executed by a processor."
-> — Intel Software Developer's Manual, Volume 3
+> "An interrupt is usually defined as an event that alters the sequence of instructions executed by a processor."
+> — Daniel P. Bovet, Marco Cesati, *Understanding the Linux Kernel*, Chapter 4
 
 
 키보드를 누르면 문자가 화면에 나타난다. 네트워크 패킷이 도착하면 프로그램이 이를 처리한다. 디스크 읽기가 완료되면 블록된 프로세스가 깨어난다. 이 모든 일은 어떻게 가능할까?
@@ -19,7 +19,7 @@ CPU가 순차적으로 명령어를 실행하는 도중, 외부 하드웨어나 
 1. [인터럽트, 예외, 트랩: 용어의 정리](#1-인터럽트-예외-트랩-용어의-정리)
 2. [IDT: 인터럽트 디스크립터 테이블](#2-idt-인터럽트-디스크립터-테이블)
 3. [하드웨어 인터럽트: PIC에서 APIC까지](#3-하드웨어-인터럽트-pic에서-apic까지)
-4. [Linux의 인터럽트 처리](#4-linux의-인터럽트-처리)
+4. [리눅스의 인터럽트 처리](#4-리눅스의-인터럽트-처리)
 5. [Top Half vs Bottom Half](#5-top-half-vs-bottom-half)
 6. [Threaded IRQ](#6-threaded-irq)
 7. [/proc/interrupts 분석](#7-procinterrupts-분석)
@@ -40,12 +40,12 @@ Intel 아키텍처에서는 실행 흐름을 변경하는 모든 이벤트를 **
 ├── 하드웨어 인터럽트 (Hardware Interrupts)
 │   ├── Maskable Interrupts (INTR 핀)
 │   └── Non-Maskable Interrupts (NMI 핀)
-└── 소프트웨어 인터럽트 (Software Interrupts)
+└── 동기 이벤트 (Synchronous Events)
     ├── 예외 (Exceptions)
     │   ├── Faults (복구 가능, 예: Page Fault)
     │   ├── Traps (의도적, 예: Breakpoint)
     │   └── Aborts (치명적, 예: Machine Check)
-    └── 프로그램 인터럽트 (Programmed Interrupts)
+    └── 소프트웨어 인터럽트 (Programmed Interrupts)
         └── INT n 명령어
 ```
 
@@ -311,7 +311,7 @@ static const __initconst struct idt_data def_idts[] = {
     INTG(X86_TRAP_DB,       debug),               // 1: Debug
     INTG(X86_TRAP_NMI,      nmi),                 // 2: NMI
     SYSG(X86_TRAP_BP,       int3),                // 3: Breakpoint
-    INTG(X86_TRAP_OF,       overflow),            // 4: Overflow
+    SYSG(X86_TRAP_OF,       overflow),            // 4: Overflow
     // ...
     INTG(X86_TRAP_PF,       page_fault),          // 14: Page Fault
     // ...
@@ -431,7 +431,7 @@ PIC는 여러 한계가 있었다:
 단일 CPU만 지원. 모든 인터럽트가 하나의 CPU로 집중된다.
 
 **3) 우선순위 고정**
-IRQ0이 가장 높고, IRQ15가 가장 낮다. 유연한 우선순위 설정이 불가능하다.
+IRQ0이 가장 높고 IRQ7이 가장 낮다. Slave PIC가 Master의 IRQ2에 물려 있어 IRQ8~IRQ15는 IRQ1과 IRQ3 사이의 우선순위를 물려받는다. 배선으로 고정된 순서라 유연한 우선순위 설정이 불가능하다.
 
 **4) Edge-triggered 모드**
 레벨 트리거 모드가 불완전하다. 인터럽트 손실 가능성이 있다.
@@ -813,7 +813,7 @@ local_bh_enable();
  2. 프로토콜 스택 통과
  3. 사용자 공간에 데이터 전달
 - 인터럽트 활성화 상태에서 실행
-- 프리엠트 가능
+- atomic context이므로 스케줄러 선점과 슬립은 불가능
 
 ```text
 하드웨어 인터럽트 발생
@@ -1158,7 +1158,7 @@ IRQ Handler (Top Half)
 
 /* 블록 디바이스 드라이버 */
 IRQ Handler (Top Half)
-    → Tasklet 스케줄
+    → BLOCK_SOFTIRQ 또는 완료 IPI
         → 완료된 요청 처리
             → Bio 완료 콜백
 
@@ -1340,7 +1340,7 @@ $ cat /proc/interrupts | grep nvme
 # IRQ 16을 CPU 2-3에 바인딩
 echo 0c > /proc/irq/16/smp_affinity  # 0c = 1100b = CPU 2, 3
 
-# 또는 마스크 사용
+# 또는 CPU 리스트 사용
 echo 2,3 > /proc/irq/16/smp_affinity_list
 ```
 
@@ -1385,7 +1385,7 @@ static irqreturn_t i8042_interrupt(int irq, void *dev_id)
 
     spin_unlock_irqrestore(&i8042_lock, flags);
 
-    // Serio 서브시스템으로 전달 (Bottom Half)
+    // Serio 서브시스템으로 전달 (여전히 하드 IRQ 컨텍스트)
     serio_interrupt(port->serio, data, dfl);
 
     return IRQ_HANDLED;
@@ -1499,7 +1499,7 @@ Linux는 hardirq에서 장치의 즉시 요구만 처리하고, subsystem softir
 
 ## 더 읽을거리
 
-- Intel SDM Volume 3, Chapter 6: Interrupt and Exception Handling — https://www.intel.com/sdm
+- Intel SDM Volume 3A, Chapter 7: Interrupt and Exception Handling (253668-092 기준, 옛 리비전에서는 Chapter 6) — https://www.intel.com/sdm
 - 커널 소스: `arch/x86/kernel/idt.c`, `arch/x86/kernel/irq.c`, `arch/x86/kernel/apic/`, `kernel/irq/`, `kernel/softirq.c`
 - `Documentation/core-api/genericirq.rst`
 - `Documentation/core-api/workqueue.rst`

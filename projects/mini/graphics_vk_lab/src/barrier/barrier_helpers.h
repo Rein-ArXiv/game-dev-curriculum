@@ -9,9 +9,11 @@
 // 비교한다. 넓은 mask가 잘못된 layout/queue ownership을 고쳐 주지는 않으며,
 // 작은 장면에서는 유의미한 성능 차이가 없을 수 있다.
 //
-// Minimal 이 정확한 mask 를 아는 layout 쌍은 아래 세 가지뿐이고, 그 밖의 모든
-// 조합은 OverSync 와 비트 단위로 같은 보수적 fallback 으로 떨어진다. 이 계약은
-// 테스트로 고정되어 있다.
+// Minimal 이 정확한 mask 를 아는 layout 쌍은 아래 세 가지뿐이고, 그 밖의 조합은
+// ALL_COMMANDS + MEMORY_READ|WRITE 보수적 fallback 으로 떨어진다. OverSync 가
+// UNDEFINED 소스·PRESENT_SRC 대상에 두는 예외를 fallback 은 두지 않으므로, 그 두
+// 경우를 뺀 미지 쌍에서만 OverSync 와 비트 단위로 같다. 테스트는 그중 한 쌍
+// (TRANSFER_DST -> SHADER_READ_ONLY)을 고정한다.
 //
 //   UNDEFINED               -> COLOR_ATTACHMENT_OPTIMAL
 //   COLOR_ATTACHMENT_OPTIMAL -> PRESENT_SRC_KHR

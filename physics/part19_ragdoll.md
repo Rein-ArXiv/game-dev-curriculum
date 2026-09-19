@@ -249,7 +249,7 @@ struct HingeJoint {
 };
 ```
 
-*무릎의 -10° ~ 150°* 정도. 너무 곧추서거나 *반대로 꺾이는 방지*.
+*무릎의 -5° ~ 160°* 정도. 너무 곧추서거나 *반대로 꺾이는 방지*.
 
 ### 3.4 손목 / 발목 — Ball + 좁은 limit
 
@@ -327,6 +327,7 @@ if (angle > maxAngle) {
     float overshoot = angle - maxAngle;
     float torqueMag = overshoot * springStiffness;
     ApplyTorque(boneB, -axis * torqueMag);
+    ApplyTorque(boneA,  axis * torqueMag);   // 반작용 — joint 내부 토크는 쌍으로 적용
 }
 ```
 

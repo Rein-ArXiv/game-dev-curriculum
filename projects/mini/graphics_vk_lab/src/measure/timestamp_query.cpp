@@ -19,6 +19,10 @@ void TimestampQuery::Shutdown(VkContext& ctx) {
     pool_ = VK_NULL_HANDLE;
 }
 
+void TimestampQuery::ResetAll(VkCommandBuffer cmd) {
+    vkCmdResetQueryPool(cmd, pool_, 0, kRingSize * 2);
+}
+
 void TimestampQuery::Begin(VkCommandBuffer cmd) {
     const int slot = ring_.Begin();
     if (slot < 0) return;

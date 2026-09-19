@@ -52,8 +52,8 @@ std::uint64_t MmapBackend::RunCycle(const std::vector<std::string>& paths,
             // mmap(length=0) 은 EINVAL 이다. 빈 파일은 매핑 없이 0 바이트로
             // 관측시킨다 — 다른 backend 와 같은 결과.
             static const unsigned char kEmpty = 0;
-            onRead(&kEmpty, 0);
             ::close(fd);
+            onRead(&kEmpty, 0);
             continue;
         }
 
@@ -69,11 +69,19 @@ std::uint64_t MmapBackend::RunCycle(const std::vector<std::string>& paths,
         // 워크로드의 sampled checksum이 페이지를 만지면서 *페이지 폴트가 발생*
         // 하고 커널이 페이지 캐시에서 매핑을 채운다. read와 달리 유저 공간으로의
         // 명시적 복사가 없다.
-        onRead(static_cast<const unsigned char*>(p), mapBytes);
+        try {
+            onRead(static_cast<const unsigned char*>(p), mapBytes);
+        } catch (...) {
+            ::munmap(p, mapBytes);
+            ::close(fd);
+            throw;
+        }
 
         if (SklMunmap(p, mapBytes) != 0) {
             const std::string msg = std::string("munmap failed: ") + path
                                   + ": " + std::strerror(errno);
+            // The fault hook may have skipped the real unmap.
+            ::munmap(p, mapBytes);
             ::close(fd);
             throw std::runtime_error(msg);
         }

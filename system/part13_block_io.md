@@ -51,11 +51,15 @@ crw-rw-rw- 1 root tty  5, 0 Dec 23 10:00 /dev/tty
 
 ```c
 /* include/linux/blkdev.h */
-struct request_queue {
+struct queue_limits {
     unsigned int            logical_block_size;
     unsigned int            physical_block_size;
     unsigned int            max_hw_sectors;
-    unsigned int            max_segments;
+    unsigned short          max_segments;
+};
+
+struct request_queue {
+    struct queue_limits     limits;   /* q->limits.logical_block_size */
 };
 ```
 
@@ -66,7 +70,7 @@ struct request_queue {
 블록 디바이스는 `gendisk` 구조체로 표현된다.
 
 ```c
-/* include/linux/genhd.h */
+/* include/linux/blkdev.h */
 struct gendisk {
     int major;
     int first_minor;
@@ -77,16 +81,16 @@ struct gendisk {
     struct request_queue *queue;
     const struct block_device_operations *fops;
 
-    struct disk_part_tbl __rcu *part_tbl;
+    struct xarray part_tbl;
 
     unsigned long state;
     atomic_t sync_io;
 };
 ```
 
-디바이스 드라이버는 `block_device_operations`와 multi-queue 기반 큐 콜백(`blk_mq_ops`)을 구현한다. 과거의 `request_fn` 기반 단일 큐 모델은 Linux 5.0(2019)에서 제거되었고, 현재 모든 블록 드라이버는 multi-queue 경로(blk-mq)를 통과한다. 드라이버는 보통 두 가지 진입점 중 하나를 채운다.
+디바이스 드라이버는 `block_device_operations`와 multi-queue 기반 큐 콜백(`blk_mq_ops`)을 구현한다. 과거의 `request_fn` 기반 단일 큐 모델은 Linux 5.0(2019)에서 제거되었고, 현재 request 기반 블록 드라이버는 모두 multi-queue 경로(blk-mq)를 통과한다. 드라이버는 보통 두 가지 진입점 중 하나를 채운다.
 
-- `submit_bio` (`block_device_operations.submit_bio`): 큐를 거치지 않고 bio를 직접 받아 처리. brd, zram, NVMe의 일부 빠른 경로 등 단순 드라이버가 사용한다.
+- `submit_bio` (`block_device_operations.submit_bio`): 큐를 거치지 않고 bio를 직접 받아 처리. brd, zram 같은 단순 드라이버와 dm/md 같은 스택 드라이버가 사용한다.
 - `queue_rq` (`blk_mq_ops.queue_rq`): blk-mq가 만들어 준 `struct request`를 받아 처리. 대부분의 실제 디스크/SSD 드라이버 경로다.
 
 ```c
@@ -164,7 +168,7 @@ bio
 파일시스템이 디스크에서 데이터를 읽으려면 `bio`를 생성하고 제출한다.
 
 ```c
-/* fs/ext4/page-io.c - ext4 예시 */
+/* block/bio.c, block/blk-core.c - 블록 레이어 API (요약) */
 struct bio *bio_alloc(struct block_device *bdev,
                       unsigned int nr_vecs,
                       unsigned int opf,
@@ -185,9 +189,9 @@ int bio_add_page(struct bio *bio, struct page *page,
     return len;
 }
 
-blk_qc_t submit_bio(struct bio *bio)
+void submit_bio(struct bio *bio)
 {
-    return submit_bio_noacct(bio);
+    submit_bio_noacct(bio);
 }
 ```
 
@@ -850,7 +854,7 @@ NVMe(Non-Volatile Memory Express)는 SSD를 위해 처음부터 설계된 프로
 
 - PCIe 인터페이스: 높은 대역폭(PCIe 3.0 x4: 4GB/s)
 - 저지연: 프로토콜 오버헤드 최소화
-- 멀티큐: 최대 65,536개 I/O 큐, 각 큐당 65,536개 명령
+- 멀티큐: 최대 65,535개 I/O 큐, 각 큐당 65,536개 명령
 
 ### NVMe 아키텍처
 
@@ -878,7 +882,7 @@ flowchart TB
 ### NVMe 드라이버
 
 ```c
-/* drivers/nvme/host/core.c */
+/* drivers/nvme/host/pci.c */
 static const struct blk_mq_ops nvme_mq_ops = {
     .queue_rq       = nvme_queue_rq,
     .complete       = nvme_complete_rq,
@@ -917,7 +921,7 @@ static blk_status_t nvme_queue_rq(struct blk_mq_hw_ctx *hctx,
 전통적으로 I/O 완료는 인터럽트로 알린다. NVMe는 너무 빨라서 인터럽트 오버헤드가 병목이 될 수 있다. 폴링 모드를 사용하면 지연 시간을 더 줄일 수 있다.
 
 ```c
-/* drivers/nvme/host/core.c */
+/* drivers/nvme/host/pci.c */
 static int nvme_poll(struct blk_mq_hw_ctx *hctx)
 {
     struct nvme_queue *nvmeq = hctx->driver_data;
@@ -1062,7 +1066,7 @@ $ sudo sysctl -w vm.dirty_background_ratio=2
 
 ## 결론
 
-리눅스 블록 I/O 서브시스템은 40년 이상의 진화를 거쳤다. HDD의 느린 회전 디스크에서 NVMe의 초고속 flash까지, 커널은 계속 적응해왔다. 핵심 정리는 다음과 같다.
+리눅스 블록 I/O 서브시스템은 30년 이상의 진화를 거쳤다. HDD의 느린 회전 디스크에서 NVMe의 초고속 flash까지, 커널은 계속 적응해왔다. 핵심 정리는 다음과 같다.
 
 1. 레이어 분리: bio → request → 디바이스 드라이버. 각 레이어는 독립적으로 최적화된다.
 2. 비동기와 배칭: I/O는 본질적으로 느리다. 병렬 처리와 배칭이 필수다.

@@ -23,7 +23,7 @@
 7. [매개변수 전달: 레지스터 컨벤션](#7-매개변수-전달-레지스터-컨벤션)
 8. [커널 스택과 사용자 스택](#8-커널-스택과-사용자-스택)
 9. [vDSO: 시스템 콜 없이 커널 기능 사용](#9-vdso-시스템-콜-없이-커널-기능-사용)
-10. [시스템 콜 추가하기: 커널 해킹 입문](#10-시스템-콜-추가하기-커널-해킹-입문)
+10. [새로운 시스템 콜의 ABI 설계](#10-새로운-시스템-콜의-abi-설계)
 
 
 ---
@@ -308,7 +308,7 @@ void syscall_init(void)
 {
     /* SYSENTER 설정 (32비트용) */
     wrmsrl(MSR_SYSENTER_CS, __KERNEL_CS);
-    wrmsrl(MSR_SYSENTER_ESP, &cpu_tss.sp0);
+    wrmsrl(MSR_SYSENTER_ESP, cpu_tss.sp0);
     wrmsrl(MSR_SYSENTER_EIP, entry_SYSENTER_32);
 }
 ```
@@ -411,8 +411,8 @@ void syscall_init(void)
            ((u64)__USER32_CS) << 48  |  // Sysret userspace CS
            ((u64)__KERNEL_CS) << 32);    // Syscall kernel CS
 
-    /* RFLAGS 마스크: IF, DF, TF, NT, AC 비트 클리어 */
-    wrmsrl(MSR_SFMASK,
+    /* RFLAGS 마스크: IF, DF, TF, IOPL, AC, NT 비트 클리어 */
+    wrmsrl(MSR_SYSCALL_MASK,
            X86_EFLAGS_TF | X86_EFLAGS_DF | X86_EFLAGS_IF |
            X86_EFLAGS_IOPL | X86_EFLAGS_AC | X86_EFLAGS_NT);
 }
@@ -778,7 +778,7 @@ __visible const sys_call_ptr_t ia32_sys_call_table[__NR_syscall_compat_max+1] = 
 
 ### 시스템 콜 테이블 보호
 
-시스템 콜 테이블은 **읽기 전용(read-only)** 메모리에 배치된다. 이는 루트킷(rootkit)이 시스템 콜을 후킹하는 것을 방지한다.
+시스템 콜 테이블은 **읽기 전용(read-only)** 메모리에 배치된다. 이는 루트킷(rootkit)의 시스템 콜 후킹 비용을 올리지만 원천 차단하지는 못한다. 이미 커널 모드에 있는 코드는 `CR0.WP`를 클리어하거나 해당 페이지를 쓰기 가능하게 재매핑해 테이블을 덮을 수 있다.
 
 ```c
 // arch/x86/entry/syscall_64.c
@@ -918,12 +918,12 @@ ENTRY(entry_SYSCALL_64)
      * syscall은 RSP를 바꾸지 않으므로, 여기서 수동으로 전환
      */
     swapgs                      ; GS 레지스터를 커널용으로 전환
-    movq %rsp, PER_CPU_VAR(cpu_tss_rsp0)  ; 사용자 RSP 저장
+    movq %rsp, PER_CPU_VAR(rsp_scratch)  ; 사용자 RSP 저장
     movq PER_CPU_VAR(cpu_current_top_of_stack), %rsp  ; 커널 스택으로 전환
 
     /* pt_regs 구조체를 스택에 구성 */
     pushq $__USER_DS                    ; SS
-    pushq PER_CPU_VAR(cpu_tss_rsp0)     ; RSP (사용자)
+    pushq PER_CPU_VAR(rsp_scratch)      ; RSP (사용자)
     pushq %r11                          ; RFLAGS
     pushq $__USER_CS                    ; CS
     pushq %rcx                          ; RIP (복귀 주소)
@@ -1126,7 +1126,7 @@ ssize_t vfs_write(struct file *file, const char __user *buf,
     else
         ret = -EINVAL;
 
-    /* 보안 후킹 (LSM) */
+    /* 변경 통지와 I/O 통계 갱신 (LSM 검사는 쓰기 전 rw_verify_area에서 이뤄진다) */
     if (ret > 0) {
         fsnotify_modify(file);
         add_wchar(current, ret);
@@ -1512,16 +1512,16 @@ x86-64에서 커널 스택은 다음과 같이 구성된다:
 ```text
 [높은 주소]
 +-------------------------+
-|   thread_info (옛날)    | ← 최근 커널에서는 task_struct로 이동
-+-------------------------+
-|      (사용 가능)        |
-|                         |
+|     pt_regs             | ← 시스템 콜/인터럽트 시 생성
++-------------------------+ ← RSP (스택 포인터)
 |      커널 스택          | ← 아래로 성장
 |                         |
 |                         |
+|      (사용 가능)        |
+|                         |
 +-------------------------+
-|     pt_regs             | ← 시스템 콜/인터럽트 시 생성
-+-------------------------+ ← RSP (스택 포인터)
+|   thread_info (옛날)    | ← 최근 커널에서는 task_struct로 이동
++-------------------------+
 [낮은 주소]
 ```
 
@@ -1599,13 +1599,13 @@ Kernel stack overflow detected.
 // include/linux/sched/task_stack.h
 static inline unsigned long stack_not_used(struct task_struct *p)
 {
-    unsigned long *end = end_of_stack(p);
-    unsigned long *stack = task_stack_page(p);
+    unsigned long *n = end_of_stack(p);
 
-    while (*stack == STACK_MAGIC)
-        stack++;
+    do {        /* canary를 건너뛰고 아직 0으로 남은 구간을 센다 */
+        n++;
+    } while (!*n);
 
-    return (end - stack) * sizeof(*stack);
+    return (unsigned long)n - (unsigned long)end_of_stack(p);
 }
 ```
 
@@ -2460,4 +2460,4 @@ sudo perf report
 - Kernel Live Patching: 재부팅 없이 커널 패치
 - Time Namespaces: 컨테이너별 시간 격리, vDSO와의 상호작용
 
-이 글은 Linux 5.15 커널을 기준으로 작성됐다. 최신 코드는 https://kernel.org 에서 확인할 수 있다.
+이 글의 x86-64 진입 경로와 시스템 콜 테이블 코드 인용은 Linux 4.14 LTS를 기준으로 한다. 4.17에서 x86-64 시스템 콜 핸들러가 `const struct pt_regs *` 하나만 받는 호출 규약(`__x64_sys_*` 스텁)으로 바뀌었고, 5.5에서 어셈블리 심볼 매크로가 `ENTRY/END`에서 `SYM_CODE_START/SYM_CODE_END`로 바뀌었다. 그 이후 커널에서는 `sys_call_table` 정의, `SYSCALL_DEFINE` 확장 결과, `entry_64.S`의 디스패치 형태가 이 글의 인용과 다르다. 최신 코드는 https://kernel.org 에서 확인할 수 있다.

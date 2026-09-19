@@ -27,33 +27,15 @@ function Get-FreeUdpPort {
     finally { $client.Dispose() }
 }
 
-function New-AdmissionPacket([string]$Token) {
-    $tokenBytes = [Text.Encoding]::UTF8.GetBytes($Token)
-    $memory = [IO.MemoryStream]::new()
-    $writer = [IO.BinaryWriter]::new($memory)
-    try {
-        $writer.Write([uint32]0x3146444d)
-        $writer.Write([byte]1)
-        $writer.Write([byte]4)
-        $writer.Write([uint16](2 + $tokenBytes.Length))
-        $writer.Write([uint16]$tokenBytes.Length)
-        $writer.Write($tokenBytes)
-        $writer.Flush()
-        return $memory.ToArray()
-    }
-    finally {
-        $writer.Dispose()
-        $memory.Dispose()
-    }
-}
-
 if (-not $ApiPort) { $ApiPort = [string](Get-FreeTcpPort) }
 if (-not $GamePort) { $GamePort = [string](Get-FreeUdpPort) }
 
 $apiDll = Join-Path $root "projects/mini/live_service_lab/src/LiveService.Api/bin/$Configuration/net10.0/LiveService.Api.dll"
 $megaServer = Join-Path $MegaBuild "bin/$Configuration/mega_defense_server.exe"
+$probe = Join-Path $MegaBuild "bin/$Configuration/mega_live_admission_probe.exe"
 if (-not (Test-Path -LiteralPath $apiDll)) { throw "Missing API build: $apiDll" }
 if (-not (Test-Path -LiteralPath $megaServer)) { throw "Missing Mega server build: $megaServer" }
+if (-not (Test-Path -LiteralPath $probe)) { throw "Missing Mega admission probe build: $probe" }
 
 $secret = [Convert]::ToBase64String(
     [Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
@@ -66,18 +48,16 @@ $environment = @{
 }
 
 $api = Start-Process dotnet `
-    -ArgumentList @($apiDll, "--urls", $baseUrl) `
+    -ArgumentList @("`"$apiDll`"", "--urls", $baseUrl) `
     -Environment $environment -WindowStyle Hidden -PassThru
 $server = $null
-$firstClient = $null
-$secondClient = $null
 
 try {
     $ready = $false
     for ($attempt = 0; $attempt -lt 50; ++$attempt) {
         Start-Sleep -Milliseconds 100
         try {
-            Invoke-RestMethod "$baseUrl/metrics/state" | Out-Null
+            Invoke-RestMethod "$baseUrl/metrics/state" -TimeoutSec 2 | Out-Null
             $ready = $true
             break
         }
@@ -114,41 +94,28 @@ try {
         -Headers @{ Authorization = "Bearer $($loginA.accessToken)" }
     $assignmentB = Invoke-RestMethod "$baseUrl/assignments/$($ticketB.ticketId)" `
         -Headers @{ Authorization = "Bearer $($loginB.accessToken)" }
-    if ($assignmentA.matchId -ne $assignmentB.matchId) {
+    if (-not $assignmentA.matchId -or $assignmentA.matchId -ne $assignmentB.matchId -or
+        -not $assignmentA.gameToken -or -not $assignmentB.gameToken) {
         throw "Players were not assigned to the same match."
     }
 
     $server = Start-Process $megaServer `
         -ArgumentList @("--port", $GamePort, "--server-id", $serverId,
-                        "--run-seconds", "5") `
+                        "--run-seconds", "15", "--match-id", $assignmentA.matchId,
+                        "--player-id", "cross-a", "--player-id", "cross-b") `
         -Environment @{ LIVE_SERVICE_TOKEN_SECRET = $secret } `
         -WindowStyle Hidden -PassThru
-    Start-Sleep -Milliseconds 150
 
-    $firstClient = [Net.Sockets.UdpClient]::new(0)
-    $secondClient = [Net.Sockets.UdpClient]::new(0)
-    $firstClient.Client.ReceiveTimeout = 3000
-    $secondClient.Client.ReceiveTimeout = 3000
-    $packetA = New-AdmissionPacket $assignmentA.gameToken
-    $packetB = New-AdmissionPacket $assignmentB.gameToken
-    [void]$firstClient.Send($packetA, $packetA.Length, "127.0.0.1", [int]$GamePort)
-    [void]$secondClient.Send($packetB, $packetB.Length, "127.0.0.1", [int]$GamePort)
-
-    $remoteA = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
-    $remoteB = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
-    $snapshotA = $firstClient.Receive([ref]$remoteA)
-    $snapshotB = $secondClient.Receive([ref]$remoteB)
-    $validA = $snapshotA.Length -ge 8 -and $snapshotA[5] -eq 3
-    $validB = $snapshotB.Length -ge 8 -and $snapshotB[5] -eq 3
-    if (-not $validA -or -not $validB) {
-        throw "Mega did not return valid snapshots to both admitted clients."
+    # This local controller owns both queued identities and the server launch.
+    # The probe uses the product codec/content cooker and retries until a bounded deadline.
+    @($assignmentA.gameToken, $assignmentB.gameToken) | & $probe $GamePort
+    if ($LASTEXITCODE -ne 0) {
+        throw "Mega admission probe failed (exit $LASTEXITCODE)."
     }
 
     Write-Host "Live Service -> Mega token admission smoke passed." -ForegroundColor Green
 }
 finally {
-    if ($firstClient) { $firstClient.Dispose() }
-    if ($secondClient) { $secondClient.Dispose() }
     if ($server) {
         if (-not $server.HasExited) { Stop-Process -Id $server.Id -Force }
         $server.Dispose()

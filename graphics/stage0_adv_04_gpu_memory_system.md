@@ -279,7 +279,7 @@ public:
         }
 
         if (begin + size - retired_ > capacity_) {
-            return std::nullopt; // 아직 GPU가 읽는 바이트와 겹친다.
+            return std::nullopt; // 공간 부족: 퇴역 전 바이트와 겹치거나 size가 capacity_를 넘는다.
         }
 
         write_ = begin + size;
@@ -312,7 +312,7 @@ private:
 };
 ```
 
-`capacity_`를 2의 거듭제곱으로 제한하면 modulo를 mask로 바꿀 수 있지만 정확성에는 필요하지 않다. `AlignUp(begin, capacity_)`는 capacity가 일반 정수여도 동작하는 정수 나눗셈 기반 구현이어야 한다.
+`capacity_`를 2의 거듭제곱으로 제한하면 modulo를 mask로 바꿀 수 있지만 정확성에는 필요하지 않다. 다만 `offset = begin % capacity_`가 요청한 정렬을 유지하려면 `capacity_`는 사용하는 모든 `alignment`의 배수여야 한다. `AlignUp(begin, capacity_)`는 capacity가 일반 정수여도 동작하는 정수 나눗셈 기반 구현이어야 한다.
 
 ### 프레임 수가 아니라 완료 값이 수명을 결정한다
 
@@ -506,5 +506,4 @@ GPU 자원 메모리는 **배치, 가시성, 수명**의 문제다. 자원의 �
 - Microsoft, [Residency](https://learn.microsoft.com/windows/win32/direct3d12/residency)
 - GPUOpen, [Vulkan Memory Allocator](https://gpuopen-librariesandsdks.github.io/VulkanMemoryAllocator/html/)
 - NVIDIA, [CUDA C++ Best Practices Guide: Data Transfer](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#data-transfer-between-host-and-device)
-- Adam Sawicki, [Memory Management in Vulkan and DX12](https://gpuopen.com/learn/vulkan-device-memory/)
-- Sean Barrett, [Dynamic Array Allocation and Fragmentation Models](https://nothings.org/gamedev/)
+- Adam Sawicki, [Memory Management in Vulkan and DX12](https://gpuopen.com/download/gdc_2018_tutorial_memory_management_vulkan_dx12.pptx) (GDC 2018)

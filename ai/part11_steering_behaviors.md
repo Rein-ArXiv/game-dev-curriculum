@@ -58,9 +58,11 @@ Steering의 운동 모델은 의도적으로 단순하다. 에이전트는 위�
 struct Agent {
     Vec2  position;
     Vec2  velocity;
+    Vec2  facing{1, 0};  // heading — 속도 방향과 분리해 유지하는 상태
     float maxSpeed;      // 속도 상한 (m/s)
     float maxAccel;      // 조향 가속도 상한 (m/s^2)
     float responseTime;  // 목표 속도에 접근하는 시정수 (s), > 0
+    float lookAhead = 1.0f;    // Path Following의 예측 거리 (m)
     float wanderAngle = 0.0f;  // Wander의 지속적인 각도 상태
 };
 ```
@@ -445,7 +447,8 @@ if (LengthSq(avoid) < 1e-4f) {                 // 정면 정중앙 — 회피 �
 ```cpp
 Vec2 FollowPath(Agent& a, const Path& path) {
     // 1) 약간 앞의 미래 위치 예측
-    Vec2 future = a.position + Normalize(a.velocity) * a.lookAhead;
+    Vec2 forward = (LengthSq(a.velocity) > 1e-6f) ? Normalize(a.velocity) : a.facing;  // 정지 시 방향 보호
+    Vec2 future = a.position + forward * a.lookAhead;
     // 2) 경로상 가장 가까운 점과 그 점이 속한 구간의 진행 방향 찾기
     auto [closest, segDir, segIdx] = path.ClosestPoint(future);
     // 3) 미래 위치가 경로 관을 허용 폭 이상 벗어났으면 경로로 복귀
@@ -617,13 +620,15 @@ flowchart LR
 
 ```cpp
 Vec2 Separation(const Agent& a, const std::vector<Agent*>& nb) {
-    Vec2 force{0, 0};
+    Vec2 push{0, 0};
     for (const Agent* o : nb) {
         Vec2 away = a.position - o->position;
         float d = Length(away);
-        if (d > 1e-4f) force += (away / d) / d;     // 방향 / 거리 — 가까울수록 강함
+        if (d > 1e-4f) push += (away / d) / d;      // 방향 / 거리 — 가까울수록 강함
     }
-    return force;
+    if (LengthSq(push) < 1e-12f) return {0, 0};
+    Vec2 desired = Normalize(push) * a.maxSpeed;    // 밀침 방향으로 최대 속도
+    return (desired - a.velocity) / a.responseTime; // 속도 오차 → 가속도
 }
 Vec2 Alignment(const Agent& a, const std::vector<Agent*>& nb) {
     if (nb.empty()) return {0, 0};
@@ -651,16 +656,22 @@ Vec2 Cohesion(const Agent& a, const std::vector<Agent*>& nb) {
 steering은 *벡터의 합* 이라 화면에 그리면 즉시 이해된다. 디버깅의 핵심은 각 행동의 힘 벡터를 색을 달리해 에이전트에서 그려 내는 것이다.
 
 ```cpp
-void Agent::DebugDraw(DebugRenderer& dr) const {
-    dr.DrawArrow(position, position + velocity, Color::White);          // 현재 속도
-    dr.DrawArrow(position, position + lastSeekForce,  Color::Green);    // Seek
-    dr.DrawArrow(position, position + lastAvoidForce, Color::Red);      // 회피
-    dr.DrawArrow(position, position + lastTotalForce, Color::Yellow);   // 합력
-    dr.DrawCircle(position, neighborRadius, Color::Gray);               // 이웃 반경
+struct SteeringDebug {            // 프레임마다 기록해 두는 마지막 힘들
+    Vec2  lastSeekForce, lastAvoidForce, lastTotalForce;
+    float neighborRadius;
+};
+
+void DebugDraw(DebugRenderer& dr, const Agent& a, const SteeringDebug& d) {
+    const Vec2 p = a.position;
+    dr.DrawArrow(p, p + a.velocity, Color::White);           // 현재 속도
+    dr.DrawArrow(p, p + d.lastSeekForce,  Color::Green);     // Seek
+    dr.DrawArrow(p, p + d.lastAvoidForce, Color::Red);       // 회피
+    dr.DrawArrow(p, p + d.lastTotalForce, Color::Yellow);    // 합력
+    dr.DrawCircle(p, d.neighborRadius, Color::Gray);         // 이웃 반경
     // feeler 시각화 — 회피가 무엇을 보는지
-    float speed = Length(velocity);
+    float speed = Length(a.velocity);
     if (speed > 1e-5f)
-        dr.DrawLine(position, position + velocity * 0.5f, Color::Cyan);
+        dr.DrawLine(p, p + a.velocity * 0.5f, Color::Cyan);
 }
 ```
 

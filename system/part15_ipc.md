@@ -52,7 +52,7 @@ IPC의 역사는 UNIX의 역사와 함께한다:
 - **POSIX IPC**: System V의 문제점을 해결
  - 이름 기반 식별 (`/이름` 형태). 단 어느 가상 파일시스템에 매핑되는지는 IPC 종류에 따라 다르다.
  - POSIX 공유 메모리(`shm_open`): `/dev/shm/이름`
- - POSIX 메시지 큐(`mq_open`): `/dev/mqueue/이름` (mqueue tmpfs 마운트가 필요)
+ - POSIX 메시지 큐(`mq_open`): `/dev/mqueue/이름` (mqueue 파일시스템 마운트가 필요)
  - POSIX 세마포어(`sem_open`): 보통 `/dev/shm/sem.이름`
  - 파일과 유사한 인터페이스
  - descriptor와 이름 기반 lifecycle을 사용하는 별도 POSIX API
@@ -79,7 +79,7 @@ IPC 메커니즘은 여러 기준으로 분류할 수 있다:
 - **네트워크 가능**: 소켓
 
 **관계 요구사항:**
-- **부모-자식 관계 필요**: 익명 파이프
+- **fd 상속·전달 경로 필요**: 익명 파이프
 - **무관한 프로세스**: Named pipe, 메시지 큐, 공유 메모리, 소켓
 
 ### IPC 선택 가이드
@@ -302,6 +302,7 @@ static ssize_t pipe_read(struct kiocb *iocb, struct iov_iter *to)
 {
     struct file *filp = iocb->ki_filp;
     struct pipe_inode_info *pipe = filp->private_data;
+    ssize_t ret = 0;
 
     mutex_lock(&pipe->mutex);
 
@@ -321,6 +322,7 @@ static ssize_t pipe_read(struct kiocb *iocb, struct iov_iter *to)
 
             buf->offset += chars;
             buf->len -= chars;
+            ret += chars;
 
             /* 버퍼가 비었으면 tail 증가 */
             if (!buf->len) {
@@ -375,7 +377,7 @@ splice(pipefd[0], NULL, fd_out, NULL, 65536, 0);     // 파이프 -> 파일
 
 ### FIFO의 필요성
 
-익명 파이프는 부모-자식 관계가 필요하다. **무관한 프로세스**가 통신하려면?
+익명 파이프는 fd를 상속하거나 전달받은 프로세스 사이에서만 쓸 수 있다. **무관한 프로세스**가 통신하려면?
 
 **Named Pipe (FIFO)**는 파일시스템에 이름을 가진 파이프다:
 
@@ -509,7 +511,7 @@ close(fd);
 | 특성 | 익명 파이프 | FIFO |
 |------|-----------|------|
 | 이름 | 없음 | 파일시스템 경로 |
-| 관계 | 부모-자식 필요 | 무관한 프로세스 가능 |
+| 관계 | fd 상속·전달 경로 필요 | 무관한 프로세스 가능 |
 | 영속성 | 프로세스 종료 시 삭제 | 명시적 삭제 필요 |
 | 양방향 | 두 개 필요 | 두 개 필요 (동일) |
 | 성능 | 약간 빠름 | 약간 느림 (inode lookup) |
@@ -679,11 +681,11 @@ struct mqueue_inode_info {
     struct inode vfs_inode;
     wait_queue_head_t wait_q;
 
-    struct msg_msg **messages;  /* 메시지 배열 */
+    struct rb_root msg_tree;    /* 우선순위별 메시지 rb-tree */
     struct mq_attr attr;
 
     struct sigevent notify;     /* 비동기 통지 */
-    pid_t notify_owner;
+    struct pid *notify_owner;
     /* ... */
 };
 
@@ -1560,6 +1562,8 @@ static long do_msgsnd(int msqid, long mtype, void __user *mtext,
 {
     struct msg_queue *msq;
     struct msg_msg *msg;
+    struct ipc_namespace *ns = current->nsproxy->ipc_ns;
+    DEFINE_WAKE_Q(wake_q);
 
     /* 메시지 큐 찾기 */
     msq = msq_obtain_object_check(ns, msqid);
@@ -1649,6 +1653,7 @@ static int unix_stream_sendmsg(struct socket *sock, struct msghdr *msg, size_t l
     struct sock *sk = sock->sk;
     struct sock *other = unix_peer(sk);
     struct sk_buff *skb;
+    int err;
 
     /* sk_buff 할당 */
     skb = sock_alloc_send_skb(sk, len, msg->msg_flags & MSG_DONTWAIT, &err);

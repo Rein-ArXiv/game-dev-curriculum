@@ -114,6 +114,9 @@ void ForcesScene::HandleInput() {
 }
 
 void ForcesScene::Step(float dt) {
+    // 캔버스를 아직 모르면 (탭 첫 진입 프레임) 적분하지 않는다 — 바닥 / 벽이
+    // 0 으로 잡혀 mass 가 (-22,-22) 로 끌려가고 가짜 에너지 표본이 남는다.
+    if (lastCanvasW_ <= 0) return;
     // 핸들 드래그 = 위치 리셋 (Welcome 패턴).
     if (massHandle_.IsDragging()) {
         pos_ = massHandle_.Position();

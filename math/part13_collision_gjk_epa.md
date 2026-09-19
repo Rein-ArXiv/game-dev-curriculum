@@ -1,6 +1,6 @@
 ## 들어가며
 
-SAT 는 *볼록 도형의 모든 정점·면·모서리* 를 다 알고 있어야 동작한다. 다면체의 면이 많으면 *후보 폭증*, 곡면 도형 (구·캡슐·볼록 hull) 은 *부적합*. *임의의 볼록 도형* 을 *통일된 알고리즘* 으로 처리하려면 *다른 추상* 이 필요하다.
+SAT 는 *볼록 도형의 모든 정점·면·모서리* 를 다 알고 있어야 동작한다. 다면체의 면이 많으면 *후보 폭증*, 곡면 도형 (구·캡슐) 은 *부적합*. *임의의 볼록 도형* 을 *통일된 알고리즘* 으로 처리하려면 *다른 추상* 이 필요하다.
 
 GJK (Gilbert-Johnson-Keerthi) 알고리즘이 그 답이다. 1988년 발표된 이 알고리즘의 통찰: *도형의 내부 구조를 몰라도, 지원 함수 (support function) 만 있으면 두 볼록 도형의 거리·교차를 풀 수 있다*. 지원 함수는 *주어진 방향에서 가장 먼 점* 을 반환하는 단일 함수. Sphere·Box·Convex hull·캡슐·임의 볼록 mesh — 모두 지원 함수만 정의하면 같은 GJK 코드가 동작.
 
@@ -238,7 +238,7 @@ vec3 b = SupportMinkowskiDiff(d, supA, supB);
 
 이때 *$b$ 가 d 방향에서 원점 너머에 있지 않으면* — 즉 $\vec{d} \cdot b < 0$ — *Minkowski 차가 원점을 포함 못 함* — 분리. 즉시 종료.
 
-*접촉 (touching) 정책*. $\vec{d} \cdot b = 0$ 은 *원점이 정확히 support plane 위* — 두 도형이 *경계에서 닿은 상태*. 트리거 overlap 처럼 *touch 를 collision 으로 보려면* `< 0` 으로, *침투만 collision 으로 보려면* `< -epsilon` 또는 `<= 0` 정책. 이 글의 코드는 *touch = collision (< 0 으로 분리 판정)* 정책.
+*접촉 (touching) 정책*. $\vec{d} \cdot b = 0$ 은 *원점이 정확히 support plane 위* — 두 도형이 *경계에서 닿은 상태*. 트리거 overlap 처럼 *touch 를 collision 으로 보려면* `< 0` 으로, *침투만 collision 으로 보려면* `<= 0` 또는 `< epsilon` 정책. 이 글의 코드는 *touch = collision (< 0 으로 분리 판정)* 정책.
 
 ### 3.3 심플렉스의 의미
 
@@ -292,7 +292,7 @@ bool DoLine(Simplex& s, vec3& d) {
         vec3 perp = cross(cross(ab, ao), ab);
         // 퇴화: ab 와 ao 가 거의 평행하면 perp ≈ 0 → 임의 수직축 fallback
         if (length_squared(perp) < 1e-12f) {
-            d = std::fabs(ab.x) < 0.7f ? vec3(1, 0, 0) : vec3(0, 1, 0);
+            d = std::fabs(normalize(ab).x) < 0.7f ? vec3(1, 0, 0) : vec3(0, 1, 0);
             d = normalize(cross(ab, d));
         } else {
             d = perp;
@@ -386,7 +386,7 @@ bool DoTetrahedron(Simplex& s, vec3& d) {
 }
 ```
 
-4개 면의 *법선이 원점에서 멀어지는 방향* 인지 검사. *모든 면이 원점을 안 향하면* 원점이 사면체 안. 교차 종료.
+A 를 포함한 3개 면 (ABC·ACD·ADB) 의 *법선이 원점에서 멀어지는 방향* 인지 검사 — BCD 면은 A 가 직전 방향 d 로 원점 너머에서 뽑힌 지원점이라 원점이 그 면의 A 쪽에 있음이 보장되어 생략한다. *모든 면이 원점을 안 향하면* 원점이 사면체 안. 교차 종료.
 
 *주의*: 위 코드는 사면체의 *winding 이 일관* (네 정점의 순서가 결정한 면 법선이 모두 외향) 이라고 가정한다. 새 지원점이 추가될 때 *D 가 ABC 평면의 어느 쪽에 있는가* 에 따라 면 법선 방향이 뒤집힐 수 있어, 산업 구현은 *추가 직후 winding 보정* 단계를 둔다 (예: `if (dot(abc, ad) > 0) swap(b, c)`). 교육용 코드에서는 생략했지만, *면 법선 방향 일관성* 은 실전 구현의 필수 항목.
 
@@ -398,9 +398,9 @@ bool GJKIntersect(auto supA, auto supB) {
     vec3 d = vec3(1, 0, 0);
     s.points.push_back(SupportMinkowskiDiff(d, supA, supB));
 
-    // 첫 지원점이 원점 근처면 (대칭 도형 같은 중심) d ≈ 0 → 임의 fallback.
+    // 첫 지원점이 원점 위면 (정확히 맞닿은 배치) 원점이 support plane 위 — touch = collision.
     d = -s.points[0];
-    if (length_squared(d) < 1e-12f) d = vec3(1, 0, 0);
+    if (length_squared(d) < 1e-12f) return true;
 
     for (int iter = 0; iter < 100; ++iter) {
         vec3 newPt = SupportMinkowskiDiff(d, supA, supB);
@@ -419,7 +419,7 @@ bool GJKIntersect(auto supA, auto supB) {
 }
 ```
 
-100회 반복 한도. 보통 5~15 회 안에 종료. *수치 함정* 으로 무한 루프 가능 — 한도가 안전망. 다만 상한 도달은 분리에 대한 아무 정보도 주지 않으므로, 산업 구현은 이 경로를 `false` 로 접지 않고 별도 상태 (`IterationLimit`) 로 보고한다 (7.1절). *중심이 같은 대칭 도형* 에서 첫 지원점이 *원점 근처* 가 되면 다음 방향이 영벡터에 가까워져 무진행 — 임의 축 fallback 으로 회피.
+100회 반복 한도. 보통 5~15 회 안에 종료. *수치 함정* 으로 무한 루프 가능 — 한도가 안전망. 다만 상한 도달은 분리에 대한 아무 정보도 주지 않으므로, 산업 구현은 이 경로를 `false` 로 접지 않고 별도 상태 (`IterationLimit`) 로 보고한다 (7.1절). 첫 지원점이 *원점 위* 에 놓이면 (두 도형이 정확히 맞닿아 원점이 support plane 위에 있는 배치) 다음 방향이 영벡터가 되어 무진행 — 원점이 Minkowski 차의 경계 위이므로 접촉 정책대로 collision 으로 종료한다. 중심이 같은 대칭 도형은 오히려 첫 지원점이 원점에서 가장 먼 점이라 이 경우가 아니다.
 
 위 코드의 분리 판정 `dot(newPt, d) < 0` 의 *접촉 정책* 은 3.2절을 따른다 — touch (`= 0`) 는 `< 0` 분리 조건에 걸리지 않으므로 *분리로 빠지지 않는다*. 따라서 이 코드는 *접촉도 collision* 으로 본다.
 
@@ -636,14 +636,14 @@ EPA 의 출력:
 물리 응답에 그대로 입력. 두 도형을 *법선 방향으로 깊이만큼* 분리.
 
 ```cpp
-void ResolveGJKCollision(Body& a, Body& b, EPAResult epa) {
-    // a를 -normal 방향으로, b를 +normal 방향으로
-    float total = a.invMass + b.invMass;
-    if (total <= 0) return;
-    a.position -= epa.normal * epa.depth * (a.invMass / total);
-    b.position += epa.normal * epa.depth * (b.invMass / total);
+// a 를 -normal 방향으로, b 를 +normal 방향으로. splitA 는 a 가 떠맡는 몫 (0~1).
+void SeparateAlongNormal(vec3& posA, vec3& posB, EPAResult epa, float splitA) {
+    posA -= epa.normal * (epa.depth * splitA);
+    posB += epa.normal * (epa.depth * (1.0f - splitA));
 }
 ```
+
+EPA 가 책임지는 것은 *법선과 깊이* 까지다. 그 depth 를 두 도형이 어떻게 나눠 갖는지는 질량과 motion type 을 아는 동역학 모델이 정한다.
 
 ### 6.7 Contact Point 추출
 
@@ -702,7 +702,7 @@ Christer Ericson 의 *RTCD* 가 정리한 *분류 순서 트릭*: 어느 순서�
 
 ### 7.5 GJK 가 본질적으로 깨지지 않는 이유
 
-GJK 의 *최악 케이스* 가 *유한 시간 종료* 하는 게 수학적으로 증명되어 있다. 다만 *부동소수점 환경* 에서 *실제 구현* 은 *유한 시간 보장 안 됨* — epsilon + 반복 한도가 안전망.
+*볼록 다면체* 에 대해서는 GJK 의 *최악 케이스* 가 *유한 시간 종료* 하는 게 수학적으로 증명되어 있다 — 지원점이 유한 정점집합에서 나와 심플렉스가 순환할 수 없기 때문이다. 구·캡슐 같은 곡면 볼록체는 정확 산술에서도 점근 수렴만 하므로 허용오차 종료가 필수다. 다만 *부동소수점 환경* 에서 *실제 구현* 은 *유한 시간 보장 안 됨* — epsilon + 반복 한도가 안전망.
 
 ## 8. 엔진에서의 GJK 활용
 
@@ -798,7 +798,7 @@ GJK와 EPA는 벡터, 내적, 외적, 볼록성이라는 작은 수학 부품을
 - Christer Ericson, *Real-Time Collision Detection*, Ch. 9 — GJK 의 종합 설명.
 - Casey Muratori, "Implementing GJK" (Molly Rocket, 2006) — 알고리즘 시각적 설명 영상.
 - Erin Catto, GDC presentations — 게임 물리 엔진의 GJK 활용.
-- Bullet Physics 소스 (`btGjkPairDetector.cpp`, `btGjkEpaSolver.cpp`) — 산업 표준 구현.
+- Bullet Physics 소스 (`btGjkPairDetector.cpp`, `btGjkEpa2.cpp`) — 산업 표준 구현.
 - *Real-Time Collision Detection* 의 EPA 구현 절 — 안정성 디테일.
 - van den Bergen, *Collision Detection in Interactive 3D Environments* — GJK + 변형 알고리즘 종합.
 - Dirk Gregorius, "Robust Contact Creation for Physics Simulations" (GDC) — contact manifold 의 산업 응용.

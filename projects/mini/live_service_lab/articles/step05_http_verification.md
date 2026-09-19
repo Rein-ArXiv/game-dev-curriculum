@@ -158,20 +158,24 @@ Require(retry.Status == 200 && BoolField(retry.Body, "duplicate"),
 
 ## process smoke
 
-실제 HTTP smoke는 `scripts/check_live_mega.ps1`이 실행한다. API를 loopback 숨김 process로 띄운 뒤
-전용 게임 서버 process까지 연결하는 교차 언어 smoke이며 다음을 수행한다.
+`scripts/check_live_mega.ps1`은 API를 loopback 숨김 process로 띄운 뒤 전용 게임 서버까지 연결하는 교차 언어 smoke다. 검사 경로는 다음과 같다.
 
-1. server key로 UDP endpoint와 capacity 1을 등록한다.
+1. server key로 UDP endpoint와 capacity 1을 등록한다. 이 정원은 플레이어 수가 아니라 동시 매치 수다.
 2. 두 player의 access token을 발급한다.
 3. 두 bearer token으로 queue에 들어간다.
 4. 두 assignment의 match ID가 같은지 확인한다.
-5. 두 game token을 admission 패킷에 담아 전용 서버에 보낸다.
-6. 두 client가 모두 snapshot을 받는지 확인한다.
+5. 신뢰된 로컬 제어 프로세스인 스크립트가 match ID와 두 player ID를 서버 실행 인자로 넘긴다.
+6. `mega_live_admission_probe`가 두 game token을 표준 입력으로 받아 제품의 `WriteAdmissionHello`로 전송한다.
+7. 두 client가 올바른 콘텐츠의 `AdmissionGrant`와 tick이 진행된 snapshot을 모두 받는지 확인한다.
+
+서버의 `--match-id ID --player-id A --player-id B`는 단일 2인 매치를 고정한다. 외부 배정 모드에서는 내부 UDP queue를 거부하며, 토큰의 매치 ID와 원문 player ID를 명단과 대조한다. 서명이 맞는 토큰이라는 사실만으로 임의의 매치를 만들 수는 없다. 이 smoke에서는 스크립트가 두 player의 로그인·queue와 서버 기동을 모두 소유한다. 공개 client가 자기 명단을 제출하게 만드는 API가 아니며, 운영용 fleet agent를 대신하는 일반 할당 서비스도 아니다.
+
+검사 도구는 제품과 동일한 콘텐츠 cooker로 해시를 만들고 같은 packet encoder/decoder를 링크한다. PowerShell에서 버전 바이트나 헤더를 별도로 작성하지 않는다. UDP 시작 시점을 고정 sleep으로 추측하지 않고 최대 5초 동안 hello를 재시도한다. 서버는 동일한 입장의 재시도에 승인 패킷을 다시 보내므로 첫 승인이 유실되어도 자리를 중복 생성하지 않고 복구한다. `test_external_assignment`는 잘못된 명단·매치·콘텐츠 거부와 이 복구를 검사한다.
 
 API ready를 고정 sleep 하나로 가정하지 않고 `/metrics/state`를 짧게 polling한다. test 종료의 `finally`
 블록은 process를 정리해 실패한 smoke가 개발 포트를 계속 점유하지 않게 한다.
 
-이 smoke는 행복 경로만 실행한다. `/results` 제출과 중복 receipt, 오류 매핑 표의 401·400·404·409
+이 smoke는 정상 접속 경로를 대상으로 한다. `/results` 제출과 중복 receipt, 오류 매핑 표의 401·400·404·409
 응답은 여기서 밟히지 않고 `HttpAuthBoundary`와 `HttpErrorMapping`이 맡는다. 두 검사는 게임 서버
 없이 HTTP 응답 코드만 읽고, 반대로 UDP admission handshake와 교차 언어 token 검증은 이 smoke에만
 있다. 남는 공백은 여러 API instance와 실제 fleet agent가 관여하는 경로다.
@@ -182,9 +186,7 @@ API ready를 고정 sleep 하나로 가정하지 않고 `/metrics/state`를 짧�
 instance, key rotation, secret manager, durable queue를 해결하지 않는다. `/metrics/state`도 인증 없는
 lab 관측 endpoint이므로 공개 환경 구성 그대로 사용할 수 없다.
 
-Mega 전용 서버는 assignment game token을 실제 UDP handshake에서 오프라인 검증한다. 반면 Mega
-process가 register, heartbeat, result HTTP를 직접 호출하지는 않는다. fleet agent가 이 API 호출을
-소유한다는 배포 경계를 문서와 실행 명령에 그대로 남긴다.
+Mega 전용 서버는 game token을 오프라인 검증하고 로컬 실행 인자로 인계된 assignment를 대조한다. Mega process가 register, heartbeat, result HTTP를 직접 호출하지는 않는다. 여러 서버를 자동 기동·재기동하며 배정을 전달하는 fleet agent도 이 LAB의 완성 기능으로 간주할 수 없다.
 
 ## 실행 확인
 

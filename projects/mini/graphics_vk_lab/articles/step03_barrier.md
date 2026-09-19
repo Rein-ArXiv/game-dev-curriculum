@@ -110,7 +110,7 @@ b.dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
 이 차이가 Vulkan 학습의 핵심이다. barrier 는 “많이 넣으면 안전”이 아니라 “정확히 넣어야 빠르고 안전”하다.
 
-다만 이 lab 의 Minimal 이 정확한 mask 를 아는 전이는 위 세 가지뿐이다. `BuildImageBarrier` 의 Minimal 분기는 3-엔트리 lookup table 이고, 그 밖의 layout 조합은 `ALL_COMMANDS` + `MEMORY_READ | MEMORY_WRITE` 라는 보수적 fallback 으로 떨어져 Over-sync 와 비트 단위로 같은 값을 낸다. 새 전이를 추가하면서 이 테이블을 갱신하지 않으면 Minimal 을 골라도 조용히 over-sync 가 된다.
+다만 이 lab 의 Minimal 이 정확한 mask 를 아는 전이는 위 세 가지뿐이다. `BuildImageBarrier` 의 Minimal 분기는 3-엔트리 lookup table 이고, 그 밖의 layout 조합은 `ALL_COMMANDS` + `MEMORY_READ | MEMORY_WRITE` 라는 보수적 fallback 으로 떨어진다. Over-sync 가 UNDEFINED 소스·PRESENT_SRC 대상에 두는 예외를 fallback 은 두지 않으므로, 그 두 경우를 뺀 미지 쌍에서만 Over-sync 와 비트 단위로 같은 값을 낸다. 새 전이를 추가하면서 이 테이블을 갱신하지 않으면 Minimal 을 골라도 조용히 over-sync 가 된다.
 
 ## 4. 측정 기준
 
@@ -150,7 +150,7 @@ step03: 5 test(s), 137 checks, 0 failed
 
 다섯 이름이 각각 고정하는 것은 다음과 같다.
 
-- `minimal_barriers` / `oversync_barriers` — 세 전이(UNDEFINED→COLOR_ATTACHMENT_OPTIMAL, COLOR_ATTACHMENT_OPTIMAL→PRESENT_SRC_KHR, UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL) 각각의 `image` / `oldLayout` / `newLayout` / `subresourceRange` / 네 mask 를 단언한다 — 두 color 전이는 양쪽 정책에서, depth 초기화 전이는 Minimal 에서다. Minimal 이 정확한 mask 를 아는 layout 쌍은 그 셋뿐이고 그 밖의 조합에서는 Over-sync 와 비트 단위로 같은 값이 나온다는 fallback 계약도 `oversync_barriers` 쪽에 있다.
+- `minimal_barriers` / `oversync_barriers` — 세 전이(UNDEFINED→COLOR_ATTACHMENT_OPTIMAL, COLOR_ATTACHMENT_OPTIMAL→PRESENT_SRC_KHR, UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL) 각각의 `image` / `oldLayout` / `newLayout` / `subresourceRange` / 네 mask 를 단언한다 — 두 color 전이는 양쪽 정책에서, depth 초기화 전이는 Minimal 에서다. Minimal 이 정확한 mask 를 아는 layout 쌍은 그 셋뿐이고 그 밖의 조합(UNDEFINED 소스·PRESENT_SRC 대상 제외)에서는 Over-sync 와 비트 단위로 같은 값이 나온다는 fallback 계약도 한 쌍(TRANSFER_DST→SHADER_READ_ONLY)에 대해 `oversync_barriers` 쪽에 있다.
 - `barrier_record_path` — `ImageLayoutTransition` 이 실제로 채워 넘기는 `VkDependencyInfo` 를 함수 포인터 seam 으로 가로채, barrier 개수가 1 이고 그 내용이 `BuildImageBarrier` 결과와 완전히 같은지 확인한다.
 - `barrier_injection` — 아래 실패 주입 토글의 headless 계약. 자세한 것은 이어지는 절에 있다.
 - `barrier_policy_names` — 패널 콤보에 뜨는 두 정책 이름.
@@ -168,7 +168,7 @@ step03: 5 test(s), 137 checks, 0 failed
 | 토글 | 코드 동작 | 기대되는 validation 오류 유형 |
 |---|---|---|
 | `Inject: skip barriers` | 프레임당 color 전이 두 개를 아예 기록하지 않는다 | wrong image layout — attachment 가 `COLOR_ATTACHMENT_OPTIMAL` 이 아니고 present 시점에 `PRESENT_SRC_KHR` 도 아니다 |
-| `Inject: wrong srcAccessMask` | `BuildImageBarrier` 결과의 `srcAccessMask` 만 0 으로 덮어쓴다 | wrong access mask — 이전 쓰기를 덮지 못하는 dependency |
+| `Inject: wrong srcAccessMask` | `BuildImageBarrier` 결과의 `srcAccessMask` 만 0 으로 덮어쓴다 | wrong access mask — 이전 쓰기를 덮지 못하는 dependency. 코어 validation 은 이를 잡지 않으므로 vkconfig 등으로 synchronization validation(`validate_sync`)을 켜야 `SYNC-HAZARD` 메시지가 뜬다 |
 
 두 토글의 계약 중 headless 로 잡을 수 있는 부분은 `barrier_injection` 이 검사한다. `ShouldRecordBarrier` / `ApplyInjection` / `ExpectedBarrierCalls` 는 순수 함수로 분리되어 있고, 테스트는 `App::RecordFrame` 과 같은 순서로 이 셋을 호출한다. 기록 훅이 실제로 몇 번 불렸는지까지 세므로 "계산은 0 이라고 하는데 기록은 되는" 어긋남이 남지 않는다.
 
@@ -183,7 +183,7 @@ for (const vklab::BarrierInjection& inj : {none, skip, wrong}) {
         vklab::ImageLayoutTransitions(fakeCmd, &b, 1);
         ++recorded;
     }
-    CHECK(recorded == vklab::ExpectedBarrierCalls(inj, 2));
+    CHECK(recorded == (inj.skipBarriers ? 0 : 2));
     CHECK(g_captureCalls == vklab::ExpectedBarrierCalls(inj, 2));
 }
 ```

@@ -277,7 +277,7 @@ jt2 = std::clamp(jt2, -mu * jn, mu * jn);
 
 더 정확한 근사. cone 을 *8 변* 로. 더 작은 오차 + 약간 더 비싼 솔버.
 
-Bullet 의 *high-precision friction* 옵션.
+Bullet 에는 8 변 옵션이 없다 — 기본은 접촉당 마찰 방향 1 개, `SOLVER_USE_2_FRICTION_DIRECTIONS` 옵션으로 두 방향 (4 변) 까지다.
 
 ### 4.5 2D 의 경우
 
@@ -503,7 +503,7 @@ $\mu_s=\mu_d$로 단순화하면 상태 전환 불연속은 줄지만 정지 유
 
 ### 8.2 Bullet
 
-`btDefaultContactSolver` — pyramid friction 기본.
+`btSequentialImpulseConstraintSolver` — pyramid friction 기본.
 
 - 옵션에 따라 두 friction direction과 friction direction caching을 사용할 수 있다.
 
@@ -570,9 +570,9 @@ flowchart LR
 
 - Anitescu, Potra, "Formulating Dynamic Multi-Rigid-Body Contact Problems with Friction as Solvable Linear Complementarity Problems" (1997) — 마찰의 LCP 정식.
 - Erin Catto, "Modeling and Solving Constraints" (GDC 2009) — sequential impulse + 마찰.
-- PhysX SDK Guide, "Friction Patches" — patch friction 산업 구현.
-- Bullet manual, "Solving Sequentially" — pyramid 마찰 옵션.
+- PhysX SDK Guide, "Rigid Body Dynamics" (friction patch 서술) — patch friction 산업 구현.
+- Bullet 소스 (`btSequentialImpulseConstraintSolver.cpp`, `btContactSolverInfo.h`) — 마찰 방향 1개/2개 옵션 (`SOLVER_USE_2_FRICTION_DIRECTIONS`) 의 구현.
 - Brian Mirtich, *Impulse-based Dynamic Simulation* (PhD 1996) — 마찰의 임펄스 모델.
 - Ian Millington, *Game Physics Engine Development*, Ch. 14 — 마찰 통합.
 - Stewart, Trinkle, "An Implicit Time-Stepping Scheme for Rigid Body Dynamics with Inelastic Collisions and Coulomb Friction" (1996) — 마찰 시간 적분의 학술 표준.
-- Box2D 소스 (`b2ContactSolver.cpp`) — 산업 reference.
+- Box2D v2.4 소스 (`b2_contact_solver.cpp`) — 산업 reference.

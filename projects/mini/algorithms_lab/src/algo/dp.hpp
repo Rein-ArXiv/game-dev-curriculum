@@ -75,7 +75,7 @@ inline int64_t Knapsack1D(const std::vector<Item>& items, int64_t capacity,
     const size_t cap = size_t(capacity < 0 ? 0 : capacity);
     std::vector<int64_t> dp(cap + 1, 0);
     for (const Item& it : items) {
-        if (it.weight <= 0) continue;
+        if (it.weight < 0) continue;   // 무게 0 인 물건도 0/1 의미 그대로 한 번만 더해진다
         const size_t weight = size_t(it.weight);
         if (weight > cap) continue;
         if (descending) {

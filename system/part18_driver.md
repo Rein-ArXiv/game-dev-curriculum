@@ -118,7 +118,7 @@ struct file_operations {
     int (*release) (struct inode *, struct file *);
     int (*fsync) (struct file *, loff_t, loff_t, int datasync);
     long (*unlocked_ioctl) (struct file *, unsigned int, unsigned long);
-    int (*poll) (struct file *, struct poll_table_struct *);
+    __poll_t (*poll) (struct file *, struct poll_table_struct *);
     /* ... */
 };
 ```
@@ -1157,13 +1157,13 @@ static const struct file_operations null_fops = {
 
 ### 시리얼 포트 드라이버
 
-`drivers/tty/serial/8250/8250_core.c`의 `serial8250_startup` 함수다.
+`drivers/tty/serial/8250/8250_port.c`의 `serial8250_do_startup` 함수를 골자만 남겨 단순화한 것이다(실제 IRQ 등록은 `up->ops->setup_irq`를 거친다).
 
 ```c
-static int serial8250_startup(struct uart_port *port)
+static int serial8250_do_startup(struct uart_port *port)
 {
     struct uart_8250_port *up = up_to_u8250p(port);
-    unsigned long flags;
+    int retval;
 
     /* 인터럽트 비활성화 */
     serial_port_out(port, UART_IER, 0);
@@ -1326,4 +1326,4 @@ Kernel version과 configuration에 따라 internal symbol과 구조체 layout이
 - 커널 소스 트리의 `Documentation/driver-api/`
 - 커널 소스 트리의 `Documentation/core-api/workqueue.rst`, `Documentation/RCU/`, `Documentation/admin-guide/module-signing.rst`
 - LWN.net: https://lwn.net/
-- Bootlin의 *Embedded Linux and Kernel Engineering* 자료: https://bootlin.com/docs/
+- Bootlin의 교육 자료(*Embedded Linux system development*, *Linux kernel and driver development* 등): https://bootlin.com/docs/

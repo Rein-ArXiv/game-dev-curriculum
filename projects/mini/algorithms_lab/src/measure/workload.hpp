@@ -106,10 +106,14 @@ inline const char* SortShapeName(SortShape s) {
 // snippet-end: workload-sort-shapes
 
 // snippet-begin: workload-float-keys
-// 실수 키의 경계값 모음. NaN · ±0 · ±inf · 비정규 수가 섞여야 순서 보존 변환이
-// 실제로 검사된다. 이 목록에 -0.0 과 +0.0 이 둘 다 있는 것이 핵심이다.
+// 실수 키의 경계값 모음. ±0 · ±inf · 최대/최소 정규 수 · 비정규 수가 섞여야 순서 보존
+// 변환이 실제로 검사된다. 이 목록에 -0.0 과 +0.0 이 둘 다 있는 것이 핵심이다.
+// (NaN 은 왕복 검사가 == 를 쓰므로 이 목록에는 넣지 않는다.)
 inline std::vector<float> AdversarialFloats() {
+    float pos_inf = 0.0f;
+    { const uint32_t bits = 0x7F800000u; std::memcpy(&pos_inf, &bits, sizeof(bits)); }
     return {
+        pos_inf, -pos_inf,
         0.0f, -0.0f, 1.0f, -1.0f, 0.5f, -0.5f,
         1e-30f, -1e-30f, 1e30f, -1e30f,
         3.4028235e38f, -3.4028235e38f,

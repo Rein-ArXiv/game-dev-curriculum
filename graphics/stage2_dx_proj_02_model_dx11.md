@@ -64,7 +64,7 @@ static_assert(sizeof(Vertex) == 48, "Vertex layout");
 
 탄젠트(tangent)를 `float4`로 저장하고 `w`에 비탄젠트(bitangent)의 부호 `±1`을 넣는다. MikkTSpace와 glTF 2.0이 채택한 표준 포맷이다. 좌우 대칭 UV를 쓰는 모델(캐릭터 얼굴, 좌우 대칭 텍스처 패킹)에서는 한쪽 절반의 UV가 뒤집혀 들어가는데, 이때 픽셀 셰이더가 비탄젠트를 `cross(N, T)`로만 재구성하면 절반의 법선이 반대로 향한다. `w` 부호를 저장해 두면 셰이더에서 `bitangent = cross(N, T.xyz) * T.w`로 복원해 이 함정을 막는다.
 
-이 48바이트 배치에는 한 가지 더 따져 둘 점이 있다. 정점 구조체의 크기는 GPU의 정점 캐시 효율과 직결된다. 정점이 48바이트면 64바이트 캐시 라인 하나에 정점 하나가 들어가고 16바이트가 남는다. PBR에 필요한 최소 속성(위치·법선·UV·탄젠트)만 담아 48바이트로 맞춘 것은 의도된 선택이다. 정점 색상이나 두 번째 UV 세트, 스키닝 가중치를 추가하면 구조체가 커지고 대역폭이 늘어난다. 필요할 때만 추가한다.
+이 48바이트 배치에는 한 가지 더 따져 둘 점이 있다. 정점 구조체의 크기는 GPU의 정점 캐시 효율과 직결된다. 정점이 48바이트면 64바이트 캐시 라인 셋에 정점 넷이 정확히 들어가고(192바이트), 절반은 라인 경계에 걸치지만 낭비되는 바이트는 없다. PBR에 필요한 최소 속성(위치·법선·UV·탄젠트)만 담아 48바이트로 맞춘 것은 의도된 선택이다. 정점 색상이나 두 번째 UV 세트, 스키닝 가중치를 추가하면 구조체가 커지고 대역폭이 늘어난다. 필요할 때만 추가한다.
 
 ### 입력 레이아웃
 
@@ -138,8 +138,14 @@ void ExtractMesh(const aiMesh* m,
                    : DirectX::XMFLOAT2{ 0.0f, 0.0f };
 
         // 탄젠트 + handedness 계산
-        DirectX::XMFLOAT3 T = { m->mTangents  [i].x, m->mTangents  [i].y, m->mTangents  [i].z };
-        DirectX::XMFLOAT3 B = { m->mBitangents[i].x, m->mBitangents[i].y, m->mBitangents[i].z };
+        // UV 가 없는 메시는 Assimp 가 탄젠트를 만들지 않아 mTangents/mBitangents 가 null 이다
+        const bool hasTangents = m->mTangents && m->mBitangents;
+        DirectX::XMFLOAT3 T = hasTangents
+            ? DirectX::XMFLOAT3{ m->mTangents  [i].x, m->mTangents  [i].y, m->mTangents  [i].z }
+            : DirectX::XMFLOAT3{ 1.0f, 0.0f, 0.0f };
+        DirectX::XMFLOAT3 B = hasTangents
+            ? DirectX::XMFLOAT3{ m->mBitangents[i].x, m->mBitangents[i].y, m->mBitangents[i].z }
+            : DirectX::XMFLOAT3{ 0.0f, 1.0f, 0.0f };
         DirectX::XMFLOAT3 N = v.normal;
         // handedness = sign( dot( cross(N, T), B ) )
         DirectX::XMVECTOR vN = DirectX::XMLoadFloat3(&N);
@@ -489,7 +495,7 @@ void UpdateFrameCB(ID3D11DeviceContext* ctx, const FrameCB& cb) {
 }
 ```
 
-상수 버퍼는 16바이트 정렬을 따라야 한다. `FrameCB`에 `float4x4` 두 개와 `float3` 하나를 넣으면 `float3` 뒤에 4바이트 패딩이 들어가야 16바이트 경계가 맞는다. HLSL의 `cbuffer`는 멤버를 16바이트 경계로 정렬하므로, C++ 구조체도 같은 패딩을 명시해야 GPU가 읽는 오프셋과 일치한다. 어긋나면 행렬 뒤 멤버가 밀려 엉뚱한 값이 들어간다.
+상수 버퍼는 16바이트 정렬을 따라야 한다. `FrameCB`에 `float4x4` 두 개와 `float3` 하나를 넣으면 `float3` 뒤에 4바이트 패딩이 들어가야 16바이트 경계가 맞는다. HLSL의 `cbuffer`는 멤버를 4바이트 단위로 채우되 한 멤버가 16바이트 경계를 가로지르지 않게 밀어내고 전체 크기를 16바이트 배수로 올리므로, C++ 구조체도 같은 패딩을 명시해야 GPU가 읽는 오프셋과 일치한다. 어긋나면 행렬 뒤 멤버가 밀려 엉뚱한 값이 들어간다.
 
 ### 머티리얼 정렬로 상태 변경을 줄인다
 
@@ -513,11 +519,11 @@ for (const auto& mesh : model.meshes) {
 }
 ```
 
-수백에서 수천 메시 규모의 큰 모델에서, 재질이 수십 종이라면 정렬 후 재질 바인딩 횟수가 메시 수에서 재질 수로 줄어든다. 메시 1,000개가 재질 20종을 공유하면 바인딩이 1,000회에서 20회로 떨어진다. CPU의 드로우 콜 준비 시간이 대략 30~50% 줄어드는 것이 일반적이다. 단, 정렬은 트레이드오프를 동반한다. 메시를 재질 순으로 묶으면 공간상 인접한 메시들이 흩어져 GPU의 컬링이나 깊이 정렬과 충돌할 수 있다. 깊이 정렬이 중요한 반투명 패스에서는 재질 정렬 대신 거리 정렬을 써야 한다. 불투명 패스에서만 재질 정렬을 적용하는 것이 안전하다.
+수백에서 수천 메시 규모의 큰 모델에서, 재질이 수십 종이라면 정렬 후 재질 바인딩 횟수가 메시 수에서 재질 수로 줄어든다. 메시 1,000개가 재질 20종을 공유하면 바인딩이 1,000회에서 20회로 떨어진다. CPU의 드로우 콜 준비 시간이 얼마나 줄어드는지는 `BindMaterial`이 메시당 준비 시간에서 차지하는 비중에 달려 있으므로, 실제 이득은 프로파일러로 측정해 확인한다. 단, 정렬은 트레이드오프를 동반한다. 메시를 재질 순으로 묶으면 공간상 인접한 메시들이 흩어져 GPU의 컬링이나 깊이 정렬과 충돌할 수 있다. 깊이 정렬이 중요한 반투명 패스에서는 재질 정렬 대신 거리 정렬을 써야 한다. 불투명 패스에서만 재질 정렬을 적용하는 것이 안전하다.
 
 ### 인덱스 포맷 — 16비트 대 32비트
 
-인덱스 버퍼의 원소 크기는 정점 수에 따라 고른다. 정점 수가 65,536 미만이면 16비트 인덱스(`DXGI_FORMAT_R16_UINT`)로 충분하다. 16비트면 인덱스 버퍼 메모리가 절반이고, GPU의 포스트 트랜스폼 정점 캐시(post-transform vertex cache)에 더 많은 인덱스가 들어가 캐시 효율이 올라간다.
+인덱스 버퍼의 원소 크기는 정점 수에 따라 고른다. 정점 수가 65,536 미만이면 16비트 인덱스(`DXGI_FORMAT_R16_UINT`)로 충분하다. 16비트면 인덱스 버퍼 메모리가 절반이고 인덱스 페치 대역폭도 절반이라 캐시 라인 하나에 인덱스가 두 배 들어간다. GPU의 포스트 트랜스폼 정점 캐시(post-transform vertex cache)는 변환된 정점 출력을 정점 단위로 담으므로, 그 적중률은 인덱스 비트폭이 아니라 인덱스 순서가 좌우한다.
 
 ```cpp
 DXGI_FORMAT indexFormat = (vertices.size() <= 65536)
@@ -556,7 +562,7 @@ DirectXTK11은 Microsoft가 제공하는 DX11 헬퍼 라이브러리다. 게임 
 
 ### SimpleMath로 수학 코드를 읽기 쉽게
 
-DirectXMath의 `XMVECTOR`/`XMMATRIX`는 SIMD 레지스터에 직접 대응하는 타입이라 빠르지만, 연산자 오버로딩이 없어 `XMVectorAdd`, `XMMatrixMultiply` 같은 함수 호출이 코드를 장황하게 만든다. SimpleMath는 그 위에 얇은 래퍼를 씌워 연산자를 쓸 수 있게 한다.
+DirectXMath의 `XMVECTOR`/`XMMATRIX`는 SIMD 레지스터에 직접 대응하는 타입이라 빠르지만, 저장용 타입인 `XMFLOAT3`/`XMFLOAT4X4`에는 연산자가 없어 매번 `XMLoadFloat3`/`XMStoreFloat4x4`로 `XMVECTOR`/`XMMATRIX`에 옮겨 계산해야 하는 로드·저장 코드가 장황해진다. SimpleMath는 그 위에 얇은 래퍼를 씌워 연산자를 쓸 수 있게 한다.
 
 ```cpp
 using namespace DirectX::SimpleMath;
@@ -580,9 +586,10 @@ Matrix proj(XMMatrixPerspectiveFovLH(XM_PIDIV4, 16.0f/9, 0.1f, 1000.0f));
 외부 모델 없이 박스·구·실린더를 즉시 만든다.
 
 ```cpp
-auto box      = DirectX::GeometricPrimitive::CreateBox     (context, {2, 1, 3});
-auto sphere   = DirectX::GeometricPrimitive::CreateSphere  (context, 1.0f, 32);
-auto cylinder = DirectX::GeometricPrimitive::CreateCylinder(context, 2.0f, 0.5f);
+// rhcoords=false — 이 문서의 파이프라인은 왼손 좌표계·시계방향 감김이다
+auto box      = DirectX::GeometricPrimitive::CreateBox     (context, {2, 1, 3}, false);
+auto sphere   = DirectX::GeometricPrimitive::CreateSphere  (context, 1.0f, 32, false);
+auto cylinder = DirectX::GeometricPrimitive::CreateCylinder(context, 2.0f, 0.5f, 32, false);
 
 box->Draw(world, view, proj, Colors::CornflowerBlue);
 sphere->Draw(world2, view, proj, Colors::Red, texture.Get(), false);

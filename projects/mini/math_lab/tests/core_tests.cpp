@@ -274,6 +274,19 @@ void TestQuaternionGimbalLock() {
     // snippet-end: step02-gimbal-lock
 }
 
+void TestGjkIterationLimit() {
+    const mathlab::OBB2D a{{0, 0}, 1, 1, 0};
+    const mathlab::OBB2D b{{0.5f, 0.25f}, 1, 1, 0};
+    CHECK(mathlab::OBBOBBSat2D(a, b).intersect);
+    for (int budget : {0, 1}) {
+        const auto trace = mathlab::GJK2DTraced(a, b, budget);
+        CHECK(!trace.empty());
+        CHECK(!trace.back().done);
+    }
+    const auto converged = mathlab::GJK2DTraced(a, b);
+    CHECK(converged.back().done && converged.back().intersect);
+}
+
 // ==================== curves ====================
 
 void TestCurves() {
@@ -593,6 +606,26 @@ void CheckBvhStructure(const std::vector<mathlab::AABB2D>& boxes,
     CHECK(internalNodes > 5);
     CHECK(splitOnY > 0);   // 축 선택이 고정돼 있지 않은지
     for (size_t i = 0; i < covered.size(); ++i) CHECK(covered[i] == 1);
+}
+
+void TestBvhBoundaryContract() {
+    const mathlab::AABB2D box{{1, 1}, {3, 3}};
+    float tn = 0.0f, tf = 0.0f;
+    CHECK(mathlab::RayAABB2D({0, 2}, {1e-9f, 0}, box, tn, tf));
+    CHECK(NearRel(tn, 1e9) && NearRel(tf, 3e9));
+    CHECK(mathlab::RayAABB2D({4, 2}, {-1e-9f, -0.0f}, box, tn, tf));
+    CHECK(NearRel(tn, 1e9) && NearRel(tf, 3e9));
+    CHECK(mathlab::RayAABB2D({1, 2}, {0, 1}, box, tn, tf));
+    CHECK(!mathlab::RayAABB2D({0, 2}, {0, 1}, box, tn, tf));
+
+    const std::vector<mathlab::AABB2D> boxes{box};
+    mathlab::BVH2D bvh;
+    bvh.Build(boxes);
+    const auto endpoint = bvh.Trace(boxes, {0, 2}, {1, 0}, 1.0f);
+    CHECK(endpoint.hit && endpoint.hitObjIdx == 0 && Near(endpoint.hitT, 1.0f));
+    CHECK(!bvh.Trace(boxes, {0, 2}, {1, 0}, 0.5f).hit);
+    CHECK(bvh.Trace(boxes, {2, 2}, {1, 0}, 0.0f).hit);
+    CHECK(!bvh.Trace(boxes, {2, 2}, {1, 0}, -1.0f).hit);
 }
 
 void TestBvh() {
@@ -1347,7 +1380,7 @@ bool PropQuatSlerpUniform(const float* p, prop::Observation& obs) {
     if (!obs.Bound("max|norm(slerp sample) - 1| over the arc", (double)slerpNormError,
                    32.0 * kUnitRoundoff)) ok = false;
     // 현 = 2 sin(dTheta/2). 등속이면 모든 구간의 dTheta 가 같아 비가 1 이다.
-    // 호 0.5 rad 를 32 등분하면 현이 0.0156 이고 성분 오차는 1e-7 대라 여유가
+    // 회전각 0.5 rad (쿼터니언 호 0.25 rad) 를 32 등분하면 현이 0.0078 이고 성분 오차는 1e-7 대라 여유가
     // 세 자릿수 있다. 계약은 "비 - 1 <= 0.02".
     if (!obs.Bound("slerp chord max/min - 1", (double)slerpRatio - 1.0, 0.02)) ok = false;
     if (!obs.Bound("1 - |dot(slerp(a,b,0), a)|",
@@ -2123,10 +2156,12 @@ const TestCase kCases[] = {
     {"step04", nullptr, nullptr, &kProperties[5]},
     {"step04", nullptr, nullptr, &kProperties[6]},
     {"step05", "collision/sat_vs_gjk",            TestCollision,                   nullptr},
+    {"step05", "collision/iteration_limit",       TestGjkIterationLimit,           nullptr},
     {"step05", nullptr, nullptr, &kProperties[7]},
     {"step05", nullptr, nullptr, &kProperties[8]},
     {"step05", nullptr, nullptr, &kProperties[9]},
     {"step06", "bvh/median_split_and_traversal",  TestBvh,                         nullptr},
+    {"step06", "bvh/ray_boundary_contract",       TestBvhBoundaryContract,         nullptr},
     {"step07", "sdf/primitives_and_smin",         TestSdf,                         nullptr},
     {"step08", "depth/std_vs_reverse",            TestDepth,                       nullptr},
     {"step08", "kahan/compensated_sum",           TestKahan,                       nullptr},

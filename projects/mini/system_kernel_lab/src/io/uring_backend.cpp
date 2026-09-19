@@ -7,10 +7,12 @@
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#include <exception>
 #include <liburing.h>
 #include <stdexcept>
 #include <string>
 #include <limits>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -105,8 +107,6 @@ std::uint64_t UringBackend::RunCycle(const std::vector<std::string>& paths,
     std::vector<std::vector<unsigned char>>  bufs(n);
     // 어느 요청의 CQE 를 이미 수확했는가. 취소 대상 특정과 배수 회계에 쓴다.
     std::vector<char>                        reaped(n, 0);
-    // user_data 가 손상돼 CQE 를 요청에 매핑할 수 없게 된 상태.
-    bool                                     identityLost = false;
     auto closeAll = [&fds]() {
         for (int& fd : fds) {
             if (fd >= 0) {
@@ -128,6 +128,19 @@ std::uint64_t UringBackend::RunCycle(const std::vector<std::string>& paths,
         impl_->ringInited = true;
     };
 
+    if (!impl_->ringInited) resetRing();
+
+    // flags == 0: consume all prepared SQEs before adding cancellation requests.
+    // A permanent cleanup failure cannot justify releasing live I/O buffers.
+    auto submitPending = [&]() {
+        while (io_uring_sq_ready(&impl_->ring) != 0) {
+            const int rc = io_uring_submit(&impl_->ring);
+            if (rc < 0 && rc != -EINTR && rc != -EAGAIN)
+                std::terminate();
+            if (rc <= 0) std::this_thread::yield();
+        }
+    };
+
     // 대기 API 가 실패해 사이클을 포기해야 할 때, in-flight 요청은 곧 사라질
     // bufs[] 를 가리킨 채 남는다. 링을 재초기화(io_uring_queue_exit)하는 것만
     // 으로는 커널이 그 요청을 정리하는 시점이 우리 반환 시점과 동기화되지
@@ -135,53 +148,52 @@ std::uint64_t UringBackend::RunCycle(const std::vector<std::string>& paths,
     // *원 요청 CQE 와 취소 요청 CQE 를 모두 수확한 뒤* 에야 반환한다.
     // (system/part14_io_uring.md 의 drain 규약)
     auto cancelAndDrain = [&]() {
-        // user_data 를 믿을 수 없으면 취소 대상을 특정할 수 없다. 이 경우에만
-        // 링 폐기에 의존한다.
-        if (identityLost) return;
-
-        std::size_t outstanding = 0;
-        for (std::size_t i = 0; i < n; ++i) {
-            if (!reaped[i]) ++outstanding;
-        }
+        submitPending();
+        // Each read is one-shot. Even an invalid identity still retires one read.
+        const std::size_t outstanding = n - drain_.requestCqes;
         if (outstanding == 0) return;
 
         std::size_t queued = 0;
         for (std::size_t i = 0; i < n; ++i) {
             if (reaped[i]) continue;
             io_uring_sqe* sqe = io_uring_get_sqe(&impl_->ring);
-            if (!sqe) break;
+            if (!sqe) std::terminate();
             io_uring_prep_cancel64(sqe, static_cast<__u64>(i), /*flags=*/0);
             // 취소 요청 자신의 CQE 는 최상위 비트로 구분한다. 원 요청의
             // user_data 는 파일 인덱스(< n)라 절대 겹치지 않는다.
             io_uring_sqe_set_data64(sqe, kCancelTag | static_cast<__u64>(i));
             ++queued;
         }
-        if (queued == 0) return;
-        if (io_uring_submit(&impl_->ring) < 0) return;
+        submitPending();
         drain_.cancelSqes += queued;
 
         std::size_t pendingOriginals = outstanding;
         std::size_t pendingCancels   = queued;
-        // 안전 상한. 기대 수확 개수는 pendingOriginals + pendingCancels 이고,
-        // 그보다 많이 돈다는 것은 회계가 어긋났다는 뜻이므로 무한 대기 대신
-        // 빠져나온다 — 호출부가 곧 링을 재초기화한다.
-        std::size_t budget = 2 * (pendingOriginals + pendingCancels) + 8;
-        while ((pendingOriginals > 0 || pendingCancels > 0) && budget-- > 0) {
+        while (pendingOriginals > 0 || pendingCancels > 0) {
             io_uring_cqe* cqe = nullptr;
-            const int rc = io_uring_wait_cqe(&impl_->ring, &cqe);
+            // Timeout is not completion. Keep ownership until the read CQE arrives.
+            __kernel_timespec ts{};
+            ts.tv_sec = 1;
+            const int injected = SklFaultCheck("io_uring_drain_wait");
+            const int rc = injected ? -injected
+                : io_uring_wait_cqe_timeout(&impl_->ring, &cqe, &ts);
             if (rc < 0) {
-                if (rc == -EINTR) continue;
-                break;
+                if (rc == -EINTR || rc == -ETIME || rc == -EAGAIN) continue;
+                std::terminate();
             }
             const __u64 data = io_uring_cqe_get_data64(cqe);
-            if ((data & kCancelTag) != 0) {
+            if ((data & kCancelTag) != 0 && (data & ~kCancelTag) < n) {
                 if (pendingCancels > 0) --pendingCancels;
                 ++drain_.cancelCqes;
             } else if (data < n) {
-                if (!reaped[data]) {
-                    reaped[data] = 1;
-                    if (pendingOriginals > 0) --pendingOriginals;
-                }
+                reaped[data] = 1;
+                if (pendingOriginals > 0) --pendingOriginals;
+                ++drain_.requestCqes;
+            } else {
+                // 취소 CQE 의 user_data 는 우리가 직접 박은 kCancelTag|i 뿐이므로
+                // 어느 쪽 형태도 아닌 값은 user_data 가 손상된 원 요청 CQE 다.
+                // 최상위 비트만 보고 취소로 세면 pendingOriginals 가 영영 안 준다.
+                if (pendingOriginals > 0) --pendingOriginals;
                 ++drain_.requestCqes;
             }
             io_uring_cqe_seen(&impl_->ring, cqe);
@@ -199,6 +211,8 @@ std::uint64_t UringBackend::RunCycle(const std::vector<std::string>& paths,
         }
     };
 
+    for (auto& buf : bufs) buf.resize(fileBytes);
+
     // open + 버퍼 준비. submit 전 실패가 나도 링에 미제출 SQE가 남지 않는다.
     for (std::size_t i = 0; i < n; ++i) {
         fds[i] = SklOpen(paths[i].c_str(), O_RDONLY);
@@ -207,7 +221,6 @@ std::uint64_t UringBackend::RunCycle(const std::vector<std::string>& paths,
             throw std::runtime_error(std::string("open failed: ") + paths[i]
                                      + ": " + std::strerror(errno));
         }
-        bufs[i].resize(fileBytes);
     }
 
     // SQE 채움.
@@ -227,6 +240,8 @@ std::uint64_t UringBackend::RunCycle(const std::vector<std::string>& paths,
     // 일괄 제출. 여러 read 요청을 하나의 submit 경계로 밀어 넣는다.
     const int submitted = SklIoUringSubmit(&impl_->ring);
     if (submitted < 0) {
+        // Even an interrupted submit must not leave published reads using locals.
+        cancelAndDrain();
         closeAll();
         // 제출 실패 시 준비된 SQE가 링에 남을 수 있다. SQE는 곧 소멸할
         // 버퍼와 닫힌 fd를 가리키므로 다음 사이클 전에 반드시 버린다.
@@ -249,6 +264,7 @@ std::uint64_t UringBackend::RunCycle(const std::vector<std::string>& paths,
     std::uint64_t totalBytes = 0;
     std::size_t doneCount = 0;
     std::string firstError;
+    std::exception_ptr callbackError;
     while (doneCount < n) {
         io_uring_cqe* cqe = nullptr;
         const int waitRc = SklIoUringWaitCqe(&impl_->ring, &cqe);
@@ -269,8 +285,6 @@ std::uint64_t UringBackend::RunCycle(const std::vector<std::string>& paths,
             if (firstError.empty()) {
                 firstError = "io_uring returned invalid user_data";
             }
-            // 어느 요청의 완료인지 알 수 없다 — 이후 취소 대상 특정 불가.
-            identityLost = true;
             io_uring_cqe_seen(&impl_->ring, cqe);
             ++doneCount;
             continue;
@@ -290,11 +304,15 @@ std::uint64_t UringBackend::RunCycle(const std::vector<std::string>& paths,
             ++doneCount;
             continue;
         }
-        // bytes < fileBytes 는 EOF 이지 오류가 아니다
-        // (io_backend.h 의 short read 계약).
         const std::size_t bytes = static_cast<std::size_t>(cqe->res);
-        onRead(bufs[idx].data(), bytes);
-        totalBytes += bytes;
+        if (!callbackError) {
+            try {
+                onRead(bufs[idx].data(), bytes);
+                totalBytes += bytes;
+            } catch (...) {
+                callbackError = std::current_exception();
+            }
+        }
         if (fds[idx] >= 0) {
             ::close(fds[idx]);
             fds[idx] = -1;
@@ -302,8 +320,9 @@ std::uint64_t UringBackend::RunCycle(const std::vector<std::string>& paths,
         io_uring_cqe_seen(&impl_->ring, cqe);
         ++doneCount;
     }
+    closeAll();
+    if (callbackError) std::rethrow_exception(callbackError);
     if (!firstError.empty()) {
-        closeAll();
         throw std::runtime_error(firstError);
     }
 

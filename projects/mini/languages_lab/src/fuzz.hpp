@@ -518,7 +518,6 @@ inline bool IsKnownVerifyMessage(const std::string& message) {
         "알 수 없는 명령 코드다",
         "상수 인덱스가 범위를 벗어났다",
         "이름 인덱스가 범위를 벗어났다",
-        "네이티브 이름 인덱스가 범위를 벗어났다",
         "분기 인덱스가 범위를 벗어났다",
     };
     for (const char* candidate : kExact)

@@ -376,7 +376,7 @@ struct RigidBodyArray {
 };
 ```
 
-Jolt physics 가 SoA 친화 내부 구조 채택. Box2D / Bullet 은 *AoS (각 강체가 한 객체)* — 더 단순.
+Jolt physics 는 `Body` 한 객체에 상태를 인라인으로 두고 동적 body 에만 붙는 `MotionProperties` 를 포인터로 분리한 hot/cold 분리 구조. Box2D / Bullet 은 *AoS (각 강체가 한 객체)* — 더 단순.
 
 ### 5.5 객체와 형상의 분리
 
@@ -414,8 +414,7 @@ void Step(RigidBody2D& body, float dt) {
     // 1. 외력 적용 (사용자 코드 / 충돌 응답 / gravity)
     float mass = 1.0f / body.invMass;
     body.forceAccum  += gravity * mass;
-    body.forceAccum  += userForce;
-    body.torqueAccum += userTorque;
+    // 사용자 힘·토크는 호출자가 ApplyForce / ApplyTorque 로 accumulator 에 이미 더해 두었다
 
     // 2. 적분 — semi-implicit Euler
     body.linearVelocity  += body.forceAccum  * body.invMass    * dt;
@@ -571,8 +570,8 @@ struct RigidBody2D {
 // 충돌 응답에서 운동량 분배
 float totalInvMass = a.invMass + b.invMass;
 if (totalInvMass <= 0) return;     // 둘 다 정적 — 아무 변화 없음
-vec2 impulseA = -normal * impulseMag * (a.invMass / totalInvMass);
-vec2 impulseB =  normal * impulseMag * (b.invMass / totalInvMass);
+vec2 deltaVelA = -normal * impulseMag * a.invMass;   // 충격량 -J → Δv = -J / m_A
+vec2 deltaVelB =  normal * impulseMag * b.invMass;   // 충격량 +J → Δv = +J / m_B, 정적이면 0
 ```
 
 자연스럽게 *정적 객체가 무한 질량* 처럼 동작. dynamic 만 *전체 충격량* 받음.
@@ -589,8 +588,8 @@ struct RigidBody2D {
 };
 
 // 매 step 마지막에 sleep 검사
-if (length(body.linearVelocity) < kSleepEpsilon &&
-    std::fabs(body.angularVelocity) < kSleepEpsilon) {
+if (length(body.linearVelocity) < kLinearSleepEpsilon &&
+    std::fabs(body.angularVelocity) < kAngularSleepEpsilon) {
     body.sleepTimer += dt;
     if (body.sleepTimer > 0.5f) body.isSleeping = true;
 } else {
@@ -599,7 +598,7 @@ if (length(body.linearVelocity) < kSleepEpsilon &&
 }
 ```
 
-선속도와 각속도는 단위가 다르므로 별도 임계값을 쓰고, 일정 시간 연속으로 조건을 만족할 때 island 단위로 잠재운다. 외력, kinematic body 이동, 깨어 있는 body와의 접촉, joint 연결은 wake-up 조건이 된다. 임계값을 너무 높이면 눈에 보이는 운동이 사라지고 너무 낮으면 접촉 잡음 때문에 잠들지 못한다.
+선속도와 각속도는 단위가 다르므로 별도 임계값을 쓰고, 일정 시간 연속으로 조건을 만족할 때 잠재운다 (위 스케치는 body 단위, 실제 엔진은 island 단위로 게이팅한다). 외력, kinematic body 이동, 깨어 있는 body와의 접촉, joint 연결은 wake-up 조건이 된다. 임계값을 너무 높이면 눈에 보이는 운동이 사라지고 너무 낮으면 접촉 잡음 때문에 잠들지 못한다.
 
 ### 7.5 mass 와 invMass 의 동기화
 
@@ -669,9 +668,9 @@ physics pose는 고정 step의 권위 상태다. renderer는 이전·현재 phys
 
 - Ian Millington, *Game Physics Engine Development*, 2nd ed., Ch. 5~6 — 강체 시뮬레이션의 표준 입문.
 - David Baraff, "Rigid Body Simulation" (SIGGRAPH Course Notes) — 학술적 정밀한 유도.
-- Erin Catto, "Box2D Manual" + 소스 (`b2Body.h`, `b2Body.cpp`) — 2D 강체의 reference 구현.
+- Erin Catto, "Box2D Manual" + v2.4 소스 (`b2_body.h`, `b2_body.cpp`) — 2D 강체의 reference 구현.
 - Bullet Physics SDK Manual, "Rigid Body Dynamics" — 3D 강체의 산업 구현.
 - PhysX 5 SDK Guide, "Rigid Body Dynamics" — PhysX 의 API 모델.
-- Jorrit Rouwé, Jolt physics 소스 (`Body.h`, `MotionProperties.h`) — SoA 친화 모던 구현.
-- *Real-Time Collision Detection* (Christer Ericson), Ch. 2 — 강체 표현과 공간 변환.
+- Jorrit Rouwé, Jolt physics 소스 (`Body.h`, `MotionProperties.h`) — Body 와 MotionProperties 를 분리한 hot/cold 레이아웃의 모던 구현.
+- *Real-Time Collision Detection* (Christer Ericson), Ch. 3 — 강체 표현에 필요한 행렬·좌표계·벡터 기초.
 - Glenn Fiedler, "Physics in 3D" 시리즈 — 게임 친화적 강체 설명.

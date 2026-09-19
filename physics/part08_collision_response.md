@@ -51,7 +51,7 @@ $k_s$ = 스프링 강도, $k_d$ = 감쇠 계수. 침투할수록 *밀어내는 �
 void PenaltyResponse(Body& a, Body& b, vec2 n, float depth) {
     vec2 vRel = b.linearVelocity - a.linearVelocity;
     float vn  = dot(vRel, n);
-    vec2  F   = -kSpring * depth * n - kDamper * vn * n;
+    vec2  F   =  kSpring * depth * n - kDamper * vn * n;   // B 에 작용하는 힘 (A 에는 -F)
     a.forceAccum -= F;
     b.forceAccum += F;
 }
@@ -518,7 +518,7 @@ void ApplyImpulseAtPoint2D(Body2D& body, vec2 impulse, vec2 r) {
 
 ### 7.3 충돌점의 위치
 
-normal impulse 계산 시 *$\vec{r}_A$, $\vec{r}_B$* 가 *충돌점에서 각 강체 질량중심까지의 벡터*. narrow phase 가 *접촉점의 world 좌표* 를 출력 — 거기서 각 강체의 질량중심을 빼서 계산.
+normal impulse 계산 시 *$\vec{r}_A$, $\vec{r}_B$* 가 *각 강체 질량중심에서 충돌점까지의 벡터*. narrow phase 가 *접촉점의 world 좌표* 를 출력 — 거기서 각 강체의 질량중심을 빼서 계산.
 
 ```cpp
 vec2 contactWorld = manifold.contactPoint;
@@ -598,7 +598,7 @@ flowchart TD
 5. **Position correction** — 속도만 갱신해선 안 됨. Slop + percentage 의 안정적 보정.
 6. **Baumgarte 안정화** — 위치 오차를 *속도 bias* 로 흘려넣는다. 수치 안정화 항이 에너지를 주입할 수 있어 clamp와 튜닝이 필요하다.
 7. **회전 임펄스** — 접촉점이 질량중심 외부면 자동으로 회전 갱신.
-8. **엔진별 채택** — Box2D NGS, Bullet pseudo-velocity, PhysX TGS, Jolt parallel.
+8. **반복 접촉 솔버의 구성** — persistent manifold + warm start, velocity·position iteration 의 분리, 반복 수는 장르 이름이 아니라 측정으로 결정.
 
 Normal impulse 와 position correction 은 충돌 응답의 뼈대다. 여기에 접선 방향 응답, 여러 접촉점, 관절 제약을 같은 solver 틀로 결합하면 강체 월드의 안정성이 결정된다.
 
@@ -609,6 +609,6 @@ Normal impulse 와 position correction 은 충돌 응답의 뼈대다. 여기에
 - Brian Mirtich, *Impulse-based Dynamic Simulation of Rigid Body Systems* (PhD 1996) — impulse 모델의 학술적 토대.
 - Ian Millington, *Game Physics Engine Development*, Ch. 13~14 — 충돌 응답 종합.
 - David Baraff, "An Introduction to Physically Based Modeling: Rigid Body Simulation II" (SIGGRAPH Course) — 정밀한 유도.
-- Box2D 소스 (`b2ContactSolver.cpp`) — sequential impulse + NGS 산업 reference.
+- Box2D v2.4 소스 (`b2_contact_solver.cpp`) — sequential impulse + NGS 산업 reference.
 - Bullet 소스 (`btSequentialImpulseConstraintSolver.cpp`) — pseudo-velocity 패턴.
-- PhysX 5 SDK Guide, "Contact Generation and Solver" — TGS 산업 구현.
+- PhysX 5 SDK Guide, "Rigid Body Dynamics — Temporal Gauss-Seidel" — TGS 산업 구현.

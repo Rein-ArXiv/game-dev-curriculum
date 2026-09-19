@@ -65,6 +65,7 @@ void App::InitVulkan() {
 
     // 메시 staging upload — 1회 command buffer.
     VkCommandBuffer up = BeginSingleTime();
+    gpuTimer_.ResetAll(up);     // query 는 첫 읽기 전에 GPU 에서 한 번 reset 되어야 한다.
     scene_.Init(ctx_, alloc_, up);
     EndSingleTime(up);
     scene_.FreeStaging(alloc_);
@@ -564,9 +565,12 @@ void App::OnFrame() {
 
     // swapchain image 수와 frame slot 수는 같다고 가정할 수 없다. acquire된
     // image의 직전 사용이 다른 slot이었다면 해당 모드의 완료 객체를 기다린다.
+    // Binary 에서 slot fence 는 slot 당 하나뿐이라 그 slot 이 그 뒤 다시
+    // 제출됐으면 fence 는 더 새 작업의 것이다. 그 재제출이 이미 이전 제출을
+    // 기다렸으므로, fence 가 아직 이 image 를 쓴 제출의 것일 때만 기다린다.
     if (syncMode_ == SyncMode::Binary) {
-        const int lastSlot = completion_.LastSlotForImage(imageIndex);
-        if (lastSlot != FrameCompletionTracker::kNoSlot)
+        int lastSlot = FrameCompletionTracker::kNoSlot;
+        if (completion_.NeedsFenceWait(imageIndex, lastSlot))
             vkWaitForFences(dev, 1, &frames_[(size_t)lastSlot].inFlight, VK_TRUE, UINT64_MAX);
     } else {
         uint64_t imageWait = 0;

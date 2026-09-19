@@ -224,7 +224,9 @@ private:
 ### 구현
 
 ```cpp
-// src/sim/soa.cpp (현재 단계, scalar만)
+// src/sim/soa.cpp + src/sim/soa_draw.cpp (현재 단계, scalar만)
+// raylib.h include와 Draw() 는 soa_draw.cpp 쪽이다. 계산 코어만 담은 soa.cpp 는
+// raylib을 링크하지 않는 테스트 타깃에도 그대로 들어간다.
 
 #include "sim/soa.h"
 
@@ -726,7 +728,7 @@ layout: 2 test(s), 157 check(s), 0 failure(s)
 - layout 변경 시 화면이 깜박이지만 시뮬 패턴이 *같아 보임* → 결정론적 시드(`0xC0FFEE`)가 모든 layout에서 같으니 정상
 - AoS가 SoA보다 *느리지 않음* → 컴파일러가 AoS도 잘 최적화했거나 데이터 크기가 아직 캐시 안에 머무는 케이스. `-O3` 또는 `/O2` 빌드에서 충분히 일어날 수 있다. 더 큰 차이를 보려면 entities를 100k로 늘려 캐시 한계를 넘긴다. `-O0` 빌드는 디버그 참고용이지 성능 판단 기준으로 쓰지 않는다
 - Archetype이 SoA보다 *느림* → chunk 수가 너무 많아서 외부 루프 오버헤드가 보이는 경우. 100k에서는 약 391 chunk라 차이가 있을 수 있음
-- 시뮬이 멈춤 → 재시작 직후 GetFrameTime()이 비정상적으로 커서 첫 프레임에 모든 점이 화면 밖으로 날아가는 경우. *두 프레임 후* 정상화되니 잠깐 기다림
+- 시뮬이 멈춘 것처럼 보임 → 재시작 직후 `GetFrameTime()` 이 비정상적으로 커서 첫 프레임에 모든 점이 경계로 몰린 경우. 갱신 루프가 매 프레임 `[0, w-1] x [0, h-1]` 로 clamp하므로 점이 화면 밖으로 나가지는 않는다
 
 ### 비교 측정의 정직성
 

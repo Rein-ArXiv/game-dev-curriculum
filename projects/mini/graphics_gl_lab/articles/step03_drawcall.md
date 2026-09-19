@@ -46,7 +46,7 @@ for (const auto& o : objects_) {
 
 오브젝트당 *Uniform 2 회 + DrawCall 1 회*. 1 만 오브젝트 = *2 만 Uniform 호출 + 1 만 DrawCall*.
 
-CPU 비용 모델 — *Uniform 호출 ≈ 1 μs, DrawCall ≈ 5~50 μs* (드라이버 / GPU 의존). 합 *70~520ms*. 16ms 예산 *압도적 초과*.
+CPU 비용 모델 — *Uniform 호출 ≈ 1 μs, DrawCall ≈ 0.5~3 μs* (드라이버 / GPU 의존). 합 *25~50ms*. 16ms 예산 *압도적 초과*.
 
 GPU 측은 *일이 적음* — 1만 큐브 = *수십만 삼각형* — 현대 GPU 가 *수 ms* 에 처리. 따라서 *CPU 바운드* 가 된다.
 
@@ -132,7 +132,7 @@ struct DrawElementsIndirectCommand {
     uint32_t count;          // 인덱스 수
     uint32_t instanceCount;
     uint32_t firstIndex;
-    uint32_t baseVertex;
+    int32_t  baseVertex;
     uint32_t baseInstance;
 };
 ```
@@ -311,7 +311,7 @@ build\Release\graphics_gl_render_tests.exe step03   # Linux/macOS: ./build/graph
 
 ```text
 [gl] vendor=Intel renderer=Intel(R) Iris(R) Xe Graphics version=4.5.0 - Build 32.0.101.7088
-[capture] blank=de62d2f6be770383 individual=1fefa0cb97edbf78 instanced=1fefa0cb97edbf78 mdi=1fefa0cb97edbf78
+[capture] blank=53db657412b82325 individual=a5a5faaa932b802e instanced=a5a5faaa932b802e mdi=a5a5faaa932b802e
 [step03] draw_mode_capture ... ok
 graphics_gl_render_tests: 1/1 passed (filter=step03)
 ```

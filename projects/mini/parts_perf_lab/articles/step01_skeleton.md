@@ -123,7 +123,7 @@ else()
 endif()
 ```
 
-`SUPPORT_MODULE_RAUDIO OFF`는 raylib의 오디오 모듈을 빼는 옵션이다. 이 도구는 소리를 내지 않고, 빌드 시간과 의존성을 줄인다.
+`SUPPORT_MODULE_RAUDIO OFF`는 raylib의 오디오 모듈을 빼려는 의도의 옵션이다. 다만 raylib 5.0은 이 옵션을 `CUSTOMIZE_BUILD=ON`일 때만 읽으므로 실제로는 `raudio.c`가 그대로 빌드된다 — 이 도구가 소리를 내지 않는다는 의도 표기로만 남아 있다.
 
 ## 4. SoA 시뮬레이션 클래스
 
@@ -453,7 +453,7 @@ int main() {
 }
 ```
 
-`SetTargetFPS(0)` 은 *raylib 내부의 FPS 제한 로직* 을 끈다. raylib이 매 프레임 끝에 `WaitTime`으로 sleep을 걸어 목표 fps에 맞추는 동작을 비활성화한다는 뜻이다. VSync는 GLFW 컨텍스트 옵션이라 *별도* 인데, 이 도구는 VSync를 명시적으로 요청하지 않으므로 OS·드라이버 기본값이 적용된다(데스크톱에서는 보통 disabled). 측정이 모니터의 16.67ms 갭에 묶이지 않도록 하는 게 두 설정의 공통 목적이다.
+`SetTargetFPS(0)` 은 *raylib 내부의 FPS 제한 로직* 을 끈다. raylib이 매 프레임 끝에 `WaitTime`으로 sleep을 걸어 목표 fps에 맞추는 동작을 비활성화한다는 뜻이다. VSync는 GLFW 컨텍스트 옵션이라 *별도* 인데, 이 도구는 `FLAG_VSYNC_HINT` 를 요청하지 않는데, raylib은 창을 만들 때 `glfwSwapInterval(0)` 으로 VSync를 끄고 그 플래그가 있을 때만 1로 올리므로 결과는 disabled 다(드라이버 설정이 강제로 켜는 것은 별개다). 측정이 모니터의 16.67ms 갭에 묶이지 않도록 하는 게 두 설정의 공통 목적이다.
 
 Update와 Draw 사이에 *Begin/End 측정* 이 정확히 한 쌍씩 들어가는 게 핵심이다. 측정 호출이 어긋나면 그래프가 잘못된 값을 그린다.
 
@@ -499,7 +499,7 @@ void TestFrameTimerWindow() {
     CHECK(timer.Filled() == 0);
     CHECK(timer.LastTotalMs() == 0.0f);
     // ...
-    // total은 두 구간의 합이다. 한쪽만 재거나 겹쳐 재면 이 등식이 깨진다.
+    // LastTotalMs는 두 값을 더해 돌려주는 파생 값이라 이 등식은 항상 참이다.
     CHECK(timer.LastTotalMs() == timer.LastUpdateMs() + timer.LastDrawMs());
     // ...
     // 용량을 다 채우면 head가 0으로 감기고 filled는 kCapacity에서 멈춘다.
@@ -513,7 +513,7 @@ void TestFrameTimerWindow() {
 }
 ```
 
-`LastTotalMs()` 등식은 측정 구간이 어긋났는지를 잡는다. 링 버퍼 포화 검사는 `filled_` 가 `kCapacity` 를 넘어 자라지 않는다는 것 — 그래프가 읽을 구간이 배열 밖으로 나가지 않는 근거다.
+`LastTotalMs()` 등식은 합산 경로가 바뀌지 않았는지만 고정한다 — 파생 값이라 항상 참이고, 측정 구간이 어긋났는지는 잡지 못한다. 링 버퍼 포화 검사는 `filled_` 가 `kCapacity` 를 넘어 자라지 않는다는 것 — 그래프가 읽을 구간이 배열 밖으로 나가지 않는 근거다.
 
 빌드하고 그 그룹만 돌린다.
 
@@ -564,6 +564,6 @@ skeleton: 1 test(s), 14 check(s), 0 failure(s)
 - [raylib examples](https://github.com/raysan5/raylib/tree/master/examples) — 즉시 모드 그리기 패턴 다수
 - [CMake FetchContent 모듈](https://cmake.org/cmake/help/latest/module/FetchContent.html)
 - Jonathan Boccara, "Strong Types for Strong Interfaces" (Meeting C++ 2017) — 측정용 코드의 단위(ms, ns) 안전 처리 패턴
-- Bryce Adelstein-Lelbach, "Benchmarking C++ Code" (CppCon 2015) — 측정의 함정과 정직한 비교
+- Bryce Adelstein Lelbach, "Benchmarking C++ Code" (CppCon 2015) — 측정의 함정과 정직한 비교
 - [Google Benchmark](https://github.com/google/benchmark) — 자동화 비교 측정. 시각화는 빈약하지만 자동화에 강함
 - [Tracy Profiler](https://github.com/wolfpld/tracy) — 시각화 풀 기능 프로파일러. 프로덕션 게임에서 표준

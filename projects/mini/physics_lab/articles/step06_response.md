@@ -222,7 +222,7 @@ for (const auto& c : contacts) {
 
 이 코드는 velocity impulse와 별도로 위치를 투영하는 단순 post-stabilization이다. 문헌의 split impulse는 운동 에너지를 직접 바꾸지 않는 별도 보정 속도 또는 별도 누적 impulse를 두는 더 구체적인 기법이다. 여기서는 그 구현까지 했다고 부르지 않는다.
 
-보정 pass 는 `iterations / 2` 번 돌고, *매 iteration 시작마다 접촉을 다시 수집한다* — 위치를 밀면 depth 가 바뀌므로 이전 iteration 의 depth 로 계속 미는 것은 틀리다. 반대로 한 iteration *안에서* 는 그 스냅숏을 끝까지 쓴다. 이 "언제 다시 재는가" 가 결과를 바꾸는 진짜 파라미터다 — 같은 공식이라도 갱신 시점이 다르면 다른 시뮬이 된다. 그래서 이 pass 도 수집·SI 와 함께 공유 헤더에 한 벌만 둔다.
+보정 pass 는 `max(1, iterations / 2)` 번 돌고, *매 iteration 시작마다 접촉을 다시 수집한다* — 위치를 밀면 depth 가 바뀌므로 이전 iteration 의 depth 로 계속 미는 것은 틀리다. 반대로 한 iteration *안에서* 는 그 스냅숏을 끝까지 쓴다. 이 "언제 다시 재는가" 가 결과를 바꾸는 진짜 파라미터다 — 같은 공식이라도 갱신 시점이 다르면 다른 시뮬이 된다. 그래서 이 pass 도 수집·SI 와 함께 공유 헤더에 한 벌만 둔다.
 
 ## 7. 무엇을 보는가
 

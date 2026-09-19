@@ -115,7 +115,7 @@ Apple Core Foundation, Python(CPython의 주 메모리 관리), C++ `std::shared
 
 ### 원리: 살아있는 것을 표시하고, 나머지를 청소
 
-1960년 McCarthy의 원조 알고리즘:
+1960년 McCarthy의 원조 알고리즘을 후대의 tri-color 표기로 다시 쓰면:
 
 **Phase 1: Mark (표시)**
 
@@ -504,9 +504,9 @@ GC가 C를 도달 불가능으로 오인해 회수할 수 있음 → 버그!
 
 ### Tri-color Invariant: 정확성 보장
 
-정확성의 기준은 강한 tri-color 불변식이다(Dijkstra et al. 1978). black 객체가 white 객체를 직접 가리키는 상태를 허용하지 않는다.
+정확성의 기준은 tri-color 불변식이다(Dijkstra et al. 1978). 강한 불변식은 black 객체가 white 객체를 직접 가리키는 상태를 허용하지 않고, 약한 불변식은 black이 가리키는 white 객체가 어떤 gray 객체에서 white 사슬을 따라 도달 가능하기만 하면 허용한다.
 
-이를 유지하기 위한 두 가지 전략:
+둘 중 하나를 유지하기 위한 두 가지 전략 — incremental update는 강한 불변식을, SATB는 약한 불변식을 보존한다:
 
 ### Incremental Update (증분 갱신)
 
@@ -1063,6 +1063,8 @@ java \
 heap 크기 `32GB` 같은 단일 문턱으로 collector를 고를 수는 없다. 같은 live set으로 실제 트래픽을 재생해 처리량, p95/p99/max pause, RSS, CPU와 allocation stall을 함께 비교한다.
 
 ### GC 로그 분석
+
+아래는 JDK 8 `-XX:+PrintGCDetails` 형식의 예시다. 위 명령의 JDK 9+ 통합 로깅은 줄마다 `[time][level][tags]` 장식이 붙고 phase 분해에는 `-Xlog:gc*=debug`가 필요하며 phase 이름도 다르지만, 읽는 법은 같다.
 
 ```text
 [GC pause (G1 Evacuation Pause) (young), 0.0045872 secs]

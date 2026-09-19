@@ -296,6 +296,7 @@ void Scene::Draw(ShaderProgram& shader, float aspectRatio, GlCounters& counters)
     } break;
 
     case DrawMode::Instanced: {
+        if (objects_.empty()) break;    // 빈 씬은 제출 0 (ExpectedDrawSubmissions 와 일치).
         UpdateInstanceData();
         if (shader.SetInt("uUseInstancing", 1)) counters.uniformUpdates++;
         glDrawElementsInstanced(GL_TRIANGLES, indexCount_, GL_UNSIGNED_INT,
@@ -305,6 +306,7 @@ void Scene::Draw(ShaderProgram& shader, float aspectRatio, GlCounters& counters)
     } break;
 
     case DrawMode::MultiDrawIndirect: {
+        if (objects_.empty()) break;    // 빈 씬은 제출 0 — 0 바이트 indirect 버퍼로 드로우하지 않는다.
         UpdateInstanceData();
         if (shader.SetInt("uUseInstancing", 1)) counters.uniformUpdates++;
         glBindBuffer(GL_DRAW_INDIRECT_BUFFER, indirectBuffer_);

@@ -1,6 +1,7 @@
 #include "alloc/malloc_allocator.h"
 
 #include <cstdlib>
+#include <limits>
 
 #if defined(_MSC_VER)
 #include <malloc.h>  // _aligned_malloc, _aligned_free
@@ -11,7 +12,8 @@ namespace ppl {
 void* MallocAllocator::Allocate(std::size_t size, std::size_t alignment) {
     // alignment는 0이 아니고 2의 거듭제곱이어야 한다.
     // 잘못된 값이면 nullptr을 돌려준다 (assert 대신 nullptr이 측정 흐름에 안전).
-    if (!IsValidAlignment(alignment)) {
+    if (size == 0 || !IsValidAlignment(alignment) ||
+        size > std::numeric_limits<std::size_t>::max() - (alignment - 1)) {
         return nullptr;
     }
 

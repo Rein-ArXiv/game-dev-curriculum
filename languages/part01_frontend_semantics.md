@@ -386,4 +386,4 @@ CallExpr "damage(target, 10)"
 - Thomas Reps, "Maximal-Munch Tokenization in Linear Time" (TOPLAS 1998) — 최장 일치 토큰화의 형식적 분석.
 - Benjamin C. Pierce, *Types and Programming Languages* (MIT Press, 2002) — 정적 의미론과 타입 검사의 표준 참고서.
 - Luis Damas, Robin Milner, "Principal Type-Schemes for Functional Programs" (POPL 1982) — Hindley-Milner 타입 추론의 원전.
-- Unicode Consortium, *Unicode Standard Annex #29: Text Segmentation* — 코드 포인트·바이트·grapheme 경계 구분. https://unicode.org/reports/tr29/
+- Unicode Consortium, *Unicode Standard Annex #29: Unicode Text Segmentation* — grapheme cluster·단어·문장 경계의 기본 규칙(코드 포인트와 UTF-8 바이트 오프셋의 구분은 이 문헌의 범위 밖이다). https://unicode.org/reports/tr29/

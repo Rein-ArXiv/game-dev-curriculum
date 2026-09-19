@@ -151,7 +151,8 @@ bool ApplyCgroupCpuWeight(int weight) {
     const std::string dir = CurrentCgroupV2Path();
     if (dir.empty()) {
         std::fprintf(stderr,
-            "skl: cgroup v2 not detected — keeping default\n");
+            "skl: no usable cgroup v2 path (not detected, or SKL_CGROUP_DIR does "
+            "not approve it) — keeping default\n");
         return false;
     }
     CaptureOriginalCgroupWeight(dir);
@@ -198,17 +199,39 @@ bool RestoreCgroupCpuWeightIfNeeded() {
 
 bool ApplySchedToCurrentThread(SchedType type) {
     switch (type) {
-        case SchedType::Default:
+        case SchedType::Default: {
             // 명시적 reset. nice 0 + SCHED_OTHER.
-            if (::setpriority(PRIO_PROCESS, SklGettid(), 0) != 0) {
-                // 거의 실패하지 않지만 silent fallback.
+            //
+            // nice 를 *내리는* 것은 권한이 필요한 방향이다 — nice +10 에서 0
+            // 으로 되돌리려면 CAP_SYS_NICE 거나 RLIMIT_NICE 여유가 있어야 하고,
+            // soft 가 0 인 보통 머신에서는 EACCES 로 실패한다. 그걸 삼키고 true 를
+            // 돌려주면 호출 측의 schedApplied_ 메타데이터가 거짓이 된다.
+            // 헤더의 계약대로 실패를 stderr 로 알리고 false 를 돌려준다.
+            //
+            // 한쪽이 실패해도 다른 한쪽은 그대로 시도한다 — 되돌릴 수 있는 만큼은
+            // 되돌리는 것이 best-effort 폴백의 의미다. 둘 다 seam 을 지나므로
+            // 이 분기도 주입으로 결정적으로 밟을 수 있다.
+            bool ok = true;
+            if (SklSetPriority(PRIO_PROCESS, static_cast<id_t>(SklGettid()), 0)
+                != 0) {
+                std::fprintf(stderr,
+                    "skl: setpriority(nice=0) failed: %s — keeping current "
+                    "nice. Check ulimit -e and CAP_SYS_NICE.\n",
+                    std::strerror(errno));
+                ok = false;
             }
-            {
-                sched_param p{};
-                p.sched_priority = 0;
-                ::pthread_setschedparam(::pthread_self(), SCHED_OTHER, &p);
+            sched_param p{};
+            p.sched_priority = 0;
+            const int rc =
+                SklPthreadSetSchedParam(::pthread_self(), SCHED_OTHER, &p);
+            if (rc != 0) {
+                std::fprintf(stderr,
+                    "skl: pthread_setschedparam(SCHED_OTHER) failed: %s — "
+                    "keeping current policy\n", std::strerror(rc));
+                ok = false;
             }
-            return true;
+            return ok;
+        }
 
         case SchedType::Nice:
             return ApplyNice(10);

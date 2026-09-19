@@ -58,7 +58,7 @@ JIT 컴파일 → 네이티브 기계어
 이후 실행은 네이티브 코드
 ```
 
-이 아이디어는 Sun의 HotSpot JVM(1999), V8(2008), LuaJIT(2009), PyPy(2007)의 기반이 되었다.
+이 아이디어는 Sun의 HotSpot JVM(1999), V8(2008), LuaJIT 2.0(2009), PyPy(2007)의 기반이 되었다.
 
 ### Tiered Compilation: 현대의 표준
 
@@ -401,7 +401,7 @@ JIT이 `x ^ 0x3C909090`을 `xor eax, 0x3C909090`(바이트열 `35 90 90 90 3C`)�
 2. **Guard Pages**: JIT 코드 영역 사이에 실행 불가 페이지 삽입
 3. **Randomization**: JIT 코드 레이아웃 무작위화
 
-V8 블로그 "Untrusted code mitigations"(2018)와 JIT spraying 방어 문헌이 이러한 기법들을 다룬다.
+Blazakis의 원 논문(BlackHat DC 2010)과 Niu & Tan의 RockJIT(CCS 2014) 같은 JIT spraying 방어 문헌이 이러한 기법들을 다룬다. V8 블로그 "Untrusted code mitigations"(2018)는 별개 위협인 Spectre 부채널의 완화(인덱스 마스킹, 프로세스 격리)를 다룬다.
 
 ## 4. 기본 JIT: 간단한 수식 컴파일러
 
@@ -478,7 +478,7 @@ void codegen(Node* node, unsigned char** code) {
 ```c
 void emit_mov_eax_imm(unsigned char** code, int imm) {
     *(*code)++ = 0xB8;  // opcode
-    *(int*)(*code) = imm;
+    memcpy(*code, &imm, sizeof(imm));  // 정렬되지 않은 주소에 int lvalue로 쓰면 UB다
     *code += 4;
 }
 
@@ -848,7 +848,7 @@ add("hello", "world");  // 가정 위반!
 4. **Fallback**: 인터프리터나 baseline JIT으로 계속 실행
 5. **Invalidation**: 최적화된 코드 폐기
 
-Benedikt Meurer의 JSConf EU 2017 발표 "A Tale of TurboFan"이 강조하듯, deoptimization은 추측 기반 최적화를 가능하게 만드는 안전망이다. 되돌아갈 길이 보장되기 때문에 컴파일러가 과감하게 가정할 수 있다.
+Benedikt Meurer의 JSKongress 2017 발표 "A Tale of TurboFan"이 강조하듯, deoptimization은 추측 기반 최적화를 가능하게 만드는 안전망이다. 되돌아갈 길이 보장되기 때문에 컴파일러가 과감하게 가정할 수 있다.
 
 ### On-Stack Replacement (OSR)
 
@@ -1077,11 +1077,16 @@ mov ecx, 0
 ```assembly
 vxorps xmm0, xmm0, xmm0
 xor eax, eax
+mov ecx, [rdx+8]
+and ecx, -4                            ; Length를 4의 배수로 내림 — 벡터 루프의 상한
+jz .tail
 .vector_loop:
     vpaddd xmm0, xmm0, [rdx+rax*4+16]  ; 4개 동시 덧셈
     add eax, 4
-    cmp eax, [rdx+8]
+    cmp eax, ecx
     jl .vector_loop
+.tail:
+; 나머지 0~3개 원소는 스칼라 루프로 처리(생략)
 ; Horizontal sum
 vpshufd xmm1, xmm0, 0x4E
 vpaddd xmm0, xmm0, xmm1
@@ -1151,4 +1156,4 @@ JIT 컴파일은 하드웨어와 소프트웨어, 보안과 성능, 정적 정�
 
 ### 튜토리얼
 - Eli Bendersky, ["Adventures in JIT compilation"](https://eli.thegreenplace.net/2017/adventures-in-jit-compilation-part-1-an-interpreter/), 2017-2018 (4부작 시리즈)
-- Chris Seaton, ["A User's Perspective on Truffle/Graal"](https://chrisseaton.com/truffleruby/), 여러 블로그 포스트
+- Chris Seaton, [TruffleRuby 블로그·논문·강연 모음](https://chrisseaton.com/truffleruby/) — "Understanding How Graal Works", "Deoptimizing Ruby" 등 여러 포스트

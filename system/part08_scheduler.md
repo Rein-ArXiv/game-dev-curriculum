@@ -178,7 +178,7 @@ flowchart TB
     C --> D[2002<br/>O 1 스케줄러]
     D --> E[2007<br/>CFS + vruntime]
     E --> F[2014<br/>SCHED_DEADLINE EDF]
-    F --> G[2018<br/>EAS big.LITTLE]
+    F --> G[2019<br/>EAS big.LITTLE]
     G --> H[2023.10<br/>EEVDF로 교체 6.6]
 ```
 
@@ -441,8 +441,10 @@ struct task_group {
 
 스케줄링은 두 단계로 일어난다.
 
-1. 그룹 간: 각 그룹의 `se`를 vruntime 기준으로 선택
-2. 그룹 내: 선택된 그룹의 `cfs_rq`에서 최소 vruntime 태스크 선택
+1. 그룹 간: 루트 `cfs_rq`에서 그룹의 `se`를 선택
+2. 그룹 내: 선택된 그룹의 `cfs_rq`에서 다시 엔티티를 선택
+
+두 단계 모두 같은 선택기를 탄다. EEVDF 이전 CFS는 각 단계에서 최소 vruntime 엔티티를 골랐고, 6.6 이후에는 eligible 후보 중 virtual deadline이 가장 이른 엔티티를 고른다. 아래 예시는 EEVDF 이전 CFS 기준이다.
 
 ```mermaid
 flowchart TB
@@ -676,7 +678,7 @@ static void task_numa_placement(struct task_struct *p)
 }
 ```
 
-같은 메모리를 공유하는 태스크는 `numa_group`으로 묶여 같은 노드로 끌어 모인다. fork된 자식은 부모와 같은 그룹에서 시작한다.
+같은 메모리를 공유하는 태스크는 `numa_group`으로 묶여 같은 노드로 끌어 모인다. 새 태스크의 `numa_group`은 fork 시점에 비어 있고, 이후 페이지 폴트에서 다른 태스크의 접근 흔적을 만나야 그룹에 합류한다.
 
 ### Tickless와 nohz_full
 
@@ -750,7 +752,7 @@ FIFO에 타임슬라이스를 더한 것이다.
 
 ```c
 // upstream의 통상적인 초기 RR quantum. sysctl로 확인·변경 가능
-#define DEF_TIMESLICE (100 * HZ / 1000)  // 100ms
+#define RR_TIMESLICE (100 * HZ / 1000)  // 100ms
 ```
 
 같은 우선순위의 RR 태스크들은 설정된 quantum을 소진하면 같은 우선순위 queue의 뒤로 이동한다. 실제 quantum은 `sched_rr_get_interval()`이나 해당 시스템의 sysctl로 확인해야 한다. 다른 우선순위와의 관계는 FIFO와 같다.
@@ -934,12 +936,12 @@ struct em_perf_domain {
 
 struct em_perf_state {
     unsigned long frequency;  // kHz
-    unsigned long power;      // mW
-    unsigned long cost;       // power / frequency
+    unsigned long power;      // µW (6.0 이전은 mW)
+    unsigned long cost;       // power * max_frequency / frequency
 };
 ```
 
-Device Tree에서 다음처럼 정의된다.
+upstream은 OPP 테이블의 `opp-microwatt`이나 CPU 노드의 `dynamic-power-coefficient`로 전력 정보를 받아 cpufreq 드라이버가 Energy Model로 등록한다. 아래는 mainline에 병합되지 않은 초기 EAS RFC의 Device Tree 표현으로, 도메인별 비용 테이블의 모양을 보여 준다.
 
 ```dts
 energy-costs {
@@ -1027,9 +1029,9 @@ Linux 3.2부터 추가된 기능이다.
 
 ```c
 struct cfs_bandwidth {
-    u64 quota;    // 주기당 사용 가능한 시간 (μs)
-    u64 period;   // 주기 길이 (μs)
-    u64 runtime;  // 현재 주기에 남은 시간
+    u64 quota;       // 주기당 사용 가능한 시간 (ns)
+    ktime_t period;  // 주기 길이 (ns)
+    u64 runtime;     // 현재 주기에 남은 시간 (ns)
     // ...
 };
 ```
@@ -1117,7 +1119,7 @@ renice -n 5 -p 12345           # 실행 중인 프로세스 조정
 # 차이 확인
 nice -n  0 stress -c 1 &
 nice -n 19 stress -c 1 &
-# weight 비율로 첫 번째가 두 번째보다 약 70배 많은 CPU를 받는다
+# 같은 CPU에서 경쟁시키면(예: taskset -c 0) weight 비율대로 첫 번째가 두 번째보다 약 70배 많은 CPU를 받는다
 ```
 
 ### 실시간 스케줄링 설정

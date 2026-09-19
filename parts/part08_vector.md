@@ -132,9 +132,9 @@ C++ 표준은 `std::vector`가 요소들을 **연속된(contiguous) 메모리**�
 **메모리 레이아웃:**
 
 *Heap Memory:*
-| elem0 | elem1 | elem2 | elem3 | unused |
-|:-----:|:-----:|:-----:|:-----:|:------:|
-| ↑ `m_begin` | | | ↑ `m_end` | ↑ `m_end_of_storage` |
+| elem0 | elem1 | elem2 | elem3 | unused | (버퍼 끝) |
+|:-----:|:-----:|:-----:|:-----:|:------:|:---------:|
+| ↑ `m_begin` | | | | ↑ `m_end` | ↑ `m_end_of_storage` |
 
 *Stack (vector object) - 3개의 포인터 (24 bytes on 64-bit):*
 | 필드 | 역할 |
@@ -444,7 +444,7 @@ v.clear();
 void push_back(const T& value) {
     if (m_end == m_end_of_storage) {
         // 1. 새 메모리 할당
-        size_type new_cap = capacity() * 2;
+        size_type new_cap = capacity() == 0 ? 1 : capacity() * 2;
         T* new_begin = allocate(new_cap);
 
         // 2. 요소들을 새 위치로 이동
@@ -824,21 +824,18 @@ struct Transform {
 // 모든 멤버가 trivially relocatable
 
 // NOT trivially relocatable
-class String {
-    char* ptr;
+class SmallBuffer {
+    char inline_[16];
+    char* ptr_;                // 짧은 값이면 자기 자신의 inline_을 가리킨다
 
-    String(String&& other) noexcept {
-        ptr = other.ptr;
-        other.ptr = nullptr;  // ← 중요! 이전 객체 무효화
-    }
-
-    ~String() {
-        delete[] ptr;
+    SmallBuffer(SmallBuffer&& other) noexcept {
+        std::memcpy(inline_, other.inline_, sizeof(inline_));
+        ptr_ = inline_;        // ← 새 주소를 다시 가리켜야 한다
     }
 };
-// memcpy로 복사하면:
-// 1. ptr이 두 객체에서 동일한 주소를 가리킴
-// 2. 소멸자가 두 번 호출됨 → double-free!
+// memcpy로 재배치하면:
+// 1. ptr_이 여전히 옛 객체의 inline_을 가리킴
+// 2. 옛 저장소를 해제하는 순간 dangling → 자기 참조 불변식이 깨진다
 ```
 
 **Unreal의 타입 특성 시스템:**
@@ -901,18 +898,20 @@ Electronic Arts의 EASTL은 게임 엔진의 메모리 관리 요구사항을 �
 **표준 할당자의 한계:**
 
 ```cpp
-// std::vector는 할당자를 타입으로만 받음
+// std::vector도 할당자 인스턴스를 멤버로 갖지만, 기본 생성하면 상태가 없다
 std::vector<int, MyAllocator<int>> v1;
 std::vector<int, MyAllocator<int>> v2;
 
-// v1과 v2는 같은 타입의 할당자 사용
-// 다른 메모리 풀을 사용하고 싶어도 불가능!
+// 다른 풀을 쓰려면 생성 시점에 할당자 인스턴스를 넘겨야 하고,
+// 할당자 타입이 vector 타입의 일부라 나중에 교체할 수 없다
+std::vector<int, MyAllocator<int>> v3{MyAllocator<int>(&poolA)};
 ```
 
-**EASTL의 해결책: 인스턴스 할당자**
+**EASTL의 접근: 타입에 매이지 않는 기본 할당자**
 
 ```cpp
-// EASTL/vector.h
+// EASTL/vector.h의 구조를 단순화한 의사 코드.
+// 실제 VectorBase는 capacity 포인터와 할당자를 compressed_pair로 묶는다.
 template <typename T, typename Allocator = EASTLAllocatorType>
 class vector {
 protected:
@@ -1203,23 +1202,27 @@ void push_back(const T& value) {
         size_type new_cap = capacity() == 0 ? 1 : capacity() * 2;
 
         T* new_begin = m_alloc.allocate(new_cap);
+        T* new_slot = new_begin + size();   // 새 요소가 들어갈 맨 뒤 자리
         T* new_end = new_begin;
+        bool slot_built = false;
 
         try {
-            // 1. 새 요소 먼저 생성
-            ::new (static_cast<void*>(new_end)) T(value);
-            ++new_end;
+            // 1. 새 요소를 맨 뒤 자리에 먼저 생성
+            ::new (static_cast<void*>(new_slot)) T(value);
+            slot_built = true;
 
-            // 2. 기존 요소들 이동
+            // 2. 기존 요소들을 앞에서부터 이동
             for (T* p = m_begin; p != m_end; ++p, ++new_end) {
                 ::new (static_cast<void*>(new_end)) T(std::move(*p));
             }
+            ++new_end;  // 맨 뒤의 새 요소까지 포함
         } catch (...) {
             // 예외 발생 시 정리
             while (new_end != new_begin) {
                 --new_end;
                 new_end->~T();  // 소멸자 명시적 호출
             }
+            if (slot_built) new_slot->~T();
             m_alloc.deallocate(new_begin, new_cap);
             throw;  // 예외 재전파
         }
@@ -1386,6 +1389,7 @@ v.push_back(std::move(w));
 v.emplace_back(2, "direct");
 // 출력:
 // Widget constructed
+// Widget moved      (용량이 1→2로 늘며 기존 원소가 이동한다)
 ```
 
 `emplace_back(args...)`는 **새 원소**를 목적 위치에 직접 생성하므로 호출자가 별도 임시 객체를 만든 경우의 이동을 피할 수 있다. 그러나 용량 증가가 발생하면 기존 원소의 이동·복사 또는 구현이 허용한 bytewise relocation 비용은 여전히 생긴다. `push_back(T(...))`도 copy elision과 이동 최적화의 영향을 받으므로, 두 API 사이에 보편적인 큰 성능 차이가 있다고 가정하지 않는다.
@@ -1515,4 +1519,4 @@ vector의 본질은 세 개의 포인터로 표현할 수 있는 연속 메모�
 - 표준 라이브러리 구현: [GCC libstdc++ stl_vector.h](https://github.com/gcc-mirror/gcc/blob/master/libstdc%2B%2B-v3/include/bits/stl_vector.h), [LLVM libc++ vector](https://github.com/llvm/llvm-project/blob/main/libcxx/include/vector), [MSVC STL vector](https://github.com/microsoft/STL/blob/main/stl/inc/vector)
 - 커스텀 구현: [Folly FBVector](https://github.com/facebook/folly/blob/main/folly/docs/FBVector.md), [LLVM SmallVector.h](https://github.com/llvm/llvm-project/blob/main/llvm/include/llvm/ADT/SmallVector.h), [EASTL vector.h](https://github.com/electronicarts/EASTL/blob/master/include/EASTL/vector.h)
 - 예외 안전성: Herb Sutter, *Exceptional C++* (Addison-Wesley, 1999); Dave Abrahams, "Exception-Safety in Generic Components" (1998)
-- 최신 제안: [P1144 Object relocation in terms of move plus destroy](https://wg21.link/p1144), [P0843 static_vector](https://wg21.link/p0843)
+- 최신 제안: [P1144 std::is_trivially_relocatable](https://wg21.link/p1144), [P0843 inplace_vector](https://wg21.link/p0843)

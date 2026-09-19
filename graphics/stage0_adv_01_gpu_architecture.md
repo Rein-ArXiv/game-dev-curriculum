@@ -4,7 +4,7 @@ GPU는 많은 산술 유닛에 규칙적인 병렬 작업을 공급해 처리량
 
 그래픽스 API는 정점, 픽셀, 컴퓨트 셰이더를 추상화하지만 실제 실행 단위는 스레드 하나가 아니라 warp, wave, subgroup 같은 묶음이다. 메모리 접근도 포인터 하나를 읽는 문제가 아니라 수십 lane의 주소가 얼마나 연속적인지, 캐시와 VRAM 대역폭을 얼마나 잘 쓰는지의 문제다. 분기 하나도 lane들이 같은 길을 가느냐 갈라지느냐에 따라 비용이 몇 배로 달라진다.
 
-이 글은 현대 GPU의 실행 모델, 메모리 계층, 점유율(Occupancy), 분기 발산(Warp Divergence), 고정 기능 유닛을 정리한다. 정량적인 수치(레지스터 개수, 캐시 지연, 대역폭, 트랜잭션 크기)를 곁들여 GPU가 어떤 단위로 무엇을 하는지를 구체적으로 본다. 목표는 셰이더 코드를 볼 때 "이 코드는 몇 개 lane이 함께 실행되고, 어느 메모리를 두드리며, 어느 하드웨어 유닛을 병목으로 만드는가"를 판단할 수 있게 만드는 것이다.
+이 글은 현대 GPU의 실행 모델, 메모리 계층, 점유율(Occupancy), 분기 발산(Warp Divergence), 고정 기능 유닛을 정리한다. 정량적인 수치(레지스터 개수, 트랜잭션 크기)와 측정 기준(캐시 지연, 대역폭)을 곁들여 GPU가 어떤 단위로 무엇을 하는지를 구체적으로 본다. 목표는 셰이더 코드를 볼 때 "이 코드는 몇 개 lane이 함께 실행되고, 어느 메모리를 두드리며, 어느 하드웨어 유닛을 병목으로 만드는가"를 판단할 수 있게 만드는 것이다.
 
 
 ---
@@ -105,7 +105,7 @@ GPU 메모리 계층은 CPU와 비슷해 보이지만 처리량 중심 설계의
 
 GPU는 많은 memory channel과 넓은 GDDR/HBM 인터페이스로 높은 peak bandwidth를 제공하고, CPU는 cache hierarchy와 낮은 thread latency·일반 목적 접근에 다른 균형을 둔다. 제품 세대와 메모리 구성에 따라 수치가 크게 달라지므로 비교할 때는 해당 장치의 이론 peak와 profiler의 achieved bandwidth를 함께 적는다. 이론 peak를 못 채웠다고 곧 메모리 최적화 실패는 아니다. 작은 dispatch, dependency, partition imbalance, cache hit가 원인일 수 있다.
 
-ALU 처리량 대비 메모리 대역폭의 비율을 *산술 강도(Arithmetic Intensity)* 라 부른다. 메모리에서 가져온 바이트 하나당 얼마나 많은 연산을 하느냐다. 산술 강도가 낮으면(예: 단순 복사, 가벼운 후처리) 대역폭 바운드(bandwidth-bound)가 되고, 높으면(예: 복잡한 PBR, 노이즈 함수) ALU 바운드가 된다. 어느 쪽인지 알아야 최적화 방향이 정해진다.
+메모리 트래픽 대비 연산량의 비율을 *산술 강도(Arithmetic Intensity)* 라 부른다. 메모리에서 가져온 바이트 하나당 얼마나 많은 연산을 하느냐다. 산술 강도가 낮으면(예: 단순 복사, 가벼운 후처리) 대역폭 바운드(bandwidth-bound)가 되고, 높으면(예: 복잡한 PBR, 노이즈 함수) ALU 바운드가 된다. 어느 쪽인지 알아야 최적화 방향이 정해진다.
 
 ### Coalescing: 메모리 성능의 핵심
 
@@ -171,7 +171,7 @@ Occupancy를 제한하는 요소는 네 가지다. SM 하나가 가진 자원(�
 
 레지스터 압박은 흔한 제한이다. 예를 들어 NVIDIA SM 하나가 32비트 레지스터 65,536개를 제공하고 warp 폭이 32라고 가정하자. 산술적인 상한만 보면 lane당 32개일 때 $65,536/(32\cdot32)=64$ warp, lane당 96개일 때 $65,536/(96\cdot32)\approx21$ warp다. 실제 resident 수는 레지스터 할당 granularity, workgroup 단위 배치, 최대 thread·warp·block 수와 shared memory 제한 때문에 이 상한보다 작을 수 있다. 루프를 과하게 전개하거나 live 임시값을 늘리면 레지스터 사용량이 올라 resident warp가 줄어들 수 있다.
 
-$$\text{resident warp} \approx \min\left(\frac{\text{레지스터 파일 크기}}{\text{warp당 레지스터}},\ \frac{\text{shared memory 총량}}{\text{workgroup당 shared}},\ \text{warp 슬롯 상한}\right)$$
+$$\text{resident warp} \approx \min\left(\frac{\text{레지스터 파일 크기}}{\text{warp당 레지스터}},\ \frac{\text{shared memory 총량}}{\text{workgroup당 shared}}\times\text{workgroup당 warp 수},\ \text{warp 슬롯 상한}\right)$$
 
 ### Occupancy가 높다고 항상 빠른 것은 아니다
 
@@ -297,45 +297,21 @@ GPU 벤더마다 용어와 세부 구조는 다르지만 공통된 추상은 비
 
 같은 GLSL/HLSL이라도 subgroup size에 고정된 가정을 넣으면 아키텍처가 바뀔 때 성능이 흔들린다. wave64를 가정하고 shared memory 인덱싱이나 prefix sum 폭을 64로 하드코딩한 셰이더를 wave32 하드웨어에서 돌리면, 절반의 가정이 어긋나 동작이 틀리거나 느려진다. `subgroupSize`를 쿼리하고, 32와 64 모두에서 합리적으로 동작하는 알고리즘을 택하는 편이 안전하다.
 
-Vulkan은 이 차이를 subgroup size, memory property, queue family, feature bit로 노출한다. 디바이스 속성을 쿼리하는 코드는 다음과 같다.
-
-```cpp
-VkPhysicalDeviceSubgroupProperties subgroup{};
-subgroup.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
-
-VkPhysicalDeviceProperties2 props{};
-props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-props.pNext = &subgroup;
-vkGetPhysicalDeviceProperties2(physicalDevice, &props);
-
-uint32_t lanes = subgroup.subgroupSize;            // 32 또는 64
-VkShaderStageFlags ops = subgroup.supportedStages; // subgroup 연산 지원 스테이지
-```
+Vulkan은 이 차이를 subgroup size와 memory property 같은 장치 속성으로 노출한다. 실행 묶음의 폭과 subgroup 연산이 지원되는 셰이더 스테이지는 장치 속성 질의로 런타임에 읽는다. 벤더 이름이나 셰이더 컴파일 타임 상수로 폭을 고정하지 않는 것이 이 질의의 목적이다.
 
 ### subgroup size 고정 요청
 
-특정 알고리즘이 고정 폭을 요구하면, RDNA처럼 두 폭을 지원하는 하드웨어에서 파이프라인 생성 시 폭을 요청할 수 있다. `VK_EXT_subgroup_size_control`이 이를 제공한다.
-
-```cpp
-VkPipelineShaderStageRequiredSubgroupSizeCreateInfo reqSize{};
-reqSize.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO;
-reqSize.requiredSubgroupSize = 32;  // wave32 강제 (지원 범위 내에서)
-
-// 셰이더 스테이지 생성 정보의 pNext에 연결한다
-shaderStage.pNext = &reqSize;
-```
-
-다만 폭을 강제하면 하드웨어가 자연스럽게 고를 폭을 막아 occupancy나 명령 패킹이 나빠질 수 있다. 측정 없이 강제하지 않는다.
+특정 알고리즘이 고정 폭을 요구하면, RDNA처럼 두 폭을 지원하는 하드웨어에서 파이프라인 생성 시 원하는 폭을 요청하는 기능을 저수준 API가 제공한다. 다만 폭을 강제하면 하드웨어가 자연스럽게 고를 폭을 막아 occupancy나 명령 패킹이 나빠질 수 있으므로, 장치가 보고하는 지원 범위 안에서만 요청하고 측정 없이 강제하지 않는다.
 
 ### 메모리 타입 노출
 
-Vulkan은 메모리 종류도 명시적으로 노출한다. `vkGetPhysicalDeviceMemoryProperties`가 반환하는 메모리 타입의 property flag로 어디에 무엇을 둘지 결정한다.
+저수준 API는 메모리 종류도 명시적으로 노출한다. 장치가 보고하는 메모리 타입의 속성 조합으로 어디에 무엇을 둘지 결정한다.
 
-| 메모리 property | 위치 | 용도 |
+| 메모리 속성 | 위치 | 용도 |
 |---|---|---|
-| `DEVICE_LOCAL` | VRAM | 텍스처, 렌더 타깃, 자주 읽는 버퍼 |
-| `HOST_VISIBLE` + `HOST_COHERENT` | 시스템 RAM (또는 BAR) | 업로드 스테이징, 매 프레임 갱신 |
-| `DEVICE_LOCAL` + `HOST_VISIBLE` | ReBAR/스몰 BAR 영역 | 작은 빈번 업데이트 (가능 시) |
+| device-local | VRAM | 텍스처, 렌더 타깃, 자주 읽는 버퍼 |
+| host-visible + host-coherent | 시스템 RAM (또는 BAR) | 업로드 스테이징, 매 프레임 갱신 |
+| device-local + host-visible | ReBAR/스몰 BAR 영역 | 작은 빈번 업데이트 (가능 시) |
 
 CPU가 채워야 하는 데이터는 host-visible 메모리에 쓰고, GPU가 자주 읽는 데이터는 device-local로 복사하는 것이 기본 패턴이다. ReBAR(Resizable BAR)가 켜진 시스템에서는 device-local이면서 host-visible인 큰 영역이 노출되어 스테이징 복사를 줄일 수 있다.
 
@@ -355,22 +331,9 @@ RenderDoc은 기능 디버깅에 강하고, 벤더 프로파일러는 성능 병
 
 ### 애플리케이션 측 타임스탬프
 
-프로파일러를 띄우지 않고도 패스별 GPU 시간을 측정할 수 있다. Vulkan은 timestamp query로 명령 버퍼 안의 두 지점 사이 GPU 시간을 잰다.
+프로파일러를 띄우지 않고도 패스별 GPU 시간을 측정할 수 있다. GPU timestamp query는 명령 스트림의 두 지점에 tick 값을 기록하게 하고, 두 값의 차에 장치가 보고하는 tick 주기(tick당 나노초)를 곱해 실제 시간으로 환산한다.
 
-```cpp
-// 풀 생성 시 VK_QUERY_TYPE_TIMESTAMP 로 만든 queryPool 사용
-vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool, 0);
-RecordShadowPass(cmd);
-vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool, 1);
-
-// 이후 결과를 읽고 timestampPeriod(ns/tick)를 곱해 실제 시간으로 환산한다
-uint64_t ts[2];
-vkGetQueryPoolResults(device, queryPool, 0, 2, sizeof(ts), ts,
-                      sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
-double ms = (ts[1] - ts[0]) * timestampPeriod / 1.0e6;
-```
-
-`timestampPeriod`는 `VkPhysicalDeviceLimits`에서 얻는 tick당 나노초 값이다. 패스별 시간을 프레임마다 기록하면 어느 패스가 비싼지 코드 안에서 추적할 수 있다. 디버그 마커(`vkCmdBeginDebugUtilsLabelEXT`)를 함께 넣으면 RenderDoc과 벤더 도구의 호출 트리에서 패스 경계가 명확해진다.
+tick 주기는 정수가 아닐 수 있으므로 부동소수점으로 다루고, 기록된 값은 GPU가 그 지점을 실제로 지난 뒤에야 유효하므로 결과가 준비됐는지 확인한 뒤 읽는다. 패스별 시간을 프레임마다 기록하면 어느 패스가 비싼지 코드 안에서 추적할 수 있고, 디버그 라벨을 함께 남기면 RenderDoc과 벤더 도구의 호출 트리에서 패스 경계가 명확해진다.
 
 ### 병목 좁히기
 
@@ -410,6 +373,6 @@ GPU는 수십 lane이 한 묶음으로 같은 명령을 실행하는 SIMT 처리
 ## 더 읽을거리
 
 - Fabian Giesen, ["A trip through the Graphics Pipeline 2011"](https://fgiesen.wordpress.com/2011/07/09/a-trip-through-the-graphics-pipeline-2011-index/) — 하드웨어 유닛 관점의 파이프라인 해부.
-- NVIDIA, [CUDA C++ Programming Guide: Hardware Implementation](https://docs.nvidia.com/cuda/cuda-c-programming-guide/) — SIMT·occupancy·coalescing 의 정식 문서.
+- NVIDIA, [CUDA Programming Guide](https://docs.nvidia.com/cuda/cuda-programming-guide/) — SIMT·occupancy·coalescing 의 정식 문서.
 - AMD, ["RDNA Architecture" 백서](https://gpuopen.com/rdna/) — wave32/64·캐시 계층의 벤더 시점.
 - [Nsight Graphics](https://developer.nvidia.com/nsight-graphics) / [Radeon GPU Profiler](https://gpuopen.com/rgp/) — 본문 측정 도구.

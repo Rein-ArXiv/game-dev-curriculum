@@ -148,6 +148,8 @@ PID namespace는 **계층적**이다. 자식 namespace의 프로세스는 부모
 ```c
 #define _GNU_SOURCE
 #include <sched.h>
+#include <signal.h>
+#include <stdio.h>
 #include <unistd.h>
 
 int child_func(void *arg) {
@@ -315,7 +317,10 @@ web-server
 
 **구현:**
 ```c
+#define _GNU_SOURCE
 #include <sched.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 int child_func(void *arg) {
@@ -370,10 +375,10 @@ uid=0(root) gid=0(root)
 
 # 호스트에서 보면
 $ ps aux | grep container-process
-nobody   12345  ...
+100000   12345  ...
 ```
 
-컨테이너는 자신이 root라고 믿지만, 호스트에서는 nobody!
+컨테이너는 자신이 root라고 믿지만, 호스트에서는 비특권 UID 100000!
 
 **UID 매핑:**
 ```text
@@ -393,7 +398,7 @@ user:100000:65536
 user:100000:65536
 
 # 컨테이너 실행
-unshare --user --map-root-user
+unshare --user --map-auto --setuid 0 --setgid 0
 ```
 
 **보안 이점:**
@@ -502,7 +507,7 @@ docker run --cpu-shares=512 ubuntu  # 기본은 1024
 
 **커널 구현:**
 ```c
-// kernel/sched/fair.c
+// kernel/sched/sched.h
 struct cfs_bandwidth {
     ktime_t period;         // 구성된 bandwidth period
     u64 quota;              // 사용 가능 시간
@@ -510,7 +515,7 @@ struct cfs_bandwidth {
     // ...
 };
 
-// 스케줄러가 주기적으로 체크
+// kernel/sched/fair.c — 스케줄러가 주기적으로 체크
 if (cfs_rq->runtime_remaining <= 0) {
     throttle_cfs_rq(cfs_rq);  // CPU 할당 중단
 }
@@ -650,8 +655,8 @@ Container A          Container B
     │                │
 [lower (RO)]    [upper (RW)]
   이미지          쓰기 레이어
-    │
-[work dir]
+                     │
+                [work dir]
 ```
 
 **예시:**
@@ -706,14 +711,20 @@ int ovl_copy_up_one(struct dentry *parent, struct dentry *dentry) {
     // upper에 새 파일 생성
     new_file = ovl_path_open(&upperpath, O_WRONLY | O_CREAT);
 
-    // 데이터 복사
-    loff_t read_pos = 0;
-    loff_t write_pos = 0;
-    do {
-        bytes = vfs_read(old_file, buf, PAGE_SIZE, &read_pos);
-        if (bytes > 0)
-            vfs_write(new_file, buf, bytes, &write_pos);
-    } while (bytes > 0);
+    // 데이터 복사: reflink(extent 공유) 시도 후, 안 되면 splice로 1 MiB 청크 복사
+    loff_t len = i_size_read(d_inode(dentry));
+    cloned = vfs_clone_file_range(old_file, 0, new_file, 0, len, 0);
+    if (cloned != len) {
+        loff_t old_pos = 0, new_pos = 0;
+        while (len) {
+            size_t this_len = min_t(size_t, len, OVL_COPY_UP_CHUNK_SIZE);  // 1 << 20
+            bytes = do_splice_direct(old_file, &old_pos, new_file, &new_pos,
+                                     this_len, SPLICE_F_MOVE);
+            if (bytes <= 0)
+                break;
+            len -= bytes;
+        }
+    }
 
     // 메타데이터 복사 (권한, 소유자, ...)
     ovl_copy_xattr(old_file, new_file);
@@ -990,7 +1001,7 @@ docker run --runtime=runsc nginx
 
 ## 7. 보안 고려사항
 
-컨테이너의 격리는 namespace와 cgroup만으로 완성되지 않는다. 같은 커널을 공유하는 만큼, 컨테이너 내부 프로세스가 호스트 권한을 얻을 가능성을 추가 메커니즘으로 차단해야 한다. Docker와 runc는 컨테이너를 띄울 때 다음 다섯 가지 보호를 기본으로 적용한다.
+컨테이너의 격리는 namespace와 cgroup만으로 완성되지 않는다. 같은 커널을 공유하는 만큼, 컨테이너 내부 프로세스가 호스트 권한을 얻을 가능성을 추가 메커니즘으로 차단해야 한다. Docker와 runc는 컨테이너를 띄울 때 다음 다섯 가지 보호를 적용한다. 앞의 셋은 기본값이고, User Namespace(`userns-remap`)와 읽기 전용 rootfs 같은 권한 옵션은 운영자가 명시적으로 켜야 한다.
 
 - **Capabilities 제한**: `CAP_SYS_ADMIN`, `CAP_SYS_MODULE` 등 위험한 권한을 bounding set에서 제거하고, 컨테이너에 14개 안팎의 capability만 남긴다.
 - **Seccomp 프로필**: 약 300개 시스템 콜만 허용하고, `reboot`, `swapon`, `kexec_load` 같은 호출은 `SCMP_ACT_ERRNO`로 차단한다.
@@ -1117,7 +1128,7 @@ int main(int argc, char *argv[]) {
     int gate[2];
     pipe2(gate, O_CLOEXEC);
     struct ChildArgs child_args = {.start_gate = gate[0]};
-    pid_t pid = clone(child_main, child_stack, clone_flags, &child_args);
+    pid_t pid = clone(child_main, child_stack + STACK_SIZE, clone_flags, &child_args);
 
     // 자식은 gate에서 읽으며 execve 전에 대기한다.
     setup_cgroup(pid);
@@ -1179,7 +1190,7 @@ int main(int argc, char *argv[]) {
     int gate[2];
     pipe2(gate, O_CLOEXEC);
     struct ChildArgs child_args = {.start_gate = gate[0]};
-    pid_t pid = clone(child_main, child_stack, flags | SIGCHLD, &child_args);
+    pid_t pid = clone(child_main, child_stack + STACK_SIZE, flags | SIGCHLD, &child_args);
 
     setup_cgroup(pid);
     setup_network(pid);

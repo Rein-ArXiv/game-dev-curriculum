@@ -129,7 +129,7 @@ CHECK(Global(execution, "a") == 14.0);
 CHECK(Global(execution, "b") == 20.0);
 ```
 
-`+`와 `*`는 결합 법칙이 성립해 결합 방향이 값에 드러나지 않는다. 위 두 줄만으로는
+`+`와 `*`는 위처럼 정확히 표현되는 작은 정수에서는 결합 방향이 값에 드러나지 않는다(부동소수점 일반에서는 결합 법칙이 성립하지 않는다). 위 두 줄만으로는
 `ParsePrecedence(precedence + 1)`을 `ParsePrecedence(precedence)`로 바꿔 파서를 우결합으로
 만들어도 통과한다. 결합 방향을 고정하려면 비결합 연산자를 써야 한다.
 
@@ -245,7 +245,7 @@ void Expression(TokenList& out, int depth) {
 매우 큰 값에 비중을 명시적으로 준다. 균등 난수는 경계를 거의 만들지 못한다. 셋째, `/`의
 오른쪽에 리터럴 `0`을 넣는 확률을 따로 둔다.
 
-생성된 소스는 `;`와 `}` 뒤에서 줄을 바꾼다. 한 줄짜리 소스만 만들면 `SourceLocation`의
+생성된 소스는 `;`, `{`, `}` 뒤에서 줄을 바꾼다. 한 줄짜리 소스만 만들면 `SourceLocation`의
 기본값이 `{1, 1}`이라 위치 추적을 통째로 지워도 통과한다.
 
 ### property와 oracle
@@ -257,9 +257,9 @@ void Expression(TokenList& out, int depth) {
 std::string GrammarCompileViolation(const std::string& source) {
     const auto first = lab::lang::Compiler{}.Compile(source);
     if (!first.program) {
-        return "컴파일 실패: " + (first.diagnostics.empty()
-                                      ? std::string("(진단조차 없다)")
-                                      : lab::lang::FormatDiagnostic(first.diagnostics.front()));
+        if (first.diagnostics.empty()) return "컴파일 실패(진단조차 없다)";
+        return "컴파일 실패(" + first.diagnostics.front().message + "): " +  // 메시지가 부류, 위치는 가변부
+               lab::lang::FormatDiagnostic(first.diagnostics.front());
     }
     if (!first.diagnostics.empty()) return "프로그램과 진단이 동시에 나왔다";
 
@@ -322,7 +322,8 @@ property는 여전히 통과하지만 아무것도 검사하지 않은 것이므
 
 검증이 실제로 힘을 갖는지는 결함을 주입해 확인한다. `Prefix`의 `true` 처리에서
 `Emit(OpCode::Constant, ...)` 한 줄을 지웠다. 기존 사례 중 `true`나 `false`를 쓰는 것은
-하나도 없어서, 열다섯 개 사례가 전부 `ok`인 채 이 배터리만 죽는다.
+하나도 없어서, 열다섯 개 사례가 전부 `ok`인 채 생성 배터리만 죽는다 — 이 배터리와, `true`를 변형
+어휘에 두는 토큰 변형 배터리다.
 
 ```text
 [step02] parser_rejects_incomplete_expression ok

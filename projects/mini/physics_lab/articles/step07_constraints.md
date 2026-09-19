@@ -6,7 +6,7 @@
 
 | 솔버 | 작용 level | 강점 | 약점 | 표준 사용처 |
 |---|---|---|---|---|
-| PBD distance constraint | position | 무조건 안정, cloth / rope 표준 | stiffness 가 iter 의존 (적게 돌리면 늘어남) | cloth, rope, soft body |
+| PBD distance constraint | position | stiff force 모델보다 큰 dt 에 견고, cloth / rope 표준 | stiffness 가 iter 의존 (적게 돌리면 늘어남) | cloth, rope, soft body |
 | Sequential Impulse distance constraint | velocity + Baumgarte | 링크 길이가 rigid, 압축·신장 모두 억제 | position drift 누적 (Baumgarte 로 보정) | rope, 링크 구조물 |
 
 *범위*. 이 Scene 이 구현하는 제약은 *distance constraint 하나* 다. `Particle` 은 `pos / vel / prevPos / invMass` 만 갖는다 — 회전 자유도, 관성 모멘트, 각속도가 없으므로 hinge / slider / motor 같은 joint 와 ragdoll 은 이 lab 의 범위 밖이다.
@@ -180,20 +180,20 @@ PBD 와 정반대 — *PBD 는 position 풀고 velocity derive*, *SI 는 velocit
 
 ## 4. Step 흐름 두 갈래
 
-매 step 안에서 *anchor 강제 고정* — 솔버가 (0 invMass 라 안 움직이지만) *수치 오차* 로 살짝 이동할 수 있어 마지막에 명시:
+매 step 시작에서 *anchor 강제 고정* — DragHandle 이 끈 위치를 솔버 전에 반영:
 
 ```cpp
 particles_[0].pos = anchorHandle_.Position();
 particles_[0].vel = {0, 0};
 ```
 
-이걸 *솔버 후* 에도 한 번 더. 이 한 줄이 *체인이 anchor 에서 떨어지지 않게* 보장.
+솔버 후에는 다시 고정하지 않는다 — invMass 0 인 anchor 에 솔버가 더하는 양은 정확히 0 이라, 이 한 줄만으로 *체인이 anchor 에서 떨어지지 않게* 보장된다.
 
 `baumgarte_` 항이 *SI 전용*. PBD 토글일 때는 사용 안 됨 — PBD 는 *position 을 직접 보정* 하기 때문에 *Baumgarte 같은 drift 보정 항이 본질적으로 불필요*.
 
 ## 5. 무엇을 보는가
 
-- **chain stretch 시각화**: 각 link 의 색이 *늘어남에 비례해서 빨강이 진해짐*. PBD iter 가 부족하면 anchor 가까운 link 는 정상, 멀리 갈수록 *진해진다* — *propagation 한계*.
+- **chain stretch 시각화**: 각 link 의 색이 *늘어남에 비례해서 빨강이 진해짐*. PBD iter 가 부족하면 끝 link 는 정상, anchor 에 가까울수록 *진해진다* — *propagation 한계*.
 - **avg stretch 그래프**: 시간에 따른 평균 stretch. anchor 를 끌면 *spike → 정착*. iter 가 충분히 크면 *0 근처 유지*, 부족하면 *진동*.
 - **solver ms 그래프**: PBD vs SI 의 시간 비교. 보통 비슷, *N × iterations* 에 비례.
 
@@ -203,7 +203,7 @@ chain 이 *완전히 늘어남 = 0* — anchor 에서 자연스럽게 늘어진 
 
 **시나리오 B — N=12, iter=2, PBD.**
 
-chain 의 *마지막 link* 가 *눈에 띄게 늘어짐* — propagation 부족. iter 가 너무 적어 *anchor 쪽 link 만 만족* 하고 그 영향이 끝까지 전달 안 됨.
+chain 의 *anchor 쪽 link* 가 *눈에 띄게 늘어짐* — propagation 부족. sweep 이 anchor 에서 끝 쪽으로 훑어 *끝 link 만 정확히 만족* 하고, 아래 질량의 하중이 anchor 쪽까지 전달 안 됨.
 
 **시나리오 C — N=12, iter=12, SI, baumgarte=0.0.**
 
@@ -239,6 +239,7 @@ add_test(NAME step07.distance_projection COMMAND physics_core_tests        step0
 <!-- snippet: tests/physics_constraints_tests.cpp@anchor-invariant -->
 ```cpp
 // 한 스텝 뒤에도 anchor 는 제자리 — invMass 0 은 어떤 보정도 받지 않는다.
+// (Step 은 솔버 뒤에 anchor 를 다시 고정하지 않으므로 이 검사가 솔버를 본다.)
 const Vector2 anchor = scene.Particles()[0].pos;
 scene.Step(1.0f / 120.0f);
 CHECK(scene.Particles()[0].pos.x == anchor.x);
@@ -314,13 +315,13 @@ Step 7 에서 추가한 것.
 2. **PBD distance solve** — iter 안에서 모든 link 의 *position projection*. invMass 비율로 두 mass 분배.
 3. **SI distance solve** — velocity 등식 + Baumgarte. accumulated lambda 는 정해진 부호 제한 없음 (거리 *유지* 라 압축 / 늘어남 모두 허용).
 4. **두 Step 흐름 분리** — PBD 는 *predict → solve → derive vel*, SI 는 *integrate vel → solve → update pos*. 같은 chain 으로 *완전히 다른 흐름*.
-5. **anchor handle 강제 고정** — DragHandle 위치를 매 frame 두 번 강제 — 사용자 입력 → 솔버 후. 수치 오차로 anchor 가 안 흔들리도록.
+5. **anchor handle 강제 고정** — DragHandle 위치를 매 frame 솔버 전에 한 번 강제. 솔버 후 재고정은 없다 — invMass 0 인 anchor 에 솔버가 더하는 양은 정확히 0 이다.
 
 이 chain 시뮬을 *cloth 격자* 로 확장하면 *Step 7 의 코드를 거의 그대로* — Particle 배열을 2D 격자 + diagonal constraint 추가. *Soft body* 도 tetrahedral mesh 의 edge 마다 DistanceConstraint. PBD 의 일반성이 여기 있다.
 
 6. **`physics_constraints_tests` 타깃 + `step07` 필터** — `ctest --test-dir build -C Release -R step07` 로 anchor 고정, PBD 의 iteration = stiffness (0.0062 → 0.00028), SI 의 Baumgarte drift (0.162 대 0.0047) 를 창 없이 검사.
 
-자동으로 갈리는 것은 저 부등식들까지다. link 색이 anchor 에서 멀어질수록 진해지는 propagation 의 *모양* 은 화면에서 읽는다.
+자동으로 갈리는 것은 저 부등식들까지다. link 색이 anchor 에 가까울수록 진해지는 propagation 의 *모양* 은 화면에서 읽는다.
 
 ## 더 읽을거리
 

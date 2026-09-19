@@ -177,7 +177,7 @@ DXT1 이 *가장 작음 (1/8)*, DXT5 / BC7 이 *동일 크기 (1/4)*. *BC7 의 �
 
 ## 4. 프로시저 텍스처와 Triplanar
 
-학습 lab 의 텍스처 — *외부 이미지 파일 의존 없이* *코드로 생성*. 체크보드 + 색 그라데이션 + 약간의 노이즈.
+학습 lab 의 텍스처 — *외부 이미지 파일 의존 없이* *코드로 생성*. 체크보드 + 색 그라데이션 (sin 파동).
 
 <!-- snippet: src/render/texture_modes.cpp#TextureRegistry::GenProcedural -->
 ```cpp
@@ -287,7 +287,7 @@ ctest --test-dir build -C Release -R gl_step06 --output-on-failure
 100% tests passed out of 2
 ```
 
-계약 쪽이 `BlockBytesFor(mode, w, h)` 와 그것을 레벨마다 더하는 `ExpectedMipChainBytes` 를 검사한다. 4 의 배수가 아닌 크기의 블록 올림, DXT1 = 1/8 · DXT5/BC7 = 1/4 의 압축비, mip chain 합이 base level 의 4/3 배를 넘지 않는다는 성질까지 절대값으로 고정한다.
+계약 쪽이 `BlockBytesFor(mode, w, h)` 와 그것을 레벨마다 더하는 `ExpectedMipChainBytes` 를 검사한다. 4 의 배수가 아닌 크기의 블록 올림, DXT1 = 1/8 · DXT5/BC7 = 1/4 의 압축비, mip chain 합이 base level 의 4/3 배 (+ 작은 레벨의 4×4 블록 올림 여유 64 B) 를 넘지 않는다는 성질까지 절대값으로 고정한다.
 
 ```powershell
 build\Release\graphics_gl_contract_tests.exe step06   # Linux/macOS: ./build/graphics_gl_contract_tests step06

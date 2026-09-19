@@ -74,7 +74,7 @@ char str[] = "Hello";
 
 2001년, Joel Spolsky는 그의 [유명한 블로그 글](https://www.joelonsoftware.com/2001/12/11/back-to-basics/)에서 `strcat`의 문제를 Shlemiel the Painter라는 비유로 설명했다.
 
-> Shlemiel은 페인트통과 붓을 들고 도로에 선을 그린다. 매일 출발점에서 시작해 페인트를 칠하다가, 페인트가 떨어지면 다시 출발점까지 돌아가 페인트를 채운다. 매일 작업 거리가 멀어질수록 왕복 시간이 기하급수적으로 늘어난다.
+> Shlemiel은 페인트통과 붓을 들고 도로에 선을 그린다. 매일 출발점에서 시작해 페인트를 칠하다가, 페인트가 떨어지면 다시 출발점까지 돌아가 페인트를 채운다. 매일 작업 거리가 멀어질수록 왕복 시간이 길어져 실제 칠하는 양은 갈수록 줄어든다.
 
 이것이 정확히 `strcat`이 하는 일이다.
 
@@ -234,6 +234,22 @@ public:
         std::memcpy(data_, str, capacity_);
     }
 
+    // 소유 포인터를 가진 클래스는 복사·이동을 직접 정의해야 한다.
+    // 정의하지 않으면 암시적 얕은 복사가 같은 버퍼를 두 번 해제한다.
+    String(const String& other)
+        : data_(new char[other.length_ + 1]),
+          length_(other.length_),
+          capacity_(other.length_ + 1) {
+        std::memcpy(data_, other.data_, length_ + 1);
+    }
+
+    String(String&& other) noexcept
+        : data_(other.data_), length_(other.length_), capacity_(other.capacity_) {
+        other.data_ = nullptr;
+        other.length_ = 0;
+        other.capacity_ = 0;
+    }
+
     ~String() {
         delete[] data_;
     }
@@ -351,7 +367,7 @@ public:
         std::memcpy(result.data_, data_, length_);
         std::memcpy(result.data_ + length_, other.data_, other.length_ + 1);
         result.length_ = length_ + other.length_;
-        return result;  // 복사 발생 (RVO 가능)
+        return result;  // 값 반환 (NRVO 가능, 생략되지 않으면 이동 생성자)
     }
 };
 ```
@@ -373,10 +389,10 @@ String s3 = s1 + s2;  // 2번 할당, 2번 복사 (임시 객체 생성)
 
 ```cpp
 String result = s1 + s2 + s3 + s4;
-// 1. temp1 = s1 + s2     (할당 1, s1+s2 크기)
-// 2. temp2 = temp1 + s3  (할당 2, s1+s2+s3 크기)
-// 3. result = temp2 + s4 (할당 3, s1+s2+s3+s4 크기)
-// 총 3번 할당, 6번 복사 - O(n²) 퇴화
+// 1. temp1 = s1 + s2     (버퍼 할당, s1+s2 크기)
+// 2. temp2 = temp1 + s3  (버퍼 할당, s1+s2+s3 크기)
+// 3. result = temp2 + s4 (버퍼 할당, s1+s2+s3+s4 크기)
+// 호출마다 2번 할당(빈 result + reserve) → 총 6번 할당, 6번 복사 - O(n²) 퇴화
 ```
 
 C++11의 move semantics는 이 문제를 크게 완화한다.
@@ -546,7 +562,7 @@ private:
         int ref_count;  // 참조 카운트
         size_t length;
         size_t capacity;
-        char data[1];   // Flexible Array Member
+        char data[1];   // struct hack (진짜 FAM은 char data[]; 이며 C++ 표준에는 없다)
     };
 
     StringData* ptr_;
@@ -590,10 +606,10 @@ C++03 시대의 장점은 다음과 같다.
 ```cpp
 // C++03 COW string (GCC 구버전)
 std::string s1 = "Hello";
-std::string s2 = s1;  // COW: 데이터 공유
+char& ref = s1[0];    // s1의 첫 문자 참조 (아직 유일 소유자라 복사 없음)
 
-char& ref = s1[0];    // s1의 첫 문자 참조
-s2[0] = 'J';          // s2 수정 → COW 발동, s2는 새 버퍼 할당
+std::string s2 = s1;  // COW: 데이터 공유
+s1[0] = 'J';          // s1 수정 → COW 발동, s1이 새 버퍼 할당
 
 // 문제: ref는 여전히 유효할까?
 // COW 구현에서는 미정의 동작이 발생할 수 있다
@@ -935,7 +951,8 @@ null-terminated 표현은 길이 field 없이 C 배열과 pointer 연산에 맞�
 - [GCC libstdc++ basic_string.h](https://github.com/gcc-mirror/gcc/blob/master/libstdc%2B%2B-v3/include/bits/basic_string.h) - GCC의 실제 구현 (15자 SSO)
 - [LLVM libc++ string](https://github.com/llvm/llvm-project/blob/main/libcxx/include/string) - Clang의 구현 (22자 SSO)
 - [Microsoft STL xstring](https://github.com/microsoft/STL/blob/main/stl/inc/xstring) - MSVC의 구현 (15자 SSO)
-- [Facebook Folly: FBString Documentation](https://github.com/facebook/folly/blob/main/folly/docs/FBString.md) - Growth factor 1.5배 vs 2배 성능 비교
+- [Facebook Folly: FBString Documentation](https://github.com/facebook/folly/blob/main/folly/docs/FBString.md) - 23자 in-situ·jemalloc 연동을 포함한 3단 저장 전략
+- [Facebook Folly: FBVector Documentation](https://github.com/facebook/folly/blob/main/folly/docs/FBVector.md) - Growth factor 1.5배 vs 2배 성능 비교
 - [Qt Documentation: Implicit Sharing](https://doc.qt.io/qt-6/implicit-sharing.html) - Qt가 여전히 COW를 사용하는 이유
 - [WG21 P0254R2: Integrating `std::string_view` and `std::string`](https://wg21.link/p0254r2)
 - [Microsoft Learn: BSTR](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/automat/bstr) - length-prefix 표현을 채택한 실제 타입의 명세

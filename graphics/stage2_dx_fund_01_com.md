@@ -143,7 +143,7 @@ GUID로 디스패치하는 이유는 v-table 호환과 같은 맥락이다. 인�
 
 `QueryInterface`는 단순한 캐스트가 아니라 세 가지 수학적 성질 — 반사성(reflexivity), 대칭성(symmetry), 추이성(transitivity) — 을 만족해야 한다.
 
-- 반사성: 어느 인터페이스에서든 `QueryInterface(IID_IUnknown)`은 항상 성공하고, 같은 객체에 대해 늘 동일한 `IUnknown*`를 돌려준다. 이 성질 덕분에 두 인터페이스 포인터가 같은 객체를 가리키는지는 각각을 `IUnknown`으로 질의해 비교하면 된다.
+- 반사성: 인터페이스 A의 포인터에서 같은 IID_A로 질의하면 항상 성공해야 한다. 여기에 별도의 객체 동일성(identity) 규칙이 더해져, 어느 인터페이스에서든 `QueryInterface(IID_IUnknown)`은 항상 성공하고 같은 객체에 대해 늘 동일한 `IUnknown*`를 돌려준다. 이 성질 덕분에 두 인터페이스 포인터가 같은 객체를 가리키는지는 각각을 `IUnknown`으로 질의해 비교하면 된다.
 - 대칭성: 인터페이스 A에서 B로 질의가 성공하면, B에서 A로 질의도 성공해야 한다.
 - 추이성: A에서 B로, B에서 C로 질의가 성공하면, A에서 C로 질의도 성공해야 한다.
 
@@ -185,7 +185,7 @@ HRESULT hr = D3D11CreateDevice(
 | `GetAddressOf` | `T**` | 변화 없음 | 출력 인자 — 기존 값이 있으면 덮어쓰며 누수 |
 | `ReleaseAndGetAddressOf` | `T**` | 기존 값 Release | 출력 인자 — 재사용 시 안전 |
 | `As(&ComPtr<U>)` | `HRESULT` | 대상 +1 | `QueryInterface`의 타입 안전 래퍼 |
-| `Reset` | `void` | -1 | 명시적으로 참조를 끊음 |
+| `Reset` | `unsigned long` | -1 | 명시적으로 참조를 끊음 (해제 후 남은 카운트를 돌려줌) |
 | `Detach` | `T*` | 변화 없음 | 소유권을 외부로 양도 (카운트 그대로 포인터만 분리) |
 | `Attach(T*)` | `void` | 받지 않음 | 이미 AddRef된 포인터의 소유권을 인수 |
 
@@ -262,7 +262,7 @@ for (UINT i = 0;
     // 소프트웨어 어댑터(WARP)는 건너뛴다
     if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
 
-    if (desc.DedicatedVideoMemory > maxVRAM) {
+    if (!bestAdapter || desc.DedicatedVideoMemory > maxVRAM) {
         maxVRAM = desc.DedicatedVideoMemory;
         adapter.As(&bestAdapter);   // IDXGIAdapter1 → IDXGIAdapter4
     }

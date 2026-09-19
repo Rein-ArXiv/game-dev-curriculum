@@ -46,7 +46,10 @@ void ResponseScene::ResetBodies(int n) {
     if (lastCanvasW_ <= 0) return;
     // 좌상단부터 격자에 가깝게 배치 → 떨어지면서 stacking.
     float r        = 12.0f;
-    int   perRow   = std::max(1, (lastCanvasW_ - 40) / (int)(r * 2.4f));
+    // 한 줄 최대 12 개 — 1000 px 캔버스에서는 한 줄에 34 개가 들어가 기본 N=24
+    // 가 한 줄로 놓여 body-body 접촉이 전혀 없다. 헤드리스 400 px 캔버스와 같은
+    // 12 열로 고정해 두 줄 이상 쌓이게 한다 (measure_scene 도 동일).
+    int   perRow   = std::max(1, std::min(12, (lastCanvasW_ - 40) / (int)(r * 2.4f)));
     for (int k = 0; k < n; ++k) {
         int row = k / perRow;
         int col = k % perRow;

@@ -7,14 +7,14 @@
 //   <GL draw calls>
 //   gpuTimer.End();
 //   ... 다음 프레임 ...
-//   double ms = gpuTimer.LastMs();    // 결과 회수 (지연 1~2 프레임)
+//   double ms = gpuTimer.LastMs();    // 결과 회수 (지연 1~3 프레임)
 //
 // GL_TIME_ELAPSED 쿼리는 query 구간 *전체 GPU 시간* 을 반환한다. 셰이더 stage
 // (vertex / geometry / fragment) 별 분리는 *불가능* — 그건 NVIDIA Nsight /
 // AMD RGP 같은 벤더 프로파일러의 영역.
 //
 // CPU-GPU 동기화 비용을 피하기 위해 N 프레임 ring buffer 패턴을 쓴다 — 결과를
-// *2~3 프레임 후에 회수*. 매 프레임 결과를 받지만 약간 지연됨.
+// *1~3 프레임 후에 회수*. 매 프레임 결과를 받지만 약간 지연됨.
 
 #include <glad/gl.h>
 

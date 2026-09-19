@@ -192,7 +192,7 @@ grub_cmd_linux(grub_command_t cmd, int argc, char *argv[])
     if (lh.boot_flag != 0xaa55)
         return grub_error(GRUB_ERR_BAD_OS, "invalid magic number");
 
-    // 보호 모드로 전환
+    // 비디오 모드 정보를 부트 파라미터에 채움
     grub_linux_setup_video(&params);
 
     // 커널을 메모리에 로드
@@ -219,7 +219,7 @@ bzImage의 구조는 다음과 같다.
 ```mermaid
 flowchart TB
     A["Real-mode 커널 헤더 (setup.bin)<br/>boot_params 구조체<br/>BIOS 호출 코드"]
-    B["32비트 진입점 (header.S)<br/>startup_32"]
+    B["32비트 진입점 (compressed/head_64.S)<br/>startup_32"]
     C["압축된 커널 (vmlinux.bin.gz)<br/>실제 커널 코드<br/>.text, .data 섹션"]
     D["압축 해제 코드 (decompress_kernel)"]
     A --> B --> C --> D
@@ -245,11 +245,12 @@ SYM_FUNC_START(startup_32)
     movl    %eax, %es
     movl    %eax, %ss
 
-    /* 스택 설정, 임시 페이지 테이블 구성, 롱 모드 활성화 (아래 절 참조) */
+    /* 스택 설정, 임시 페이지 테이블 구성,
+       __KERNEL_CS:startup_64를 스택에 적재, 롱 모드 활성화 (아래 절 참조) */
     ...
 
-    /* 64비트 코드(startup_64)로 점프 */
-    ljmpl   $__KERNEL_CS, $startup_64
+    /* far return으로 64비트 코드(startup_64)에 진입한다 (far jump가 아니다) */
+    lret
 SYM_FUNC_END(startup_32)
 
     .code64
@@ -320,9 +321,9 @@ asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
     leal    pgtable(%ebx), %eax
     movl    %eax, %cr3
 
-    /* PAE와 PSE 활성화 */
+    /* PAE 활성화 */
     movl    %cr4, %eax
-    orl     $(X86_CR4_PAE | X86_CR4_PSE), %eax
+    orl     $X86_CR4_PAE, %eax
     movl    %eax, %cr4
 
     /* IA-32e 모드 활성화 */
@@ -331,12 +332,17 @@ asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
     btsl    $_EFER_LME, %eax
     wrmsr
 
-    /* 페이징 활성화 */
+    /* 점프 대상(startup_64)과 __KERNEL_CS를 스택에 올린다 */
+    leal    startup_64(%ebp), %eax
+    pushl   $__KERNEL_CS
+    pushl   %eax
+
+    /* 페이징 활성화 = 롱 모드 진입 */
     movl    $(X86_CR0_PG | X86_CR0_PE), %eax
     movl    %eax, %cr0
 
-    /* 64비트 코드로 점프 */
-    ljmpl   $__BOOT_CS, $startup_64
+    /* far return으로 64비트 코드에 진입한다 (far jump가 아니다) */
+    lret
 ```
 
 ## 4. start_kernel: 커널의 main
@@ -376,11 +382,11 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
     /* 타이머 초기화 */
     time_init();
 
-    /* 콘솔 초기화 */
-    console_init();
-
     /* 인터럽트 활성화 */
     local_irq_enable();
+
+    /* 콘솔 초기화 (PCI 설정 전에 먼저 켜는 의도된 예외) */
+    console_init();
 
     /* 나머지 시스템 초기화 */
     rest_init();
@@ -893,10 +899,6 @@ chmod +x "$DESTDIR/init"
  if (err)
  panic("junk in compressed archive");
 
- /* /init 실행 */
- if (!ramdisk_execute_command)
- ramdisk_execute_command = "/init";
-
  return 0;
  }
  ```
@@ -941,6 +943,9 @@ chmod +x "$DESTDIR/init"
  const char *newroot = argv[1];
  const char *init = argv[2];
 
+ /* 옛 루트의 fd를 미리 열어 둔다 (MS_MOVE 뒤에는 경로 이름이 남지 않는다) */
+ int cfd = open("/", O_RDONLY);
+
  /* 새 루트로 chdir */
  chdir(newroot);
 
@@ -951,8 +956,8 @@ chmod +x "$DESTDIR/init"
  chroot(".");
  chdir("/");
 
- /* 이전 initramfs 삭제 */
- recursiveRemove("/oldroot");
+ /* 이전 initramfs 삭제 (경로가 아니라 fd로) */
+ recursiveRemove(cfd);
 
  /* init 실행 */
  execv(init, argv + 2);

@@ -193,13 +193,14 @@ Reconciliation의 숨은 비용은 replay하는 미확정 command 수다. 대략
 
 ```cpp
 void Client::SmoothVisual(const Vec3& oldVisual,
-                          const Vec3& correctedPhysics) {
+                          const Vec3& correctedPhysics, float dt) {
     float error = Length(oldVisual - correctedPhysics);
 
     if (error > teleportThreshold_) {
         visualPosition_ = correctedPhysics;
     } else {
-        visualPosition_ = Lerp(oldVisual, correctedPhysics, 0.15f);
+        float alpha = 1.0f - std::exp(-12.0f * dt);   // 프레임레이트 독립 감쇠
+        visualPosition_ = Lerp(oldVisual, correctedPhysics, alpha);
     }
 }
 ```
@@ -256,7 +257,7 @@ server send:  0ms  50ms 100ms 150ms 200ms
 client recv: 42ms  96ms 171ms 190ms 280ms
 ```
 
-도착 즉시 위치를 적용하면 42ms, 96ms, 171ms에만 위치가 바뀐다. 렌더링은 60Hz 또는 144Hz로 더 자주 일어나므로 나머지 프레임에서는 정지했다가 튄다. 화면 주사율이 높을수록 — 즉 좋은 모니터일수록 — 이 끊김은 더 잘 보인다.
+도착 즉시 위치를 적용하면 42ms, 96ms, 171ms, 190ms, 280ms에만 위치가 바뀐다. 렌더링은 60Hz 또는 144Hz로 더 자주 일어나므로 나머지 프레임에서는 정지했다가 튄다. 화면 주사율이 높을수록 — 즉 좋은 모니터일수록 — 이 끊김은 더 잘 보인다.
 
 원격 엔티티 처리는 simulation state와 visual state를 분리해야 한다. 네트워크에서 받은 상태는 history에 저장하고, 렌더링은 history를 샘플링한다. "수신 이벤트가 화면을 직접 건드리지 않는다"는 이 분리가 이 글 전체의 골격이다 — 수신은 불규칙하고 렌더링은 규칙적이므로, 둘 사이에 시간축을 가진 버퍼가 있어야 한다.
 
@@ -508,11 +509,11 @@ rewindTime = 명령 수신 시각
 
 **시간 오차의 분해.** 서버가 재구성하는 되감기 시각은 $\hat t_r = t_{\text{recv}} - \widehat{\text{owl}} - \hat d_{\text{interp}}$ 이고, 사격자가 실제로 본 시각은 $t_r^\star = t_{\text{recv}} - \text{owl}^\star - d_{\text{interp}}^\star$ 다. 되감기 시간 오차는 두 추정 오차의 합이다.
 
-$$\varepsilon_t = \hat t_r - t_r^\star = (\widehat{\text{owl}} - \text{owl}^\star) + (\hat d_{\text{interp}} - d_{\text{interp}}^\star)$$
+$$\varepsilon_t = \hat t_r - t_r^\star = (\text{owl}^\star - \widehat{\text{owl}}) + (d_{\text{interp}}^\star - \hat d_{\text{interp}})$$
 
 주요 항은 다음과 같다.
 
-- **경로 비대칭** — $\widehat{\text{owl}} = \text{RTT}/2$로 두지만 실제 단방향 지연은 $\text{owl}^\star = \text{RTT}/2 + \Delta$이며, $\Delta = (d_{\uparrow}-d_{\downarrow})/2$는 상·하향 경로 지연 차의 절반이다. 왕복 측정만으로는 $\Delta$를 분리할 수 없다 — 이는 NTP에서 오프셋이 경로 비대칭에 의해 최대 왕복 지연의 절반까지 편향되는 것과 같은 근본 한계다(RFC 5905 §8). 즉 $|\varepsilon_{\text{owl}}| \le \text{RTT}/2$가 원리적 상한이고, 대칭 경로에서만 작다. 모바일 상향처럼 비대칭이 큰 회선에서는 수십 ms까지 벌어진다.
+- **경로 비대칭** — $\widehat{\text{owl}} = \text{RTT}/2$로 두지만 실제 단방향 지연은 $\text{owl}^\star = \text{RTT}/2 + \Delta$이며, $\Delta = (d_{\uparrow}-d_{\downarrow})/2$는 상·하향 경로 지연 차의 절반이다. 왕복 측정만으로는 $\Delta$를 분리할 수 없다 — 이는 NTP에서 오프셋이 경로 비대칭에 의해 최대 왕복 지연의 절반까지 편향되는 것과 같은 근본 한계다. 즉 $|\varepsilon_{\text{owl}}| \le \text{RTT}/2$가 원리적 상한이고, 대칭 경로에서만 작다. 모바일 상향처럼 비대칭이 큰 회선에서는 수십 ms까지 벌어진다.
 - **보간 지연 불일치** — 클라이언트가 보고한 $\hat d_{\text{interp}}$가 실제 적응형 값과 다르면 그 차이가 그대로 오차다. 서버가 고정값을 가정하면 계통 편향이 된다(위 본문).
 - **시계 동기 오차** — 시계 추정의 잔차. 보통 수 ms 규모로 31절의 보정 품질에 달려 있다.
 - **서버 샘플 양자화** — history를 기록 주기 $T_h$의 격자에서만 뽑으면 nearest/previous sample 정책에 따라 최대 한 간격 규모의 시간 오차가 생긴다. 두 sample 사이 보간은 등속·등회전 가정 아래 이 오차를 줄이지만 tick 사이의 충돌·animation 불연속까지 복원하지는 못한다.
@@ -982,7 +983,7 @@ t=87ms~  [클라(피격자)] 자기 체력 감소 수신. 피격 연출.
 - Timothy Ford, [Overwatch Gameplay Architecture and Netcode](https://www.youtube.com/watch?v=W3aieHjyNvw) (GDC 2017) — 예측 범위, 적응형 입력 버퍼, 클라이언트 선행과 판정 정책.
 - Valve Developer Wiki, [Source Multiplayer Networking](https://developer.valvesoftware.com/wiki/Source_Multiplayer_Networking), [Interpolation](https://developer.valvesoftware.com/wiki/Interpolation), [Lag Compensation](https://developer.valvesoftware.com/wiki/Lag_Compensation) — Source 엔진의 틱·보간·hitbox rewind 계약.
 - IEEE DIS(Distributed Interactive Simulation) 표준 — 운동 모델 기반 dead reckoning의 표준화된 형태.
-- David L. Mills, [RFC 5905: Network Time Protocol Version 4](https://www.rfc-editor.org/rfc/rfc5905) — §8은 왕복 지연·오프셋 계산과 비대칭 한계, §10은 clock filter, §12는 clock discipline을 정의한다.
+- David L. Mills, [RFC 5905: Network Time Protocol Version 4](https://www.rfc-editor.org/rfc/rfc5905) — §8은 왕복 지연·오프셋 계산, §10은 clock filter, §11.3은 clock discipline을 정의한다.
 - Flaviu Cristian, *Probabilistic Clock Synchronization* (Distributed Computing 3, 1989) — 단방향 지연을 RTT/2로 추정할 때의 오차 경계.
 - David Aldridge, *I Shot You First: Networking the Gameplay of Halo: Reach* (GDC 2011) — 권위·판정 정책·대역폭 운영 사례.
 - Riot Games, [VALORANT's 128-Tick Servers](https://technology.riotgames.com/news/valorants-128-tick-servers) — 서버 tick budget 최적화 사례.

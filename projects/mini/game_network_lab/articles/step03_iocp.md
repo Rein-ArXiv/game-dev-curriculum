@@ -196,8 +196,9 @@ game_network_process_tests: 1 case(s) passed [step03 1]
 ```
 
 `Start()`가 true를 돌려줬다는 사실만 확인하면 drain이 깨진 서버도 통과한다. `stopping_`
-latch를 지우지 않고 다시 시작한 서버는 preposted `AcceptEx`가 전부 즉시 거부되므로 살아
-있지만 아무것도 받지 못한다. `connect()`도 증거가 되지 못한다. 커널이 listen backlog에서
+latch를 지우지 않고 다시 시작한 서버는 preposted `AcceptEx`가 전부 즉시 거부되어 `Start()`
+자체가 false를 돌려주지만, prepost를 하나도 걸지 못한 채 true를 돌려주는 서버는 살아 있어도
+아무것도 받지 못한다. `connect()`도 증거가 되지 못한다. 커널이 listen backlog에서
 연결을 완성하므로 accept가 하나도 걸려 있지 않아도 성공한다. 그래서 판정은 `Connected`
 이벤트가 실제로 올라오는지로 한다.
 
@@ -222,7 +223,9 @@ if (connection == 0) {
 ```
 
 같은 이유로 종료 사건까지 기다린 뒤에 다음 round를 시작한다. 서버가 능동 종료자가 되면
-listening port가 곧바로 재사용되지 않아 round 사이에 다른 실패가 섞인다.
+listening port에 `TIME_WAIT` 연결이 남는다. 이 구현은 `SO_REUSEADDR`로 재bind를 허용하고
+Windows의 bind 규칙도 `TIME_WAIT`만으로 listening port를 잠그지 않으므로 그것이 실패를 만들지는
+않지만, round마다 종료 경로를 같게 두려는 것이다.
 
 ---
 

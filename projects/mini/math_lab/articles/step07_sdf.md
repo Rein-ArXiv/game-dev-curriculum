@@ -7,7 +7,7 @@
 - **두 도형의 SDF**: A = Circle, B = Box. 핸들 두 개로 위치, 슬라이더로 크기.
 - **합성 모드 토글**: Union (`min`), Smooth Min (`smin` polynomial), Subtract (`max(a, -b)`). math part14 의 표준 boolean / smooth 합성.
 - **smooth 강도 슬라이더 k**: 0 (날카로움) → 200 (부드러운 융합). Smin 모드에서만.
-- **거리 등고선 + 안/밖 색상**: 화면 전체를 256×256 텍스처에 *부호 거리에 따른 grayscale + 안쪽 약간 붉은 음영*. *등고선 띠* 30 px 마다.
+- **거리 등고선 + 안/밖 색상**: 화면 전체를 256×256 텍스처에 *부호 거리에 따른 grayscale + 안쪽 약간 청록빛 음영*. *등고선 띠* 30 px 마다.
 - **Sphere Tracing 광선**: ro / rd 두 핸들 + 매 단계의 *안전 구* 시각. *광선이 표면까지 몇 단계로 도달하는지* 직접 보임.
 
 핵심 통찰들 — *SDF 가 형상을 거리 함수로 표현*, *boolean 합성이 min/max 한 줄*, *smin 이 도형을 부드럽게 녹임*, *Sphere Tracing 의 매 단계 안전 구가 SDF 의 직관* — 모두 *마우스에 따라 즉시 갱신*.
@@ -101,9 +101,9 @@ void SdfScene::RebuildTextureIfNeeded(int cx, int cy, int cw, int ch) {
     if (!dirty_ && !resize) return;
     // ... 캔버스 좌표 기억 ...
     for (int j = 0; j < texH_; ++j) {
-        float py = (float)cy + ((float)j / (float)texH_) * (float)ch;
+        float py = (float)cy + (((float)j + 0.5f) / (float)texH_) * (float)ch;
         for (int i = 0; i < texW_; ++i) {
-            float px = (float)cx + ((float)i / (float)texW_) * (float)cw;
+            float px = (float)cx + (((float)i + 0.5f) / (float)texW_) * (float)cw;
             float d = SampleSDF({px, py});
 
             float t = std::clamp(d / 200.0f, -1.0f, 1.0f);
@@ -156,9 +156,9 @@ if (showContours_) {
 
 | 영역 | 색 |
 |---|---|
-| 안쪽 (d < 0) | 약간 붉은 어두운 회색 |
+| 안쪽 (d < 0) | 약간 청록빛 어두운 회색 (R 만 0.65 배) |
 | 표면 (d ≈ 0) | 중간 회색 |
-| 바깥 (d > 0) | 약간 푸른 밝은 회색 |
+| 바깥 (d > 0) | 약간 누런 밝은 회색 (B 만 0.85 배) |
 | 등고선 띠 | 어둡게 |
 
 이 컨벤션이 *SDF 의 안/밖 + 거리 분포* 둘 다 한 시각에 보여준다.

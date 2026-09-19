@@ -607,7 +607,7 @@ snapshot health 지표에 더해 전체 network budget을 channel·entity type·
 
 - Glenn Fiedler, [Snapshot Interpolation](https://gafferongames.com/post/snapshot_interpolation/), [Snapshot Compression](https://gafferongames.com/post/snapshot_compression/), [Reading and Writing Packets](https://gafferongames.com/post/reading_and_writing_packets/), [Serialization Strategies](https://gafferongames.com/post/serialization_strategies/) — 보간, delta·quantization, bit packing 구현.
 - Fabien Sanglard, [Quake 3 Network Model](https://fabiensanglard.net/quake3/network.php) — baseline + delta snapshot 구조.
-- Mark Frohnmayer, Tim Gift, ["The TRIBES Engine Networking Model"](https://www.gamedevs.org/uploads/tribes-networking-model.pdf) — ghost, relevancy와 우선순위 누적기 기반 복제.
+- Mark Frohnmayer, Tim Gift, ["The TRIBES Engine Networking Model"](https://www.gamedevs.org/uploads/tribes-networking-model.pdf) — ghost, relevancy와 우선순위 기반 복제.
 - Valve Developer Wiki, [Source Multiplayer Networking](https://developer.valvesoftware.com/wiki/Source_Multiplayer_Networking) — delta snapshot 운영 문서.
 - David Aldridge, *I Shot You First: Networking the Gameplay of Halo: Reach* (GDC 2011) — 우선순위·budget 운영 사례.
 - Jean-Sébastien Boulanger, Jörg Kienzle, Clark Verbrugge, *Comparing Interest Management Algorithms for Massively Multiplayer Games* (NetGames 2006) — 거리·셀·시야 기반 AOI 비교.

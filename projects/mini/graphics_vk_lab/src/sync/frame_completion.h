@@ -9,7 +9,12 @@
 //
 // SyncMode 에 따라 완료의 근거가 다르다.
 //   - Binary   : slot 마다 VkFence 하나. image 는 "마지막으로 이 image 를 쓴
-//                slot" 을 기억했다가 그 slot 의 fence 를 기다린다.
+//                slot" 을 기억했다가, 그 slot 의 fence 가 아직 그 제출의
+//                것일 때만 기다린다. slot 이 그 뒤 다시 제출됐다면 fence 는
+//                더 새 작업을 가리키고, slot 재사용 자체가 이전 제출의 완료를
+//                이미 보장했으므로 그 fence 를 기다리는 것은 과대 대기다.
+//                "아직 그 제출의 것인가" 는 모드와 무관한 단조 제출 일련번호
+//                를 slot 별·image 별로 남겨 비교한다.
 //   - Timeline : 단조 증가하는 값 하나. slot/image 각각의 마지막 signal 값을
 //                기억했다가 그 값을 기다린다.
 //
@@ -51,6 +56,11 @@ public:
     // Binary 모드에서 이 image 를 마지막으로 쓴 frame slot (없으면 kNoSlot).
     int LastSlotForImage(uint32_t image) const;
 
+    // Binary 모드에서 이 image 를 다시 쓰기 전에 fence 대기가 필요한가.
+    // 그 slot 의 fence 가 아직 이 image 를 쓴 제출의 것일 때만 true 이고,
+    // 이때 outSlot 에 기다릴 slot 을 넣는다.
+    bool NeedsFenceWait(uint32_t image, int& outSlot) const;
+
     uint64_t SlotValue(int slot) const;
     uint64_t ImageValue(uint32_t image) const;
 
@@ -62,6 +72,10 @@ private:
     std::vector<uint64_t> slotValues_;
     std::vector<uint64_t> imageValues_;
     std::vector<int>      imageSlots_;
+    // 모드와 무관한 단조 제출 일련번호. 0 은 "기록 없음".
+    uint64_t              nextSerial_ = 0;
+    std::vector<uint64_t> slotSerial_;
+    std::vector<uint64_t> imageSerial_;
 };
 
 }  // namespace vklab

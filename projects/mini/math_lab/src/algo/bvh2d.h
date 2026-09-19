@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace mathlab {
@@ -28,27 +29,33 @@ inline AABB2D AABBUnion(AABB2D a, AABB2D b) {
 // Ray vs AABB 2D (slab test). 분기 있는 안전 버전.
 inline bool RayAABB2D(Vector2 ro, Vector2 rd, AABB2D box,
                        float& tNear, float& tFar) {
-    tNear = -1e30f;
-    tFar  =  1e30f;
+    double near = -std::numeric_limits<double>::infinity();
+    double far = std::numeric_limits<double>::infinity();
     for (int i = 0; i < 2; ++i) {
-        float ri  = (i == 0) ? ro.x : ro.y;
-        float di  = (i == 0) ? rd.x : rd.y;
-        float lo  = (i == 0) ? box.min.x : box.min.y;
-        float hi  = (i == 0) ? box.max.x : box.max.y;
-        if (std::fabs(di) < 1e-8f) {
+        double ri = (i == 0) ? ro.x : ro.y;
+        double di = (i == 0) ? rd.x : rd.y;
+        double lo = (i == 0) ? box.min.x : box.min.y;
+        double hi = (i == 0) ? box.max.x : box.max.y;
+        if (di == 0.0) {
             if (ri < lo || ri > hi) return false;
         } else {
-            const float magnitude = std::max(std::fabs(di), 1e-8f);
-            const float invD = std::copysign(1.0f / magnitude, di);
-            float t0 = (lo - ri) * invD;
-            float t1 = (hi - ri) * invD;
+            double t0 = (lo - ri) / di;
+            double t1 = (hi - ri) / di;
             if (t0 > t1) std::swap(t0, t1);
-            tNear = std::max(tNear, t0);
-            tFar  = std::min(tFar,  t1);
-            if (tNear > tFar) return false;
+            near = std::max(near, t0);
+            far = std::min(far, t1);
+            if (near > far) return false;
         }
     }
-    return tFar >= 0;
+    const auto toFloat = [](double value) {
+        const double limit = std::numeric_limits<float>::max();
+        if (value > limit) return std::numeric_limits<float>::infinity();
+        if (value < -limit) return -std::numeric_limits<float>::infinity();
+        return static_cast<float>(value);
+    };
+    tNear = toFloat(near);
+    tFar = toFloat(far);
+    return far >= 0;
 }
 
 struct BVHNode2D {
@@ -176,7 +183,7 @@ inline RayTraversalResult BVH2D::Trace(const std::vector<AABB2D>& boxes,
                 float oTn, oTf;
                 if (RayAABB2D(ro, rd, boxes[(size_t)objIdx], oTn, oTf)) {
                     float t = std::max(oTn, 0.0f);
-                    if (t < r.hitT) {
+                    if (t <= r.hitT && (!r.hit || t < r.hitT)) {
                         r.hitT = t;
                         r.hit  = true;
                         r.hitObjIdx = objIdx;

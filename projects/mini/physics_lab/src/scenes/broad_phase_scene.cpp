@@ -286,10 +286,15 @@ void BroadPhaseScene::DrawWorld(int cx, int cy, int cw, int ch) {
     // SpatialHash 모드면 격자 점선 표시.
     if (algo_ == BroadAlgo::SpatialHash) {
         Color grid = {80, 84, 92, 100};
-        for (float x = (float)cx; x < (float)(cx + cw); x += cellSize_) {
+        // 셀 경계는 월드 원점 기준 (RunSpatialHash 의 floor(pos / c)) — 캔버스
+        // 원점 (cy = 32) 에서 시작하면 실제 셀과 어긋난 격자가 그려진다.
+        float c  = cellSize_ > 1.0f ? cellSize_ : 1.0f;
+        float x0 = std::floor((float)cx / c) * c;
+        float y0 = std::floor((float)cy / c) * c;
+        for (float x = x0; x < (float)(cx + cw); x += c) {
             DrawLine((int)x, cy, (int)x, cy + ch, grid);
         }
-        for (float y = (float)cy; y < (float)(cy + ch); y += cellSize_) {
+        for (float y = y0; y < (float)(cy + ch); y += c) {
             DrawLine(cx, (int)y, cx + cw, (int)y, grid);
         }
     }

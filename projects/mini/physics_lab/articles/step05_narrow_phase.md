@@ -307,7 +307,7 @@ bothAgree_      = agreeHit && agreeDepth;
 
 - **두 다각형 + contact normal**: 충돌이면 두 도형이 빨갛게 칠해지고 중앙에서 normal 방향 화살표가 *depth 의 4 배 길이* 로 그려진다 (depth 가 작으면 화살표가 짧음).
 - **depth 그래프**: 시간에 따른 penetration depth. 두 다각형을 슬슬 끌어가면 *0 → 양수 → 0* 으로 변하는 산.
-- **algo us 그래프**: SAT 와 GJK+EPA 의 시간 비교. *SAT 가 일관되게 더 빠름* — GJK 의 iteration overhead + EPA 의 polytope 확장 비용 때문. 다만 *원, 캡슐 같은 도형* 이 섞이면 SAT 가 동작 안 함 → GJK+EPA 만 남음.
+- **algo us 그래프**: SAT 와 GJK+EPA 의 시간 비교. *겹친 상태에서는 SAT 가 더 빠름* — GJK 의 iteration overhead + EPA 의 polytope 확장 비용 때문. 떨어져 있을 때는 EPA 가 돌지 않고 GJK 가 1 ~ 2 회 반복에 끝나 GJK+EPA 쪽이 오히려 빠를 수 있다. 다만 *원, 캡슐 같은 도형* 이 섞이면 SAT 가 동작 안 함 → GJK+EPA 만 남음.
 - **vertices / radius 슬라이더**: 다각형 모양 변경. *vertices 가 많을수록 SAT 가 비례해서 느려짐*. GJK 는 *iteration 수가 거의 안 변함* — N 에 대해 더 좋게 스케일.
 - **cross-check 결과**: SAT 와 GJK+EPA 의 hit / depth 가 매 frame 비교. 일치하면 *agree*, 다르면 *DISAGREE 빨간 띠*.
 
@@ -395,7 +395,7 @@ ctest --test-dir build -C Release -R step05 --output-on-failure
 
 세 번째가 특히 중요하다. 깊이 식을 MTD 로 바꾸면 *최소 축이 달라질 수 있어* 법선 결정 로직도 같이 맞춰야 하는데, 이 검사가 그 둘이 따로 놀지 않는지를 본다. 옛 식으로 되돌려 보면 이 타깃은 65 개 CHECK 가 깨진다.
 
-45 도 배치를 못 박은 네 줄이 그 회귀를 붙잡는 자리다. 마지막 줄이 핵심이다 — 두 값이 0.41 만큼 떨어져 있으므로 이 검사는 허용 오차를 조이는 것이 아니라 *식 자체* 를 고정한다.
+45 도 배치를 못 박은 네 줄이 그 회귀를 붙잡는 자리다. 세 번째 줄이 핵심이다 — 두 값이 0.41 만큼 떨어져 있으므로 이 검사는 허용 오차를 조이는 것이 아니라 *식 자체* 를 고정한다.
 
 <!-- snippet: tests/physics_collision_tests.cpp@mtd-vs-intersection -->
 ```cpp

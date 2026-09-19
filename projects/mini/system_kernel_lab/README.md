@@ -143,7 +143,7 @@ system_kernel_lab/
 ## 빌드와 실행
 
 ```bash
-./scripts/install_deps.sh        # SDL2, liburing 등 (Ubuntu/Debian)
+bash scripts/install_deps.sh     # SDL2, liburing 등 (Ubuntu/Debian)
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ctest --test-dir build --output-on-failure
@@ -185,10 +185,12 @@ export SKL_CGROUP_DIR=/sys/fs/cgroup/<delegated-benchmark-cgroup>
 종료에서는 원래 `cpu.weight` 복구를 시도하지만, 강제 종료까지 복구할 수
 있다는 보장은 없으므로 공유 cgroup에는 사용하지 않는다.
 
-`SCHED_FIFO` 성공 경로, 위임 cgroup의 `cpu.weight` 쓰기·복구, 경쟁 부하에서의
-스케줄링 비교, 베어메탈 대조 측정은 권한이나 별도 환경을 요구해 WSL2에서 닫지
-못했다. 그 항목들을 다른 리눅스 기기에서 어떤 명령으로 돌리고 무엇이 나오면
-통과인지는 `docs/LINUX_HANDOFF.md`에 있다. 같은 문서가 **리눅스 기기에서도
+`SCHED_FIFO` 성공 경로와 위임 cgroup의 `cpu.weight` 쓰기·복구는 권한이 필요해
+무권한 기본 실행에서는 폴백만 검사하지만, 2026-08-24 `wsl -u root`로 WSL2 안에서
+성공 경로까지 닫았다(`SKL_REQUIRE_SCHED=fifo,cgroup` EXIT=0, `cpu.weight`
+100→200→100 복구, 무권한 ctest 25/25 유지). 경쟁 부하에서의 스케줄링 비교와
+베어메탈 대조 측정은 아직 닫지 못했다. 그 항목들을 어떤 명령으로 돌리고 무엇이
+나오면 통과인지는 `docs/LINUX_HANDOFF.md`에 있다. 같은 문서가 **리눅스 기기에서도
 닫을 수 없는 항목**(FIFO 위 aio/uring 부분 읽기, pread·mmap의 FIFO EINTR,
 io_uring 취소의 `-ECANCELED`)과 그 규약이 이미 닫혔는지도 구분해 둔다.
 

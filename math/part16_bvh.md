@@ -127,7 +127,6 @@ std::vector<int>     objectIndices;  // leaf 가 가리키는 객체 배열
 | AABB | 24 B | 빠름 (변환마다 재계산) | 보통 | 빠름 |
 | OBB | 60+ B | 느림 (회전 따라 갱신) | 타이트 | 느림 |
 | K-DOP | 가변 | 보통 | 가변 | 보통 |
-| Slab | 가변 | 보통 | 보통 | 보통 |
 
 ### 2.2 AABB — 표준
 
@@ -342,7 +341,7 @@ $$
 
 - **자식 박스 표면적 작아야** — 좌·우 자식이 *타이트* 할수록 좋음.
 - **면적과 객체 비용의 결합** — 객체 수가 한쪽에 많아도 그 자식의 면적과 primitive 비용이 충분히 작으면 좋은 분할일 수 있다. 단순한 count 균형이 목적은 아니다.
-- **자식 표면적 합 < 부모 표면적** — 자식이 *겹쳐도* OK 일 수 있다 (객체 수가 균형 잡히면).
+- **자식 표면적 합이 부모보다 커도 이득일 수 있다** — 균형 분할 ($N_L = N_R = N/2$) 이면 $\text{SA}(L) + \text{SA}(R) < (2 - 2C_T/(N C_I)) \cdot \text{SA}(P)$ 까지 분할이 leaf 보다 싸다. 자식이 *겹쳐도* OK 일 수 있다.
 
 단순 median 분할이 *항상 최적은 아님*. *겹쳐도 객체 분포 적합* 한 분할이 더 좋을 수 있다.
 
@@ -402,9 +401,9 @@ bool EvaluateSplitsBinned(std::vector<int>& objs, int begin, int end,
 
 ### 4.6 PBRT 와 산업
 
-*PBRT* (Physically Based Rendering Toolkit) 가 *binned SAH* 의 교과서적 구현. NVIDIA OptiX, Embree, RTX BVH 가 모두 *binned SAH* 또는 변형 사용.
+*PBRT* (*Physically Based Rendering: From Theory to Implementation*) 가 *binned SAH* 의 교과서적 구현. NVIDIA OptiX, Embree, RTX BVH 가 모두 *binned SAH* 또는 변형 사용.
 
-게임 엔진의 BVH 빌드는 *binned SAH* 가 거의 표준. *오프라인 빌드* 는 *전체 SAH (n²)*, *런타임 빌드* 는 *binned*.
+게임 엔진의 BVH 빌드는 *binned SAH* 가 거의 표준. *오프라인 빌드* 는 *전체 sweep SAH (naive n², 정렬 + prefix/suffix 로 n log n)*, *런타임 빌드* 는 *binned*.
 
 ### 4.7 SAH 의 한계
 
@@ -459,7 +458,7 @@ flowchart LR
 
 ### 5.3 LBVH 알고리즘
 
-Tero Karras 의 *Linear BVH* (2012). GPU 친화적 $O(n)$ 빌드.
+Lauterbach 외의 *Linear BVH* (2009) 와 Karras 의 완전 병렬 트리 구성 (2012). GPU 친화적 $O(n)$ 빌드.
 
 1. 각 객체 중심점 → *Morton code*.
 2. Morton code 순으로 *정렬*.
@@ -658,7 +657,7 @@ void SweepAndPrune(std::vector<AABB>& boxes,
 }
 ```
 
-*객체 분포가 한 축으로 잘 나뉘면* 매우 효율적. *동적 갱신* 도 *증분 정렬* 로 빠름. Bullet · Box2D 등에서 *대안 broad phase*.
+*객체 분포가 한 축으로 잘 나뉘면* 매우 효율적. *동적 갱신* 도 *증분 정렬* 로 빠름. Bullet (`btAxisSweep3`) 등에서 *대안 broad phase* (Box2D 는 dynamic tree 를 쓴다).
 
 ### 7.4 BVH vs Sweep and Prune
 
@@ -676,7 +675,7 @@ void SweepAndPrune(std::vector<AABB>& boxes,
 
 Octree 로 *공간 분할* 후 각 셀 안에 *BVH* — 두 패러다임의 결합. 큰 환경의 *정적 BVH + 영역별 동적 BVH*.
 
-UE5 의 *Lumen* 같은 시스템이 이런 *계층적 가속 구조*. 각 LOD 별 BVH, 각 노드 안에 하위 BVH.
+DXR / OptiX 의 *TLAS + BLAS* 가 이런 *계층적 가속 구조* 의 대표 — 인스턴스 단위 상위 BVH, 각 인스턴스 안에 메시별 하위 BVH.
 
 ## 8. 레이 트래버설과 GPU BVH
 
@@ -730,7 +729,7 @@ bool TraceRay(vec3 ro, vec3 rd, RayHit& bestHit) {
                 }
             }
         } else {
-            // inner — 두 자식 push (가까운 자식을 나중에 push 해서 먼저 pop)
+            // inner — 두 자식 push (left 가 먼저 pop 되는 고정 순서 — 가까운 자식 우선은 8.3절)
             stack.push(node.rightChild);
             stack.push(node.leftChild);
         }
@@ -779,7 +778,7 @@ flowchart LR
     RTCore --- BVH[BVH 데이터]
 ```
 
-소프트웨어 BVH 트래버설 대비 *5~10x 가속*. 게임의 실시간 레이트레이싱 가능.
+소프트웨어 BVH 트래버설 대비 *5~10x 가속* 은 벤더 발표 기준의 예시 수치다 — 비교 대상 (같은 GPU 의 컴퓨트 셰이더인지, 이전 세대인지) 과 씬·광선 분포에 따라 달라 직접 측정한다. 게임의 실시간 레이트레이싱 가능.
 
 API: DXR (DirectX Raytracing), Vulkan Ray Tracing, OptiX. 모두 *BLAS + TLAS* 패턴 (6.5절).
 
@@ -813,11 +812,11 @@ BVH 는 *객체 자체를 트리로 묶는* 가속 구조. 빈 공간을 분할�
 
 ## 더 읽을거리
 
-- Tero Karras, "Maximizing Parallelism in the Construction of BVHs, Octrees, and k-d Trees" (HPG, 2012) — LBVH 원전.
+- Tero Karras, "Maximizing Parallelism in the Construction of BVHs, Octrees, and k-d Trees" (HPG, 2012) — LBVH 의 완전 병렬 트리 구성. LBVH 원전은 Lauterbach, Garland, Sengupta, Luebke, Manocha, "Fast BVH Construction on GPUs" (Eurographics, 2009).
 - Ingo Wald, "On Fast Construction of SAH-based Bounding Volume Hierarchies" (IEEE Symposium on Interactive Ray Tracing, RT07, 2007) — binned SAH 표준.
 - Pharr, Jakob, Humphreys, *Physically Based Rendering* (PBRT), Ch. 4 — SAH BVH 의 교과서.
 - *Real-Time Rendering*, 4th ed., Ch. 19, 26 — BVH 와 레이트레이싱.
-- NVIDIA OptiX 7 Programming Guide — BLAS/TLAS 산업 패턴.
+- NVIDIA OptiX 7 Programming Guide — GAS/IAS (BLAS/TLAS 에 대응하는 OptiX 용어) 2단계 가속 구조 패턴.
 - DXR Spec (Microsoft) — DirectX Raytracing API.
 - Bullet Physics 소스 (`btDbvt.cpp`) — 동적 BVH 산업 구현.
 - Embree (Intel) — 산업 표준 CPU BVH 라이브러리.

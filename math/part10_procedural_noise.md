@@ -76,7 +76,7 @@ Value Noise > Perlin > Simplex 순으로 격자 아티팩트가 *줄어든다*. 
 
 ### 1.5 빠른 평가
 
-게임의 노이즈는 *수만~수백만 점에서* 호출. 한 호출의 비용이 *마이크로초 단위* 여야 *프레임 안에 끝난다*.
+게임의 노이즈는 *수만~수백만 점에서* 호출. 한 호출의 비용이 *수십 나노초 단위* 여야 *프레임 안에 끝난다*.
 
 호출 비용의 상대 순위도 구현에 따라 바뀐다. permutation table 접근, hash 방식, SIMD batch, derivative 동시 계산, CPU cache와 GPU shader compiler를 포함해 같은 octave 수와 품질에서 측정해야 한다. 차원이 커지면 hypercube의 $2^n$ corner를 평가하는 고전 Perlin 방식보다 simplex의 기여 corner 수가 유리해지는 경향은 있다.
 
@@ -143,7 +143,7 @@ float ValueNoise2D(float px, float py) {
 | Smoothstep | $f^2 (3 - 2f)$ | C1 |
 | Quintic | $f^3 (10 - 15f + 6f^2)$ | C2 |
 
-게임에서 *smoothstep* 이 표준. 라이팅 계산이 *법선 (미분 1번)* 을 쓰니 C1 이면 충분. C2 가 필요한 곳 (예: 곡률 기반 셰이더) 에서만 quintic.
+값만 쓰는 마스크·임계값 용도에는 *smoothstep* 으로 충분. 라이팅이 *법선 (미분 1번)* 을 쓰면 C1 만으로는 *2차 미분 불연속이 셀 경계의 주름* 으로 보이므로 (Perlin 2002 의 개선 동기), 셰이딩용 노이즈는 quintic 이 기본.
 
 ### 2.3 격자 아티팩트
 
@@ -284,7 +284,7 @@ n차원에서 *최소 점 수로 만드는 부피*. 2D 삼각형 (3점), 3D 사�
 flowchart LR
     Grid[격자 셀<br/>2D = 4 코너<br/>3D = 8 코너<br/>4D = 16 코너] --> Simplex[단순체<br/>2D = 3 코너<br/>3D = 4 코너<br/>4D = 5 코너]
     Grid --> Cost[차원 비용 O 2^n]
-    Simplex --> Cost2[차원 비용 O n+1]
+    Simplex --> Cost2[차원 비용 O n^2]
 ```
 
 코너 수가 적어 *차원 비용이 $O(n^2)$ 에 가깝다*. Perlin의 $O(2^n)$ 보다 훨씬 *고차원 친화적*.
@@ -298,7 +298,7 @@ Simplex 평가는 *입력 좌표를 simplex 좌표계로 변환* 후 *각 단순
 1. 입력 좌표를 *왜곡 (skew)* 해서 격자가 simplex 정렬되도록.
 2. 그 격자에서 *현재 포함된 단순체* 의 코너들 (n+1 개) 식별.
 3. 각 코너에서 *그래디언트 + 거리 기반 기여* 계산.
-4. 합산 후 다시 원래 좌표계로.
+4. 기여 합산 후 정규화 상수를 곱해 [-1, 1] 범위로. 좌표 복원 (un-skew) 은 코너 식별 전에 이미 끝남.
 
 ```cpp
 // 의사 코드
@@ -329,7 +329,7 @@ float SimplexNoise2D(float x, float y) {
 }
 ```
 
-코드가 *복잡하다*. 직접 구현하기보다 *공인된 라이브러리* (예: stb_perlin) 를 쓰는 게 일반적.
+코드가 *복잡하다*. 직접 구현하기보다 *공인된 라이브러리* (예: FastNoise2, OpenSimplex2) 를 쓰는 게 일반적.
 
 ### 4.3 Simplex의 장점
 
@@ -520,7 +520,7 @@ float MultiWarpNoise(vec2 p) {
 }
 ```
 
-Quilez의 *fbm of fbm* 패턴. 더 *복잡하고 자연스러운* 결과. 비용은 호출 N배.
+Quilez의 *fbm of fbm* 패턴을 단일 옥타브 noise로 줄인 형태 — 각 호출을 FBM 으로 바꾸면 원 패턴이 된다. 더 *복잡하고 자연스러운* 결과. 비용은 noise 호출 5배 (FBM 이면 옥타브 수만큼 더).
 
 ### 6.5 게임 응용
 
@@ -713,6 +713,7 @@ bool ShouldSpawnEnemy(float x, float z, uint64_t worldSeed) {
     float densityRaw = SimplexNoise2D(x * 0.05f, z * 0.05f);  // [-1, 1]
     float density01  = densityRaw * 0.5f + 0.5f;              // [0, 1]로 매핑
     float threshold  = 0.3f;
+    // Hash(x, z, seed): 2.1의 Hash(int, int) 를 좌표 정수화 + 시드 혼합까지 확장한 [0, 1) 해시 (정의 생략)
     return density01 > threshold && Hash(x, z, worldSeed) < density01;
 }
 ```

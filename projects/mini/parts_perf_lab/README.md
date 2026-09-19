@@ -91,7 +91,7 @@ parts_perf_lab/
 - 컨테이너 세 종류(vector / std::list / intrusive)의 **결과 동등성** — 같은 시드로 채운 노드 수가 정확히 같고 합산 결과가 순회 순서 차이만큼만 다르다.
 - `EventBenchmark` 프레임 계약 — 4종 할당자 각각에서 프레임 종료 시 `LiveBytes() == 0`, `LastFrameAllocCount() == Target()`, Arena의 bump pointer가 0으로 되돌아온다.
 - `{SoA, AoS, Archetype} x {Scalar, SSE} x {branchless off, on}` 12조합(AVX2 빌드에서는 18조합)이 모두 같은 결과를 낸다. 엔티티 수 513은 SIMD 잔여(513%4=1)와 Archetype 부분 chunk(2\*256+1)를 동시에 자극한다.
-- 경계 반사 불변식 — 갱신 후 모든 엔티티가 뷰포트 안에 있고, `|velX|`·`|velY|`가 성분별로 보존되며, 좁은 뷰포트에서 엔티티마다 실제로 속도 부호가 뒤집힌다.
+- 경계 반사 불변식 — 갱신 후 모든 엔티티가 뷰포트 안에 있고, `|velX|`·`|velY|`가 성분별로 보존되며, 좁은 뷰포트에서 대다수 엔티티의 속도 부호가 실제로 뒤집힌다.
 
 ## 빌드와 실행
 
@@ -152,4 +152,4 @@ ctest --test-dir build_avx2 -C Release --output-on-failure
 
 ## 거대 프로젝트와의 관계
 
-거대 프로젝트의 `memory`, `containers`, `ecs` 모듈은 현재 디펜스 제품 경로에 억지로 연결하지 않고 독립 테스트로 검증한다. 이 lab은 해당 모듈을 다른 제품 경로에 채택할 때 사용할 판단 근거를 만든다. 프레임 Arena·Pool·Slab의 수명 계약, SoA·AoS·Archetype의 순회 비용, 스칼라·SIMD 경로의 결과 동등성을 같은 워크로드에서 측정한다.
+거대 프로젝트의 `memory`, `containers`, `ecs` 모듈은 현재 디펜스 제품 경로에서 모두 쓰이고 있고, 그 위에 독립 테스트가 따로 붙어 있다. 이 lab은 그 모듈을 다른 제품 경로에 채택하거나 대안을 고를 때 사용할 판단 근거를 만든다. 프레임 Arena·Pool·Slab의 수명 계약, SoA·AoS·Archetype의 순회 비용, 스칼라·SIMD 경로의 결과 동등성을 같은 워크로드에서 측정한다.

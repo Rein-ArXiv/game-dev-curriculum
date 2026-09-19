@@ -13,8 +13,8 @@
 | 결과 | max delta | 의미 |
 |---|---|---|
 | BIT-EXACT REPEATABLE | 정확히 0.0 | 이 프로세스의 두 실행이 일치. lockstep의 필요조건일 뿐 충분조건은 아님. |
-| tolerantly deterministic | $\varepsilon$ 이하 (예: < 0.001 px) | SIMD reduce 순서 / floating-point arithmetic 의 영향. 게임 *실행* 은 문제 없지만 lockstep 은 위험. |
-| NON-DETERMINISTIC | $\varepsilon$ 초과 | 시뮬이 갈라짐. 멀티스레딩의 race / 부동소수 결합법칙 / RNG 순서 변경. |
+| NEAR-REPEATABLE | $\varepsilon$ 이하 (예: < 0.001 px) | SIMD reduce 순서 / floating-point arithmetic 의 영향. 게임 *실행* 은 문제 없지만 lockstep 은 위험. |
+| RUNS DIVERGED | $\varepsilon$ 초과 | 시뮬이 갈라짐. 멀티스레딩의 race / 부동소수 결합법칙 / RNG 순서 변경. |
 
 대부분의 게임 엔진은 *기본적으로 non-deterministic*. *결정성을 보장하려면* 명시적 노력 필요 — fixed dt + 동일 순서 reduce + cross-platform float consistency + 결정적 RNG.
 
@@ -47,7 +47,7 @@ class MeasureScene : public IScene {
         auto runOnce = [&]() {
             std::vector<MeasureBody> sim;
             InitBodies(sim, N_, seed_);
-            for (int s = 0; s < testFrames_; ++s) StepSim(sim, 1/120);
+            for (int s = 0; s < testFrames_; ++s) StepSim(sim, 1.0f / 120.0f);
             return sim;
         };
         auto a = runOnce();
@@ -141,7 +141,7 @@ void RunDeterminismTest() {
     auto runOnce = [&]() {
         std::vector<MeasureBody> sim;
         InitBodies(sim, N_, seed_);
-        for (int s = 0; s < testFrames_; ++s) StepSim(sim, 1/120);
+        for (int s = 0; s < testFrames_; ++s) StepSim(sim, 1.0f / 120.0f);
         return sim;
     };
     auto a = runOnce();
@@ -168,13 +168,13 @@ void RunDeterminismTest() {
 ```cpp
 if (maxD == 0.0f) {                         // 정확히 같음
     DrawRectangle(... GREEN ...);
-    Label("BIT-EXACT DETERMINISTIC");
+    Label("BIT-EXACT REPEATABLE (THIS RUN)");
 } else if (maxD < 1e-3f) {                  // 0.001 px 이하
     DrawRectangle(... YELLOW ...);
-    Label("tolerantly deterministic");
+    Label("NEAR-REPEATABLE (THIS RUN)");
 } else {
     DrawRectangle(... RED ...);
-    Label("NON-DETERMINISTIC");
+    Label("RUNS DIVERGED");
 }
 ```
 
@@ -188,7 +188,7 @@ if (maxD == 0.0f) {                         // 정확히 같음
 
 깰 수 있는 변경들 (실험 가능).
 
-1. **iter 안의 contact 순서를 frame 마다 바꿈** — 예: contact 를 `std::random_shuffle` 로 섞기. SI 의 *Gauss-Seidel 풀이* 는 *순서 의존* 이라 결과가 다르다.
+1. **iter 안의 contact 순서를 frame 마다 바꿈** — 예: contact 를 `std::shuffle` 로 섞기. SI 의 *Gauss-Seidel 풀이* 는 *순서 의존* 이라 결과가 다르다.
 2. **multithread 로 contact 병렬 처리** — `parallel_for(contacts, ...)`. 같은 contact 에 대한 갱신이 *경쟁* → race condition. 정확히 *같은 reduce* 순서가 보장 안 됨.
 3. **RNG 를 시뮬 도중 사용** — 예: penalty 의 noise. `std::mt19937` 의 *호출 순서* 가 *thread 마다* 다르면 깨짐.
 4. **floating-point optimization flags** — `-ffast-math` (GCC), `/fp:fast` (MSVC)는 재결합과 contraction을 허용한다. 같은 바이너리가 프레임마다 다른 최적화 패스를 택하는 것은 아니지만, 빌드·아키텍처·벡터화 폭이 달라지면 연산 순서와 반올림이 달라질 수 있다.
@@ -218,7 +218,7 @@ Step 8 에서 추가한 것 — 그리고 lab 전체의 마무리.
 
 1. **MeasureScene 의 Live 시뮬 + Run determinism 버튼** — 같은 `StepSim` 코드를 *Live 한 step* 과 *동기적 결정성 테스트* 양쪽에 재사용. 그리고 그 `StepSim` 은 Response 와 *같은* 접촉 솔버(`src/core/contact_solver.h`)를 돈다 — 측정 대상이 교재의 솔버 그 자체다.
 2. **결정성 3 분류** — bit-exact / tolerantly deterministic / non-deterministic. UI 가 색띠로 즉시 분류.
-3. **종합 측정** — Live 의 *avg penetration* + *total KE* 시간 그래프. seed / N / iter 토글이 바뀌면 그래프가 재시작.
+3. **종합 측정** — Live 의 *avg penetration* + *total KE* 시간 그래프. seed / N 이 바뀌면 그래프가 재시작하고, iter 는 곡선을 이어 그린 채 즉시 반영된다.
 4. **physics_lab 전체** — Step 1 (skeleton + fixed dt accumulator) → Step 2 (integrators) → Step 3 (forces) → Step 4 (broad phase) → Step 5 (narrow phase) → Step 6 (response) → Step 7 (constraints) → Step 8 (measure). *physics 시리즈의 part01·02 (운동학·적분기), part05 (Broad Phase), part06·07 (SAT / GJK+EPA), part08 (법선 응답), part10·11·12 (제약·SI·PBD)* 를 인터랙티브하게 검증하는 *측정 도구* 완성. 마찰 (part09), 회전 강체 동역학 (part03·04), 조인트 (part13), part14~20 은 대응 구현이 없다.
 
 전체 실행:

@@ -66,9 +66,9 @@ void SdfScene::RebuildTextureIfNeeded(int cx, int cy, int cw, int ch) {
 
     // 캔버스 좌표를 [0, texW_) × [0, texH_) 로 매핑.
     for (int j = 0; j < texH_; ++j) {
-        float py = (float)cy + ((float)j / (float)texH_) * (float)ch;
+        float py = (float)cy + (((float)j + 0.5f) / (float)texH_) * (float)ch;
         for (int i = 0; i < texW_; ++i) {
-            float px = (float)cx + ((float)i / (float)texW_) * (float)cw;
+            float px = (float)cx + (((float)i + 0.5f) / (float)texW_) * (float)cw;
             float d = SampleSDF({px, py});
 
             // 거리 기반 grayscale: 안쪽은 어둡게, 바깥쪽은 밝게.
@@ -170,10 +170,8 @@ void SdfScene::DrawWorld(int cx, int cy, int cw, int ch) {
 
     centerA_.Draw(Color{255, 200, 80, 255}, "A");
     centerB_.Draw(Color{120, 200, 255, 255}, "B");
-    if (showRay_) {
-        rayStart_.Draw(Color{120, 220, 120, 255}, "ro");
-        rayEnd_.Draw(Color{220, 120, 220, 255}, "rd");
-    }
+    rayStart_.Draw(Color{120, 220, 120, 255}, "ro");
+    rayEnd_.Draw(Color{220, 120, 220, 255}, "rd");
 
     const char* opName = (op_ == Op::Union)    ? "Union (min)"
                           : (op_ == Op::Smin)    ? "Smooth Min"

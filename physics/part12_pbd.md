@@ -349,7 +349,7 @@ PBD 로 강체 관절도 가능. *XPBD with rigid bodies* (Müller et al., SCA 2
 
 - Hinge: 두 강체의 위치 + 한 회전축 일치.
 - Ball: 위치 일치만.
-- Slider: 위치 + 한 회전축 자유 + 한 이동축 자유.
+- Slider: 회전 정렬 (고정) + 한 이동축만 자유.
 
 쿼터니언으로 회전 제약 표현. 자세한 건 XPBD 논문.
 
@@ -431,7 +431,7 @@ $$
 
 여기서 $\tilde{\alpha} = \alpha / \Delta t^2$. 두 식을 연립해 $\lambda$ 와 $\vec{x}^{n+1}$ 동시 풀이.
 
-이 $\lambda$ 는 $\Delta t^2$ 를 흡수한 값이라 $[\lambda] = \text{kg} \cdot \text{m}$ 이며, 11편 sequential impulse 의 임펄스 $\lambda$ (단위 $\text{N} \cdot \text{s}$) 와 다르다. 임펄스로 환산하려면 $\lambda / \Delta t$ 를 쓴다.
+이 $\lambda$ 는 $\Delta t^2$ 를 흡수한 값이라 $[\lambda] = \text{kg} \cdot \text{m}$ 이며, sequential impulse 의 임펄스 $\lambda$ (단위 $\text{N} \cdot \text{s}$) 와 다르다. 임펄스로 환산하려면 $\lambda / \Delta t$ 를 쓴다.
 
 ### 6.3 lambda 갱신
 
@@ -523,6 +523,7 @@ const float kSubDt = dt / kSubSteps;       // dt = 1/60, kSubSteps = 8 → kSubD
 
 for (int s = 0; s < kSubSteps; ++s) {
     Predict(particles, kSubDt);
+    for (auto& c : constraints) c.ResetLambda();   // substep = 독립 solve window
     for (int iter = 0; iter < 1; ++iter) {   // iter = 1 권장
         for (auto& c : constraints) c.Project(particles, kSubDt);
     }
@@ -619,6 +620,6 @@ PBD 계열의 핵심은 *위치 예측 → 제약 투영 → 속도 재구성* �
 - Macklin, Müller, Chentanez, Kim, "Unified Particle Physics for Real-Time Applications" (SIGGRAPH 2014) — Flex 의 통합 입자 솔버.
 - Macklin, Storey, Lu, Terdiman, Chentanez, Jeschke, Müller, "Small Steps in Physics Simulation" (SCA 2019) — substepping > iteration 의 근거.
 - NVIDIA Flex SDK 문서 — 산업 PBD/XPBD 구현.
-- Bender et al., "Position-Based Simulation Methods in Computer Graphics" (Eurographics 2014) — survey.
+- Bender, Müller, Otaduy, Teschner, Macklin, "A Survey on Position-Based Simulation Methods in Computer Graphics" (Computer Graphics Forum 33(6), 2014) — survey.
 - Jakobsen, "Advanced Character Physics" (GDC 2001) — Verlet + 제약 (PBD 의 전신).
 - Unity / Unreal 의 cloth 문서 — 산업 적용 사례.

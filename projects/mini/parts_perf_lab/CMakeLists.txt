@@ -19,7 +19,7 @@ endif()
 include(FetchContent)
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
-set(SUPPORT_MODULE_RAUDIO OFF CACHE BOOL "" FORCE)  # 오디오 불필요
+set(SUPPORT_MODULE_RAUDIO OFF CACHE BOOL "" FORCE)  # 오디오 불필요(다만 raylib 5.0 은 CUSTOMIZE_BUILD=ON 일 때만 이 옵션을 읽으므로 raudio.c 는 그대로 빌드된다)
 
 FetchContent_Declare(
     raylib

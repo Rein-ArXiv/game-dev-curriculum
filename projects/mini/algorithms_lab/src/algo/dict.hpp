@@ -104,10 +104,10 @@ public:
 
 private:
     struct Node { std::string key; int64_t value; size_t next; bool dead; };
-    static const size_t kNil = size_t(-1);
+    static constexpr size_t kNil = size_t(-1);   // constexpr 라야 odr-use(vector::assign 의 const& 인자)에 정의가 붙는다
 
     size_t Bucket(const std::string& key) const {
-        return size_t(HashKey(key, seed_) & uint64_t(bucket_.size() - 1));
+        return size_t(HashKey(key, seed_) % uint64_t(bucket_.size()));   // 버킷 수가 2의 거듭제곱이 아니어도 전 버킷에 닿는다
     }
     void Rehash(size_t buckets) {
         std::vector<Node> old;

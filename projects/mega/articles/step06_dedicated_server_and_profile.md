@@ -100,6 +100,7 @@ IPv4 가 아니면 빈 문자열을 돌려준다. 서버는 그 빈 문자열을
 struct ClientSession {
     net::UdpEndpoint     endpoint;
     live::GameAdmission  admission;
+    wire::AdmissionGrant grant;
     // 클라이언트당 신뢰·순서 수신. 클라이언트가 1번부터 센다.
     net::ReliableOrderedReceiver<wire::Command> commands{1};
     // ...
@@ -109,7 +110,7 @@ struct ClientSession {
 
 **신뢰 수신 채널이 클라이언트마다 하나씩** 있다. 이것이 없으면 두 클라이언트의 시퀀스가 섞인다 — 둘 다 1부터 세므로, 하나의 채널에 넣으면 두 번째 클라이언트의 1번이 첫 번째의 중복으로 버려진다.
 
-`admission` 을 세션이 들고 있는 이유는 재접속 처리다. 같은 끝점에서 Hello 가 다시 오면 **토큰 id 가 같은지** 확인한다. 다르면 다른 사람이 그 끝점을 물려받았다는 뜻이므로 거부한다.
+`admission` 을 세션이 들고 있는 이유는 같은 끝점의 Hello 재시도를 처리하기 위해서다. 토큰·플레이어·매치 ID가 기존 세션과 같은지 확인하고, 명단과 콘텐츠 검사도 다시 통과해야 한다. `grant`에는 최초 승인 배정을 보관한다. 승인 패킷이 유실되어도 같은 배정을 재전송하고 세션을 새로 만들지 않는다. 이는 끝점이 바뀌는 재접속 지원과는 다르다.
 
 ## 3. 서비스 사이클: 수신 → 시뮬 → 방송
 
@@ -123,7 +124,7 @@ void Step(Clock::time_point now) {
         simulationStarted_ = true;
         nextTick_ = now;
         std::printf("[match] start id=%s capacity=%zu\n", activeMatch_.c_str(),
-                    matches_.Capacity(activeMatch_));
+                    kServerMaximumPlayers);
     }
 
     if (simulationStarted_ && now >= nextTick_) {
@@ -302,17 +303,6 @@ void AdmitClient(const net::UdpDatagram& datagram, const std::string& endpointKe
         ++rejectedPackets_;
         return;
     }
-    auto existingClient = clients_.find(endpointKey);
-    if (existingClient != clients_.end()) {
-        if (existingClient->second.admission.tokenId != admission.tokenId) {
-            ++rejectedPackets_;
-        } else {
-            existingClient->second.endpoint = datagram.sender;
-            existingClient->second.lastSeen = now;
-            // ...
-        }
-        return;
-    }
     const auto tokenOwner = tokenEndpoints_.find(admission.tokenId);
     const auto playerOwner = playerEndpoints_.find(admission.playerId);
     const bool tokenConflict = tokenOwner != tokenEndpoints_.end() &&
@@ -320,12 +310,38 @@ void AdmitClient(const net::UdpDatagram& datagram, const std::string& endpointKe
     const bool playerConflict = playerOwner != playerEndpoints_.end() &&
                                 playerOwner->second != endpointKey;
     // ...
-    if (!matches_.Allows(admission.matchId, wire::PlayerKey(admission.playerId))) {
+    const bool external = !options_.assignedMatchId.empty();
+    // ...
+    const bool isAssigned = external
+        ? admission.matchId == options_.assignedMatchId &&
+          std::find(options_.assignedPlayers.begin(), options_.assignedPlayers.end(),
+                    admission.playerId) != options_.assignedPlayers.end()
+        : matches_.Allows(admission.matchId, wire::PlayerKey(admission.playerId));
+    if (!isAssigned || (!activeMatch_.empty() && activeMatch_ != admission.matchId)) {
         ++rejectedPackets_;
         return;
     }
     // ...
-    const size_t capacity = matches_.Capacity(admission.matchId);
+    auto existingClient = clients_.find(endpointKey);
+    if (existingClient != clients_.end()) {
+        ClientSession& session = existingClient->second;
+        if (session.admission.tokenId != admission.tokenId ||
+            session.admission.playerId != admission.playerId ||
+            session.admission.matchId != admission.matchId) {
+            ++rejectedPackets_;
+        } else {
+            session.lastSeen = now;
+            session.window.OnReceived(framing.seq);
+            session.baselines.Acknowledge(framing);
+            // ...
+            socket_.SendTo(session.endpoint, wire::WriteAdmissionGrant(
+                session.grant, session.window.Header(session.seq.Next())));
+            ++grantsSent_;
+        }
+        return;
+    }
+    const size_t capacity = external ? options_.assignedPlayers.size()
+                                     : matches_.Capacity(admission.matchId);
     const bool full = clients_.size() >= capacity ||
                       clients_.size() >= kServerMaximumPlayers;
     if (tokenConflict || playerConflict || full) {
@@ -357,7 +373,9 @@ void AdmitClient(const net::UdpDatagram& datagram, const std::string& endpointKe
 
 `tokenEndpoints_` 와 `playerEndpoints_` 를 **따로** 두는 것도 의도다. 한 플레이어가 서로 다른 두 토큰을 발급받는 경우가 있을 수 있고(재시도), 그때도 플레이어 단위 중복은 막아야 한다.
 
-**같은 끝점의 재-Hello 는 갱신으로 처리한다.** 클라이언트는 500ms 마다 Hello 를 보내므로(5편) 정상 운영에서 이 경로가 계속 밟힌다. 그때마다 새 세션을 만들면 명령 시퀀스가 초기화된다.
+**같은 끝점의 재-Hello 는 갱신과 승인 재전송으로 처리한다.** 클라이언트는 500ms 마다 Hello 를 보내므로 정상 운영에서 이 경로가 계속 밟힌다. 그때마다 새 세션을 만들면 명령 시퀀스가 초기화된다.
+
+명단은 제품 내부 queue가 형성하거나, 신뢰된 로컬 제어 프로세스가 서버의 `--match-id`와 두 `--player-id`로 전달한다. 후자는 Live Service의 외부 배정을 사용하는 모드다. 이 모드에서는 UDP queue 요청으로 명단을 바꿀 수 없으며 원문 플레이어 ID를 비교한다. 스크립트 `scripts/check_live_mega.ps1`이 API 로그인·배정부터 실제 입장까지 이 경로를 검사한다.
 
 ## 6. 상수 시간 비교와 오프라인 검증
 
@@ -727,7 +745,7 @@ Total Test time (real) =   3.32 sec
 [test] defense_progression: 15 checks, 0 failures
 ```
 
-`test_dedicated_process` 가 3.1초 걸리는 것은 **진짜 서버 프로세스를 띄우기 때문**이다. 이 테스트는 `mega_defense_server --port N --server-id process-server --run-seconds 3` 을 spawn 하고, 독립적인 UDP 끝점 **둘**을 열어 각각 `alice`/`token-a`, `bob`/`token-b` 토큰으로 입장한다. 두 토큰의 `MatchId` 는 같고(`process-match`), `ServerId` 는 서버가 받은 것과 같다.
+`test_dedicated_process`는 **진짜 서버 프로세스를 띄운다.** `mega_defense_server --port N --server-id process-server --run-seconds 3`을 spawn하고, 독립적인 UDP 끝점 둘을 연다. 내부 queue가 반환한 같은 매치 ID를 넣어 각각 `alice`/`token-a`, `bob`/`token-b` 토큰으로 입장한다. `ServerId`는 서버가 받은 것과 같다. 외부 배정은 이 테스트와 별도로 `test_external_assignment`와 Live Service 교차 프로세스 검사에서 확인한다.
 
 그다음 첫 번째 끝점이 배치 명령(시퀀스 1)을 보내고, 두 조건이 성립할 때까지 기다린다 — 첫 번째 끝점이 `acknowledgedCommand == 1 && towers.size() == 1` 인 스냅샷을 받고, 두 번째 끝점도 `towers.size() == 1` 인 스냅샷을 받는 것. **후자가 방송을 증명한다.** 명령을 보내지 않은 클라이언트도 상태를 받는다는 뜻이다. 마지막으로 서버 종료 코드가 0인지 본다.
 

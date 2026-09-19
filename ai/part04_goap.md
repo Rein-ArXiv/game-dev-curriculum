@@ -9,9 +9,9 @@ FSM, 행동 트리, 효용 AI는 전이 그래프·트리·후보 점수처럼 �
 ```mermaid
 flowchart LR
     Goal[목표: EnemyDead] --> Plan[플래너: A* 역방향 탐색]
-    Pool[행동 풀<br/>MoveToCover, Reload,<br/>Flank, Attack] --> Plan
+    Pool[행동 풀<br/>MoveToCover, Reload,<br/>FlankAttack, DirectAttack] --> Plan
     State[현재 WorldState] --> Plan
-    Plan --> Seq[계획: MoveToCover → Reload → Flank → Attack]
+    Plan --> Seq[계획: MoveToCover → Reload → FlankAttack]
 ```
 
 이 글의 목표.
@@ -73,7 +73,7 @@ flowchart LR
 
 ### 닫힌 세계 가정
 
-STRIPS는 *닫힌 세계 가정(closed-world assumption)* 위에서 돈다. WorldState에 명시되지 않은 명제는 *거짓* 으로 간주한다. "EnemyVisible 비트가 없으면 적이 안 보인다"로 본다. 이 가정 덕분에 행동의 효과를 *변경된 비트만 기술* 하면 된다 — 효과에 없는 명제는 그대로 유지된다(STRIPS의 frame axiom). 부분 상태를 `values`와 `mask`로 표현하면 "이 비트는 비교 대상이 아니다"를 나타낼 수 있지만, 이것이 확률적 불확실성까지 모델링하는 것은 아니다.
+STRIPS는 *닫힌 세계 가정(closed-world assumption)* 위에서 돈다. WorldState에 명시되지 않은 명제는 *거짓* 으로 간주한다. "EnemyVisible 비트가 없으면 적이 안 보인다"로 본다. 여기에 *효과에 없는 명제는 그대로 유지된다* 는 STRIPS 가정(상황 계산의 frame axiom을 일일이 쓰지 않게 하는 규약)이 더해져, 행동의 효과를 *변경된 비트만 기술* 하면 된다. 부분 상태를 `values`와 `mask`로 표현하면 "이 비트는 비교 대상이 아니다"를 나타낼 수 있지만, 이것이 확률적 불확실성까지 모델링하는 것은 아니다.
 
 ### 선언적 분리의 대가
 
@@ -182,7 +182,7 @@ struct Action {
 
 ### 전방 적용(apply)
 
-전방 탐색에서는 상태 $s$에 행동을 적용해 새 상태를 만든다. 효과의 mask가 가리키는 비트만 효과 값으로 덮어쓰고, 나머지는 그대로 둔다(닫힌 세계의 frame axiom).
+전방 탐색에서는 상태 $s$에 행동을 적용해 새 상태를 만든다. 효과의 mask가 가리키는 비트만 효과 값으로 덮어쓰고, 나머지는 그대로 둔다(STRIPS 가정).
 
 ```cpp
 // 전방: s 에 행동을 적용한 결과 상태
@@ -425,7 +425,7 @@ N0을 꺼낸다. start가 `{EnemyDead=1}`을 만족하나? start.EnemyDead=0 →
 open = [ N2(f=5, g=4), N1(f=5, g=3) ]
 ```
 
-둘 다 $f=5$로 동률이다. 이 역방향 탐색에서 *$g$가 큰* 쪽은 목표 root에서 더 깊고 종료 조건인 시작 상태에 더 가깝다. 이를 먼저 꺼내도록 타이브레이크하면 탐색이 더 빨리 바닥에 닿는다. N2(g=4)를 먼저 꺼낸다고 하자.
+둘 다 $f=5$로 동률이다. 이 역방향 탐색에서 $f$ 동률이면 *$g$가 큰* 쪽은 $h$가 작아 종료 조건인 시작 상태에 더 가깝다(N1·N2는 둘 다 root의 자식이라 깊이는 같다). 이를 먼저 꺼내도록 타이브레이크하면 탐색이 더 빨리 바닥에 닿는다. N2(g=4)를 먼저 꺼낸다고 하자.
 
 N2 목표 `{AmmoAvailable=1, EnemyVisible=1}`. start가 만족하나? AmmoAvailable=0 → 불만족. 확장. AmmoAvailable=1을 효과로 갖는 행동은 Reload 하나.
 
@@ -746,7 +746,7 @@ GOAP는 행동의 *순서를 미리 짜두지 않는다.* 개별 행동에 전�
 
 ## 더 읽을거리
 
-- Jeff Orkin, "Three States and a Plan: The AI of F.E.A.R." (GDC 2006) — GOAP 게임 적용의 결정적 사례, 세 상태와 SmartObject.
+- Jeff Orkin, "Three States and a Plan: The A.I. of F.E.A.R." (GDC 2006) — GOAP 게임 적용의 결정적 사례, 세 상태와 SmartObject.
 - Jeff Orkin, "Applying Goal-Oriented Action Planning to Games" (*AI Game Programming Wisdom 2*) — 비트셋 표현과 플래너 구현 상세.
 - Fikes & Nilsson, "STRIPS: A New Approach to the Application of Theorem Proving to Problem Solving" (1971) — 자동 계획과 회귀의 원전.
 - Steve Rabin (ed.), *Game AI Pro* 2권, GOAP·planning 관련 챕터 — 비트셋 표현과 최적화 패턴.
@@ -754,5 +754,5 @@ GOAP는 행동의 *순서를 미리 짜두지 않는다.* 개별 행동에 전�
 - Blai Bonet & Héctor Geffner, "Planning as Heuristic Search" (*Artificial Intelligence* 129, 2001) — $h_{\max}$·$h_{\text{add}}$와 휴리스틱 탐색 계획(HSP)의 원전.
 - Jörg Hoffmann & Bernhard Nebel, "The FF Planning System: Fast Plan Generation Through Heuristic Search" (*JAIR* 14, 2001) — 완화 계획 휴리스틱 $h_{\text{FF}}$와 helpful action 가지치기.
 - Tom Bylander, "The Computational Complexity of Propositional STRIPS Planning" (*Artificial Intelligence* 69, 1994) — STRIPS 계획의 PSPACE-완전성과 완화(삭제 없는) 최적화의 NP-난해성.
-- Peter Higley, "Goal-Oriented Action Planning: Ten Years of AI Programming" (GDC) — GOAP 채택 게임들의 회고와 함정.
+- Chris Conway, Peter Higley & Eric Jacopin, "Goal-Oriented Action Planning: Ten Years Old and No Fear!" (GDC 2015 AI Summit) — GOAP 채택 게임들의 회고와 함정.
 - Troy Humphreys, "Exploring HTN Planners through Example" (*Game AI Pro*) — GOAP의 계층적 대안 HTN의 실전 구현.

@@ -214,6 +214,7 @@ void TestBackBufferBarrierSequence() {
     CHECK(entry == 1);
     CHECK(exit == 1);
     CHECK(cmd.barriers.size() == 2);
+    if (cmd.barriers.size() < 2) return;   // 아래 인덱싱은 위 판정이 참일 때만 안전하다.
 
     const auto& first = cmd.barriers[0].list[0].Transition;
     const auto& second = cmd.barriers[1].list[0].Transition;

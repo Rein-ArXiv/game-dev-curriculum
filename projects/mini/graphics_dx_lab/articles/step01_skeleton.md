@@ -22,6 +22,7 @@
 | `src/measure/frame_timer.h` · `.cpp` | 신규 | CPU 프레임 ms · EMA · 240 프레임 히스토리 |
 | `src/ui/panel.h` · `.cpp` | 신규 | ImGui 패널 |
 | `shaders/cube.hlsl` | 신규 | VS 1 개 + PS 2 개 |
+| `tests/graphics_dx_contract_tests.cpp` | 신규 | 계약 테스트(`step01` 그룹: 프레임 상수 합성 · 종료 순서) — 타깃 `graphics_dx_contract_tests` 와 `add_test` 는 `CMakeLists.txt` 에 |
 
 정책 토글(`PsoSwitchPolicy` / `RootSigPolicy` / `HeapPolicy` / `BarrierPolicy`) 은 이 step 의 관심사가 아니다. 이 글의 스니펫은 골격을 세우는 데 필요한 코드만 싣는다.
 
@@ -625,7 +626,9 @@ ComPtr<ID3D12Resource> CreateBufferStatic(
     // ...
     void* mapped = nullptr;
     D3D12_RANGE rd{0, 0};
-    upload->Map(0, &rd, &mapped);
+    if (FAILED(upload->Map(0, &rd, &mapped))) {
+        throw std::runtime_error("CreateBufferStatic: map failed");
+    }
     std::memcpy(mapped, data, bytes);
     upload->Unmap(0, nullptr);
 
@@ -664,7 +667,9 @@ ComPtr<ID3D12Resource> CreateBufferUpload(
         throw std::runtime_error("CreateBufferUpload failed");
     }
     D3D12_RANGE rd{0, 0};
-    buf->Map(0, &rd, outMapped);
+    if (FAILED(buf->Map(0, &rd, outMapped))) {
+        throw std::runtime_error("CreateBufferUpload: map failed");
+    }
     return buf;
 }
 ```
@@ -743,7 +748,9 @@ struct FrameCB {
     float               time;
     DirectX::XMFLOAT3   lightDir;
     float               pad;
+    float               slotPad[40];
 };
+static_assert(sizeof(FrameCB) == 256, "FrameCB slot stride must be 256 bytes");
 
 struct CameraSetup {
     DirectX::XMFLOAT3 eye{60.0f, 40.0f, 60.0f};
@@ -916,7 +923,9 @@ void App::InitImGui() {
     d.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     d.NumDescriptors = 1;
     d.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    ctx_.Device()->CreateDescriptorHeap(&d, IID_PPV_ARGS(&imguiHeap_));
+    if (FAILED(ctx_.Device()->CreateDescriptorHeap(&d, IID_PPV_ARGS(&imguiHeap_)))) {
+        throw std::runtime_error("CreateDescriptorHeap(imgui) failed");
+    }
 
     ImGui_ImplWin32_Init(hwnd_);
     ImGui_ImplDX12_Init(ctx_.Device(), kFramesInFlight,
@@ -999,7 +1008,7 @@ void FrameTimer::EndFrame() {
 
 히스토리는 링 버퍼다. 240 칸을 `historyHead_` 가 순회하므로 그리기 직전에 한 번 선형화해야 시간 순서로 보인다.
 
-종료 순서에도 계약이 있다. 마지막 프레임의 `EndFrame()` 은 `ExecuteCommandLists` + `Present` + `Signal` 만 하고 기다리지 않으므로, 종료 시점에 GPU 는 아직 그 프레임을 그리고 있을 수 있다. 그래서 **무엇을 놓기도 전에** `Flush()` 로 GPU 완료를 먼저 보장한다. 그 뒤에 ImGui 백엔드(폰트 텍스처·프레임별 정점/인덱스 버퍼·PSO·루트시그니처)를 내리고, 디버그 콜백을 떼고, timestamp query heap·readback 버퍼를 놓고, 마지막에 `D3D12Context::Shutdown()` 이 남은 `ComPtr` 들을 푼다. 순서가 뒤집히면 GPU 가 참조 중인 자원을 Release 하는 것이라 D3D12 에서 정의되지 않은 동작이다.
+종료 순서에도 계약이 있다. 마지막 프레임의 `EndFrame()` 은 `ExecuteCommandLists` + `Present` + `Signal` 만 하고 기다리지 않으므로, 종료 시점에 GPU 는 아직 그 프레임을 그리고 있을 수 있다. 그래서 **무엇을 놓기도 전에** `Flush()` 로 GPU 완료를 먼저 보장한다. 그 뒤에 ImGui 백엔드(폰트 텍스처·프레임별 정점/인덱스 버퍼·PSO·루트시그니처)를 내리고, 디버그 콜백을 떼고, timestamp query heap·readback 버퍼를 놓고, 마지막에 `D3D12Context::Shutdown()` 이 한 번 더 `Flush()` 하고 fence 이벤트 핸들을 닫으며, 남은 `ComPtr` 들은 `App` 소멸자의 멤버 파괴 순서(`ctx_` 가 다른 D3D 멤버보다 앞에 선언되어 가장 늦게 풀린다)가 푼다. 순서가 뒤집히면 GPU 가 참조 중인 자원을 Release 하는 것이라 D3D12 에서 정의되지 않은 동작이다.
 
 <!-- snippet: src/app/app.cpp#App::Shutdown -->
 ```cpp

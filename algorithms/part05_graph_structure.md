@@ -395,6 +395,6 @@ Union-Find는 간선 추가에 따른 component partition을 거의 상수의 �
 - Cormen, Leiserson, Rivest, Stein, *Introduction to Algorithms*, 4th ed. (MIT Press, 2022), Ch. 19~21 — disjoint set, 그래프 표현·순회·SCC, MST의 표준 증명.
 - Steven S. Skiena, *The Algorithm Design Manual*, 3rd ed. (Springer, 2020), Ch. 7~8 — 그래프 문제를 식별하고 순회 결과를 처리하는 실무 설계.
 - Robert E. Tarjan, “Depth-First Search and Linear Graph Algorithms”, *SIAM Journal on Computing* 1(2), 1972 — SCC, articulation 관련 DFS low-link 기법의 고전.
-- J. B. Kruskal, “On the Shortest Spanning Subtree of a Graph”, *Proceedings of the AMS* 7, 1956 — Kruskal MST 원전.
+- J. B. Kruskal, “On the Shortest Spanning Subtree of a Graph and the Traveling Salesman Problem”, *Proceedings of the AMS* 7, 1956 — Kruskal MST 원전.
 - Robert C. Prim, “Shortest Connection Networks and Some Generalizations”, *Bell System Technical Journal* 36, 1957 — Prim MST의 고전적 서술.
 - Robert E. Tarjan, “Efficiency of a Good But Not Linear Set Union Algorithm”, *JACM* 22(2), 1975 — path compression과 union rank 분석.

@@ -36,13 +36,14 @@ C 언어가 1972년 Dennis Ritchie에 의해 만들어졌을 때, 설계 목표�
 
 모든 플랫폼에서 동일한 동작을 강제하면 어떤 플랫폼에서는 불필요한 오버헤드가 발생한다. 따라서 C 표준 위원회는 의도적으로 특정 동작을 정의하지 않기로 결정했다.
 
-### UB의 세 가지 유형
+### 표준이 나누는 동작의 범주
 
-C11 표준(ISO/IEC 9899:2011)은 세 가지 범주로 동작을 분류한다.
+C11 표준(ISO/IEC 9899:2011) §3.4는 표준이 완전히 규정하지 않는 동작을 네 범주로 나눈다.
 
-1. **Defined Behavior**: 표준이 정확히 규정함.
-2. **Implementation-Defined Behavior**: 구현체가 선택하되 문서화해야 함(예: `sizeof(int)`).
-3. **Undefined Behavior**: 표준이 어떤 요구사항도 하지 않음.
+1. **Implementation-Defined Behavior**: 구현체가 선택하되 문서화해야 함(예: `sizeof(int)`).
+2. **Unspecified Behavior**: 표준이 둘 이상의 가능성을 허용하되 어느 쪽인지 규정하지 않음(예: 함수 인자의 평가 순서). implementation-defined는 그 선택을 문서화하도록 요구한 특수 경우다.
+3. **Locale-Specific Behavior**: 현재 로케일에 따라 달라짐.
+4. **Undefined Behavior**: 표준이 어떤 요구사항도 하지 않음.
 
 UB에 대한 표준의 공식 설명:
 
@@ -96,19 +97,19 @@ THEN (해당 코드 경로는 실행되지 않는다)
 THEREFORE (그 경로로 이어지는 조건은 항상 거짓이다)
 ```
 
-이는 논리학의 modus tollens(부정 논법)를 역으로 적용한 것이다.
+이는 논리학의 modus tollens(부정 논법)를 그대로 적용한 것이다.
 
 ### 예제 1: Null Check 제거
 
 ```c
-void process(int* ptr) {
+int process(int* ptr) {
     int value = *ptr;  // (1) Null이면 UB 발생
 
     if (ptr == NULL) { // (2) Null check
-        return;
+        return 0;
     }
 
-    // ptr 사용
+    return value;      // ptr 사용
 }
 ```
 
@@ -150,12 +151,13 @@ fill(100);
 Clang은 이 함수를 다음과 같이 최적화할 수 있다.
 
 ```c
-// 최적화 후 (개념적)
+// 최적화 후 (개념적): index < 4가 보장되므로 반복 횟수 상한이 상수로 고정되고
+// 루프와 경계 검사가 사라진다. 저장 자체는 index에 따라 그대로 남는다.
 void fill(int index) {
-    table[0] = 0;
-    table[1] = 1;
-    table[2] = 2;
-    table[3] = 3;
+    if (index >= 0) table[0] = 0;
+    if (index >= 1) table[1] = 1;
+    if (index >= 2) table[2] = 2;
+    if (index >= 3) table[3] = 3;
 }
 ```
 
@@ -172,14 +174,15 @@ void caller() {
 }
 ```
 
-GCC `-O2`는 `caller` 전체를 빈 함수로 만들 수 있다.
+GCC `-O2`는 `printf` 호출을 통째로 지우고 `caller`를 트랩으로 끝낸다.
 
 ```asm
 caller:
-    ret  ; 아무것도 하지 않음
+    mov DWORD PTR ds:0, 0  ; null store만 남기고
+    ud2                    ; 도달하면 트랩
 ```
 
-`may_do_something(NULL)`은 UB이므로 실행되지 않는다고 가정 → 이후 코드도 도달 불가능 → 전부 삭제.
+`may_do_something(NULL)`은 UB이므로 그 뒤가 도달 불가능하다고 가정 → `printf` 호출이 삭제된다. GCC는 이 경로를 조용히 지우는 대신 `-fisolate-erroneous-paths-dereference`(`-O2` 기본값)로 트랩 명령을 심는다.
 
 ## 3. 시간여행: UB가 과거를 바꾸는 이유
 
@@ -412,7 +415,7 @@ gcc -O2 -fno-strict-aliasing code.c
 strict aliasing 기반 최적화를 비활성화한다. Linux kernel build는 GCC/Clang의 strict-aliasing 가정에 의존하지 않도록 이 계열 flag를 전역 build 정책에 포함해 왔지만, 정확한 flag 조합은 대상 kernel tree와 toolchain에서 확인한다.
 
 ```make
-# arch/x86/Makefile
+# Makefile (커널 트리 최상위)
 KBUILD_CFLAGS += -fno-strict-aliasing
 ```
 
@@ -432,7 +435,7 @@ i++;  // UB
 
 C11 표준 6.5/5:
 
-> "If an exceptional condition occurs during the evaluation of an expression (..., overflow during signed integer arithmetic), the behavior is undefined."
+> "If an exceptional condition occurs during the evaluation of an expression (that is, if the result is not mathematically defined or not in the range of representable values for its type), the behavior is undefined."
 
 ### 왜 Unsigned는 정의되고 Signed는 아닌가
 
@@ -602,7 +605,7 @@ int get(int index) {
 
 // 안전
 int get(int index) {
-    if (index >= SIZE) return -1;
+    if (index < 0 || index >= SIZE) return -1;
     return array[index];
 }
 ```
@@ -808,7 +811,7 @@ John Regehr의 표현을 빌리면, UB는 시간 기계와 같다. 컴파일러�
 - [AddressSanitizer Algorithm](https://github.com/google/sanitizers/wiki/AddressSanitizerAlgorithm)
 - Chris Lattner, ["What Every C Programmer Should Know About Undefined Behavior"](https://blog.llvm.org/2011/05/what-every-c-programmer-should-know.html), LLVM Blog, 2011
 - John Regehr, ["A Guide to Undefined Behavior in C and C++"](https://blog.regehr.org/archives/213), 2010
-- John Regehr, ["Undefined Behavior in 2017"](https://blog.regehr.org/archives/1520), 2017
+- Pascal Cuoq, John Regehr, ["Undefined Behavior in 2017"](https://blog.regehr.org/archives/1520), 2017
 - Raymond Chen, ["Undefined behavior can result in time travel (among other things, but time travel is the funkiest)"](https://devblogs.microsoft.com/oldnewthing/20140627-00/?p=633), 2014
 - Wang Xi et al., ["Towards Optimization-Safe Systems"](https://css.csail.mit.edu/stack/), SOSP 2013
 - Chandler Carruth, ["Garbage In, Garbage Out: Arguing about Undefined Behavior"](https://www.youtube.com/watch?v=yG1OZ69H_-o), CppCon 2016

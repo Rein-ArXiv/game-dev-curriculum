@@ -109,7 +109,9 @@ inline SATAxisInfo SATEvaluateAxis(const std::array<Vector2, 4>& a,
         if (pa < r.minA) r.minA = pa; if (pa > r.maxA) r.maxA = pa;
         if (pb < r.minB) r.minB = pb; if (pb > r.maxB) r.maxB = pb;
     }
-    float overlap = std::min(r.maxA, r.maxB) - std::max(r.minA, r.minB);
+    // 겹침 양: b 를 이 축의 ± 방향으로 밀어 분리하는 두 거리 중 작은 쪽.
+    // 단순 교집합 길이는 한 구간이 다른 구간을 포함할 때 실제 분리 거리보다 작다.
+    float overlap = std::min(r.maxA - r.minB, r.maxB - r.minA);
     r.overlap    = overlap;
     r.separating = (overlap < 0);
     return r;
@@ -190,7 +192,7 @@ struct GJKStep {
     std::vector<Vector2> simplex;   // 이 단계의 simplex
     Vector2              direction; // 다음 search direction
     Vector2              newPoint;  // 이 단계에서 추가된 지원점
-    bool                 done;
+    bool                 done;      // 충돌/분리 판정 확정. 한도 소진은 false
     bool                 intersect;
     int                  iter;
 };
@@ -218,7 +220,7 @@ inline std::vector<GJKStep> GJK2DTraced(const OBB2D& A, const OBB2D& B,
     for (int i = 1; i <= maxIter; ++i) {
         Vector2 newP = MinkowskiSupport2D(A, B, d);
         if (Dot2(newP, d) < 0) {
-            // ... 분리됨 — done/intersect=false 를 trace 에 남기고 return ...
+            // ... 분리됨 — done=true, intersect=false를 남기고 return ...
         }
         S.push_back(newP);
 
@@ -230,12 +232,14 @@ inline std::vector<GJKStep> GJK2DTraced(const OBB2D& A, const OBB2D& B,
         }
         // ... 매 단계 trace 기록 ...
     }
-    // ... 최대 반복 도달 — 안전 종료 ...
+    // ... 최대 반복 도달 — done=false(미확정)를 유지하고 종료 ...
     return trace;
 }
 ```
 
 설계: *알고리즘 자체와 trace 가 분리*. 시각화는 trace 의 *step 인덱스* 만 알면 됨. step 별로 *어느 simplex / 어느 방향* 이 었는지를 그려준다.
+
+`done`은 계산 루프가 끝났다는 뜻이 아니라 충돌 또는 분리를 **판정했다**는 뜻이다. 반복 예산을 소진한 마지막 항목은 `done=false`이며, `intersect=false`만 보고 비충돌로 처리하면 안 된다. 화면에서는 이 상태를 `INDETERMINATE (limit)`로 구분한다. 실제 충돌 판정에 사용한다면 미확정 상태에 대한 재시도나 다른 판정법 적용 정책이 필요하다.
 
 ## 6. GJK 의 stepping UI
 
@@ -399,7 +403,7 @@ if (!obs.Bound("GJK verdict changed under uniform scale",
                (gjkBase == GjkIntersect(sA, sB)) ? 0.0 : 1.0, 0.0)) ok = false;
 ```
 
-세 property 모두 비퇴화 표본의 정의를 *교차하는 쌍* 으로 잡고 하한 10% · 상한 90~95% 를 건다. 표본이 전부 "떨어짐" 으로 쏠리면 두 함수가 모두 `false` 를 상수로 돌려줘도 일치하기 때문이다. 고정 사례의 `hits > kPairs/10` 과 같은 방어를 하네스 쪽으로 옮긴 것이다.
+세 property 모두 비퇴화 표본에 하한 10% · 상한 90~95% 를 건다 — `sat-gjk-agree` 와 `rigid-invariance` 는 *교차하는 쌍*, `axis-witness` 는 *분리된 쌍* 이 비퇴화다. 표본이 전부 "떨어짐" 으로 쏠리면 두 함수가 모두 `false` 를 상수로 돌려줘도 일치하기 때문이다. 고정 사례의 `hits > kPairs/10` 과 같은 방어를 하네스 쪽으로 옮긴 것이다.
 
 세 property 에 각각 무력화 변이를 넣어 죽는 것을 확인했다. SAT 후보축에서 B 의 면 법선을 빼면 일치가 깨지고, 분리 판정 문턱을 `overlap < 0` 에서 `overlap < 0.05f` 로 올리면 *실제로는 겹치는데 분리라고 말하는* 축이 나와 실증이 깨지며, A 의 첫 면 법선을 월드 X 축으로 고정하면 회전 불변이 깨진다. 두 번째 변이의 보고는 이렇게 나온다.
 
@@ -427,13 +431,13 @@ $ ctest --test-dir build -C Release -R math_step05_collision --output-on-failure
 ```text
 $ ./build/Release/math_core_tests.exe step05
 [step05] collision/sat_vs_gjk ............ 14 checks, 0 failed
-[step05] collision/sat-gjk-agree ......... 4 checks, 0 failed  (5000 samples, 734 non-degenerate, 1 skipped, worst 0.000x)
-[step05] collision/axis-witness .......... 4 checks, 0 failed  (2500 samples, 2131 non-degenerate, 0 skipped, worst 0.004x on '|separating axis| - 1')
+[step05] collision/sat-gjk-agree ......... 4 checks, 0 failed  (5000 samples, 755 non-degenerate, 0 skipped, worst 0.000x)
+[step05] collision/axis-witness .......... 4 checks, 0 failed  (2500 samples, 2099 non-degenerate, 0 skipped, worst 0.004x on '|separating axis| - 1')
 [step05] collision/rigid-invariance ...... 4 checks, 0 failed  (3000 samples, 456 non-degenerate, 0 skipped, worst 0.000x)
 step05: 4 case(s), 26 check(s), 0 failure(s)
 ```
 
-고정 사례의 CHECK 는 14 개지만 그 뒤에서 도형 쌍 20,000 개가 돌아간다 — 루프 안에서 세고 밖에서 한 번 단언하는 형태라 실패해도 출력이 터지지 않는다. 갈리는 쌍이 나오면 처음 3 개의 인덱스와 두 판정값이 `stderr` 로 찍힌다. property 쪽 `worst 0.000x` 는 그 property 의 조항이 전부 *정확 일치* (상계 0) 라는 뜻이다 — 판정이 불리언이라 허용 오차라는 것이 없다. `axis-witness` 의 `0.004x` 만 예외인데, 분리축이 단위벡터인지 재는 조항이 유일한 수치 조항이기 때문이다.
+고정 사례의 CHECK 는 14 개지만 그 뒤에서 도형 쌍 20,000 개가 돌아간다 — 루프 안에서 세고 밖에서 한 번 단언하는 형태라 실패해도 출력이 터지지 않는다. 갈리는 쌍이 나오면 처음 3 개의 인덱스와 두 판정값이 `stderr` 로 찍힌다. property 쪽 `worst 0.000x` 는 그 property 의 조항이 전부 *정확 일치* (상계 0) 라는 뜻이다 — 판정이 불리언이라 허용 오차라는 것이 없다. `axis-witness` 의 `0.004x` 만 예외인데, 상계가 0 이 아닌 조항이 둘 — 분리축이 단위벡터인지 재는 조항 (상계 `1e-5`) 과 교차 분기의 64 방향 gap 조항 (상계 `eps`) — 있고, 그중 관측값이 0 을 벗어나는 것은 앞의 것뿐이기 때문이다.
 
 ---
 

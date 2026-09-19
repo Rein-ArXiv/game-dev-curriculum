@@ -28,6 +28,7 @@ void ConstraintsScene::BuildChain(int n, float segmentLen) {
     particles_.clear();
     links_.clear();
     if (n < 2) n = 2;
+    N_ = n;   // 클램프를 N_ 에도 반영 — 아니면 Step 이 매 스텝 chain 을 다시 짓는다.
 
     Vector2 start = {(float)(lastCanvasX_ + lastCanvasW_ / 4),
                       (float)(lastCanvasY_ + 60)};
@@ -156,10 +157,6 @@ void ConstraintsScene::Step(float dt) {
             p.pos.y += p.vel.y * dt;
         }
     }
-
-    // anchor 강제 고정 — 솔버가 살짝 움직였을 수 있어서.
-    particles_[0].pos = anchorHandle_.Position();
-    particles_[0].vel = {0, 0};
 
     auto t1 = std::chrono::high_resolution_clock::now();
     lastMs_ = std::chrono::duration<double, std::milli>(t1 - t0).count();

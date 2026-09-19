@@ -8,6 +8,8 @@
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#include <exception>
+#include <signal.h>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -45,11 +47,12 @@ int SklAioCancel(int fd, aiocb* cb) {
 }
 
 ssize_t SklAioReturn(aiocb* cb) {
+    const ssize_t result = ::aio_return(cb);
     if (const int e = SklFaultCheck("aio_return")) {
         errno = e;
         return -1;
     }
-    return ::aio_return(cb);
+    return result;
 }
 
 }  // namespace
@@ -61,8 +64,8 @@ std::uint64_t AioBackend::RunCycle(const std::vector<std::string>& paths,
     if (n == 0) return 0;
 
     // 사이클마다 fresh aiocb 배열·버퍼·fd 배열을 잡는다. backend 멤버에 들고
-    // 재사용하면 alloc 비용이 줄지만, 이번 회차는 *모델의 비용* 을 측정에 그대로
-    // 드러내기 위해 재사용을 미룬다. retain 토글이 들어가면 비교한다.
+    // 재사용하면 alloc 비용이 줄지만, 이 구현은 자원 생성 비용까지 사이클
+    // 측정에 포함한다. 버퍼 재사용을 가정한 정상 상태 측정과 구분해야 한다.
     std::vector<aiocb>                       cbs(n);
     std::vector<aiocb*>                      cbsList(n);
     std::vector<std::vector<unsigned char>>  bufs(n);
@@ -77,6 +80,9 @@ std::uint64_t AioBackend::RunCycle(const std::vector<std::string>& paths,
         }
     };
 
+    // Allocate before opening descriptors; allocation failures leave no resources.
+    for (auto& buf : bufs) buf.resize(fileBytes);
+
     // open + aiocb 준비. 제출 전 실패가 나면 pending AIO가 없다.
     for (std::size_t i = 0; i < n; ++i) {
         fds[i] = SklOpen(paths[i].c_str(), O_RDONLY);
@@ -85,18 +91,18 @@ std::uint64_t AioBackend::RunCycle(const std::vector<std::string>& paths,
             throw std::runtime_error(std::string("open failed: ") + paths[i]
                                      + ": " + std::strerror(errno));
         }
-        bufs[i].resize(fileBytes);
-
         std::memset(&cbs[i], 0, sizeof(aiocb));
         cbs[i].aio_fildes = fds[i];
         cbs[i].aio_buf    = bufs[i].data();
         cbs[i].aio_nbytes = fileBytes;
         cbs[i].aio_offset = 0;
+        cbs[i].aio_sigevent.sigev_notify = SIGEV_NONE;
         cbsList[i] = &cbs[i];
     }
 
     std::uint64_t totalBytes = 0;
     std::string firstError;
+    std::exception_ptr callbackError;
     auto finishCompleted = [&](std::size_t i, bool invokeRead) {
         if (done[i]) return false;
 
@@ -116,12 +122,15 @@ std::uint64_t AioBackend::RunCycle(const std::vector<std::string>& paths,
                     firstError = std::string("aio_return failed: ") + paths[i]
                                + ": " + std::strerror(errno);
                 }
-            } else if (invokeRead) {
-                // bytes < fileBytes 는 EOF 이지 오류가 아니다
-                // (io_backend.h 의 short read 계약).
+            } else if (invokeRead && !callbackError) {
                 const std::size_t got = static_cast<std::size_t>(bytes);
-                onRead(bufs[i].data(), got);
-                totalBytes += got;
+                try {
+                    onRead(bufs[i].data(), got);
+                    totalBytes += got;
+                } catch (...) {
+                    // Keep all aiocb/buffers alive until every request is reaped.
+                    callbackError = std::current_exception();
+                }
             }
         }
 
@@ -190,6 +199,7 @@ std::uint64_t AioBackend::RunCycle(const std::vector<std::string>& paths,
     // 수확 단계. aio_suspend로 *어느 하나라도 완료* 까지 대기, 완료된 것만
     // 처리하고 다시 대기.
     drainSubmitted(n, /*invokeRead=*/true);
+    if (callbackError) std::rethrow_exception(callbackError);
     if (!firstError.empty()) {
         closeAll();
         throw std::runtime_error(firstError);
@@ -210,7 +220,7 @@ std::uint64_t AioBackend::RunCycle(const std::vector<std::string>&,
                                      std::size_t,
                                      const OnFileRead&) {
     throw std::runtime_error(
-        "AioBackend: POSIX AIO not compiled in (librt missing at build time)");
+        "AioBackend: POSIX AIO not compiled in (<aio.h>/aio_* symbols unavailable at build time)");
 }
 
 }  // namespace skl

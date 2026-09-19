@@ -113,7 +113,7 @@ struct RayHit {
     vec3   point;      // 충돌 점 (= origin + t * direction)
     vec3   normal;     // 표면 법선
     int    objectId;   // (선택) 충돌 객체
-    vec2   uv;         // (선택) 텍스처 좌표
+    vec2   uv;         // (선택) 표면 매개변수 — 삼각형이면 barycentric (u, v). 텍스처 좌표는 정점 UV 를 이것으로 보간해 얻는다
 };
 ```
 
@@ -302,7 +302,7 @@ $$
 t_{\min} = \max(t_x^{\min}, t_y^{\min}, t_z^{\min}), \quad t_{\max} = \min(t_x^{\max}, t_y^{\max}, t_z^{\max})
 $$
 
-$t_{\min} \le t_{\max}$ 이면 교차.
+$t_{\min} \le t_{\max}$ 이고 $t_{\max} \ge 0$ 이면 교차 (광선은 $t \ge 0$ 이므로 박스가 원점 뒤에 있으면 제외 — 아래 코드의 `0.0f` 가 이 조건이다).
 
 ### 4.3 분기 없는 SIMD 코드
 
@@ -459,7 +459,7 @@ if (det < 1e-8f) return false;  // backface 또는 평행
 
 ### 5.5 산업 변형
 
-- **Watertight Möller-Trumbore**: 삼각형 *모서리에서 광선이 새는* 함정 해결. PBRT 의 표준.
+- **Watertight 교차 (Woop 외, 2013)**: 삼각형 *모서리에서 광선이 새는* 함정 해결. Möller-Trumbore 와 별개 알고리즘. PBRT 의 표준.
 - **Pluecker coordinates**: 다른 표현. 메모리 ↑ 속도 ↑.
 - **Triangle preprocessing**: 사전에 정점 변환 후 저장 (정적 메쉬 가속).
 
@@ -493,9 +493,8 @@ bool RayOBB(vec3 ro, vec3 rd, OBB box, float& t) {
                           dot(rd, box.axes[2]));
 
     AABB localAABB { -box.extents, box.extents };
-    vec3 invRd = 1.0f / localRD;
     float tNear, tFar;
-    return RayAABB(localRO, invRd, localAABB, tNear, tFar) && (t = tNear, true);
+    return RayAABBSafe(localRO, localRD, localAABB, tNear, tFar) && (t = tNear, true);
 }
 ```
 
@@ -665,7 +664,7 @@ bool RayMeshNaive(Ray ray, Mesh& mesh, RayHit& bestHit) {
 
 ### 7.2 BVH 가속
 
-BVH 트래버설을 *광선 트래버설 코드* 로 (BVH 편 8.2절 참조).
+BVH 트래버설을 *광선 트래버설 코드* 로.
 
 ```cpp
 bool RayMeshBVH(Ray ray, BVH& bvh, RayHit& bestHit) {
@@ -710,7 +709,7 @@ bool RayMeshBVH(Ray ray, BVH& bvh, RayHit& bestHit) {
 
 ### 7.3 가까운 자식 우선
 
-BVH 편 8.3절. 가까운 자식부터 push 해서 *가까운 hit 빨리 찾기*. 그러면 *먼 자식 가지치기* 더 자주 발생.
+가까운 자식부터 push 해서 *가까운 hit 빨리 찾기*. 그러면 *먼 자식 가지치기* 더 자주 발생.
 
 ```cpp
 // 두 자식 박스 각각 광선 검사 후 t_near 정렬
@@ -740,7 +739,7 @@ if (tL_near < tR_near) {
 
 ### 7.5 RTX 하드웨어 트래버설
 
-BVH 편 8.5절. RT Core 가 BVH 트래버설 + 삼각형 교차를 *전용 하드웨어* 로. 매 픽셀 *수십 광선* 도 가능.
+RT Core 가 BVH 트래버설 + 삼각형 교차를 *전용 하드웨어* 로. 매 픽셀 *수십 광선* 도 가능.
 
 ## 8. 수치 안정성과 self-intersection
 
@@ -787,7 +786,7 @@ ray.origin = hitPoint + epsilon * surfaceNormal;
 
 기본 Möller-Trumbore 는 *삼각형 모서리에서 광선이 새는* 함정. 두 인접 삼각형의 *공유 모서리* 에서 광선이 *둘 다 miss* 또는 *둘 다 hit*.
 
-PBRT 의 *Watertight Möller-Trumbore* 는 *부호 일관성* 으로 수밀성 보장. 광선 방향 부호 분기 + 정밀 정수 산술.
+PBRT 가 채택한 *watertight 교차* (Woop·Benthin·Wald, 2013 — Möller-Trumbore 와 별개 알고리즘) 는 *부호 일관성* 으로 수밀성 보장. 광선 방향 부호 분기 + 정밀 정수 산술.
 
 ```text
 # 의사 코드:
@@ -856,9 +855,9 @@ struct RayDebug {
 
 - Möller, Trumbore, "Fast, Minimum Storage Ray-Triangle Intersection" (Journal of Graphics Tools, 1997) — 표준 알고리즘 원전.
 - Christer Ericson, *Real-Time Collision Detection*, Ch. 5.3 — 광선 도형 교차 종합.
-- Pharr, Jakob, Humphreys, *Physically Based Rendering* (PBRT 4th), Ch. 6 — Watertight Möller-Trumbore + 광선 robust 처리.
+- Pharr, Jakob, Humphreys, *Physically Based Rendering* (PBRT 4th), Ch. 6 — watertight 광선-삼각형 교차 (Woop, Benthin, Wald, JCGT 2013 의 알고리즘) + 광선 robust 처리.
 - *Real-Time Rendering*, 4th ed., Ch. 22 — 레이/도형 교차 알고리즘.
 - Amy Williams et al., "An Efficient and Robust Ray-Box Intersection Algorithm" (2005) — Slab test 변형.
 - DXR Spec / Vulkan Ray Tracing — 산업 광선 API.
-- Inigo Quilez, "Intersectors" (https://iquilezles.org/articles/intersectors/) — SDF·analytic 도형 광선 교차 카탈로그.
+- Inigo Quilez, "Intersectors" (https://iquilezles.org/articles/intersectors/) — analytic 도형 광선 교차 카탈로그.
 - Embree (Intel) 소스 — 산업 표준 CPU 레이 트래버설 구현.

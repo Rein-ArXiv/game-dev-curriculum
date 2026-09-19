@@ -124,7 +124,7 @@ $$
 E(t) = \tfrac{1}{2} v^2 + \tfrac{1}{2} \omega^2 x^2 = \tfrac{1}{2} \omega^2 A^2 = E_0
 $$
 
-따라서 *모든 시점의 $E(t) / E_0 = 1$*. 적분기가 *어긋난 만큼* 그 비율이 1 에서 벗어난다. 그래프의 y 축이 $E/E_0$, 1.0 이 *이상적 보존*. 1.0 보다 위면 *에너지 추가* (Explicit Euler 의 폭주), 아래면 *에너지 손실* (드물게 발생, 일부 implicit scheme).
+따라서 *모든 시점의 $E(t) / E_0 = 1$*. 적분기가 *어긋난 만큼* 그 비율이 1 에서 벗어난다. 그래프의 y 축이 $E/E_0$, 1.0 이 *이상적 보존*. 1.0 보다 위면 *에너지 추가* (Explicit Euler 의 폭주), 아래면 *에너지 손실* (RK4 의 느린 단조 감쇠, Verlet / Semi-implicit 의 유계 진동 아래쪽 — implicit Euler 류의 수치 감쇠도 이쪽).
 
 ## 3. Scene 자료구조 + 누적기 (fixed dt + integDt)
 
@@ -172,7 +172,7 @@ void Step(float dt) override {   // dt = main fixed dt = 1/120
 - integDt_ = 1/240 이면 main 의 한 frame step 마다 *substep 2 번* → 적분이 *더 정밀*.
 - integDt_ = 1/120 이면 substep 1 번.
 - integDt_ = 1/60 이면 main step *2 번 모이면* substep 1 번 → 적분이 *덜 정밀*.
-- integDt_ = 1/30 이면 main step *4 번 모이면* substep 1 번 → *대부분 적분기에서 발산 시작*.
+- integDt_ = 1/30 이면 main step *4 번 모이면* substep 1 번 → *Explicit Euler 의 발산이 눈에 띄게 빨라짐* (Semi-implicit / Verlet / RK4 는 유계).
 
 `while` 의 `guard < 32` 는 spiral of death 방지 — kFixedDt + integDt_ 조합이 잘못되어 substep 이 끝없이 도는 경우를 차단.
 
@@ -228,9 +228,9 @@ DrawLineGraph(rect, inputs, 5, "Energy / E_0", 0.5f, 1.5f, true);
 **시나리오 C — `dt = 1/30`, $\omega = 20$ (3.18 Hz, 더 빠른 진동).**
 
 - Explicit: 1 초 만에 폭주.
-- Semi-implicit: *약간의 폭주 보임* — $\omega \Delta t = 20 \times 1/30 \approx 0.67$. symplectic 의 안정 한계 $\omega \Delta t < 2$ 근처지만 잘 동작. 더 큰 $\omega$ 면 *Semi-impl 도 폭주*.
+- Semi-implicit: *폭주는 없고 에너지 진동 폭만 커짐* ($E/E_0$ 가 0.75 ~ 1.5 사이를 오감) — $\omega \Delta t = 20 \times 1/30 \approx 0.67$. symplectic 의 안정 한계 $\omega \Delta t < 2$ 안이라 유계. $\omega \Delta t \ge 2$ (이 dt 면 $\omega \ge 60$, 슬라이더 범위 밖) 에서야 *Semi-impl 도 폭주*.
 - Verlet: 정상.
-- RK4: 정상.
+- RK4: 발산은 없지만 *단조 감쇠* — $E/E_0$ 가 10 초에 0.71, 20 초 (그래프 창 전체) 에 0.50 까지 내려간다. $\omega \Delta t$ 가 크면 RK4 의 drift 는 더 이상 '매우 작지' 않다.
 
 이 셋을 직접 토글해 보면 시리즈 글의 *"Euler 가 발산"* 같은 추상적 주장이 *그래프 곡선 한 개로 압축*. 글에서 *왜 게임 엔진이 Semi-impl 또는 Verlet 을 쓰는가* 가 *이 한 그래프 안에 있다*.
 

@@ -492,7 +492,7 @@ rttr::type arrayType = rttr::type::get<std::vector<int>>();
 bool isSeq = arrayType.is_sequential_container();  // true
 
 // 템플릿 인자 추출
-rttr::type elemType = arrayType.get_template_arguments()[0];  // int
+rttr::type elemType = *arrayType.get_template_arguments().begin();  // int — array_range에는 첨자 연산자가 없다
 
 // 열거형
 enum class State { Idle, Running };
@@ -505,7 +505,7 @@ RTTR_REGISTRATION {
 }
 ```
 
-### 장점과 단점
+### RTTR의 장점과 단점
 
 장점:
 - 표준 C++만 사용해 다양한 컴파일러에서 동작.
@@ -603,7 +603,7 @@ RuntimeType BuildRuntimeType() {
 
 1. 프로젝트가 지원하는 모든 컴파일러와 플랫폼의 구현 성숙도 확인.
 2. 기존 시스템과의 호환성(Unreal은 이미 UHT 생태계가 확립됨).
-3. 메타데이터 문법 표준화 필요(어트리뷰트는 제한적).
+3. 표준 annotation(`[[=expr]]`, P3394)이 같은 회의에서 채택됐지만, 컴파일러의 구현 성숙도와 기존 엔진 메타데이터 문법에서의 이행 비용이 남는다.
 
 표준 기능이 툴체인의 일부 매크로와 외부 파서 의존을 줄일 가능성은 크다. 다만 기존 엔진의 annotation 문법, schema 안정성, hot reload와 이전 데이터 호환성은 언어 reflection만으로 사라지지 않는다.
 
@@ -620,7 +620,7 @@ void PropertyEditor::Show(Object* obj) {
 
     for (Property* prop : type->GetProperties()) {
         const char* category = prop->GetMetadata("Category");
-        if (category != currentCategory) {
+        if (!currentCategory || std::strcmp(category, currentCategory) != 0) {   // 포인터가 아니라 내용을 비교한다
             ImGui::SeparatorText(category);
             currentCategory = category;
         }
@@ -780,6 +780,12 @@ void Serializer::SaveToJson(Object* obj, JsonWriter& json) {
             float value = prop->GetValue<float>(obj);
             json.WriteFloat(value);
         }
+        else if (prop->IsA<IntProperty>()) {
+            json.WriteInt(prop->GetValue<int>(obj));
+        }
+        else if (prop->IsA<BoolProperty>()) {
+            json.WriteBool(prop->GetValue<bool>(obj));
+        }
         else if (prop->IsA<ArrayProperty>()) {
             ArrayProperty* arrayProp = (ArrayProperty*)prop;
             void* arrayData = prop->GetValuePtr(obj);
@@ -890,8 +896,8 @@ C++26 작업 초안의 static reflection은 선언에서 serializer와 런타임
 
 ## 더 읽을거리
 
-- [Unreal Object Handling](https://docs.unrealengine.com/5.0/en-US/objects-in-unreal-engine/) - UObject 시스템 개요
-- [Unreal Header Tool 문서](https://docs.unrealengine.com/) - UHT의 작동 방식
+- [Unreal Object Handling](https://dev.epicgames.com/documentation/en-us/unreal-engine/unreal-object-handling-in-unreal-engine) - UObject 시스템 개요
+- [Unreal Header Tool 문서](https://dev.epicgames.com/documentation/en-us/unreal-engine/unreal-header-tool-for-unreal-engine) - UHT의 작동 방식
 - [Qt Meta-Object System](https://doc.qt.io/qt-6/metaobjects.html) - moc의 역사와 설계
 - [P2996: Reflection for C++26](https://wg21.link/P2996) - static reflection 제안
 - [RTTR (Run Time Type Reflection)](https://www.rttr.org/) - 템플릿/매크로 등록 기반 런타임 리플렉션

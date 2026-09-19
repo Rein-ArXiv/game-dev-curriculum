@@ -233,7 +233,7 @@ inline std::vector<LzToken> LzParse(const Bytes& data, ParseMode mode,
 
 ## 5. 적대적 입력 거부
 
-복호기 검사는 일곱 갈래다.
+복호기 검사는 여덟 갈래다.
 
 | 공격 | 무엇을 확인하나 |
 |---|---|

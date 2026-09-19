@@ -226,7 +226,7 @@ $$
 
 ## 더 읽을거리
 
-- [Song Ho Ahn, OpenGL Transformation](https://www.songho.ca/opengl/gl_transform.html) — 변환 사슬 전 단계의 행렬 유도(투영 행렬 유도가 특히 명료).
+- [Song Ho Ahn, OpenGL Transformation](https://www.songho.ca/opengl/gl_transform.html) — 변환 사슬 전 단계의 행렬 유도(투영 행렬 유도는 같은 사이트의 [OpenGL Projection Matrix](https://www.songho.ca/opengl/gl_projectionmatrix.html)가 특히 명료).
 - Eric Lengyel, *Foundations of Game Engine Development, Vol.1: Mathematics* (2016) — 동차 좌표·역전치·핸디드니스의 엄밀한 정리.
 - [OpenGL 4.6 Core Specification](https://registry.khronos.org/OpenGL/specs/gl/glspec46.core.pdf) — 클립 좌표, 원근 분할, 뷰포트 변환의 규범적 계약.
 - [Vulkan Specification: Fixed-Function Vertex Post-Processing](https://registry.khronos.org/vulkan/specs/latest/html/vkspec.html#vertexpostproc) — Vulkan 클립 볼륨과 뷰포트 변환의 규범적 정의.

@@ -597,5 +597,5 @@ BT의 진짜 가치는 모듈성이다. 서브트리를 재사용하고, Blackbo
 - Steve Rabin (ed.), *Game AI Pro* 1권, "The Behavior Tree Starter Kit" — 노드 구현과 데코레이터 카탈로그.
 - Unreal Engine 공식 문서, "Behavior Trees" / "Decorators" — event-driven 모델과 abort 정책.
 - Michele Colledanchise & Petter Ögren, *Behavior Trees in Robotics and AI* (2018) — BT의 형식적 분석과 FSM 등가성 증명.
-- Andreas Marzinotto, Michele Colledanchise, Christian Smith & Petter Ögren, "Towards a Unified Behavior Trees Framework for Robot Control" (IEEE ICRA 2014, pp. 5420–5427) — tick·반환 상태·반응 실행의 형식적 정의.
+- Alejandro Marzinotto, Michele Colledanchise, Christian Smith & Petter Ögren, "Towards a Unified Behavior Trees Framework for Robot Control" (IEEE ICRA 2014, pp. 5420–5427) — tick·반환 상태·반응 실행의 형식적 정의.
 - Chris Simpson, "Behavior trees for AI: How they work" (Gamasutra) — 입문용 시각적 설명.

@@ -106,7 +106,7 @@ mat4 ResultB = M1 * (M2 * M3);
 // 교환법칙: 다른 결과
 mat4 RT = R * T;
 mat4 TR = T * R;
-// RT != TR (회전 후 이동 vs 이동 후 회전)
+// RT != TR (이동 후 회전 vs 회전 후 이동)
 ```
 
 ### 1.4 단위 행렬과 영행렬
@@ -337,30 +337,30 @@ $$
 오른손 좌표계 vs 왼손 좌표계에서 *같은 시각적 회전* 의 행렬 부호가 다르다.
 
 - **OpenGL 관례** (오른손이 흔함): 4.1의 식 그대로.
-- **DirectX 관례** (왼손이 흔함): 양의 회전 방향이 반대. 일부 행렬의 sin 항 부호가 뒤집힘.
+- **DirectX 관례** (왼손이 흔함): DirectXMath의 `XMMatrixRotationX/Y/Z` 원소가 4.1과 *전치* 로 보이는 것은 손잡이가 아니라 *행 벡터 관례* (8.4) 때문이고, 좌표 사상은 4.1과 같다. 손잡이 자체 (z축 반전) 를 바꿔 *같은 시각적 회전* 을 얻으려면 z축을 섞는 $R_x$·$R_y$ 의 sin 항 부호만 뒤집히고 $R_z$ 는 그대로다.
 
 DirectX 자체가 *왼손을 강제* 하지는 않는다. DirectXMath의 축 회전 함수는 `XMMatrixRotationX/Y/Z`처럼 손잡이 접미사가 없고, 뷰·투영 함수가 `XMMatrixLookAtLH/RH`, `XMMatrixPerspectiveFovLH/RH` 쌍을 제공한다. *튜토리얼과 일반적 관례* 가 LH일 뿐이다. 어느 좌표계로 갈지는 *프로젝트 시작 시 결정* 하고 일관되게 쓴다.
 
 ```cpp
-// OpenGL convention
-mat4 RotateZ_RH(float theta) {
+// 오른손 좌표계 (OpenGL 관례): 4.1의 R_x 그대로
+mat4 RotateX_RH(float theta) {
     float c = cos(theta), s = sin(theta);
     return {
-        { c, -s, 0, 0},
-        { s,  c, 0, 0},
-        { 0,  0, 1, 0},
-        { 0,  0, 0, 1},
+        { 1,  0,  0, 0},
+        { 0,  c, -s, 0},
+        { 0,  s,  c, 0},
+        { 0,  0,  0, 1},
     };
 }
 
-// DirectX convention (left-handed)
-mat4 RotateZ_LH(float theta) {
+// 왼손 좌표계 (z축 반전) 에서 같은 시각적 회전: sin 항 부호 반전
+mat4 RotateX_LH(float theta) {
     float c = cos(theta), s = sin(theta);
     return {
-        { c,  s, 0, 0},
-        {-s,  c, 0, 0},
-        { 0,  0, 1, 0},
-        { 0,  0, 0, 1},
+        { 1,  0,  0, 0},
+        { 0,  c,  s, 0},
+        { 0, -s,  c, 0},
+        { 0,  0,  0, 1},
     };
 }
 ```
@@ -776,9 +776,9 @@ if (std::isnan(inv[0][0]) || std::isinf(inv[0][0])) {
 
 | 표기 | API |
 |---|---|
-| Column-major | OpenGL, GLSL, Vulkan, glm, Metal Shading Language |
+| Column-major | OpenGL, GLSL, Vulkan, glm, Metal Shading Language, Unity (`Matrix4x4`) |
 | Row-major | DirectXMath, Unreal (DirectXMath의 row-vector + row-major 관례) |
-| 사용자 선택 | Eigen, Unity (column-major default) |
+| 사용자 선택 | Eigen (column-major default) |
 
 OpenGL 셰이더 코드가 *행렬 인덱싱이 `M[col][row]`* 인 이유는 column-major.
 

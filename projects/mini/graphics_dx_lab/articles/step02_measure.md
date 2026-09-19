@@ -13,8 +13,9 @@ DX12 의 측정 인프라 — *Timestamp Query (GPU 시간)* + *Counter (CPU 호
 | `src/scene/scene.h` | 변경 | `GlCounters` 추가 |
 | `src/app/app.h` · `.cpp` | 변경 | `TimestampQuery` · `D3D12Debug` 멤버, 프레임 루프에 `Begin`/`End`/`SignalSubmitted`/`Poll` 삽입 |
 | `src/ui/panel.h` · `.cpp` | 변경 | CPU/GPU ms plot + 디버그 로그 창 |
-| `tests/d3d12_stubs.h` · `tests/graphics_dx_contract_tests.cpp` | 신규 | 디바이스 없는 대역 + 계약 테스트 |
-| `CMakeLists.txt` | 변경 | `graphics_dx_contract_tests` 타깃과 `add_test` 추가 |
+| `tests/d3d12_stubs.h` | 신규 | 디바이스 없는 대역 |
+| `tests/graphics_dx_contract_tests.cpp` | 변경 | 측정 인프라 계약 테스트 그룹(`step02`) 추가 |
+| `CMakeLists.txt` | 변경 | `graphics_dx_contract_tests` 에 `timestamp_query.cpp` 링크와 `graphics_dx_step02_measure` `add_test` 추가 |
 
 ---
 
@@ -208,7 +209,7 @@ void TimestampQuery::Poll() {
 }
 ```
 
-미완료면 기다리지 않고 그냥 돌아온다. `Map` 에 넘기는 `D3D12_RANGE` 가 *읽을 구간만* 가리키고, `Unmap` 에 넘기는 범위는 `{0, 0}` 이다 — CPU 가 아무것도 쓰지 않았다는 뜻이다. 이 두 범위를 대충 `nullptr` 로 두면 드라이버가 버퍼 전체를 무효화한다.
+미완료면 기다리지 않고 그냥 돌아온다. `Map` 에 넘기는 `D3D12_RANGE` 가 *읽을 구간만* 가리키고, `Unmap` 에 넘기는 범위는 `{0, 0}` 이다 — CPU 가 아무것도 쓰지 않았다는 뜻이다. 이 두 범위를 대충 `nullptr` 로 두어도 동작은 같지만, 읽기 범위는 CPU 캐시 무효화가 필요한 플랫폼에서 그 범위와 디버그 레이어·그래픽스 디버거의 추적 범위를 버퍼 전체로 넓히고, 쓰기 범위는 툴링 추적에만 쓰이므로 정확한 범위를 넘기는 것이 공식 권고다.
 
 ring을 다시 사용할 때도 같은 검사가 필요하다. GPU가 CPU보다 세 프레임 이상
 뒤처졌다면 slot을 덮어쓰지 않고 그 프레임의 측정을 생략한다. 측정 누락은
@@ -222,8 +223,10 @@ void TimestampQuery::Begin(ID3D12GraphicsCommandList* cmd) {
     if (!fence_) return;
 
     const UINT64 previous = slotFences_[(size_t)writeIdx_];
-    if (previous != 0 && !IsSlotReady(fence_->GetCompletedValue(), previous)) {
-        return;
+    if (previous != 0) {
+        if (!IsSlotReady(fence_->GetCompletedValue(), previous)) return;
+        Poll();
+        if (slotFences_[(size_t)writeIdx_] != 0) return;
     }
 
     activeSlot_ = writeIdx_;
@@ -474,7 +477,7 @@ DirectX contract tests passed
 
 - 완료값이 slot fence 값보다 작으면 `Poll`이 `Map`을 *한 번도* 부르지 않고 slot도 소비하지 않는다.
 - 완료 후에는 정확히 한 번 `Map`/`Unmap` 하고, 주입한 tick 차와 주파수로 계산한 ms가 나온다.
-- 링을 완료 없이 가득 채운 뒤 `Begin`을 부르면 slot을 잡지 않고(`activeSlot == -1`) `EndQuery`도 기록하지 않는다. 완료를 알리면 그때 다시 같은 slot을 잡는다.
+- 링을 완료 없이 가득 채운 뒤 `Begin`을 부르면 slot을 잡지 않고(`activeSlot == -1`) `EndQuery`도 기록하지 않는다. 완료를 알리면 그때 그 slot 의 결과를 먼저 회수한 뒤 다시 같은 slot을 잡는다.
 
 종료 순서 — `App::Shutdown()` 에서 `ctx_.Flush()` 가 ImGui 백엔드 종료·`gpuTimer_.Shutdown()`·`ctx_.Shutdown()` 보다 앞에 오고 `D3D12Context::Flush()` 가 `Signal` 뒤에 실제로 기다리는 것 — 은 이 세 그룹이 아니라 step01 의 `shutdown_waits_for_gpu` 그룹이 검사한다.
 
@@ -525,5 +528,5 @@ OpenGL 의 `GL_TIME_ELAPSED` 와 *근본 동일* 한 패턴. API 차이는 *명�
 ## 더 읽을거리
 
 - Microsoft Learn, [Timing (Direct3D 12 Queries)](https://learn.microsoft.com/en-us/windows/win32/direct3d12/timing) — 타임스탬프 쿼리·주파수 보정의 공식 문서.
-- Microsoft Learn, [ID3D12InfoQueue1](https://learn.microsoft.com/en-us/windows/win32/api/d3d12sdklayers/nn-d3d12sdklayers-id3d12infoqueue1) — 디버그 레이어 콜백 명세.
+- Microsoft DirectX Developer Blog, [D3D12 Debug Layer Message Callback](https://devblogs.microsoft.com/directx/d3d12-debug-layer-message-callback/) — `ID3D12InfoQueue1` 콜백 등록과 스레드·재진입 제약.
 - [PIX Timing Captures](https://devblogs.microsoft.com/pix/timing-captures/) — 프레임 전체의 queue 실행과 병목을 분석하는 표준 도구.

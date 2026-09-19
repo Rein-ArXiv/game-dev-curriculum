@@ -446,7 +446,7 @@ semi-implicit Euler 적분:
 
 ```cpp
 for (auto& p : ps) {
-    p.velocity += (p.acceleration + gravity) * dt;
+    p.velocity += p.acceleration * dt;   // a_i 에 중력이 이미 들어 있다 (위 식) — 다시 더하면 중력을 두 번 적분한다
     p.position += p.velocity * dt;
 }
 ```
@@ -570,7 +570,7 @@ $$
 \sum_j \frac{\partial \rho_i}{\partial p_j} p_j = -\rho_i^* + \rho_0
 $$
 
-행렬 식을 *Jacobi 또는 Gauss-Seidel iter* 로 푼다. 밀도 오차를 작게 유지하므로 큰 dt 에서도 표준 SPH 보다 안정적이다.
+행렬 식을 *relaxed Jacobi iter* 로 푼다. 밀도 오차를 작게 유지하므로 큰 dt 에서도 표준 SPH 보다 안정적이다.
 
 압력 반복의 수렴 허용 오차와 최대 반복 수가 밀도 오차와 프레임 비용을 결정한다.
 

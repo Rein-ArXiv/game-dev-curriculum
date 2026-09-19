@@ -60,7 +60,7 @@ inline float Value2D(float x, float y, uint32_t seed) {
 }
 
 // ---- Perlin Noise (2D, gradient) ----
-// 격자 정점에 *단위 그라디언트* — 4 방향 (축 정렬) 으로 충분 (math part10).
+// 격자 정점에 *단위 그라디언트* — 축 정렬 4 방향만 쓴다 (math part10 은 8~16 종을 권장; 그만큼 출력 범위가 좁다).
 // snippet-begin: perlin-2d
 inline void Grad2(int ix, int iy, uint32_t seed, float& gx, float& gy) {
     uint32_t h = Hash2(ix, iy, seed);
@@ -130,7 +130,7 @@ inline float Simplex2D(float x, float y, uint32_t seed) {
     float n0 = contrib(x0, y0, i,      j     );
     float n1 = contrib(x1, y1, i + i1, j + j1);
     float n2 = contrib(x2, y2, i + 1,  j + 1 );
-    // 70.0 은 길이 √2 급 그래디언트 12종을 쓰는 표준 구현의 정규화 상수다.
+    // 70.0 은 3D 용 12종 표를 2D 로 투영해 쓰는(대각 √2 4종 + 축 정렬 단위 4종) 표준 구현의 정규화 상수다.
     // 이 코드의 Grad2 는 축 정렬 단위 벡터 4종이라 그 상수가 맞지 않는다 —
     // 실측 범위 ≈ [-0.684, 0.684] (seed=7, 20만 표본 + 격자 스캔).
     return 70.0f * (n0 + n1 + n2);

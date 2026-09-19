@@ -156,8 +156,8 @@ std::int32_t ReadI32(std::span<const std::byte> input, std::size_t& offset) {
 
 std::uint32_t ParseUnsigned(const char* text, std::uint32_t fallback) {
     char* end = nullptr;
-    unsigned long value = std::strtoul(text, &end, 10);
-    if (end == text || *end != '\0' || value > 0xfffffffful) return fallback;
+    unsigned long long value = std::strtoull(text, &end, 10);
+    if (end == text || *end != '\0' || value > 0xffffffffull) return fallback;
     return static_cast<std::uint32_t>(value);
 }
 

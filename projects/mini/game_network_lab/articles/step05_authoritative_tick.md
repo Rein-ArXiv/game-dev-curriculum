@@ -88,8 +88,10 @@ clamp할지를 게임 규칙으로 명시해야 한다.
 ```cpp
 for (auto& [id, client] : clients_) {
     static_cast<void>(id);
-    client.positionX += client.moveX;
-    client.positionY += client.moveY;
+    client.positionX = static_cast<std::int32_t>(std::clamp<std::int64_t>(
+        std::int64_t{client.positionX} + client.moveX, INT32_MIN, INT32_MAX));
+    client.positionY = static_cast<std::int32_t>(std::clamp<std::int64_t>(
+        std::int64_t{client.positionY} + client.moveY, INT32_MIN, INT32_MAX));
 }
 ```
 

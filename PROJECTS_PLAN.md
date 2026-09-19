@@ -111,7 +111,7 @@ render snapshot + audio events + network snapshot
   잘못되면 기본 세트 전체로 폴백한다.
 - 스프라이트 파일은 게임 규칙과 분리되어 같은 ID의 외형을 교체한다.
 - simulation은 파일 경로나 GPU 객체를 알지 않는다.
-- 상태 변경은 `PlaceTower`, `UpgradeTower`, `SellTower`, `SetTargetMode` 명령을 통과한다.
+- 상태 변경은 `PlaceTower`, `UpgradeTower`, `SellTower`, `SetTargetMode`, `Blast`(발파) 명령을 통과한다.
 - 현재 타워 6종과 적 6종은 네트워크 wire format에 포함된 폐쇄 enum이다. 수치와 웨이브는
   각각 코드의 정의 테이블과 외부 웨이브 파일이 소유한다. 새 종류 추가는 호스트와
   클라이언트의 프로토콜 버전을 함께 올리는 변경이다. 런타임 DLC registry를 구현한 것처럼
@@ -138,7 +138,7 @@ Loopback 시뮬레이터는 프로토콜 테스트 백엔드로 유지하지만 
 ### 인터넷 서비스 확장 경계
 
 Mega는 listen host 2인 세션과 token admission을 사용하는 2인 전용 서버를 지원한다. 재접속,
-delta baseline, AOI/interest management, 악성 패킷 rate limiting, 패킷 AEAD, NAT traversal,
+AOI/interest management, 악성 패킷 rate limiting, 패킷 AEAD, NAT traversal,
 relay, 자동 fleet agent는 현재 제품 범위가 아니다. 구현된 실제 두 프로세스·세 끝점 연결과
 권위 검증을 미구현 항목의 빈 interface로 대체하지 않는다.
 
@@ -172,6 +172,6 @@ server allocation·짧은 수명의 game token·멱등 result를 HTTP 제어 경
 | sanitizer | 부분 | mega만 `MEGA_SANITIZE=address`로 ASan 구성이 있다. 네 lab에는 sanitizer 구성이 없다 |
 | coverage-guided fuzzing | 아니오 | 어느 lab도 libFuzzer·coverage 되먹임을 쓰지 않는다. 「property test」 요구의 범위 밖이며, 대응 없음을 그대로 적는다 |
 
-기법 자체의 소유는 `algorithms/part11_property_fuzz_verification.md`이고, 어느 절이 어느 lab에서 도는지는 [`algorithms/README.md`의 실행 자산 표](algorithms/README.md#part11의-실행-자산--어느-lab에서-도는가)에 있다.
+기법 자체의 소유는 `algorithms/part11_property_fuzz_verification.md`이고, 어느 절이 어느 lab에서 도는지는 [`algorithms/README.md`의 실행 자산 표](algorithms/README.md#part11의-실행-자산--어느-lab에서-도는가)에 있다(그 표는 다른 축의 세 lab과 mega만 다루고, `algorithms_lab` 자신의 property 11종은 같은 README의 소유 lab 항목에 적혀 있다).
 
 README에는 구현된 기능, 시뮬레이션으로만 검증한 기능, 교체 지점만 있는 기능을 구분해 적는다. “풀 스택 멀티플레이” 같은 표현은 실제 socket 서버·클라이언트와 플레이 세션이 검증된 뒤에만 사용한다.

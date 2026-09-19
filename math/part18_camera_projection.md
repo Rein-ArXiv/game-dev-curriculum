@@ -663,9 +663,9 @@ static Plane MakePlane(vec4 v) {
 }
 
 void ExtractFrustumPlanes(mat4 viewProj, ClipDepth depth, Plane planes[6]) {
-    // 행 = 열의 의미가 행렬 메모리 레이아웃에 따라 다름
+    // 4.5절과 같은 [행][열] 인덱싱. 열 우선 라이브러리 (GLM 등) 면 m[0][i] … m[3][i] 로 첨자를 뒤집는다
     auto row = [&](int i) {
-        return vec4(viewProj[0][i], viewProj[1][i], viewProj[2][i], viewProj[3][i]);
+        return vec4(viewProj[i][0], viewProj[i][1], viewProj[i][2], viewProj[i][3]);
     };
     vec4 r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
 
@@ -792,5 +792,5 @@ GPU의 *Hierarchical Z-buffer*, *Hardware Occlusion Query*, *Software Rasterizer
 - Nathan Reed, ["Depth Precision Visualized"](https://developer.nvidia.com/content/depth-precision-visualized) — Reverse-Z와 깊이 정밀도의 시각적 해설.
 - Gil Gribb, Klaus Hartmann, "Fast Extraction of Viewing Frustum Planes" (2001) — 평면 추출 원전.
 - Microsoft DirectX 12 Spec — DX 의 NDC 관례.
-- Vulkan Spec, Section 23.5 — Vulkan 의 좌표계.
+- Vulkan Spec, "Fixed-Function Vertex Post-Processing" 장의 "Coordinate Transformations" 절 — Vulkan 의 좌표계 (절 번호는 판마다 바뀐다).
 - *Frostbite Cascaded Shadow Maps* (GDC) — 산업 CSM 구현.

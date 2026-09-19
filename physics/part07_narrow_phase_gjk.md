@@ -232,7 +232,7 @@ weight는 작은 음수 오차를 clamp한 뒤 다시 정규화할 수 있지만
 
 ### 거리와 margin
 
-expanded shape로 구한 core distance에서 두 margin을 뺀다.
+core support로 구한 core distance에서 두 margin을 뺀다.
 
 $$
 d_{\text{surface}}=d_{\text{core}}-m_A-m_B
@@ -356,14 +356,9 @@ smooth shape는 한 점이 자연스럽다.
 
 ### 법선 방향
 
-Minkowski 차를 $A-B$로 정의했는지 $B-A$로 정의했는지에 따라 EPA normal 부호가 달라진다. 침투 상태에서는 `witnessB - witnessA`가 법선과 반대 방향일 수 있으므로 그 벡터만으로 방향을 고르면 안 된다. 최종 API에서는 support convention을 고정하고 중심 차이로 A에서 B 방향을 검증한다.
+Minkowski 차를 $A-B$로 정의했는지 $B-A$로 정의했는지에 따라 EPA normal 부호가 달라진다. 침투 상태에서는 `witnessB - witnessA`가 법선과 반대 방향일 수 있으므로 그 벡터만으로 방향을 고르면 안 된다. 최종 API에서는 support convention을 고정하고, 그 convention($A-B$)에서 EPA가 반환한 face의 바깥 방향 법선을 그대로 A에서 B 방향으로 쓴다. 중심 차이로 부호를 다시 정하면 비대칭 도형에서 옳은 법선을 뒤집어 B를 `normal * (depth + margin)`만큼 옮겨도 분리되지 않는다.
 
-```cpp
-if (Dot(centerB - centerA, result.normal) < 0.0f)
-    result.normal = -result.normal;
-```
-
-깊은 대칭 penetration에서 witness 차이가 거의 0이면 cached normal과 canonical feature ordering을 사용한다.
+깊은 대칭 penetration에서 원점까지 거리가 같은 face가 여럿이라 법선이 유일하지 않으면 cached normal과 canonical feature ordering을 사용한다.
 
 ## 7. Warm start와 캐시 무효화
 

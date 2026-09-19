@@ -61,7 +61,8 @@ void MeasureScene::InitBodies(std::vector<MeasureBody>& out, int n,
                                   unsigned seed) const {
     out.assign((size_t)n, MeasureBody{});
     unsigned s = seed;
-    int   perRow = std::max(1, (lastCanvasW_ - 40) / (int)(kSimRadius * 2.4f));
+    // 한 줄 최대 12 개 — response_scene 의 ResetBodies 와 같은 배치 규칙.
+    int   perRow = std::max(1, std::min(12, (lastCanvasW_ - 40) / (int)(kSimRadius * 2.4f)));
     for (int k = 0; k < n; ++k) {
         int row = k / perRow;
         int col = k % perRow;

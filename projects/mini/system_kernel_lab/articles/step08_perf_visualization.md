@@ -55,7 +55,7 @@ cycle ms 그래프는 *결과* 를 보여 준다. *원인* 은 그래프에 안 
 |---|---|---|---|
 | backend: read → mmap | 비슷 | 비슷 | *증가* (mmap 접근이 page fault 경로를 거침) |
 | backend: read → io_uring | 비슷 또는 ↓ | 비슷 | 비슷 |
-| sync: mutex → spinlock | 비슷 | *감소 가능* (futex wait를 피할 수 있지만 yield 비용이 섞임) |
+| sync: mutex → spinlock | 비슷 | *감소 가능* (futex wait를 피할 수 있지만 yield 비용이 섞임) | 비슷 |
 | sched: default → SCHED_FIFO + 부하 | ↓ | *감소* (선점 안 당함) | 비슷 |
 | workers: 1 → 4 | ↓ | *증가* (4 스레드 간 스케줄러 전환) | 비슷 |
 | ctx: pthread → coroutine | *증가* | *대폭 감소* (커널 스케줄러 안 거침) | 비슷 |
@@ -251,11 +251,11 @@ ctx         : pthread
 workers     : 4
 files       : 16  x  1.05 MB
 cycle ms    :   8.124
-throughput  :  2065.4 MB/s
+throughput  :  2065.1 MB/s
 ctx-sw/cyc  :     128
 faults/cyc  :       8
 total cycles: 312
-total MB    : 5236.5
+total MB    : 5234.5
 fixture dir : /tmp/system_kernel_lab_data
 ```
 
@@ -332,7 +332,7 @@ ctx        = pthread → coroutine
 workers    = 4
 ```
 
-cycle ms는 *증가* (코루틴 모드는 단일 스레드 직렬). 그러나 ctx-sw 채널은 *대폭 감소* — 코루틴 swap이 커널을 안 거치고 유저 공간 register save/restore 만으로 끝난다. 이 *반대 방향 변화* 가 코루틴의 본질을 가장 명확히 드러낸다.
+cycle ms는 *증가* (코루틴 모드는 단일 스레드 직렬). 그러나 ctx-sw 채널은 *대폭 감소* — 코루틴 swap이 커널 스케줄러를 거치지 않는다(glibc `swapcontext` 가 `rt_sigprocmask` 시스템 콜을 부르긴 하지만 스레드 전환이 아니라 nvcsw/nivcsw 에 잡히지 않는다). 이 *반대 방향 변화* 가 코루틴의 본질을 가장 명확히 드러낸다.
 
 이 시나리오를 그래프로 보면 cycle ms는 위로, ctx-sw는 아래로 *X자로 갈라진다*. cycle ms만 볼 때보다 *왜* 코루틴이 다른지가 한 화면에 나온다.
 
@@ -941,13 +941,13 @@ io_uring,io_uring,mutex,default,1,pthread,4,16,1048576,1,1.688201,9937.926,32,0
 이 넷이 `add_test` 네 개로 걸려 있다.
 
 ```text
-5/8 Test #5: system_kernel_bench_smoke ................   Passed
-6/8 Test #6: system_kernel_bench_smoke_workers ........   Passed
-7/8 Test #7: system_kernel_bench_fault_channel ........   Passed
-8/8 Test #8: system_kernel_bench_rejects_bad_toggle ...   Passed
+5/25 Test #5: system_kernel_bench_smoke ................   Passed
+6/25 Test #6: system_kernel_bench_smoke_workers ........   Passed
+7/25 Test #7: system_kernel_bench_fault_channel ........   Passed
+8/25 Test #8: system_kernel_bench_rejects_bad_toggle ...   Passed
 ```
 
-`system_kernel_bench_fault_channel` 이 특히 값싸고 강하다. `mmap` backend는 사이클마다 새 매핑을 만들어 반드시 minor fault를 내므로, `--backend=mmap --min-faults=1` 하나로 `getrusage` → `DiffCounters` → `FrameTimer` → CSV 배선 전체를 못 박는다. 실제로 `timer.EndCycle(bytes, ...)` 에서 카운터 인자 둘을 떼어내 `timer.EndCycle(bytes)` 로 바꾸면 나머지 일곱 케이스는 모두 통과하고 이 케이스만 실패한다 — *러너가 돌기는 도는데 두 채널이 아무것도 재지 않는* 상태가 정확히 이 모양이다.
+`system_kernel_bench_fault_channel` 이 특히 값싸고 강하다. `mmap` backend는 사이클마다 새 매핑을 만들어 반드시 minor fault를 내므로, `--backend=mmap --min-faults=1` 하나로 `getrusage` → `DiffCounters` → `FrameTimer` → CSV 배선 전체를 못 박는다. 실제로 `timer.EndCycle(bytes, ...)` 에서 카운터 인자 둘을 떼어내 `timer.EndCycle(bytes)` 로 바꾸면 나머지 스물네 케이스는 모두 통과하고 이 케이스만 실패한다 — *러너가 돌기는 도는데 두 채널이 아무것도 재지 않는* 상태가 정확히 이 모양이다.
 
 `system_kernel_bench_rejects_bad_toggle` 은 `WILL_FAIL TRUE` 로 걸린 반대 방향 케이스다. 이름 파싱이 모르는 값을 통과시키도록 바꾸면 이 케이스가 실패한다.
 

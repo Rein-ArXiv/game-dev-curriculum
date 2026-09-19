@@ -97,7 +97,7 @@ flowchart TD
     Spline --> BSpline[B-Spline<br/>다항식 가중합]
     BSpline --> NURBS[NURBS<br/>유리 가중치 추가]
     BSpline --> Bezier[Bezier<br/>특수 노트 벡터]
-    BSpline --> CatmullRom[Catmull-Rom<br/>특수 매개화]
+    BSpline --> CatmullRom[Catmull-Rom<br/>보간형 cardinal spline]
 ```
 
 B-Spline 이 *대부분 스플라인의 일반화*. 단일 Bezier 곡선은 *endpoint knot 가 degree + 1번 반복된 특수 knot vector를 가진* B-Spline 으로 표현 가능. Catmull-Rom은 *interpolating cubic Hermite / cardinal spline* 계열로, 자동 접선 계산이 특징. NURBS는 B-Spline에 *유리 가중치* 추가.
@@ -429,7 +429,7 @@ flowchart LR
     P0[P0] -->|3/4| Q0[Q0 = 0.75 P0 + 0.25 P1]
     P0 -->|1/4| Q1[Q1 = 0.25 P0 + 0.75 P1]
     P1 -->|3/4| Q2[Q2 = 0.75 P1 + 0.25 P2]
-    P1 -->|1/4| Q1
+    P1 -->|3/4| Q1
     P2 -->|3/4| Q3[Q3 = ...]
     P2 -->|1/4| Q2
 ```
@@ -518,7 +518,7 @@ float ArcLengthPolylineApprox(const Spline& s, int N) {
 }
 ```
 
-가장 단순. 정확도가 N에 비례. 게임에서 N = 32~64면 충분.
+가장 단순. 오차가 $1/N^2$ 로 줄어든다. 게임에서 N = 32~64면 충분.
 
 **Simpson's rule** (3점당 2차 다항식 적분):
 
@@ -538,7 +538,7 @@ float ArcLengthSimpson(const Spline& s, int N) {
 }
 ```
 
-Riemann 보다 *훨씬 정확* (오차 $O(h^4)$ vs $O(h)$). 같은 정확도 위해 *N을 크게 줄임*.
+Polyline 근사보다 *훨씬 정확* (오차 $O(h^4)$ vs $O(h^2)$). 같은 정확도 위해 *N을 크게 줄임*.
 
 **Gauss-Legendre quadrature** (가장 정확):
 
@@ -554,7 +554,7 @@ const float kGaussW[5] = {
 };
 ```
 
-5개 점 평가로 *Riemann 100점 정도 정확도*. 게임 런타임에는 *Simpson 또는 Riemann이 더 흔함*.
+5개 점 평가로 *polyline 100점 정도 정확도*. 게임 런타임에는 *Simpson 또는 polyline 근사가 더 흔함*.
 
 ### 6.3 LUT 빌드
 
@@ -645,7 +645,7 @@ void Recurse(const Spline& s, float t0, float t1, float maxError, ArcLengthLUT& 
 }
 ```
 
-균일 표본보다 *적은 메모리로 같은 정확도*. 트랙 데이터의 압축 형태.
+균일 표본보다 *적은 메모리로 같은 정확도*. 트랙 데이터의 압축 형태. 다만 6.3절의 `ArcLengthLUT` 는 t를 인덱스에서 균일하게 복원하므로, 적응 표본에는 표본마다 $(t, s)$ 쌍을 저장하고 s로 이분 탐색해 t를 보간하는 변형 (`AddSample(t, s)`) 이 필요하다.
 
 ## 7. 곡률과 프레네 프레임
 
@@ -697,7 +697,7 @@ struct CarOnTrack {
         vec3 vel = track.Derivative(t);
 
         vec3 T = normalize(vel);
-        // Frenet normal 대신 worldUp을 T에 직교 정규화 (RMF 단순 형태)
+        // Frenet normal 대신 worldUp을 T에 직교 정규화 (reference-up 프레임; RMF 는 아님)
         vec3 Nraw = worldUp - dot(worldUp, T) * T;
         if (length_squared(Nraw) < 1e-8f) {
             vec3 fallback = std::fabs(T.x) < 0.9f
@@ -705,7 +705,7 @@ struct CarOnTrack {
             Nraw = fallback - dot(fallback, T) * T;
         }
         vec3 N = normalize(Nraw);
-        vec3 R = cross(N, T);  // right
+        vec3 R = cross(T, N);  // right
 
         // 옵션: banking 회전을 N·R 평면에서 추가
         float bank = bankingCurve.At(t);

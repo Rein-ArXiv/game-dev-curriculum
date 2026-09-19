@@ -32,7 +32,7 @@
 | [`physics_lab`](physics_lab/) | 적분기, 힘, broad/narrow phase, 충돌 응답, 거리 제약, 에너지·반복성 관찰 | 적분기 오차 차수·normal impulse·퇴화 법선 테스트. broad phase 는 brute 와의 쌍 집합 대조, narrow phase 와 접촉 솔버는 고정 사례에 더해 불변식 property 배터리(무작위 볼록쌍의 깊이 일치와 `(normal, depth)` 계약, 무작위 강체 장면의 에너지 비증가·관통 상계·bit 결정성) |
 | [`ai_lab`](ai_lab/) | A*/Dijkstra/Greedy/JPS, flow field, steering, boids, influence map | 최단 경로·도달 불가·휴리스틱 계약 테스트. 나머지 장면 테스트 보강 필요 |
 | [`graphics_gl_lab`](graphics_gl_lab/) | individual/instanced/MDI, shader permutation, uniform/UBO/SSBO, BC 포맷, MSAA | CTest 12개(전체 2개: 계약·렌더 + step별 10개) 통과. 렌더 테스트는 실제 GL 4.5 컨텍스트에서 세 드로우 모드 픽셀 해시·Rebuild 핸들 수명·MSAA 폴백을 단언 |
-| [`graphics_dx_lab`](graphics_dx_lab/) | per-draw/instanced, PSO·RootSig 정책, descriptor write 수명, barrier 기록 형태, fence-safe timestamp | 빌드 검증 완료. 순수 상태 계약 테스트와 캡처 회귀 보강 필요 |
+| [`graphics_dx_lab`](graphics_dx_lab/) | per-draw/instanced, PSO·RootSig 정책, descriptor write 수명, barrier 기록 형태, fence-safe timestamp | CTest 8개(전체 1개 + step별 7개) 통과. 디바이스 없는 순수 상태 계약(카메라 행렬·descriptor 범위·barrier flush 수·scene rebuild 반복성)을 단언. GPU 캡처 회귀 보강 필요 |
 | [`graphics_vk_lab`](graphics_vk_lab/) | per-draw/instanced, barrier mask, fence/timeline 완료 추적, timestamp, validation | 빌드 검증 완료. 동기화 상태 테스트와 validation smoke 보강 필요 |
 | [`game_network_lab`](game_network_lab/) | 실제 TCP control, Windows IOCP/Linux epoll, UDP endpoint binding, 권위 tick·snapshot | Windows(IOCP)와 WSL2 Ubuntu 26.04(epoll) 양쪽에서 CTest 12개(실행 파일 전체 5 + step 단위 7) 통과 |
 | [`live_service_lab`](live_service_lab/) | HTTP login, match queue, server registration·drain, game token, 멱등 result | .NET Release 빌드·core contract test 통과. 교차 언어 HTTP·UDP smoke는 mega 항목에서 실행. token audience·capacity·heartbeat timeout 실패 주입은 contract test 18개에 포함 |

@@ -36,7 +36,7 @@ flowchart LR
 6. [휴리스틱 선택](#6-휴리스틱-선택)
 7. [경로 복원과 Closed Set](#7-경로-복원과-closed-set)
 8. [Tie-breaking과 자연스러운 경로](#8-tie-breaking과-자연스러운-경로)
-9. [Weighted A*와 A*가 닿지 못하는 영역](#9-weighted-a와-a가-닿지-못하는-영역)
+9. [Weighted A\*와 A\*가 닿지 못하는 영역](#9-weighted-a와-a가-닿지-못하는-영역)
 
 
 ---
@@ -175,7 +175,7 @@ open.push({ Heuristic(e.to, goal), e.to });   // g 무시, h만
 
 ### 실패 모드: 막다른 우회
 
-하지만 Greedy는 *최단 경로를 보장하지 않는다.* $g$를 무시하므로, 지금까지 큰 비용을 지불한 경로라도 도착점에 조금 더 가까워 보이면 계속 그쪽으로 간다. 다음 가중 그래프가 가장 작은 반례다.
+하지만 Greedy는 *최단 경로를 보장하지 않는다.* $g$를 무시하므로, 지금까지 큰 비용을 지불한 경로라도 도착점에 조금 더 가까워 보이면 계속 그쪽으로 간다. 다음 가중 그래프가 작은 반례다.
 
 ```text
           100
@@ -338,7 +338,7 @@ for (const Edge& e : gr.Neighbors(u)) {
 
 | 그리드 | 휴리스틱 | 식 |
 |---|---|---|
-| 4-방향 | Manhattan | $h = |dx| + |dy|$ |
+| 4-방향 | Manhattan | $h = \lvert dx\rvert + \lvert dy\rvert$ |
 | 8-방향 | Octile | $h = \max(dx,dy) + (\sqrt{2}-1)\min(dx,dy)$ |
 | 자유 이동 | Euclidean | $h = \sqrt{dx^2 + dy^2}$ |
 
@@ -495,7 +495,7 @@ struct OpenKey {
 
 근본적으로 격자 경로를 없애려면 tie-break로는 부족하다. 경로 후처리(path smoothing)로 직선 가시성(line-of-sight)이 확보되는 구간을 곧게 펴거나, 처음부터 임의 각도를 허용하는 시야 기반 알고리즘이 필요하다 — 이는 그리드 표현 자체의 한계이지 A* 알고리즘의 한계가 아니다.
 
-## 9. Weighted A*와 A*가 닿지 못하는 영역
+## 9. Weighted A\*와 A\*가 닿지 못하는 영역
 
 ### 정확성을 속도와 맞바꾸기
 
@@ -521,7 +521,7 @@ $$\text{cost}(\pi_{\text{found}}) \le w \cdot \text{cost}(\pi^*)$$
 
 위 표는 "$w$배를 넘지 않는다"를 결과로만 적었다. 이 한계가 어디서 나오고, 어떤 전제에서 성립하며, 실제로 얼마나 느슨한지를 본다. 최적 비용을 $C^* = h^*(s)$로 둔다.
 
-먼저 *열린 집합에 최적 경로 노드가 남아 있다는 보조정리* 가 필요하다. weighted A*가 도착점 $t$를 꺼내기 전 어느 시점에도, $s$에서 $t$로 가는 어떤 최적 경로 위에 $g(n) = g^*(n)$인 노드 $n$이 open에 들어 있다. 최적 경로를 $s$부터 따라가며 *아직 확정 안 된 첫 노드* 를 잡으면, 그 직전 노드까지는 모두 최적 $g$로 확정되어 있어 첫 노드가 정확히 최적 $g$로 relax되어 open에 있기 때문이다. 이 보조정리는 closed 노드를 더 짧은 경로로 다시 열어주거나(admissible 휴리스틱의 reopening), $h$가 consistent하면 reopening 없이도 성립한다 — 5절 단조성이 closed 노드의 $g$ 최적을 이미 보장하기 때문이다.
+먼저 *열린 집합에 최적 경로 노드가 남아 있다는 보조정리* 가 필요하다. weighted A*가 도착점 $t$를 꺼내기 전 어느 시점에도, $s$에서 $t$로 가는 어떤 최적 경로 위에 $g(n) = g^*(n)$인 노드 $n$이 open에 들어 있다. 최적 경로를 $s$부터 따라가며 *아직 확정 안 된 첫 노드* 를 잡으면, 그 직전 노드까지는 모두 최적 $g$로 확정되어 있어 첫 노드가 정확히 최적 $g$로 relax되어 open에 있기 때문이다. 이 보조정리는 closed 노드를 더 짧은 경로로 다시 열어줄 때(admissible 휴리스틱의 reopening) 성립한다. $h$가 consistent해도 $w>1$이면 $f=g+w\,h$의 단조성이 깨져 closed 노드의 $g$가 최적이 아닐 수 있고(아래 예에서 $A$가 $g=3$으로 닫힌다), reopening 없는 consistent $h$의 $w$ 한계는 별도 증명이 필요하다(ARA*, Likhachev·Gordon·Thrun 2003).
 
 이제 한계를 유도한다. $t$를 꺼내는 순간 그 open 노드 $n$보다 $t$가 먼저 뽑혔으므로 $f(t) \le f(n)$이다. $h(t) = 0$이라 $f(t) = g(t)$이고, 전개하면
 

@@ -402,11 +402,12 @@ bool FileIoWorkload::SetupCoroContext(Coroutine& c, int idx) {
 void FileIoWorkload::StartCoroutinePool() {
     queueSync_ = CreateSync(syncType_);
 
+    // 코루틴은 driver 스레드 하나에서 직렬로 돌고 backend->RunCycle 이 반환한
+    // 뒤에만 양보하므로 backend 상태가 전환을 가로지르지 않는다. 워커마다
+    // 인스턴스를 두면 (N-1) 개의 fileBytes 크기 버퍼가 한 번도 쓰이지 않은 채
+    // 캐시 풋프린트만 키우므로 하나를 공유한다.
     coroBackends_.clear();
-    coroBackends_.reserve(workerCount_);
-    for (std::size_t i = 0; i < workerCount_; ++i) {
-        coroBackends_.push_back(CreateEffectiveBackend());
-    }
+    coroBackends_.push_back(CreateEffectiveBackend());
 
     coros_.clear();
     coros_.resize(workerCount_);
@@ -419,9 +420,11 @@ void FileIoWorkload::StartCoroutinePool() {
     coroRunning_.store(true);
     cycleBytes_.store(0);
 
-    // 코루틴 driver 자체도 별도 스레드로 둔다 — 메인 GUI 스레드를 blocking
-    // 하지 않게. driver 스레드가 *한 사이클 dispatch + 모든 코루틴 종료 대기*
-    // 패턴으로 동작. RunCycleCoroutine이 driver 스레드를 깨운다.
+    // 코루틴 driver를 별도 스레드로 둔다 — pthread 풀의 cycleSeq+ack 패턴과
+    // 대칭을 맞추고, sched 토글(ApplySchedToCurrentThread, SCHED_FIFO idle
+    // sleep)을 GUI 스레드가 아닌 워커 측 스레드에만 적용하기 위해. driver
+    // 스레드가 *한 사이클 dispatch + 모든 코루틴 종료 대기* 패턴으로 동작.
+    // RunCycleCoroutine이 driver 스레드를 깨운다.
     cycleSeq_.store(0);
     workerCycleAck_.store(0);
     coroDriver_ = std::thread([this]() {
@@ -506,7 +509,7 @@ void FileIoWorkload::StopCoroutinePool() {
 }
 
 void FileIoWorkload::CoroBody(std::size_t coroIdx) {
-    auto* backend = coroBackends_[coroIdx].get();
+    auto* backend = coroBackends_.front().get();
 
     for (;;) {
         // 작업 큐에서 한 개 pop. 단일 스레드라 sync는 의미 없지만 토글된

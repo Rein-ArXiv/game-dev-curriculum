@@ -146,7 +146,7 @@ D3D12_GPU_VIRTUAL_ADDRESS cbAddr =
 cmd->SetGraphicsRootConstantBufferView(1, cbAddr);
 ```
 
-FrameCB 주소가 `f * sizeof(FrameCB)` 만큼 밀려 있는 것에 주의한다. 업로드 버퍼 하나를 프레임 수만큼 나눠 쓰므로, 프레임 슬롯마다 다른 구간을 가리켜야 in-flight 인 프레임의 상수를 덮어쓰지 않는다.
+FrameCB 주소가 프레임 슬롯마다 256 바이트의 배수만큼 밀려 있어야 하는 것에 주의한다. root CBV 주소는 `D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT`(256) 의 배수여야 하므로 슬롯 stride 는 구조체의 원래 크기(96 바이트)가 아니라 256 바이트 단위로 잡는다. 업로드 버퍼 하나를 프레임 수만큼 나눠 쓰므로, 프레임 슬롯마다 다른 구간을 가리켜야 in-flight 인 프레임의 상수를 덮어쓰지 않는다.
 
 ## 3. 측정 결과
 
@@ -169,7 +169,7 @@ graphics 시리즈의 *"RootSig 를 패스별로만 바꾸기"* 권장이 *이 �
 
 ## 4. 슬롯 규약의 자동 검증
 
-루트 상수 레이아웃은 *셰이더 · 루트 시그니처 · 드로우 기록* 세 곳이 동시에 만족해야 하는 규약이다. 셋 중 하나만 어긋나도 화면은 그럴듯하게 깨지고, 디버그 레이어는 아무 말도 하지 않는다. 그래서 슬롯이 겹치지 않는다는 것과 예산에 정확히 맞는다는 것을 컴파일 타임에 못박는다.
+루트 상수 레이아웃은 *셰이더 · 루트 시그니처 · 드로우 기록* 세 곳이 동시에 만족해야 하는 규약이다. 셋 중 하나만 어긋나도 화면은 그럴듯하게 깨지고, 디버그 레이어는 아무 말도 하지 않는다. 그래서 예산에 정확히 맞는다는 것은 컴파일 타임에 못박고, 슬롯이 서로 겹치지 않는다는 것은 같은 테스트의 런타임 판정이 맡는다.
 
 <!-- snippet: tests/graphics_dx_contract_tests.cpp#TestRootConstantBudget -->
 ```cpp
@@ -222,7 +222,7 @@ void TestRootSigPolicyCallCounts() {
     // Per-Draw -> 드로우마다 한 번, 전부 같은 루트 시그니처 포인터.
     RecordResult perDraw;
     RunRecord(perDraw, 100, dxlab::DrawMode::PerDraw,
-              dxlab::RootSigPolicy::PerDraw, dxlab::PsoSwitchPolicy::PerDraw);
+              dxlab::RootSigPolicy::PerDraw, dxlab::PsoSwitchPolicy::PerPass);
     CHECK(perDraw.cmd.rootSigSets.size() == 100);
     for (auto* rs : perDraw.cmd.rootSigSets) CHECK(rs == FakeRootSig());
     CHECK(perDraw.counters.rootSigSets == 100);
@@ -236,7 +236,7 @@ void TestRootSigPolicyCallCounts() {
 }
 ```
 
-`RecordResult` 는 명령 기록을 남기는 command list 대역과 카운터를 함께 든 묶음이고, `RunRecord` 는 오브젝트 수와 네 정책을 받아 `Scene::RecordDraw` 를 한 번 돌린다. 두 번 돌리는 이유는 *정책 하나만 다르고 나머지가 같은* 두 실행을 나란히 놓아야 이 축의 효과가 분리되기 때문이다. 100 회 쪽의 포인터 비교가 있어야 “호출은 하는데 엉뚱한 시그니처를 물린다”가 통과하지 못한다.
+`RecordResult` 는 명령 기록을 남기는 command list 대역과 카운터를 함께 든 묶음이고, `RunRecord` 는 오브젝트 수와 세 정책을 받아 `Scene::RecordDraw` 를 한 번 돌린다. 두 번 돌리는 이유는 *정책 하나만 다르고 나머지가 같은* 두 실행을 나란히 놓아야 이 축의 효과가 분리되기 때문이다. 100 회 쪽의 포인터 비교가 있어야 “호출은 하는데 엉뚱한 시그니처를 물린다”가 통과하지 못한다.
 
 ---
 

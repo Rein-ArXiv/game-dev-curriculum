@@ -121,7 +121,7 @@ private:
 세 가지 설계 결정.
 
 1. **Node 크기 32 byte**: `float dist` + `int pad[5]` + `Node* next` = 32 byte (8-byte 정렬). vector와 intrusive list가 같은 노드 크기를 쓰도록 통일한다. std::list는 이 `Node` 위에 구현체 내부 링크와 allocator 메타데이터가 추가될 수 있다.
-2. **`pad[5]`**: Node 한 개가 캐시 라인의 절반(64 byte의 절반 = 32 byte)을 차지하도록 맞춘다. 32 byte 슬롯이라 Pool이 64 byte 캐시 라인에 정확히 *2 노드씩* 배치된다.
+2. **`pad[5]`**: Node 한 개가 캐시 라인의 절반(64 byte의 절반 = 32 byte)을 차지하도록 맞춘다. 32 byte 슬롯이라 Pool 슬롯 두 개가 캐시 라인 하나 분량을 차지한다. 라인마다 온전히 두 개가 들어가려면 백킹 버퍼가 32 byte 정렬이어야 하는데, Pool은 `alignof(Node)` 인 8 byte만 요구하므로 실제로는 노드가 라인 경계를 걸칠 수 있다.
 3. **외부 `intrusiveAlloc`**: IntrusiveList가 사용할 allocator를 외부에서 받는다. 다양한 allocator로 실험 가능 (이 도구는 Pool로 고정).
 
 ### LastSum 노출 이유
@@ -287,8 +287,8 @@ flowchart LR
     Pool --> N1["Allocate() → Slot 1"]
     Pool --> N2["Allocate() → Slot 2"]
 
-    N0 -.->|next ptr| N1
-    N1 -.->|next ptr| N2
+    N2 -.->|next ptr| N1
+    N1 -.->|next ptr| N0
 ```
 
 PoolAllocator는 *시작 시 한 번 큰 단일 버퍼* 를 잡고, Allocate 호출마다 *그 버퍼의 슬롯 하나씩* 반환한다. 슬롯이 32 byte 단위로 연속 배치되어 있어 *주소도 연속* 이다.
@@ -647,7 +647,7 @@ container: 1 test(s), 25 check(s), 0 failure(s)
 
 - **Vector**: container ms가 가장 작음. prefetcher가 잘 동작해 캐시 미스가 적다. 보통 수십 μs 단위.
 - **StdList**: container ms가 *훨씬 커질 수 있음*. 노드 주소 연속성이 보장되지 않아 cache miss가 늘기 쉽다. 워크로드·allocator·CPU에 따라 vector 대비 수배 차이가 날 수 있다.
-- **IntrusiveList (Pool)**: vector와 비슷하거나 살짝 작음/큼. Pool이 연속 슬롯을 잡으므로 prefetcher 효과가 vector에 가까울 수 있다. 정확한 비교 결과는 컴파일러·CPU에 따라 다르다.
+- **IntrusiveList (Pool)**: vector보다는 눈에 띄게 큼. Pool이 연속 슬롯을 잡아 캐시 거동은 vector에 가깝지만, 다음 노드 주소를 읽어야 다음 접근이 시작되는 직렬 의존 사슬이 남는다. StdList와의 차이는 노드 수가 커져 캐시 미스가 지배할수록 벌어진다. 정확한 비교 결과는 컴파일러·CPU에 따라 다르다.
 
 container 콤보를 vector → StdList로 바꾼 직후 *세로 절벽* 이 그래프가 아니라 *stats 텍스트* 의 container 값에 나타난다. 5배 이상 점프하는 경우 캐시 미스의 영향이 명확히 드러난 사례다.
 
@@ -664,7 +664,7 @@ allocator 토글이 alloc ms만 움직이고, container 토글이 container ms�
 
 ### 검증 체크리스트
 
-- container ms가 0 → 모든 컨테이너에서 0이라면 컴파일러가 sum 루프를 삭제했을 가능성. HUD container 줄의 `sum` 값이 프레임마다 변하는지 확인.
+- container ms가 0 → 모든 컨테이너에서 0이라면 컴파일러가 sum 루프를 삭제했을 가능성. HUD container 줄의 `sum` 값이 `0` 이 아닌지 확인한다. 컨테이너 내용은 `Init` 이후 바뀌지 않으므로 정상이면 매 프레임 같은 값이 찍힌다.
 - IntrusiveList에서 노드 수가 `kContainerCount` 보다 작음 → Pool 고갈. `kContainerCount + 16` 의 여유를 늘림.
 - StdList와 IntrusiveList ms가 비슷 → 노드 수가 작거나 측정 노이즈가 큰 경우. Release 빌드인지 확인하고 `kContainerCount` 를 늘려 차이를 키운다.
 - container 토글 변경 시 잠깐 멈춤 → Init이 N개 노드를 새로 채우느라 잠깐 비용. 5000개라면 1ms 안쪽이 정상.

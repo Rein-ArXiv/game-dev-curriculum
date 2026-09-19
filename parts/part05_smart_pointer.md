@@ -57,7 +57,6 @@ C++ 객체의 수명에 관여하는 함수는 다섯 개다.
 
 ```cpp
 class T {
-    T();                       // 기본 생성자
     T(const T&);               // 복사 생성자
     T(T&&) noexcept;           // 이동 생성자
     T& operator=(const T&);    // 복사 대입
@@ -169,7 +168,7 @@ std::unique_ptr<T> make_unique(Args&&... args) {
 
 | 객체 종류 | 이동 비용 |
 |-----------|-----------|
-| 포인터 멤버만 가진 클래스 (`vector`, `string`) | 포인터 몇 개 복사 후 원본 비우기, $O(1)$ |
+| 포인터 멤버로 자원을 가리키는 클래스 (`vector`, SSO 한도를 넘은 `string`) | 포인터 몇 개 복사 후 원본 비우기, $O(1)$ |
 | 작은 POD (`std::array<int, 4>`) | 복사와 동일 (이동할 자원 없음) |
 | 소멸자가 비싼 객체 | 원본의 소멸자가 여전히 호출됨 |
 
@@ -234,18 +233,13 @@ use_raw(Widget*):
     pop rbx
     ret
 
-; use_unique: (동일!)
+; use_unique: (해제 코드가 없다)
 use_unique(std::unique_ptr<Widget>):
-    push rbx
-    mov rbx, rdi
-    call Widget::process()
-    mov rdi, rbx
-    call operator delete(void*)
-    pop rbx
-    ret
+    mov rdi, QWORD PTR [rdi]  ; 내부 포인터를 로드
+    jmp Widget::process()     ; 꼬리 호출
 ```
 
-이 컴파일러·ABI·최적화 조건에서는 사실상 동일한 코드가 생성될 수 있다. 이것이 의도한 zero-overhead 사용 경로다.
+인라인되지 않는 이 경계에서는 값 매개변수가 invisible reference로 들어와 역참조가 한 번 더 필요하고, 해제 코드는 호출자 쪽에 남는다. 인라인이 일어나는 일반적인 사용에서는 두 경로가 같은 코드로 합쳐진다. 이것이 의도한 zero-overhead 사용 경로다.
 
 한 가지 단서가 있다. Itanium C++ ABI에서 비자명(non-trivial) 소멸자를 가진 타입을 값으로 전달하면 레지스터가 아닌 메모리를 경유하고 소멸 책임이 호출자에 남아, 인라인되지 않는 경계에서는 raw 포인터 대비 미세한 차이가 생길 수 있다(Chandler Carruth, "There Are No Zero-cost Abstractions", CppCon 2019). 인라인이 일어나는 일반적인 사용에서는 차이가 사라진다.
 
@@ -673,6 +667,8 @@ std::vector<Data> direct_vec(COUNT);
 참조 카운트를 객체 내부에 포함시킨다:
 
 ```cpp
+// 파생 타입을 CRTP로 받는다. vtable 없이 정확한 타입으로 지우기 위해서다.
+template<typename Derived>
 class RefCounted {
     mutable std::atomic<uint32_t> ref_count_{0};
 
@@ -683,7 +679,7 @@ public:
 
     void release() const noexcept {
         if (ref_count_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-            delete this;
+            delete static_cast<const Derived*>(this);
         }
     }
 
@@ -1064,6 +1060,16 @@ public:
         if (ptr_) Remove();
     }
 
+    LinkedPtr& operator=(const LinkedPtr& other) {
+        if (this != &other) {
+            if (ptr_) Remove();
+            ptr_ = other.ptr_;
+            if (ptr_) Insert(other);
+            else      prev_ = next_ = this;
+        }
+        return *this;
+    }
+
 private:
     void Insert(const LinkedPtr& other) {
         // 링크 필드는 mutable이며 pointee의 논리적 값은 바꾸지 않는다.
@@ -1120,6 +1126,10 @@ public:
         std::atomic<uint32_t> ref_count_;       // 사용 중
     };
 
+    // C++20부터 std::atomic의 기본 생성자가 비자명해져, 활성 멤버를 직접 정해 주지 않으면
+    // 암묵 기본 생성자가 삭제된다.
+    RefCountedPoolObject() noexcept : next_free_(nullptr) {}
+
     void InitializeFromPool() {
         new (&ref_count_) std::atomic<uint32_t>(1);
     }
@@ -1172,7 +1182,7 @@ C++ 표준상 union의 활성 멤버가 아닌 멤버에 접근하는 것은 정
 
 디버깅 측면에서도 까다롭다. free된 객체의 `ref_count_`를 디버거가 출력하면 그것은 사실 다음 free 블록의 포인터 값이다. `ref_count_ = 0x7FFE1234`라는 출력이 사실은 `next_free_`라는 사실을 모르면 혼란스럽다.
 
-스레드 안전성도 까다롭다. 같은 메모리 위치에 두 개의 atomic 타입이 union으로 들어가 있으면, 활성 멤버 전환 사이에 데이터 경합이 가능하다. 대부분의 레거시 구현은 싱글스레드 가정 하에 작성되었다.
+스레드 안전성도 까다롭다. 같은 메모리 위치에 atomic 카운트와 raw 포인터가 union으로 겹쳐 있으면, 활성 멤버 전환 사이에 데이터 경합이 가능하다. 대부분의 레거시 구현은 싱글스레드 가정 하에 작성되었다.
 
 ### 현대적 대안
 
@@ -1249,7 +1259,7 @@ public:
 };
 
 // 3. Intrusive counting (공유 필요 시)
-class Asset : public RefCounted {
+class Asset : public RefCounted<Asset> {
     // ...
 };
 

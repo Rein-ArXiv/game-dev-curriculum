@@ -495,7 +495,7 @@ private:
 // 없으면 미지의 값이 검증기의 switch를 그냥 통과한다.
 //
 // `default:` 대신 열거자를 전부 적는다. 명령을 추가하면서 여기를 빠뜨리면 컴파일러가
-// 미처리 열거자를 경고한다 — 침묵하는 통과보다 시끄러운 경고가 낫다.
+// 미처리 열거자를 경고한다(GCC/Clang `-Wswitch`; MSVC는 `/w14062` 필요) — 침묵하는 통과보다 시끄러운 경고가 낫다.
 inline bool IsKnownOpCode(OpCode op) {
     switch (op) {
         case OpCode::Constant:
@@ -581,16 +581,14 @@ inline bool Verify(const Program& program, std::string& error) {
         bool terminal = false;
 
         switch (instruction.op) {
+            // 피연산자 범위는 위의 정적 전수 검사가 이미 닫았다 — 여기서는 스택 효과만 본다.
             case OpCode::Constant:
-                if (!requireOperand(instruction, program.constants.size(), "상수")) return false;
                 delta = 1;
                 break;
             case OpCode::LoadGlobal:
-                if (!requireOperand(instruction, program.names.size(), "이름")) return false;
                 delta = 1;
                 break;
             case OpCode::StoreGlobal:
-                if (!requireOperand(instruction, program.names.size(), "이름")) return false;
                 required = 1;
                 break;
             case OpCode::Add:
@@ -610,8 +608,6 @@ inline bool Verify(const Program& program, std::string& error) {
                 required = 1;
                 break;
             case OpCode::CallNative:
-                if (!requireOperand(instruction, program.names.size(), "네이티브 이름"))
-                    return false;
                 required = 1;
                 break;
             case OpCode::Pop:
@@ -620,10 +616,8 @@ inline bool Verify(const Program& program, std::string& error) {
                 break;
             case OpCode::JumpIfFalse:
                 required = 1;
-                if (!requireOperand(instruction, program.code.size(), "분기")) return false;
                 break;
             case OpCode::Jump:
-                if (!requireOperand(instruction, program.code.size(), "분기")) return false;
                 break;
             case OpCode::Halt:
                 terminal = true;
@@ -673,6 +667,10 @@ struct RunResult {
 };
 
 class VirtualMachine {
+    // 호스트 함수가 같은 VM의 `Run`을 다시 부르면 바깥 실행의 값 스택과 전역이 지워져
+    // 빈 스택의 `back()`을 읽게 된다. 실행 중에는 진입을 거부한다.
+    bool running_ = false;
+
 public:
     using NativeFunction = std::function<double(double)>;
 
@@ -682,12 +680,18 @@ public:
 
     RunResult Run(const Program& program, uint64_t instructionBudget = 100000,
                   size_t stackLimit = 256) {
+        if (running_) return Failure({}, "실행 중인 VM에 다시 진입할 수 없다", 0);
+        struct ReentryGuard {
+            bool& flag;
+            explicit ReentryGuard(bool& f) : flag(f) { flag = true; }
+            ~ReentryGuard() { flag = false; }
+        } reentryGuard{running_};
+        globals_.assign(program.names.size(), std::nullopt);
+        stack_.clear();
         std::string verificationError;
         if (!Verify(program, verificationError))
             return Failure({}, "바이트코드 검증 실패: " + verificationError, 0);
 
-        globals_.assign(program.names.size(), std::nullopt);
-        stack_.clear();
         size_t pc = 0;
         uint64_t executed = 0;
 

@@ -40,7 +40,8 @@ constexpr std::size_t kEventCount = 2000;
 constexpr std::size_t kContainerCount = 5000;
 
 // allocator별 백킹 용량.
-// Pool/Slab은 한 프레임의 노드 수 + 여유를 미리 잡아 둔다.
+// Pool은 한 프레임의 노드 수 + 여유를 미리 잡아 둔다.
+// Slab은 같은 수를 크기 클래스마다 잡으므로 백킹은 8개 클래스 합만큼 커진다.
 // Arena는 노드 다발 한 번에 충분한 단일 버퍼.
 constexpr std::size_t kArenaBytes  = 256 * 1024;   // 256 KB
 constexpr std::size_t kPoolBlocks  = 4096;         // 2000 + 여유

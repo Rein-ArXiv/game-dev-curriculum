@@ -186,7 +186,8 @@ private:
 
         sockaddr_in address{};
         address.sin_family = AF_INET;
-        address.sin_addr.s_addr = htonl(INADDR_ANY);
+        address.sin_addr.s_addr =
+            htonl(config_.loopbackOnly ? INADDR_LOOPBACK : INADDR_ANY);
         address.sin_port = htons(config_.tcpPort);
         if (bind(listener_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0 ||
             listen(listener_, SOMAXCONN) < 0 || !AddEpoll(listener_, EPOLLIN)) {
@@ -204,7 +205,8 @@ private:
         }
         sockaddr_in address{};
         address.sin_family = AF_INET;
-        address.sin_addr.s_addr = htonl(INADDR_ANY);
+        address.sin_addr.s_addr =
+            htonl(config_.loopbackOnly ? INADDR_LOOPBACK : INADDR_ANY);
         address.sin_port = htons(config_.udpPort);
         if (bind(udpFd_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0 ||
             !AddEpoll(udpFd_, EPOLLIN)) {

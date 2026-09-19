@@ -210,7 +210,7 @@ $$
 | 객체 | 종단 속도 (m/s) |
 |---|---|
 | 사람 (자유 낙하) | 50 |
-| 사람 (paratrooper, 펼친 옷) | 5 |
+| 사람 (낙하산 펼침) | 5 |
 | 깃털 | 0.4 |
 | 골프공 | 32 |
 | 빗방울 | 9 |
@@ -454,7 +454,7 @@ $$
 v_0^4 = g (g x^2 + 2 y v_0^2)
 $$
 
-수평 발사 ($y = 0$):
+목표가 발사점과 같은 높이 ($y = 0$):
 
 $$
 x_{max} = \frac{v_0^2}{g}, \quad \theta_{max} = 45°
@@ -579,7 +579,8 @@ constexpr float kMinToiAdvance = 1e-5f;
 constexpr float kSkin = 0.001f;
 
 while (remainingTime > 0) {
-    RaycastHit hit = Sweep(bullet, remainingTime);
+    RaycastHit hit = Sweep(bullet.position,
+                           bullet.position + bullet.velocity * remainingTime, world);
     if (!hit.hit) {
         bullet.position += bullet.velocity * remainingTime;
         break;
@@ -879,6 +880,6 @@ BroadcastProjectileState(...);
 - Real-Time Rendering, 4th ed., online Ch. 25 "Collision Detection" — ray / sweep 검사 기초.
 - Quake 소스 — 미사일 prediction 의 산업 reference.
 - Sebastian Lague, "Projectile Prediction" 비디오 — 시각적 설명.
-- Eric Lengyel, *Mathematics for 3D Game Programming*, 발사체 챕터.
+- Eric Lengyel, *Mathematics for 3D Game Programming*, Ch. 13 "Linear Physics" §13.3 "Projectile Motion".
 - Erin Catto, GDC 발표 — 강체 + 발사체의 통합.
 - Glenn Fiedler, "Networked Physics" — 발사체 네트워크 동기화.

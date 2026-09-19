@@ -102,7 +102,7 @@ Swapchain 은 format/present mode 를 반드시 질의해야 한다. `MAILBOX` �
 1. `vkGetPhysicalDeviceSurfaceFormatsKHR`.
 2. 선호 format 선택, 없으면 첫 format.
 3. `vkGetPhysicalDeviceSurfacePresentModesKHR`.
-4. `MAILBOX` 가 있으면 선택, 없으면 `FIFO`.
+4. vsync 가 켜져 있으면 `FIFO`, 꺼져 있으면 `MAILBOX` > `IMMEDIATE` > `FIFO` 순으로 선택.
 
 이 선택 과정 자체가 Vulkan 의 명시성이다.
 
@@ -208,4 +208,4 @@ instance/device/messenger 생성은 `VkInstance` 가 있어야 성립하므로 �
 
 - [Vulkan Tutorial](https://vulkan-tutorial.com/) — instance→swapchain→파이프라인의 표준 입문.
 - [vkguide.dev](https://vkguide.dev/) — 동적 렌더링·VMA 기반의 현대적 구성.
-- [Vulkan Specification: Limits](https://registry.khronos.org/vulkan/specs/latest/html/chap33.html) — maxPushConstantsSize 128B 등 보장 한도의 원문.
+- [Vulkan Specification: Limits](https://docs.vulkan.org/spec/latest/chapters/limits.html) — maxPushConstantsSize 등 보장 한도의 원문. 최소 보장값과 장치가 보고한 실제 한도를 구분한다.

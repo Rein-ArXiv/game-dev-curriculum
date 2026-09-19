@@ -131,6 +131,10 @@ private:
     Instance*                   instanceMapped_ = nullptr;
     size_t                      instanceCapacity_ = 0;
     D3D12_VERTEX_BUFFER_VIEW   instanceVbv_{};
+    // Instance 업로드 버퍼는 frame-in-flight 수만큼 슬롯을 두고 Draw 마다 돌려 쓴다.
+    // 한 벌만 두면 GPU 가 아직 읽는 중인(N-1·N-2 프레임) 구간을 CPU 가 덮어쓴다.
+    static constexpr size_t     kInstanceSlots = 3;   // == kFramesInFlight
+    size_t                      instanceSlot_ = 0;
 };
 
 }  // namespace dxlab

@@ -201,7 +201,7 @@ ON 쪽이 *살짝 빠르거나 거의 같음* 이 흔한 결과다. 분기 빈�
 
 predication은 *같은 값* 을 다른 명령으로 내는 변형이다. 결과가 달라졌다면 그건 최적화가 아니라 버그다. 그래서 `branch` 그룹은 성능이 아니라 *등식* 만 본다 — 체크박스를 켰을 때 화면의 점들이 조금이라도 다른 자리에 있으면 ms 비교는 의미를 잃는다.
 
-앞 절에서 말한 "SIMD 경로는 토글 무관" 도 여기서 기계가 확인한다. 그쪽은 같은 함수가 같은 인자로 도는 것이므로 허용 오차가 아니라 *0* 이 기준이다.
+앞 절에서 말한 "SIMD 경로는 토글 무관" 은 이 등식으로는 확인되지 않는다. 그쪽은 같은 함수가 같은 인자로 도는 구조라 결과가 다를 수 없고, 그래서 허용 오차가 아니라 *0* 이 기준이다.
 
 <!-- snippet: tests/core_tests.cpp#TestBranchlessEquivalence -->
 ```cpp
@@ -306,4 +306,4 @@ branch: 1 test(s), 7 check(s), 0 failure(s)
 - [godbolt.org](https://godbolt.org/) — `if` vs ternary의 어셈블리 차이 직접 확인
 - Agner Fog, "The microarchitecture of Intel, AMD and VIA CPUs" — 분기 예측기 세부
 - [Andrei Alexandrescu, "Optimization Tips" (CppCon 2014)](https://www.youtube.com/watch?v=Qq_WaiwzOtI) — branchless 패턴 모음
-- Bryce Adelstein-Lelbach, "Benchmarking C++ Code" (CppCon 2015) — 분기 측정의 함정
+- Bryce Adelstein Lelbach, "Benchmarking C++ Code" (CppCon 2015) — 분기 측정의 함정

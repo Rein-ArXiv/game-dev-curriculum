@@ -54,7 +54,13 @@ GLuint ShaderProgram::Compile(GLenum type, const std::string& src) {
 
 void ShaderProgram::LoadFromSources(const std::string& vertSrc, const std::string& fragSrc) {
     GLuint vs = Compile(GL_VERTEX_SHADER,   vertSrc);
-    GLuint fs = Compile(GL_FRAGMENT_SHADER, fragSrc);
+    GLuint fs = 0;
+    try {
+        fs = Compile(GL_FRAGMENT_SHADER, fragSrc);
+    } catch (...) {
+        glDeleteShader(vs);     // 프래그먼트 컴파일 실패 시 정점 셰이더 객체 누수 방지.
+        throw;
+    }
 
     GLuint prog = glCreateProgram();
     glAttachShader(prog, vs);

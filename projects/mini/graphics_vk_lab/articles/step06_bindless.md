@@ -36,6 +36,7 @@ Vulkan bindless 를 하려면 feature 와 layout flag 가 필요하다.
 
 ```cpp
 VkPhysicalDeviceVulkan12Features v12{};
+v12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
 v12.descriptorIndexing = VK_TRUE;
 v12.runtimeDescriptorArray = VK_TRUE;
 v12.descriptorBindingPartiallyBound = VK_TRUE;
@@ -106,7 +107,7 @@ CHECK((vklab::SceneSetLayoutFlags() &
        VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT) == 0);
 ```
 
-나머지는 binding 인덱스·타입·stage 와 pool 정합성이다. pool 크기는 binding 표에서 파생되므로, binding 을 늘리고 pool 을 그대로 두는 어긋남이 여기서 잡힌다. §2 가 말한 “feature 와 layout flag 와 pool flag 가 함께 맞아야 한다”의 마지막 한 축이 이것이다.
+나머지는 binding 인덱스·타입·stage 와 pool 정합성이다. pool 크기는 binding 표에서 파생되므로, binding 을 늘리고 pool 을 그대로 두는 어긋남이 여기서 잡힌다. §2 와 §4 가 말한 “feature 와 layout flag 와 pool flag 가 함께 맞아야 한다”의 마지막 한 축이 이것이다.
 
 이 실행이 확인하지 못하는 것은 `vkCreateDescriptorSetLayout` 가 그 표를 받아 실제로 성공하는가다. 그쪽은 실행으로 본다.
 

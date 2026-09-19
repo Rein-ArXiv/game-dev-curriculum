@@ -10,8 +10,8 @@ void FrameTimer::BeginFrame() {
     auto now = Clock::now();
     if (hasPrevFrame_) {
         // dt 는 *이전 BeginFrame 과 이번 BeginFrame 의 차이* — 한 프레임의
-        // 전체 wall-clock 시간. EndFrame - BeginFrame (= 작업 시간) 만 쓰면
-        // swap 대기 시간이 빠져 *시뮬 dt 가 너무 작아짐*.
+        // 전체 wall-clock 시간. EndFrame - BeginFrame 도 swap 을 포함한 같은
+        // 구간이지만, BeginFrame 시점에는 *이번 프레임의 EndFrame 이 아직 없다*.
         std::chrono::duration<float> deltaSec = now - prevBegin_;
         lastDeltaSeconds_ = deltaSec.count();
     } else {

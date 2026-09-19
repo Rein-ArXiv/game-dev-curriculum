@@ -266,7 +266,7 @@ flowchart LR
     View --> Sampler[VkSampler]
 ```
 
-device local에 두는 이유는 대역폭이다. discrete GPU에서 VRAM 대역폭은 수백 GB/s에 이르지만, host visible 메모리(시스템 RAM이거나 작은 BAR 영역)는 PCIe를 거쳐 보통 한 자릿수~십수 GB/s에 머문다. 텍스처는 매 프레임 여러 번 샘플되므로 device local에 두는 것이 fragment 처리량을 좌우한다. 정점/인덱스 버퍼도 같은 이유로 staging을 거쳐 device local에 올린다.
+device local에 두는 이유는 대역폭이다. discrete GPU에서 VRAM 대역폭은 수백 GB/s에 이르지만, host visible 메모리(시스템 RAM)는 PCIe를 거쳐 보통 한 자릿수~십수 GB/s에 머문다. 텍스처는 매 프레임 여러 번 샘플되므로 device local에 두는 것이 fragment 처리량을 좌우한다. 정점/인덱스 버퍼도 같은 이유로 staging을 거쳐 device local에 올린다.
 
 ### Staging buffer 채우기
 
@@ -652,6 +652,6 @@ vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0);
 
 ## 더 읽을거리
 
-- [Vulkan Tutorial: Vertex buffers / Uniform buffers / Texture mapping](https://vulkan-tutorial.com/Vertex_buffers/Vertex_buffer_creation) — 본문 다섯 단계와 1:1 대응.
+- [Vulkan Tutorial: Vertex buffers](https://vulkan-tutorial.com/Vertex_buffers/Vertex_buffer_creation) 및 이어지는 Uniform buffers·Texture mapping 장 — 본문 다섯 단계와 1:1 대응.
 - [Sascha Willems, Vulkan Examples](https://github.com/SaschaWillems/Vulkan) — 자원 패턴별 단문 예제의 보고.
 - [Vulkan Guide: Descriptor Dynamic Offset](https://docs.vulkan.org/guide/latest/descriptor_dynamic_offset.html) — 동적 uniform/storage buffer offset의 정렬과 바인딩 규칙.

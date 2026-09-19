@@ -46,10 +46,10 @@
 
 ### 시그널의 역사
 
-시그널은 UNIX 초기부터 존재했다. 1970년대 초기 UNIX에는 8개의 시그널만 존재했다:
+시그널은 UNIX 초기부터 존재했다. 1973년의 4th Edition UNIX는 열두 개의 시그널을 번호로만 지원했고, `SIGHUP` 같은 이름 있는 매크로는 1979년 7th Edition의 `signal.h`에서 처음 정의됐다. 그 헤더가 정의한 열다섯 개 중 앞부분은 다음과 같다:
 
 ```c
-/* Early UNIX signals (circa 1973) */
+/* 7th Edition UNIX signals (1979) */
 #define SIGHUP  1   /* hangup */
 #define SIGINT  2   /* interrupt */
 #define SIGQUIT 3   /* quit */
@@ -107,11 +107,11 @@ $ kill -l
 
 ```c
 /* kernel/signal.c */
-static int sig_task_ignored(struct task_struct *t, int sig, bool force)
+int do_sigaction(int sig, struct k_sigaction *act, struct k_sigaction *oact)
 {
-    /* SIGKILL과 SIGSTOP은 무시할 수 없다 */
-    if (sig == SIGKILL || sig == SIGSTOP)
-        return 0;
+    /* SIGKILL과 SIGSTOP은 disposition 변경 자체가 거부된다 */
+    if (!valid_signal(sig) || sig < 1 || (act && sig_kernel_only(sig)))
+        return -EINVAL;
     /* ... */
 }
 ```
@@ -402,11 +402,11 @@ void notify_completion(pid_t server_pid, int job_id) {
 
 ### 커널 내부: 시그널 전송 메커니즘
 
-Linux 커널에서 시그널 전송은 `kernel/signal.c`의 `__send_signal`로 구현된다:
+Linux 커널에서 시그널 전송은 `kernel/signal.c`의 `__send_signal_locked`(옛 이름 `__send_signal`)로 구현된다:
 
 ```c
 /* kernel/signal.c */
-static int __send_signal(int sig, struct kernel_siginfo *info,
+static int __send_signal_locked(int sig, struct kernel_siginfo *info,
                          struct task_struct *t, enum pid_type type, bool force)
 {
     struct sigpending *pending;
@@ -441,7 +441,7 @@ out:
 **핵심 자료구조:**
 
 ```c
-/* include/linux/sched/signal.h */
+/* include/linux/signal_types.h */
 struct sigpending {
     struct list_head list;      /* sigqueue의 링크드 리스트 */
     sigset_t signal;            /* pending 시그널 비트셋 */
@@ -763,7 +763,7 @@ int main() {
 
     check_pending();  // SIGINT is pending
 
-    // 차단 해제 -> 즉시 핸들러 실행
+    // 차단 해제 -> pending SIGINT가 즉시 전달된다(핸들러 미등록 시 기본 동작인 종료)
     pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
 }
 ```
@@ -806,8 +806,8 @@ sigaction(SIGINT, &sa, NULL);
 struct task_struct {
     /* ... */
     sigset_t blocked;              /* 차단된 시그널들 */
-    sigset_t real_blocked;         /* sigsuspend() 임시 복원용 */
-    struct sigpending pending;     /* 프로세스 전역 pending 시그널 */
+    sigset_t real_blocked;         /* sigtimedwait() 임시 복원용 */
+    struct sigpending pending;     /* 이 스레드 전용 pending 시그널 */
     /* ... */
 };
 
@@ -971,8 +971,8 @@ for (int i = 0; i < 5; i++) {
 /* kernel/signal.c */
 static bool legacy_queue(struct sigpending *signals, int sig)
 {
-    /* 이미 pending이면 큐에 추가하지 않음 */
-    return sigismember(&signals->signal, sig);
+    /* 표준 시그널이 이미 pending이면 큐에 추가하지 않음 */
+    return (sig < SIGRTMIN) && sigismember(&signals->signal, sig);
 }
 ```
 
@@ -1191,7 +1191,8 @@ void *signal_thread(void *arg) {
 }
 
 int main() {
-    pthread_t tid;
+    pthread_t signal_tid;
+    pthread_t workers[4];
     sigset_t set;
 
     // 비동기로 처리할 process-control signal만 차단한다.

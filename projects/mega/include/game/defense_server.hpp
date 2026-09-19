@@ -28,6 +28,7 @@
 #include "platform/process.hpp"
 #include "tools/asset_pipeline.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -50,16 +51,33 @@ struct DefenseServerOptions {
     std::string serverId = "mega-local-1";
     std::string assets;              // 비면 실행 파일 옆의 assets/
     std::string secretBase64;        // 비면 LIVE_SERVICE_TOKEN_SECRET, 그것도 없으면 개발용
+    std::string assignedMatchId;     // 신뢰된 로컬 제어 프로세스가 넘기는 단일 매치
+    std::vector<std::string> assignedPlayers;
     int         runSeconds = 0;      // 0 = 무제한(신호로 종료)
     // 서버도 같은 A/B 레지스트리를 읽는다. 스냅샷을 전체로 보낼지 차분으로
     // 보낼지는 **보내는 쪽**이 정하는 것이고, 그 쪽이 여기다.
     Switches    switches;
+
+    bool ValidAssignment() const {
+        if (assignedMatchId.empty()) return assignedPlayers.empty();
+        if (assignedPlayers.size() != kServerMaximumPlayers) return false;
+        const auto validId = [](const std::string& value) {
+            return !value.empty() && value.size() <= 64 &&
+                std::all_of(value.begin(), value.end(), [](unsigned char c) {
+                    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                           (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
+                });
+        };
+        return validId(assignedMatchId) && validId(assignedPlayers[0]) &&
+               validId(assignedPlayers[1]) && assignedPlayers[0] != assignedPlayers[1];
+    }
 };
 
 inline const char* DefenseServerUsage() {
     return "usage: mega_defense_server [--port N] [--server-id ID] "
            "[--assets PATH] [--secret-base64 BASE64] [--run-seconds N]\n"
-           "                           [--ab name=value]...\n";
+           "                           [--ab name=value]...\n"
+           "                           [--match-id ID --player-id A --player-id B]\n";
 }
 
 inline bool ParseServerPort(const char* text, uint16_t& port) {
@@ -97,6 +115,12 @@ inline bool ParseDefenseServerOptions(int argc, char** argv, DefenseServerOption
             if (!ParseServerPort(argv[++i], options.port)) return false;
         } else if (std::strcmp(argv[i], "--server-id") == 0 && i + 1 < argc) {
             options.serverId = argv[++i];
+        } else if (std::strcmp(argv[i], "--match-id") == 0 && i + 1 < argc) {
+            if (!options.assignedMatchId.empty()) return false;
+            options.assignedMatchId = argv[++i];
+            if (options.assignedMatchId.empty()) return false;
+        } else if (std::strcmp(argv[i], "--player-id") == 0 && i + 1 < argc) {
+            options.assignedPlayers.emplace_back(argv[++i]);
         } else if (std::strcmp(argv[i], "--assets") == 0 && i + 1 < argc) {
             options.assets = argv[++i];
         } else if (std::strcmp(argv[i], "--secret-base64") == 0 && i + 1 < argc) {
@@ -107,7 +131,7 @@ inline bool ParseDefenseServerOptions(int argc, char** argv, DefenseServerOption
             return false;
         }
     }
-    return !options.serverId.empty();
+    return !options.serverId.empty() && options.ValidAssignment();
 }
 
 class DefenseServer {
@@ -117,6 +141,7 @@ public:
     struct ClientSession {
         net::UdpEndpoint     endpoint;
         live::GameAdmission  admission;
+        wire::AdmissionGrant grant;
         // 클라이언트당 신뢰·순서 수신. 클라이언트가 1번부터 센다.
         net::ReliableOrderedReceiver<wire::Command> commands{1};
         // 합류 헤더는 **링크마다** 하나의 시퀀스 공간을 요구한다. 서버가 하나를
@@ -139,6 +164,7 @@ public:
     DefenseServer& operator=(const DefenseServer&) = delete;
 
     bool Init(const DefenseServerOptions& options) {
+        if (!options.ValidAssignment()) return false;
         options_ = options;
 
         if (options_.secretBase64.empty()) {
@@ -165,6 +191,7 @@ public:
                          cookError.c_str());
         else
             patch_.Publish(1, contentHash_);
+        if (!options_.assignedMatchId.empty() && !patch_.Published()) return false;
 
         std::string flagError, eventError;
         flags_ = defense::LoadFeatureFlags(options_.assets + "/flags.txt", &externalFlags_,
@@ -248,7 +275,7 @@ public:
             simulationStarted_ = true;
             nextTick_ = now;
             std::printf("[match] start id=%s capacity=%zu\n", activeMatch_.c_str(),
-                        matches_.Capacity(activeMatch_));
+                        kServerMaximumPlayers);
         }
 
         if (simulationStarted_ && now >= nextTick_) {
@@ -404,6 +431,10 @@ private:
     // 줄 세우기 → 형성 → 이름 통지. 세 단계가 전부 여기 있다.
     void HandleQueueRequest(const net::UdpDatagram& datagram, const std::string& playerId,
                             int rating) {
+        if (!options_.assignedMatchId.empty()) {
+            ++rejectedPackets_;
+            return;
+        }
         const uint32_t key = wire::PlayerKey(playerId);
         queueEndpoints_[key] = datagram.sender;
         mp::Player player;
@@ -439,18 +470,6 @@ private:
             ++rejectedPackets_;
             return;
         }
-        auto existingClient = clients_.find(endpointKey);
-        if (existingClient != clients_.end()) {
-            if (existingClient->second.admission.tokenId != admission.tokenId) {
-                ++rejectedPackets_;
-            } else {
-                existingClient->second.endpoint = datagram.sender;
-                existingClient->second.lastSeen = now;
-                existingClient->second.window.OnReceived(framing.seq);
-                existingClient->second.baselines.Acknowledge(framing);
-            }
-            return;
-        }
         const auto tokenOwner = tokenEndpoints_.find(admission.tokenId);
         const auto playerOwner = playerEndpoints_.find(admission.playerId);
         const bool tokenConflict = tokenOwner != tokenEndpoints_.end() &&
@@ -460,7 +479,14 @@ private:
         // 형성된 매치의 명단에 이 사람이 있는가. 이전에는 "먼저 온 토큰이 정한
         // 이름과 같은가"만 물었고, 그 질문에는 서명만 유효하면 아무 이름의 매치나
         // 여는 답이 있었다.
-        if (!matches_.Allows(admission.matchId, wire::PlayerKey(admission.playerId))) {
+        const bool external = !options_.assignedMatchId.empty();
+        // 외부 배정은 해시가 아닌 원문 ID로 비교한다. UDP 요청은 명단을 바꾸지 못한다.
+        const bool isAssigned = external
+            ? admission.matchId == options_.assignedMatchId &&
+              std::find(options_.assignedPlayers.begin(), options_.assignedPlayers.end(),
+                        admission.playerId) != options_.assignedPlayers.end()
+            : matches_.Allows(admission.matchId, wire::PlayerKey(admission.playerId));
+        if (!isAssigned || (!activeMatch_.empty() && activeMatch_ != admission.matchId)) {
             ++rejectedPackets_;
             return;
         }
@@ -479,7 +505,26 @@ private:
             return;
         }
         // 정원은 둘 다 검사한다: 이 판의 정원과 이 프로세스의 상한.
-        const size_t capacity = matches_.Capacity(admission.matchId);
+        auto existingClient = clients_.find(endpointKey);
+        if (existingClient != clients_.end()) {
+            ClientSession& session = existingClient->second;
+            if (session.admission.tokenId != admission.tokenId ||
+                session.admission.playerId != admission.playerId ||
+                session.admission.matchId != admission.matchId) {
+                ++rejectedPackets_;
+            } else {
+                session.lastSeen = now;
+                session.window.OnReceived(framing.seq);
+                session.baselines.Acknowledge(framing);
+                // UDP 승인 유실 시 같은 hello로 복구한다. 자리는 추가하지 않는다.
+                socket_.SendTo(session.endpoint, wire::WriteAdmissionGrant(
+                    session.grant, session.window.Header(session.seq.Next())));
+                ++grantsSent_;
+            }
+            return;
+        }
+        const size_t capacity = external ? options_.assignedPlayers.size()
+                                         : matches_.Capacity(admission.matchId);
         const bool full = clients_.size() >= capacity ||
                           clients_.size() >= kServerMaximumPlayers;
         if (tokenConflict || playerConflict || full) {
@@ -509,7 +554,7 @@ private:
                 std::fprintf(stderr, "[flags] 일부 배정을 무시했다: %s\n", rejected.c_str());
             flagsApplied_ = true;
         }
-        wire::AdmissionGrant grant;
+        wire::AdmissionGrant& grant = session.grant;
         grant.contentVersion = patch_.Current();
         grant.contentHash = patch_.CurrentHash();
         grant.serverOs = platform::OSCode(platform::CurrentOS());

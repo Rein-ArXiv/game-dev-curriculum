@@ -159,7 +159,7 @@ void SpatialScene::DrawPanel(int px, int py, int pw, int ph) {
     int maxD = 0;
     for (auto& nn : bvh_.Nodes()) maxD = std::max(maxD, nn.depth);
     float md = (float)maxDepth_;
-    std::snprintf(buf, sizeof(buf), "show depth ≤ %d / %d", maxDepth_, maxD);
+    std::snprintf(buf, sizeof(buf), "show depth <= %d / %d", maxDepth_, maxD);
     GuiLabel(Rectangle{(float)(px + 8), (float)y, 220, 18}, buf);
     GuiSlider(Rectangle{(float)(px + 8), (float)(y + 18), 220, 16},
                nullptr, nullptr, &md, 0.0f, (float)std::max(maxD, 1));

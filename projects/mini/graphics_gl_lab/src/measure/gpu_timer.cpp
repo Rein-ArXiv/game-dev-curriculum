@@ -5,6 +5,8 @@ namespace gllab {
 void GpuTimer::Init() {
     if (initialized_) return;
     glGenQueries(kRingSize, queries_);
+    writeIdx_ = readIdx_ = inFlight_ = 0;     // Shutdown 후 재-Init 시 ring 상태 복원.
+    active_   = false;
     history_.fill(0.0f);
     initialized_ = true;
 }

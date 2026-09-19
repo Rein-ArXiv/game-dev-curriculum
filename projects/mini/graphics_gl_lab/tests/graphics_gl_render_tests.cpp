@@ -66,7 +66,7 @@ constexpr int kCaptureSize  = 256;
 constexpr int kObjectCount  = 64;
 
 uint64_t Fnv1a(const std::vector<uint8_t>& bytes) {
-    uint64_t h = 1469598103934665603ull;
+    uint64_t h = 14695981039346656037ull;
     for (uint8_t b : bytes) {
         h ^= (uint64_t)b;
         h *= 1099511628211ull;

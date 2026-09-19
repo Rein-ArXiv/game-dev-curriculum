@@ -4,7 +4,7 @@
 
 게임 엔진을 개발하거나 시스템 프로그래밍을 하다 보면 불가피하게 문자 인코딩과 마주하게 된다. UTF-8과 UTF-16 중 무엇을 써야 할까? 문자열의 "길이"는 정확히 무엇을 의미할까? 한 바이트가 정확히 무엇을 표현하는가?
 
-이 글에서는 ASCII부터 현대 Unicode까지의 여정을 따라가며, 각 설계 결정의 "왜"와 "어떻게"를 깊이 있게 탐구한다. 수학적 정확성과 실전 코드를 통해 문자 인코딩의 본질을 이해해 보자. Windows API의 A/W 이중성, MBCS 경계, Locale/NLS 같은 Windows 특화 문제도 인코딩 경계의 사례로 함께 다룬다.
+이 글에서는 ASCII부터 현대 Unicode까지의 여정을 따라가며, 각 설계 결정의 "왜"와 "어떻게"를 깊이 있게 탐구한다. 수학적 정확성과 실전 코드를 통해 문자 인코딩의 본질을 이해해 보자. Windows API의 A/W 이중성과 MBCS 경계 같은 Windows 특화 문제도 인코딩 경계의 사례로 함께 다룬다.
 
 
 ---
@@ -13,7 +13,7 @@
 1. [ASCII: 7비트의 유산](#1-ascii-7비트의-유산)
 2. [한글의 여정: 조합형과 완성형](#2-한글의-여정-조합형과-완성형)
 3. [Unicode의 탄생과 이상](#3-unicode의-탄생과-이상)
-4. [UTF-8: 냅킨에서 탄생한 천재적 설계](#4-utf-8-냅킨에서-탄생한-천재적-설계)
+4. [UTF-8: 플레이스매트에서 탄생한 천재적 설계](#4-utf-8-플레이스매트에서-탄생한-천재적-설계)
 5. [UTF-16과 16비트 고정 길이의 환상](#5-utf-16과-16비트-고정-길이의-환상)
 6. [멀티바이트 문자 경계의 함정](#6-멀티바이트-문자-경계의-함정)
 7. [BOM (Byte Order Mark)](#7-bom-byte-order-mark)
@@ -352,7 +352,7 @@ for (const char of s) {
 }
 ```
 
-## 4. UTF-8: 냅킨에서 탄생한 천재적 설계
+## 4. UTF-8: 플레이스매트에서 탄생한 천재적 설계
 
 ### 1992년 9월 2일, 뉴저지의 식당
 
@@ -368,7 +368,7 @@ Pike가 공개한 [UTF-8 History](https://doc.cat-v.org/bell_labs/utf-8_history)
 
 ### 설계 목표
 
-Thompson이 냅킨에 쓴 요구사항은 네 가지다.
+Thompson이 플레이스매트에 쓴 요구사항은 네 가지다.
 
 1. **ASCII 완벽 하위 호환**: 기존 파일 그대로 동작
 2. **자기 동기화(Self-synchronizing)**: 임의의 바이트에서 시작해도 복구 가능
@@ -761,12 +761,16 @@ HANDLE h = CreateFileW(filename_utf16.c_str(), ...);
 
 // 변환 함수
 std::wstring utf8_to_utf16(const std::string& utf8) {
+    if (utf8.empty()) return std::wstring();
+
+    // 입력 길이를 명시하면 반환 길이에 null 종결자가 포함되지 않는다.
+    const int src_len = static_cast<int>(utf8.size());
     int len = MultiByteToWideChar(CP_UTF8, 0,
-                                  utf8.c_str(), -1,
+                                  utf8.data(), src_len,
                                   nullptr, 0);
     std::wstring result(len, 0);
     MultiByteToWideChar(CP_UTF8, 0,
-                       utf8.c_str(), -1,
+                       utf8.data(), src_len,
                        &result[0], len);
     return result;
 }
@@ -793,7 +797,7 @@ count_codepoints(str);    // 3 (코드 포인트)
 인덱싱 함정:
 
 ```c
-char c = str[3];  // 0xB0
+char c = str[2];  // 0xB0
 // 이것은 '가'의 두 번째 바이트일 뿐, 의미 없음
 ```
 
@@ -1424,7 +1428,7 @@ U+FFFE, U+FFFF: 유효한 scalar value인 noncharacter; 문자 교환용으로 �
 
 - **1963년 ASCII**: 7비트 결정이 60년 넘게 유지
 - **1991년 UCS-2**: "16비트면 충분" 가정이 전 세계 시스템에 기술 부채
-- **1992년 UTF-8**: 냅킨 스케치가 인터넷 표준으로
+- **1992년 UTF-8**: 플레이스매트 스케치가 인터넷 표준으로
 
 현재의 상황은 다음과 같다.
 - **웹**: UTF-8이 98% 이상 점유
@@ -1434,7 +1438,7 @@ U+FFFE, U+FFFF: 유효한 scalar value인 noncharacter; 문자 교환용으로 �
 
 게임 엔진이나 시스템 소프트웨어를 개발한다면, 문자 인코딩은 피할 수 없는 주제다. 표면적으로는 간단해 보이지만, 그 아래에는 수십 년의 역사와 엔지니어링 트레이드오프가 층층이 쌓여 있다.
 
-Ken Thompson의 냅킨 스케치가 증명했듯이, 좋은 설계는 시간의 시험을 견딘다. UTF-8의 자기 동기화, ASCII 호환성, 엔디안 독립성은 우아한 수학적 설계가 실용적 가치를 창출하는 완벽한 예시다.
+Ken Thompson의 플레이스매트 스케치가 증명했듯이, 좋은 설계는 시간의 시험을 견딘다. UTF-8의 자기 동기화, ASCII 호환성, 엔디안 독립성은 우아한 수학적 설계가 실용적 가치를 창출하는 완벽한 예시다.
 
 Windows 환경의 MBCS 경계 문제, 콘솔 인코딩, Locale/NLS, TCHAR 마이그레이션, 안전한 문자열 함수는 서로 별개의 예외가 아니다. 외부 바이트열을 내부 Unicode 표현으로 변환하는 경계를 일관되게 두지 않았을 때 나타나는 같은 종류의 실패다.
 
@@ -1444,7 +1448,7 @@ Windows 환경의 MBCS 경계 문제, 콘솔 인코딩, Locale/NLS, TCHAR 마이
 - [UTF-8, UTF-16, UTF-32 FAQ](https://www.unicode.org/faq/utf_bom.html)
 - [RFC 3629 - UTF-8](https://www.rfc-editor.org/rfc/rfc3629)
 - [Rob Pike, "UTF-8 History"](https://doc.cat-v.org/bell_labs/utf-8_history) - 1992년 9월 2일 설계 과정
-- [Joel Spolsky, "The Absolute Minimum Every Software Developer Must Know About Unicode"](https://www.joelonsoftware.com/2003/10/08/the-absolute-minimum-every-software-developer-absolutely-positively-must-know-about-unicode-and-character-sets-no-excuses/)
+- [Joel Spolsky, "The Absolute Minimum Every Software Developer Absolutely, Positively Must Know About Unicode and Character Sets (No Excuses!)"](https://www.joelonsoftware.com/2003/10/08/the-absolute-minimum-every-software-developer-absolutely-positively-must-know-about-unicode-and-character-sets-no-excuses/)
 - [UTF-8 Everywhere Manifesto](https://utf8everywhere.org/) - UTF-16 비판과 UTF-8 권장 이유
 - [Microsoft: Windows Unicode](https://learn.microsoft.com/en-us/windows/win32/intl/unicode)
 - [Microsoft: Code Pages](https://learn.microsoft.com/en-us/windows/win32/intl/code-pages)

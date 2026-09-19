@@ -63,8 +63,14 @@ void TimestampQuery::Begin(ID3D12GraphicsCommandList* cmd) {
     if (!fence_) return;
 
     const UINT64 previous = slotFences_[(size_t)writeIdx_];
-    if (previous != 0 && !IsSlotReady(fence_->GetCompletedValue(), previous)) {
-        return;
+    if (previous != 0) {
+        // 아직 회수되지 않은 slot 이다. GPU 미완료면 이번 프레임 측정을 생략한다.
+        if (!IsSlotReady(fence_->GetCompletedValue(), previous)) return;
+        // GPU 는 끝났지만 CPU 가 아직 회수하지 않은 slot — 그냥 덮어쓰면 그 표본이
+        // 사라지고 Poll 이 새 fence 값을 영원히 기다리므로 먼저 회수한다
+        // (링이 가득 찬 상태라 readIdx_ == writeIdx_ 다).
+        Poll();
+        if (slotFences_[(size_t)writeIdx_] != 0) return;
     }
 
     activeSlot_ = writeIdx_;

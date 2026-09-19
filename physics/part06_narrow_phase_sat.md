@@ -58,12 +58,7 @@ $n$은 A에서 B를 향하는 단위 법선이고 $s_i$는 signed separation이�
 
 ### 법선 방향
 
-검출 함수가 입력 순서에 따라 법선 방향을 바꾸면 solver의 부호 계약이 깨진다. 최소 겹침 축 $n$을 얻은 뒤 중심 차이로 방향을 고정한다.
-
-```cpp
-if (Dot(centerB - centerA, normal) < 0.0f)
-    normal = -normal;
-```
+검출 함수가 입력 순서에 따라 법선 방향을 바꾸면 solver의 부호 계약이 깨진다. 최소 겹침 축 $n$의 방향은 그 축에서 깊이를 결정한 밀어내기 방향, 즉 두 투영 구간 중 어느 쪽 끝이 더 가까운지로 고정한다(`EvaluateAxis`가 고르는 부호). 중심 차이로 부호를 다시 정하면 비대칭 도형에서 깊이와 방향이 서로 다른 축 정보를 쓰게 되어 MTV 검증이 깨진다.
 
 중심이 같은 대칭 도형은 이 규칙만으로 방향을 결정하지 못한다. 이전 manifold 법선, feature 순서, canonical axis 순서 같은 결정적 tie-breaker가 필요하다.
 
@@ -372,7 +367,7 @@ normal이 조금 변하면 이전 tangent basis도 변한다. tangent impulse를
 
 ## 7. 수치 안정성과 실패 정책
 
-epsilon 하나를 모든 크기에 쓰면 작은 객체는 접촉을 놓치고 큰 객체는 과도하게 붙는다. shape scale $L$과 machine epsilon을 고려한 상대·절대 tolerance를 사용한다.
+epsilon 하나를 모든 크기에 쓰면 작은 객체는 과도하게 붙고 큰 객체는 접촉을 놓친다. shape scale $L$과 machine epsilon을 고려한 상대·절대 tolerance를 사용한다.
 
 $$
 \epsilon(L)=\epsilon_{\text{abs}}+\epsilon_{\text{rel}}L
@@ -439,7 +434,7 @@ dispatcher는 입력 순서를 canonicalize하되 출력 normal을 원래 A에�
 ```cpp
 ContactManifold Collide(const Collider& a, const Collider& b) {
     const PairKey key = CanonicalPair(a.Type(), b.Type());
-    ContactManifold result = table[key](a, b);
+    ContactManifold result = key.swapped ? table[key](b, a) : table[key](a, b);
     if (key.swapped) result.Flip();
     return result;
 }

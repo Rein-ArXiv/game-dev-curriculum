@@ -126,7 +126,9 @@ void IntegratorsScene::DrawWorld(int cx, int cy, int cw, int ch) {
         DrawLine(trackXStart, ty, trackXEnd, ty, Color{60, 64, 72, 255});
         DrawCircle(trackXMid, ty, 2.0f, Color{100, 100, 110, 255});
 
-        float t  = std::clamp(xVal / amplitude_, -1.5f, 1.5f);
+        // 발산한 Explicit Euler 의 x 가 NaN 이면 clamp 가 NaN 을 그대로 돌려주고
+        // 아래 (int) 변환이 UB — 유한하지 않으면 원점에 그린다.
+        float t  = std::isfinite(xVal) ? std::clamp(xVal / amplitude_, -1.5f, 1.5f) : 0.0f;
         int   px = trackXMid + (int)(t * (float)trackXSpan);
         DrawLineEx(Vector2{(float)trackXMid, (float)ty},
                     Vector2{(float)px, (float)ty}, 2.0f, c);

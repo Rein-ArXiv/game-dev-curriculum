@@ -144,4 +144,6 @@ flowchart TD
 - **서버·운영 선택**: `network` → `db` → `live_service`
 - **제작 실무 참고**: 필요한 시점에 `platform`, `tools`, `git.md`
 
-역할과 유지 기준은 [CURRICULUM_MAP.md](CURRICULUM_MAP.md)와 [CONTENT_OWNERSHIP.md](CONTENT_OWNERSHIP.md), 프로젝트의 완료 기준은 [PROJECTS_PLAN.md](PROJECTS_PLAN.md)에서 관리한다. 남은 검수 상태는 [REVIEW_STATE.md](REVIEW_STATE.md)와 [REVIEW_BACKLOG.md](REVIEW_BACKLOG.md)에 기록한다.
+역할과 유지 기준은 [CURRICULUM_MAP.md](CURRICULUM_MAP.md)와 [CONTENT_OWNERSHIP.md](CONTENT_OWNERSHIP.md), 프로젝트의 완료 기준은 [PROJECTS_PLAN.md](PROJECTS_PLAN.md)에서 관리한다.
+
+저장소에는 학습 문서, 최종 프로젝트 코드, 실행에 필요한 에셋, 빌드·테스트·문서 생성 스크립트를 보관한다. 로컬 검수 보고서·수정 제안, 임시 백업, 빌드 산출물, ZIP, 업로드용 내보내기 결과는 추적하지 않는다. Mermaid 원본은 Markdown에 있으며, 게시용 PNG는 `scripts/export_mermaid_png.ps1`, 업로드 원고는 `scripts/export_velog.py`로 생성한다.

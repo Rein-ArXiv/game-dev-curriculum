@@ -535,7 +535,7 @@ std::vector<ConvexInput> ShrinkConvex(const ConvexInput& in) {
         c.offsetDir = 0.0f;
         out.push_back(c);
     }
-    if (in.a.radius != 1.0f || in.b.radius != 1.0f) {
+    if (std::max(in.a.radius, in.b.radius) != 1.0f) {
         ConvexInput c = in;
         const float scale = std::max(in.a.radius, in.b.radius);
         c.a.radius /= scale;
@@ -760,7 +760,7 @@ SceneInput GenerateScene(Rng& rng, int* bucketHistogram) {
         break;
     case kSceneFast:
         // dt·v 가 반지름을 넘으면 한 프레임에 상대를 지나칠 수 있다. 자유낙하로
-        // 얻는 속도까지 더해도 (300 + √(2gH) ≈ 920 px/s) 프레임당 이동은 7.7 px —
+        // 얻는 속도까지 더해도 (축당 600 + √(2gH) ≈ 1220, 크기 ≈ 1360 px/s) 프레임당 이동은 11.3 px —
         // 반지름 14 px 아래로 내려가지 않게 잡아 tunneling 을 사전조건에서 막는다.
         count    = rng.Int(4, 12);
         radiusLo = 14.0f;
@@ -768,7 +768,8 @@ SceneInput GenerateScene(Rng& rng, int* bucketHistogram) {
         speed    = 600.0f;
         break;
     default:
-        // 퇴화 — 거의 같은 위치의 두 body (SafeUnitNormal 의 fallback 경로),
+        // 퇴화 — 거의 같은 위치의 두 body (±1 px 산포 — 깊은 초기 침투. SafeUnitNormal
+        // 의 fallback 은 여기서 안 걸리고 core 검사가 본다),
         // 반지름 격차가 큰 쌍.
         count   = rng.Int(2, 5);
         allowed = 1.6f;
@@ -976,8 +977,9 @@ std::string CheckPenetrationBound(const SceneInput& in) {
     const physlab::SolverParams params;   // Step 6 의 기본 파라미터 그대로
 
     // 에너지 상계. 중력을 켜면 위치에너지가 운동에너지로 바뀔 수 있지만, 낙하
-    // 가능한 높이는 캔버스 높이를 넘지 못한다. 임펄스도 위치 보정도 에너지를
-    // 넣지 않으므로 KE ≤ KE₀ + g·H·Σm 이다.
+    // 가능한 높이는 캔버스 높이를 넘지 못한다. 임펄스는 에너지를 넣지 않고, 위치
+    // 보정이 중력에 거슬러 넣는 위치에너지는 slop·posCorrectFactor 로 묶여 작으므로
+    // KE ≤ KE₀ + g·H·Σm 를 여유 있는 경험적 상계로 둔다.
     double totalMass = 0.0;
     for (const auto& b : bodies) {
         if (b.invMass > 0.0f) totalMass += 1.0 / (double)b.invMass;

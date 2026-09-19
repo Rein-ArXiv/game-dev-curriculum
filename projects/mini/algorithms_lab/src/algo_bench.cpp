@@ -842,7 +842,7 @@ static void BenchFlow() {
 // -------------------------------------------------------------------- 압축
 
 static void BenchCompress() {
-    Rule("코퍼스 8종 x 코덱 3팔 — 압축률은 데이터의 성질이지 알고리즘의 성질이 아니다");
+    Rule("코퍼스 8종 x 코덱 4팔 — 압축률은 데이터의 성질이지 알고리즘의 성질이 아니다");
     const Corpus kinds[] = {Corpus::Text, Corpus::StructuredBinary, Corpus::IntArray,
                             Corpus::FloatArray, Corpus::AlreadyCompressed,
                             Corpus::TinyMessage, Corpus::HighlyRepetitive, Corpus::Random};

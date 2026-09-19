@@ -38,6 +38,7 @@
 
 #include <pthread.h>
 #include <sched.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 #include "step_filter.h"
@@ -235,10 +236,13 @@ void TestFaultSpecSemantics() {
     CHECK(!skl::SetFaultSpec("read:0:ENOSUCHERRNO"));
     CHECK(!skl::SetFaultSpec(":0:EIO"));
     CHECK(!skl::SetFaultSpec("read:0:EIO:1:2"));
+    CHECK(!skl::SetFaultSpec("read:18446744073709551616:EIO"));
+    CHECK(!skl::SetFaultSpec("read:0:EIO:18446744073709551616"));
+    CHECK(!skl::SetFaultSpec("read:0:18446744073709551621"));
     CHECK(!skl::FaultsArmed());
     skl::ClearFaults();
     std::cout << "  spec 'read:2:EIO:1' -> pass,pass,EIO,pass (calls=4 "
-                 "injections=1); 4 malformed specs rejected and disarmed\n";
+                 "injections=1); 7 malformed specs rejected and disarmed\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -349,7 +353,7 @@ void TestMmapErrorPaths() {
     CHECK(OpenFdCount() == fdBefore);
 
     {
-        // munmap 실패는 매핑을 회수하지 못한 채 던진다. fd 는 그래도 닫혀야 한다.
+        // 주입이 실제 unmap을 건너뛰어도 정리 경로는 매핑과 fd를 회수한다.
         ScopedFault fault("munmap:0:EINVAL:1");
         const CycleOutcome bad = RunOne(*backend, fixture);
         CHECK(bad.threw);
@@ -631,8 +635,36 @@ void TestSchedThreadPolicyFallback() {
             failures.fetch_add(1);
         }
 
+        // 주입: Default 의 nice 복원이 실패하면 false 가 나와야 한다.
+        // 아래 무주입 복원은 권한에 따라 둘 다 나올 수 있으므로, 모든 기기에서
+        // 같은 답을 내는 실패 단언을 여기서 한 번 박아 둔다.
+        {
+            ScopedFault fault("setpriority:0:EACCES");
+            CHECK(!skl::ApplySchedToCurrentThread(skl::SchedType::Default));
+            CHECK(skl::FaultInjectionCount("setpriority") == 1);
+        }
+
         // 실패했든 성공했든 스레드는 살아 있고 기본으로 돌아갈 수 있어야 한다.
-        CHECK(skl::ApplySchedToCurrentThread(skl::SchedType::Default));
+        // 다만 nice +10 → 0 은 *우선순위를 올리는* 방향이라 CAP_SYS_NICE 나
+        // RLIMIT_NICE 여유가 없는 기기에서는 EACCES 로 실패한다 — 그때는 false 가
+        // 정상이다. 반환값을 그냥 통과시키면(예전 코드) 무조건 true 를 돌려주는
+        // 구현도 통과하므로, getpriority 로 커널에 되물어 반환값과 실제 nice 가
+        // 서로 맞는지를 단언한다 — true 면 0, false 면 +10 이 그대로 남아 있어야 한다.
+        errno = 0;
+        const int niceBefore = ::getpriority(PRIO_PROCESS, 0);
+        CHECK(errno == 0);
+        CHECK(niceBefore == 10);
+        const bool defaultOk =
+            skl::ApplySchedToCurrentThread(skl::SchedType::Default);
+        errno = 0;
+        const int niceAfter = ::getpriority(PRIO_PROCESS, 0);
+        CHECK(errno == 0);
+        CHECK(niceAfter == (defaultOk ? 0 : 10));
+        std::cout << "  Default nice reset: " << niceBefore << " -> "
+                  << niceAfter
+                  << (defaultOk ? " (restored)"
+                                : " (EACCES; nice +10 kept, false returned)")
+                  << '\n';
         {
             // 원상 복원 확인 — FIFO 가 성공했던 경우에도 SCHED_OTHER 로
             // 돌아와야 뒤의 검사가 실시간 우선순위를 물려받지 않는다.
@@ -704,7 +736,10 @@ void TestSchedCgroupFallback() {
     ::setenv("SKL_CGROUP_DIR", dir.c_str(), 1);
     {
         // (3) 원래 값 읽기 실패 → 아무것도 쓰지 않고 기본 유지.
-        ScopedFault fault("cgroup_read:0:EACCES");
+        // cgroup_write 는 관측 전용(skip 이 커서 주입하지 않음)으로 함께 무장한다.
+        // 무장하지 않으면 아래 FaultCallCount 가 seam 방문과 무관하게 0 이라
+        // 검사가 절대 실패할 수 없다.
+        ScopedFault fault("cgroup_read:0:EACCES,cgroup_write:100000000");
         CHECK(!skl::ApplySchedProcessSetup(skl::SchedType::Cgroup));
         CHECK(skl::FaultInjectionCount("cgroup_read") >= 1);
         CHECK(skl::FaultCallCount("cgroup_write") == 0);

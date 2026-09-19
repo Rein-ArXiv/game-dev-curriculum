@@ -104,7 +104,8 @@ if (mode == DrawMode::Instanced) {
     }
     if (instanceBuf_) {
         cmd->SetGraphicsRootShaderResourceView(
-            2, instanceBuf_->GetGPUVirtualAddress());
+            2, instanceBuf_->GetGPUVirtualAddress()
+               + instanceSlot_ * instanceCapacity_ * sizeof(Instance));
     }
     UINT useInstancing = 1;
     cmd->SetGraphicsRoot32BitConstants(0, kRootConstUseInstancingCount,
@@ -157,8 +158,9 @@ void Scene::EnsureInstanceBuffer(D3D12Context& ctx) {
     }
     const size_t capacity = objects_.size();
     void* mapped = nullptr;
+    static_assert(kInstanceSlots == kFramesInFlight, "instance slots must match frames in flight");
     instanceBuf_ = CreateBufferUpload(ctx.Device(),
-                                       sizeof(Instance) * capacity,
+                                       sizeof(Instance) * capacity * kInstanceSlots,
                                        &mapped);
     BindInstanceStorage((Instance*)mapped, capacity);
 
@@ -173,12 +175,13 @@ void Scene::EnsureInstanceBuffer(D3D12Context& ctx) {
 <!-- snippet: src/scene/scene_record.cpp@instance-upload -->
 ```cpp
 if (instanceMapped_ != nullptr) {
+    Instance* dst = instanceMapped_ + instanceSlot_ * instanceCapacity_;
     const size_t writable = (std::min)(objects_.size(), instanceCapacity_);
     for (size_t i = 0; i < writable; ++i) {
         const auto& o = objects_[i];
         XMMATRIX m = ComputeInstanceModel(o.axis, o.angle, o.position);
-        XMStoreFloat4x4(&instanceMapped_[i].model, XMMatrixTranspose(m));
-        instanceMapped_[i].color = { o.color.x, o.color.y, o.color.z, 1.0f };
+        XMStoreFloat4x4(&dst[i].model, XMMatrixTranspose(m));
+        dst[i].color = { o.color.x, o.color.y, o.color.z, 1.0f };
     }
 }
 ```
@@ -298,21 +301,21 @@ Per-Draw 가 *심한 시나리오* 다 — 매 드로우마다 GPU 파이프라�
 
 ## 4. 측정 결과
 
-전형적 RTX 3060. 통제 변수 — 오브젝트 1 만, RootSig 정책 `Global`, Heap 정책 `Transient rebuild`, Barrier 정책 `Immediate`, vsync off, Release 빌드. CPU ms 에는 프레임 루프의 descriptor 워크로드(`CreateShaderResourceView`) 비용이 함께 들어간다.
+전형적 RTX 3060. 통제 변수 — 오브젝트 1 만, RootSig 정책 `Global`, Heap 정책 `Transient rebuild`, Barrier 정책 `Immediate`, vsync off, Release 빌드. CPU ms 에는 프레임 루프의 descriptor 워크로드(`CreateShaderResourceView`) 비용이 함께 들어간다. 이 값은 펜스 대기와 Present 를 포함한 프레임 wall-clock 이라, 정상 상태에서는 GPU ms 아래로 내려가지 않는다 — CPU 작업이 GPU 보다 짧으면 두 값이 같아진다.
 
 | 모드 | PSO 정책 | CPU ms | GPU ms |
 |---|---|---|---|
 | Per-Draw | Per-Pass | 8 | 2 |
 | Per-Draw | Per-Material | 9 | 2 |
 | Per-Draw | Per-Draw | 35 | 5 |
-| Instanced | Per-Pass | 0.3 | 2 |
+| Instanced | Per-Pass | 2 | 2 |
 
 Instanced 모드는 드로우가 한 번뿐이라 PSO 를 정책과 무관하게 정확히 한 번만 설정한다. 즉 *PSO 정책이 `SetPipelineState` 호출 수를 바꾸는 것은 Per-Draw 드로우 모드에서뿐* 이고, `Instanced × Per-Draw` 는 `Instanced × Per-Pass` 와 같은 명령 열을 만들므로 별도 행으로 측정할 것이 없다.
 
 해석.
 
 - *Per-Draw 의 CPU 35 ms* — 3 만 root constants 호출 + 1 만 draw + 1 만 PSO set.
-- *Instanced 의 CPU 0.3 ms* — 1 호출. 약 117 배 감소.
+- *Instanced 의 CPU 2 ms* — 드로우가 1 호출이라 CPU 작업이 프레임 주기 아래로 사라지고, wall-clock 이 GPU 의 2 ms 로 수렴한다. Per-Draw 대비 약 17 배.
 - *Per-Material 의 효과 작음* — 두 PSO 뿐이라.
 - *PSO 변경의 GPU 비용* — Per-Draw 가 *2 → 5 ms* (cache invalidate).
 
@@ -363,7 +366,7 @@ DirectX contract tests passed
 - 드로우마다 루트 상수가 `(index 0, 1 DWORD, offset 0)`, `(0, 16, 4)`, `(0, 4, 20)` 순서로 기록된다.
 - 기록된 제출 수가 예측 헬퍼 `ExpectedDrawSubmissions(mode, N)`와 같다.
 
-`records_instanced` 그룹이 그중 두 번째·네 번째 항목을 판정한다. 드로우가 하나로 접히면서 루트 상수 갱신도 `useInstancing` 한 번으로 줄어드는 것 — 그것이 표의 `0.3 ms` 가 나오는 이유다.
+`records_instanced` 그룹이 그중 첫 번째(Instanced 쪽)·네 번째 항목을 판정한다. 드로우가 하나로 접히면서 루트 상수 갱신도 `useInstancing` 한 번으로 줄어드는 것 — 그것이 표의 `0.3 ms` 가 나오는 이유다.
 
 <!-- snippet: tests/graphics_dx_contract_tests.cpp#TestSceneRecordsInstanced -->
 ```cpp

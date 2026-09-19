@@ -512,7 +512,7 @@ bool HingeJoint::SolveLimitPositionConstraint() {
 
 ### 6.5 게임 활용
 
-- *Ragdoll 의 무릎*: 0° ~ 180° (역방향 안 굽힘).
+- *Ragdoll 의 무릎*: 한 방향 굽힘만 허용 — lower 를 0° 근처에 두어 *역방향 안 굽힘*.
 - *팔꿈치*: 비슷한 한도.
 - *Slider 끝점*: 미닫이문이 *벽까지만* 이동.
 - *Cone twist* (특수): 어깨의 *swing + twist 한도*.

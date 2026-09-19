@@ -22,7 +22,7 @@ PBR과 IBL의 전제는 Cook-Torrance·GGX·Smith·Fresnel-Schlick, split-sum �
 
 ## 1. 디스크립터 세트와 Push Constant
 
-OpenGL과 달리 Vulkan은 셰이더가 읽는 모든 자원을 디스크립터 세트로 묶어 명시적으로 바인딩한다. 핵심 설계 원칙은 *변경 빈도가 같은 자원을 한 세트에 모으는 것* 이다. `vkCmdBindDescriptorSets`는 인자로 받은 세트 이후를 모두 무효화하므로, 자주 바뀌는 세트를 높은 번호에 두면 드물게 바뀌는 낮은 번호 세트의 재바인딩을 피한다.
+OpenGL과 달리 Vulkan은 셰이더가 읽는 모든 자원을 디스크립터 세트로 묶어 명시적으로 바인딩한다. 핵심 설계 원칙은 *변경 빈도가 같은 자원을 한 세트에 모으는 것* 이다. `vkCmdBindDescriptorSets`로 세트 N을 바인딩하면 pipeline layout이 그 세트들에 대해 호환되지 않는 한 N보다 높은 번호의 세트가 무효화될 수 있으므로(pipeline layout compatibility 규칙), 자주 바뀌는 세트를 높은 번호에 두면 드물게 바뀌는 낮은 번호 세트의 재바인딩을 피한다.
 
 | Set | 변경 빈도 | 자원 |
 |---|---|---|
@@ -273,8 +273,7 @@ vec3 diffuse    = irradiance * albedo;
 
 const float MAX_MIP = 4.0;
 vec3 prefiltered = textureLod(prefilterMap, R, roughness * MAX_MIP).rgb;
-vec2 brdf = texture(brdfLUT, vec2(NoV, roughness)).rg;
-vec3 specular = prefiltered * (F0 * brdf.x + brdf.y);  // split-sum BRDF 항
+vec3 specular = prefiltered * MultiscatterBRDF(F0, roughness, NoV);  // split-sum BRDF 항 + 다중 산란 보정
 
 vec3 ambient = (kD * diffuse + specular) * ao;
 ```

@@ -16,6 +16,8 @@ public:
 
     void Init(VkContext& ctx);
     void Shutdown(VkContext& ctx);
+    // 풀 생성 직후 1회 — 미초기화 query 를 unavailable 상태로 만든다.
+    void ResetAll(VkCommandBuffer cmd);
 
     void Begin(VkCommandBuffer cmd);
     void End(VkCommandBuffer cmd);

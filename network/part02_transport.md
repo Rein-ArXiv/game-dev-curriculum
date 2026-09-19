@@ -77,7 +77,7 @@ TCP는 IP의 무보장 위에 "바이트 스트림이 빠짐없이, 순서대로
 | 방화벽/NAT 통과 | 잘 통과 | 가끔 막힘 | UDP 차단 환경용 TCP 폴백을 두기도 |
 | 전형적 용도 | 로그인, API, 다운로드, 채팅 | 게임플레이 상태, 보이스, 핑 측정 | |
 
-표의 마지막 행이 실무 결론이다. 그리고 중간의 "지연 특성" 행이 가장 오해받는 지점이라 한 번 더 — TCP의 평균 지연은 UDP와 같다(같은 IP 위니까). 차이는 *분포의 꼬리* 다: 손실이 났을 때 TCP는 수백 ms를 멈추고, UDP는 그냥 그 패킷만 없다. 게임은 평균이 아니라 P99로 체감되므로, 꼬리가 두꺼운 TCP가 지는 것이다.
+표의 마지막 행이 실무 결론이다. 그리고 중간의 "지연 특성" 행이 가장 오해받는 지점이라 한 번 더 — TCP의 평상시(P50) 지연은 UDP와 같다(같은 IP 위니까). 차이는 *분포의 꼬리* 다: 손실이 났을 때 TCP는 수백 ms를 멈추고, UDP는 그냥 그 패킷만 없다. 게임은 평균이 아니라 P99로 체감되므로, 꼬리가 두꺼운 TCP가 지는 것이다.
 
 ## 5. 소켓 API의 동작 모델
 
@@ -111,7 +111,7 @@ void PumpNetwork(SocketHandle s, double now) {
     for (;;) {
         Address from;
         int n = RecvFrom(s, buf, sizeof buf, &from);
-        if (n < 0) break;                                // EWOULDBLOCK — 다 비웠다
+        if (n < 0) break;                                // EWOULDBLOCK — 다 비웠다(Windows는 ICMP Port Unreachable을 WSAECONNRESET으로 돌려주므로 SIO_UDP_CONNRESET을 꺼 두지 않으면 여기서 남은 패킷을 놓친다)
         if (n < kMinPacketSize) continue;                // 쓰레기 선별: 크기
         OnPacket(from, buf, n, now);                     // protocolId·연결 조회·복호화·파싱
     }
@@ -173,7 +173,7 @@ RTO    ← SRTT + max(clockGranularity, 4·RTTVAR)
 
 RFC 6298의 `RTTVAR`는 표준편차가 아니라 절대 오차의 지수 평활값이므로, “정규분포의 4시그마 바깥” 같은 통계적 보장으로 읽으면 안 된다. 위 순서처럼 편차를 갱신할 때는 갱신 전 `SRTT`를 쓴다. RFC는 계산된 RTO가 1초보다 작으면 1초로 올릴 것을 규정하지만 실제 TCP 구현은 더 작은 최소값을 쓰기도 하므로, 프로토콜 명세와 운영체제 구현을 구분해야 한다. 재전송된 세그먼트의 모호한 ACK에서는 RTT 표본을 취하지 않는 Karn의 원칙과, timeout마다 RTO를 지수 backoff하는 규칙도 함께 작동한다. TCP timestamp와 구현의 ACK 판정은 모호성을 더 줄일 수 있다.
 
-게임 신뢰 채널도 평활 RTT와 변동치를 이용해 재전송 시간을 잡을 수 있지만 TCP 공식을 숫자까지 그대로 복사할 이유는 없다. 50ms 같은 하한은 RTT가 더 큰 경로에서는 즉시 중복 전송을 만들고, 너무 큰 하한은 복구를 늦춘다. 메시지 기한, ACK 빈도, packet loss·reordering 분포, 재전송 byte budget으로 최소·최대와 backoff를 정하고 시뮬레이션에서 spurious retransmission 비율을 측정한다.
+게임 신뢰 채널도 평활 RTT와 변동치를 이용해 재전송 시간을 잡을 수 있지만 TCP 공식을 숫자까지 그대로 복사할 이유는 없다. 50ms 같은 하한은 LAN처럼 RTT가 짧은 경로에서 복구를 늦추고, 500ms 같은 상한은 RTT가 더 큰 경로에서 즉시 중복 전송을 만든다. 메시지 기한, ACK 빈도, packet loss·reordering 분포, 재전송 byte budget으로 최소·최대와 backoff를 정하고 시뮬레이션에서 spurious retransmission 비율을 측정한다.
 
 ## 11. 흐름 제어: 수신 윈도
 
@@ -281,12 +281,12 @@ TCP 성능 진단에서는 왕복 횟수, 혼잡·흐름 윈도, 송수신 큐�
 - Kurose & Ross, *Computer Networking: A Top-Down Approach*, Ch.3 (Transport Layer) — UDP·다중화·신뢰 전송 원리의 교과서 짝.
 - [Beej's Guide to Network Programming](https://beej.us/guide/bgnet/) — 소켓 API의 가장 유명한 실전 입문(무료).
 - W. Richard Stevens, *UNIX Network Programming, Vol.1* — 소켓 의미론·옵션의 결정판 레퍼런스.
-- [RFC 768: User Datagram Protocol](https://www.rfc-editor.org/rfc/rfc768) — 본문 두 쪽짜리 UDP 명세 원문(직접 읽을 가치가 있다).
+- [RFC 768: User Datagram Protocol](https://www.rfc-editor.org/rfc/rfc768) — 세 쪽짜리 UDP 명세 원문(직접 읽을 가치가 있다).
 - Glenn Fiedler, ["UDP vs. TCP"](https://gafferongames.com/post/udp_vs_tcp/) — 게임 관점 선택 논거의 고전.
 - Kurose & Ross, *Computer Networking: A Top-Down Approach*, Ch.3 §3.5~3.7 — TCP 신뢰 전송·혼잡 제어의 교과서 짝.
 - Van Jacobson, Michael Karels, ["Congestion Avoidance and Control"](https://ee.lbl.gov/papers/congavoid.pdf) (SIGCOMM 1988) — 혼잡 붕괴에서 인터넷을 구한 원전.
 - Dah-Ming Chiu, Raj Jain, ["Analysis of the Increase and Decrease Algorithms for Congestion Avoidance in Computer Networks"](https://www.cs.wustl.edu/~jain/papers/ftp/cong_av.pdf) (Computer Networks and ISDN Systems 17(1):1–14, 1989) — AIMD가 공정·효율로 수렴함을 벡터로 증명한 원전.
-- Raj Jain, Dah-Ming Chiu, William Hawe, ["A Quantitative Measure of Fairness and Discrimination"](https://www.cs.wustl.edu/~jain/papers/ftp/fairness.pdf) (DEC-TR-301, 1984) — Jain 공정성 지수의 정의와 성질.
+- Raj Jain, Dah-Ming Chiu, William Hawe, ["A Quantitative Measure of Fairness and Discrimination for Resource Allocation in Shared Computer Systems"](https://www.cs.wustl.edu/~jain/papers/ftp/fairness.pdf) (DEC-TR-301, 1984) — Jain 공정성 지수의 정의와 성질.
 - [RFC 9293: Transmission Control Protocol](https://www.rfc-editor.org/rfc/rfc9293) — 2022년 통합 개정된 TCP 명세.
 - [RFC 6298: Computing TCP's Retransmission Timer](https://www.rfc-editor.org/rfc/rfc6298) — SRTT/RTTVAR/RTO 공식의 출처.
 - Neal Cardwell 외, ["BBR: Congestion-Based Congestion Control"](https://queue.acm.org/detail.cfm?id=3022184) (ACM Queue 2016) — 용량 직접 추정 모델의 원전.

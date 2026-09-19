@@ -10,7 +10,7 @@
 
 - **실제 동작·측정**: instance/device/swapchain/pipeline, timestamp query + validation log, `synchronization2` barrier policy(over-sync vs minimal), timeline semaphore 기반 프레임 동기화, Per-Draw vs Instanced draw.
 - **설계 토픽**: multi-queue overlap, descriptor indexing(bindless), mesh shader는 “언제 필요한가” 관점으로 문서화한다. 단순 큐브 장면에 넣으면 학습 목표가 흐려지므로 실행 토글로 만들지 않는다.
-- **범위 밖**: compute 는 이 lab 에 없다. `.comp` 셰이더도, `vkCmdDispatch` 호출도 없고, dedicated compute/transfer queue family 는 선택만 하고 워크로드에서 쓰지 않는다. 그래서 이 lab 의 barrier 실험 대상은 swapchain color 전이 두 개뿐이고, compute→graphics 같은 producer/consumer 는 관측 대상이 아니다.
+- **범위 밖**: compute 는 이 lab 에 없다. `.comp` 셰이더도, `vkCmdDispatch` 호출도 없고, dedicated compute/transfer queue family 는 선택만 하고 워크로드에서 쓰지 않는다. 그래서 이 lab 의 barrier 실험 대상은 swapchain color 전이 두 개와 depth 초기화 전이 하나뿐이고, compute→graphics 같은 producer/consumer 는 관측 대상이 아니다.
 
 ## 토글 항목
 
@@ -114,12 +114,12 @@ ctest --test-dir build --output-on-failure
 [step04] queue_family_selection ... ok (26 checks)
 [step05] sync_mode_names ... ok (2 checks)
 [step05] timeline_counter ... ok (4 checks)
-[step05] frame_completion_tracking ... ok (137 checks)
+[step05] frame_completion_tracking ... ok (177 checks)
 [step06] descriptor_set_shape ... ok (22 checks)
 [step07] draw_mode_names ... ok (5 checks)
 [step07] draw_submission_counts ... ok (55 checks)
 [step07] scene_scale_contract ... ok (13 checks)
-all: 16 test(s), 958 checks, 0 failed
+all: 16 test(s), 998 checks, 0 failed
 ```
 
 CTest 쪽 등록은 다음과 같다. 전체 실행 타깃은 그대로 두고 step 별 타깃을 더한 형태이므로, step 하나만 돌려도 전체를 돌려도 검사가 줄지 않는다.
@@ -165,7 +165,7 @@ const StepTest kStepTests[] = {
 };
 ```
 
-이 타깃은 디바이스 호출이 없는 제품 번역 단위를 실제로 링크한다. 순수 로직을 새로 분리하면 CMake 의 이 목록에 추가해야 자동 검증 범위에 들어온다 — 여기 없는 TU 는 자동 검증 밖이라는 뜻이다.
+이 타깃은 검사 대상 제품 번역 단위를 실제로 링크하고, 그중 디바이스 호출이 없는 코드만 실행한다. 순수 로직을 새로 분리하면 CMake 의 이 목록에 추가해야 자동 검증 범위에 들어온다 — 여기 없는 TU 는 자동 검증 밖이라는 뜻이다.
 
 <!-- snippet: CMakeLists.txt@contract-test-sources -->
 ```cmake
@@ -190,10 +190,10 @@ add_executable(graphics_vk_contract_tests
 | Timestamp ring | 2 | full ring 가드와 가장 오래된 슬롯 수확 인덱스 |
 | Layout 전이 | 3 | 세 전이(color 진입 / present / depth 초기화)의 `image`·`oldLayout`·`newLayout`·`subresourceRange`·네 mask 를 단언 — 두 color 전이는 Minimal·Over-sync 양쪽에서, depth 초기화 전이는 Minimal 에서 |
 | 기록 경로 | 3 | `vkCmdPipelineBarrier2` 를 함수 포인터 seam 으로 가로채 `VkDependencyInfo` 의 barrier 개수와 내용이 빌더 결과와 일치하는지 확인 |
-| 정책 fallback | 3 | Minimal 이 모르는 layout 쌍에서 Over-sync 와 비트 단위로 같은 값이 나온다는 계약 |
+| 정책 fallback | 3 | Minimal 이 모르는 layout 쌍(UNDEFINED 소스·PRESENT_SRC 대상 제외)에서 Over-sync 와 비트 단위로 같은 값이 나온다는 계약 |
 | 실패 주입 | 3 | skip 토글이 켜지면 기록된 배리어 수가 0, wrong 토글은 `srcAccessMask` 만 0 으로 만든다 |
 | Queue family 선택 | 4 | dedicated compute/transfer 판정, 없을 때 graphics family 로의 fallback, present 불가 장치의 탈락 |
-| 완료 추적 | 5 | slot/image별 값의 단조 증가, 모드 전환 시 두 체계 격리, swapchain 재생성 시 image 값 초기화 |
+| 완료 추적 | 5 | slot/image별 값의 단조 증가, 모드 전환 시 두 체계 격리, swapchain 재생성 시 image 값 초기화, Binary 에서 slot fence 가 아직 그 image 를 쓴 제출의 것일 때만 대기(3 image/2 slot 라운드로빈 12프레임에서 대기 0) |
 | Descriptor set 모양 | 6 | binding 이 둘이고 전부 원소 하나짜리이며 update-after-bind flag 가 없다는 것, pool 이 layout 에서 파생된다는 것 |
 | Draw 제출 수 | 7 | fake recorder 로 두 모드를 돌려 `drawCalls + instancedDraws == ExpectedDrawSubmissions(mode, N)` 대조 |
 | Scene 규모 | 7 | `Build(N)` 후 `ObjectCount() == N`, `WriteInstances` 의 capacity clamp, 고정 seed 배치의 결정성 |

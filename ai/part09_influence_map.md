@@ -86,7 +86,7 @@ struct InfluenceMap {
 
 ### 비용의 구조
 
-비용은 격자와 유닛 양쪽에 의존한다. decay는 $O(WH)$, 점 stamp는 유닛 수 $U$에 대해 $O(U)$, spread는 방식에 따라 $O(WH \cdot I)$(반복 $I$회) 또는 $O(WH)$(분리 커널)다. 따라서 전체는 대략 $O(U+WHI)$ 또는 $O(U+WH)$다. 전체 격자 spread가 지배적인 구성에서는 유닛 수가 늘어도 증가분이 stamp 비용에 제한되지만, $U$가 매우 크거나 커널 stamp $O(Ur^2)$를 쓰면 유닛 수가 다시 병목이 된다. 영향력 맵의 이득은 각 에이전트가 동일한 공간 추론을 반복하는 대신, 한 번 만든 장을 공유한다는 데 있다.
+비용은 격자와 유닛 양쪽에 의존한다. decay는 $O(WH)$, 점 stamp는 유닛 수 $U$에 대해 $O(U)$, spread는 방식에 따라 $O(WH \cdot I)$(반복 $I$회) 또는 $O(WH \cdot r)$(반경 $r$ 분리 커널)다. 따라서 전체는 대략 $O(U+WHI)$ 또는 $O(U+WHr)$다. 전체 격자 spread가 지배적인 구성에서는 유닛 수가 늘어도 증가분이 stamp 비용에 제한되지만, $U$가 매우 크거나 커널 stamp $O(Ur^2)$를 쓰면 유닛 수가 다시 병목이 된다. 영향력 맵의 이득은 각 에이전트가 동일한 공간 추론을 반복하는 대신, 한 번 만든 장을 공유한다는 데 있다.
 
 영향력 맵은 전략 게임과 RTS 봇 연구에서 오래 사용된 공간 요약 기법이다. 모든 상용 RTS가 같은 구조를 쓰는 표준이라고 단정할 수는 없지만, 위협·통제·밀집도를 격자 장으로 캐싱하는 대표적 선택지다.
 
@@ -167,7 +167,7 @@ void SpreadIterative(InfluenceMap& m, float decay, int iterations) {
 }
 ```
 
-감쇠율 `decay`(예: 0.7)와 반복 횟수 `iterations`가 영향력이 퍼지는 *반경* 을 정한다. `decay`가 클수록 멀리 번지고, 반복이 많을수록 넓게 퍼진다. 한 점에서 $n$칸 떨어진 셀의 값은 대략 $\text{strength} \times \text{decay}^n$이 되므로, 영향력이 무시할 수준($\epsilon$)으로 떨어지는 반경은 $n \approx \log_{\text{decay}} \epsilon$이다. 이 점이 *벽을 우회* 한다는 게 결정적 장점이다 — `IsWall` 검사로 영향력이 장애물을 통과하지 못하게 하면, 적이 벽 너머에 있을 때 그 위협은 벽을 돌아온 거리만큼만 미친다.
+감쇠율 `decay`(예: 0.7)와 반복 횟수 `iterations`가 영향력이 퍼지는 *반경* 을 정한다. `decay`가 클수록 멀리 번지고, 반복이 많을수록 넓게 퍼진다. 한 점에서 $n$칸 떨어진 셀의 값은 대략 $\text{strength} \times \text{decay}^n$이 되므로, 영향력이 무시할 수준($\epsilon$)으로 떨어지는 반경은 $n \approx \log_{\text{decay}}(\epsilon/\text{strength})$이다. 이 점이 *벽을 우회* 한다는 게 결정적 장점이다 — `IsWall` 검사로 영향력이 장애물을 통과하지 못하게 하면, 적이 벽 너머에 있을 때 그 위협은 벽을 돌아온 거리만큼만 미친다.
 
 반복 확산에는 *두 가지 결함* 이 있다. 첫째, *비등방성(anisotropic) 왜곡* 이다. "이웃 중 최대"를 쓰면 영향력이 8방향 격자를 따라 별 모양·다이아몬드 모양으로 번진다 — 원형 falloff가 아니다. 둘째, *반복 비용* 이다. 한 번 spread에 $O(WH)$이고, 넓게 번지려면 $I$번 반복하므로 $O(WH \cdot I)$다. 반경을 키우면 비용이 선형으로 는다.
 
@@ -272,12 +272,12 @@ void SpreadByDistance(InfluenceMap& m, const std::vector<Cell>& sources,
 }
 ```
 
-`Falloff`는 거리를 영향력으로 바꾸는 함수다 — 선형 $\max(0, 1 - d/r)$, 지수 $e^{-d/\sigma}$, 역제곱 $1/(1+d^2)$ 등을 쓴다. 이 방식은 비등방성이 없고(거리는 진짜 거리), 장애물을 정확히 우회한다. 대각 이동에 $\sqrt 2$ 보정을 넣으면 격자 왜곡도 줄어든다. 비용은 우선순위 큐 때문에 $O(WH \log WH)$로 반복 확산보다 무겁지만, 한 번에 정확한 거리를 얻는다. 세 방식의 절충은 다음과 같다.
+`Falloff`는 거리를 영향력으로 바꾸는 함수다 — 선형 $\max(0, 1 - d/r)$, 지수 $e^{-d/\sigma}$, 역제곱 $1/(1+d^2)$ 등을 쓴다. 이 방식은 대각 $\sqrt 2$ 보정 덕에 비등방성이 octile 잔여분(최대 약 8.24%)으로 줄고(거리는 그래프 위의 진짜 측지 거리), 장애물을 정확히 우회한다. 비용은 우선순위 큐 때문에 $O(WH \log WH)$로 반복 확산보다 무겁지만, 한 번에 정확한 거리를 얻는다. 세 방식의 절충은 다음과 같다.
 
 | 방식 | 복잡도 | 장애물 | 등방성 | 적합 |
 |---|---|---|---|---|
 | 반복 확산 (max) | $O(WH \cdot I)$ | 우회함 | 나쁨 (별 모양) | 거친 위협 맵, 작은 반경 |
-| 분리 가우시안 | $O(WH)$ | 무시 | 좋음 (원형) | 개활지, 밀집도 맵 |
+| 분리 가우시안 | $O(WH \cdot r)$ | 무시 | 좋음 (원형) | 개활지, 밀집도 맵 |
 | 거리장 BFS | $O(WH \log WH)$ | 정확히 우회 | 좋음 | 정확한 위협·접근 맵 |
 
 ## 4. Decay와 시간적 감쇠
@@ -376,7 +376,7 @@ flowchart TB
 
 ## 6. Tension·Vulnerability·Choke 추출
 
-결합된 맵에서 *파생 지표* 를 추출하면, 더 직접적인 전술 정보가 된다. Dave Mark와 Kevin Dill이 정리한 세 지표가 대표적이다.
+결합된 맵에서 *파생 지표* 를 추출하면, 더 직접적인 전술 정보가 된다. 다음 세 지표가 대표적이다.
 
 ### 세 지표의 정의
 
@@ -548,7 +548,7 @@ spread는 구현에 따라 성격이 갈린다. 반복 확산은 단순하고 �
 
 ## 더 읽을거리
 
-- Dave Mark & Kevin Dill, 영향력 맵 관련 GDC 발표 — tension/vulnerability 추출 모델의 원전.
+- Kevin Dill, "Spatial Reasoning for Strategic Decision Making" (*Game AI Pro* 2권) — 영향력 맵 위에서 지역·chokepoint를 추론하는 전략 수준 공간 추론.
 - Alex Champandard, "The Mechanics of Influence Mapping" (AiGameDev) — stamp/spread/decay의 실무.
 - Steve Rabin (ed.), *Game AI Pro* 2권, "Modular Tactical Influence Maps" — 다층 결합·정규화 아키텍처.
 - Chris Crawford, 초기 전략 게임 AI 저작 — 영향력 맵 개념의 기원.

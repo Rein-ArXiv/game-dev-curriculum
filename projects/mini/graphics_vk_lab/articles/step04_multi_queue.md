@@ -127,7 +127,7 @@ CHECK(only.compute == 0);          // c == kNoQueueFamily → c = g.
 CHECK(only.transfer == 0);         // t == kNoQueueFamily → t = g.
 ```
 
-`!(flags & VK_QUEUE_GRAPHICS_BIT)` 조건을 지우면 (c) 가, present 검사를 지우면 (e)·(f) 가 깨진다. 반대로 이 실행이 확인하지 못하는 것은 “실제 장치의 family 목록이 무엇인가”다. 그것은 드라이버가 답하는 값이라 실행으로 본다.
+compute 분기의 `!(flags & VK_QUEUE_GRAPHICS_BIT)` 조건을 지우면 (a)·(d)·(g) 가, graphics 의 첫-매치 가드 `g == kNoQueueFamily` 를 지우면 (c) 가, present 검사를 지우면 (e)·(f) 가 깨진다. 반대로 이 실행이 확인하지 못하는 것은 “실제 장치의 family 목록이 무엇인가”다. 그것은 드라이버가 답하는 값이라 실행으로 본다.
 
 ```powershell
 cmake --build build --config Debug
@@ -149,5 +149,5 @@ Vulkan multi-queue 는 고급 최적화다. 이 lab 에서는 구조와 조건�
 ## 더 읽을거리
 
 - AMD GPUOpen, ["Concurrent Execution: Asynchronous Queues"](https://gpuopen.com/learn/concurrent-execution-asynchronous-queues/) — 비동기 큐 이득의 조건과 측정.
-- [Vulkan Specification: Queue Family Ownership Transfer](https://registry.khronos.org/vulkan/specs/latest/html/chap7.html#synchronization-queue-transfers) — 큐 간 자원 소유권 이전 명세.
+- [Vulkan Specification: Queue Family Ownership Transfer](https://docs.vulkan.org/spec/latest/chapters/synchronization.html#synchronization-queue-transfers) — 큐 패밀리 간 자원 소유권 이전 명세.
 - [Sascha Willems: Compute N-body 예제](https://github.com/SaschaWillems/Vulkan/tree/master/examples/computenbody) — 그래픽스+컴퓨트 큐 병행의 실물.

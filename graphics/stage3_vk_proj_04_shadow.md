@@ -59,7 +59,7 @@ CSM의 핵심 통찰은 같은 메모리를 거리별로 재분배하는 데 있
 
 ### 투영 텍셀 종횡비 문제
 
-단일 맵의 또 다른 약점은 시점에 따른 가장자리 품질의 비일관성이다. 빛의 방향과 카메라가 보는 표면이 비스듬할수록, 화면의 한 픽셀이 그림자 맵에서 길쭉한 직사각형 영역에 대응한다. 이 종횡비 왜곡(perspective aliasing)은 단일 맵으로는 제어할 방법이 거의 없다. CSM은 가까운 캐스케이드의 절두체 범위가 좁아 빛 방향과의 각도가 덜 극단적으로 분포하므로, 이 왜곡도 자연히 완화된다. CSM이 단순히 텍셀 수를 늘리는 기법이 아니라 *문제를 거리별로 분해* 하는 기법인 이유다.
+단일 맵의 또 다른 약점은 시점에 따른 가장자리 품질의 비일관성이다. 빛의 방향과 카메라가 보는 표면이 비스듬할수록, 화면의 한 픽셀이 그림자 맵에서 길쭉한 직사각형 영역에 대응한다. 이 종횡비 왜곡(projection aliasing)은 단일 맵으로는 제어할 방법이 거의 없다. CSM은 가까운 캐스케이드의 절두체 범위가 좁아 텍셀 하나가 덮는 월드 면적이 작아지므로, 길쭉해진 풋프린트의 절대 크기도 그만큼 줄어 이 왜곡이 완화된다. CSM이 단순히 텍셀 수를 늘리는 기법이 아니라 *문제를 거리별로 분해* 하는 기법인 이유다.
 
 ## 2. 캐스케이드 분할 방식
 
@@ -73,7 +73,7 @@ CSM의 핵심 통찰은 같은 메모리를 거리별로 재분배하는 데 있
 
 $$z_i = n + (f - n) \cdot \frac{i}{N}$$
 
-near 1m, far 500m, 4 캐스케이드라면 경계는 125m, 250m, 375m가 된다. 첫 캐스케이드가 1m에서 125m까지를 단 하나의 맵으로 덮으므로, 정작 정밀도가 필요한 카메라 바로 앞 영역의 텍셀 밀도가 단일 맵과 다를 바 없이 낮다. 균등 분할은 거의 쓰이지 않는다.
+near 1m, far 500m, 4 캐스케이드라면 경계는 125.75m, 250.5m, 375.25m가 된다. 첫 캐스케이드가 1m에서 125.75m까지를 단 하나의 맵으로 덮으므로, 정작 정밀도가 필요한 카메라 바로 앞 영역의 텍셀 밀도가 단일 맵과 다를 바 없이 낮다. 균등 분할은 거의 쓰이지 않는다.
 
 ### 로그 분할(Logarithmic)
 
@@ -212,7 +212,7 @@ CSM의 가장 눈에 띄는 아티팩트는 카메라가 움직이거나 회전�
 
 ```cpp
     // 5'. 투영 직전, AABB를 텍셀 격자에 스냅한다.
-    float worldUnitsPerTexel = (maxV.x - minV.x) / shadowMapSize;
+    float worldUnitsPerTexel = std::max(maxV.x - minV.x, maxV.y - minV.y) / shadowMapSize;
 
     minV.x = std::floor(minV.x / worldUnitsPerTexel) * worldUnitsPerTexel;
     minV.y = std::floor(minV.y / worldUnitsPerTexel) * worldUnitsPerTexel;
@@ -534,10 +534,10 @@ $$w_{\text{penumbra}} = \frac{(d_{\text{receiver}} - d_{\text{blocker}}) \cdot w
 차폐물이 받는 면에서 멀수록(분자의 차이가 클수록), 광원이 클수록 반그늘이 넓어진다.
 
 ```glsl
-float penumbra = (receiverDepth - blockerDepth) * lightSizeUV / blockerDepth;
+float penumbra = (receiverDepth - blockerDepth) * lightSizeUV;   // 직교 투영이라 분모가 없다
 ```
 
-`lightSizeUV`는 광원의 각크기를 그림자 맵 UV 단위로 환산한 값이다. 직사광에서는 태양의 각지름(약 0.5도)에 대응하는 작은 상수로 두고, 원하는 부드러움에 맞춰 미세 조정한다.
+위 식의 분모 $d_{\text{blocker}}$는 점광원의 원근 투영에서 선형 폭 $w_{\text{light}}$를 각크기로 바꾸는 항이다. 직사광은 직교 투영이라 각크기가 상수이므로 반그늘 폭은 차폐물–받는 면 거리에만 비례하고, 분모를 두면 3절에서 임의로 정한 near 확장 폭에 따라 같은 기하의 반그늘이 달라진다. `lightSizeUV`는 태양의 각지름(약 0.5도)의 탄젠트에 깊이 범위(far−near)를 곱하고 직교 투영 폭으로 나눈 상수로 두고, 원하는 부드러움에 맞춰 미세 조정한다.
 
 ### 단계 3 — Penumbra 폭으로 PCF
 

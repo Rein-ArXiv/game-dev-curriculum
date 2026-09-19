@@ -67,7 +67,7 @@ vec3 dir = positionB - positionA;   // 두 위치의 차 = 방향 ✓
 vec3 wrong = positionA + positionB; // 두 위치의 합 = 의미 없음 ✗
 ```
 
-DirectX·Unity·Unreal의 일부 API는 *위치는 `Point`, 자유 벡터는 `Vector`* 로 *타입을 분리* 해 컴파일 타임에 잘못된 연산을 막는다. 게임 엔진의 일반 코드는 같은 `vec3` 으로 두는 게 흔하다 — *프로그래머의 자기 규율* 에 맡기는 모델.
+CGAL (`Point_3`/`Vector_3`) 이나 WPF Media3D (`Point3D`/`Vector3D`) 같은 일부 기하 API는 *위치는 `Point`, 자유 벡터는 `Vector`* 로 *타입을 분리* 해 컴파일 타임에 잘못된 연산을 막는다. DirectXMath·Unity·Unreal 을 포함한 게임 엔진의 일반 코드는 같은 `vec3` (`XMVECTOR`·`Vector3`·`FVector`) 으로 두는 게 흔하다 — *프로그래머의 자기 규율* 에 맡기는 모델.
 
 ### 1.2 Vec2, Vec3, Vec4 — 차원의 의미
 
@@ -164,7 +164,7 @@ position += velocity * dt;
 | 항등원 | $\vec{a} + \vec{0} = \vec{a}$ |
 | 역원 | $\vec{a} + (-\vec{a}) = \vec{0}$ |
 
-이 법칙들이 *수학적으로는* 정확히 성립하지만, *부동소수점 위에서는 마지막 비트가 어긋날 수 있다*. 예를 들어 결합법칙 $(a + b) + c$ 와 $a + (b + c)$ 가 *다른 비트 패턴* 을 줄 수 있다. 이는 `part01_number_representation`의 반올림·합산 오차와 같은 원인이다.
+이 법칙들이 *수학적으로는* 정확히 성립하지만, *부동소수점 위에서는 마지막 비트가 어긋날 수 있다*. 예를 들어 결합법칙 $(a + b) + c$ 와 $a + (b + c)$ 가 *다른 비트 패턴* 을 줄 수 있다. 이는 부동소수점 덧셈 한 번마다 생기는 반올림이 합산 순서에 따라 다르게 쌓이기 때문이다.
 
 게임 코드에서 이 차이가 의미 있는 경우는 드물지만, 결정론적 시뮬레이션에서는 *합산 순서를 고정* 해야 한다.
 
@@ -807,7 +807,7 @@ struct alignas(16) Vec3 {
 |---|---|---|
 | GLM (glm::vec3) | 12 byte | 정렬 없음, 메모리 우선 |
 | DirectXMath (XMVECTOR) | 16 byte | SIMD 우선 |
-| Unreal (FVector) | 12 byte (float3) | 메모리 우선 |
+| Unreal (FVector3f) | 12 byte (float3) | 메모리 우선. UE5의 `FVector` 는 double 24 byte |
 | Unity (Vector3) | 12 byte | 메모리 우선 |
 | 자체 엔진 | 사용자 결정 | 워크로드 의존 |
 

@@ -34,7 +34,7 @@
 
 ```text
 할당 전: [    16KB 여유    ]
-할당 후: [4KB][  ][4KB][  ][4KB]  // 8KB는 여유지만 연속된 8KB는 없다
+할당 후: [4KB][  4KB  ][4KB][  4KB  ]  // 8KB는 여유지만 연속된 8KB는 없다
 ```
 
 ### 버디 알고리즘
@@ -56,7 +56,8 @@ struct free_area {
 
 struct zone {
     struct free_area    free_area[MAX_ORDER];  // 전통적으로 MAX_ORDER = 11 (order 0~10)
-    // 커널 6.4부터 MAX_ORDER의 의미가 "포함되는 최대 order"(10)로 바뀌었고,
+    // 커널 6.4부터 MAX_ORDER의 의미가 "포함되는 최대 order"(10)로 바뀌어
+    // 배열 크기가 MAX_ORDER + 1이 되었고, 6.8에서 이름이 MAX_PAGE_ORDER로 바뀌면서
     // 배열 크기는 NR_PAGE_ORDERS로 표현된다.
     // ...
 };
@@ -81,6 +82,7 @@ static inline void __free_one_page(struct page *page, unsigned int order) {
     if (page_is_buddy(page, buddy, order)) {
         // buddy도 free 상태면 병합
         list_del(&buddy->lru);
+        page += (buddy_pfn & page_pfn) - page_pfn;  // 병합 블록의 시작(하위 버디)으로 이동
         __free_one_page(page, order + 1);  // 재귀적 병합
     } else {
         list_add(&page->lru, &zone->free_area[order].free_list);
@@ -153,9 +155,10 @@ struct slab {
 **할당 과정 (간소화):**
 ```c
 void *kmem_cache_alloc(struct kmem_cache *s, gfp_t flags) {
-    void *object = get_cpu_ptr(s->cpu_slab)->freelist;
+    struct kmem_cache_cpu *c = this_cpu_ptr(s->cpu_slab);
+    void *object = c->freelist;
     if (likely(object)) {
-        s->cpu_slab->freelist = get_freepointer(s, object);
+        c->freelist = get_freepointer(s, object);
         return object;
     }
     return slow_path(s, flags);  // 새 slab 할당
@@ -194,8 +197,9 @@ Slab 2: [offset: 128] [obj][obj][obj]...
 ```c
 // mm/slub.c
 void *kmem_cache_alloc(struct kmem_cache *s, gfp_t gfpflags) {
-    void *ret;
+    void *object;
     struct kmem_cache_cpu *c;
+    int node = NUMA_NO_NODE;
 
     c = this_cpu_ptr(s->cpu_slab);
     object = c->freelist;

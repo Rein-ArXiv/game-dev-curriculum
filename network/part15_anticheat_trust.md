@@ -409,8 +409,9 @@ struct PlayerMetrics {
 };
 
 float SuspicionScore(const PlayerMetrics& m, const ServerStats& mean) {
-    float zHsr = (m.headshotRatio - mean.headshotRatio) / mean.hsrStdDev;
-    float zKd  = (m.kdRatio - mean.kdRatio) / mean.kdStdDev;
+    // 표본이 안정되지 않은 그룹(std 0)은 §5 ZScore 와 같이 z=0 으로 둔다 — 0 나눗셈 방어
+    float zHsr = mean.hsrStdDev > 0.0f ? (m.headshotRatio - mean.headshotRatio) / mean.hsrStdDev : 0.0f;
+    float zKd  = mean.kdStdDev  > 0.0f ? (m.kdRatio - mean.kdRatio) / mean.kdStdDev : 0.0f;
     return std::max(zHsr, zKd) - 2.0f;   // 2-sigma 초과 시 의심
 }
 ```
@@ -431,9 +432,9 @@ float SuspicionScore(const PlayerMetrics& m, const ServerStats& mean) {
 가능한 모든 *게임 결정* 을 서버가 결정. 클라이언트 입력은 *요청 / 의도* 만 → 서버가 *수락 / 거절*.
 
 ```cpp
-void OnClientRequestMove(ClientInput in) {
+void OnClientRequestMove(const PlayerInput& in, float serverDt) {   // dt 는 서버 시계 기준
     PlayerState s = serverState[in.playerId];
-    if (ValidateMovement(in, s)) {
+    if (ValidateMovement(in, serverDt, s)) {
         s.position = in.requestedPosition;
         BroadcastState(s);
     } else {
@@ -599,7 +600,7 @@ flowchart LR
 
 $$\underbrace{\frac{P(H_1\mid E)}{P(H_0\mid E)}}_{\text{사후 오즈}} = \underbrace{\frac{P(E\mid H_1)}{P(E\mid H_0)}}_{\Lambda} \cdot \underbrace{\frac{\pi}{1-\pi}}_{\text{사전 오즈}}, \qquad \text{PPV}=\frac{\Lambda\,\pi}{\Lambda\,\pi+(1-\pi)}$$
 
-기저율이 작으면 사전 오즈가 작아 우도비가 통째로 끌려 내려간다. $\pi=0.01$(사전 오즈 $\approx 1/99$)에서 민감도 50%·*특이도 99.9%* 인 강한 단일 검사조차 $\Lambda=\frac{0.5}{0.001}=500$, 사후 오즈 $500\times0.0101\approx5.05$, $\text{PPV}\approx0.835$다. "99.9% 정확한" 검사가 정밀도 83.5%에 그친다 — §4에서 정규분포로 계산한 임계가 실제 오탐을 과소평가하는 것과 *정확히 같은 기저율 오류* 다. 단일 신호로는 결코 자동 영구 밴 근거가 되지 못한다.
+기저율이 작으면 사전 오즈가 작아 우도비가 통째로 끌려 내려간다. $\pi=0.01$(사전 오즈 $\approx 1/99$)에서 민감도 50%·*특이도 99.9%* 인 강한 단일 검사조차 $\Lambda=\frac{0.5}{0.001}=500$, 사후 오즈 $500\times0.0101\approx5.05$, $\text{PPV}\approx0.835$다. "99.9% 정확한" 검사가 정밀도 83.5%에 그친다 — §4에서 정규분포로 계산한 임계가 실제 오탐을 과소평가하는 것(우도 $\alpha$의 오지정)과는 다른 축에서, 사전 오즈를 빠뜨려 생기는 *기저율 오류* 다. 단일 신호로는 결코 자동 영구 밴 근거가 되지 못한다.
 
 설명용으로 account-level decision의 목표를 $\text{FDR}=1-\text{PPV}\le\varepsilon$, 민감도를 $t=1-\beta$라고 두면 필요한 누적 우도비와 허용 FPR을 역산할 수 있다. 다음 수치는 $\varepsilon=10^{-6}$을 선택한 가상 정책 예일 뿐 모든 게임의 권장값이 아니다.
 
@@ -877,7 +878,7 @@ void OnUserDataDeletionRequest(PlayerId p) {
 ## 더 읽을거리
 
 - Riot Games Technology Blog, [안티치트 관련 글 모음](https://technology.riotgames.com/) — Vanguard 의 커널 드라이버 접근과 그 트레이드오프를 공개적으로 설명한 드문 1차 자료.
-- Valve, [Valve Anti-Cheat (VAC) — Steamworks 문서](https://partner.steamgames.com/doc/features/anticheat) — 시그니처 기반 탐지 + 지연 밴 정책의 공식 설명.
+- Valve, [Anti-cheat and Game Bans — Steamworks 문서](https://partner.steamgames.com/doc/features/anticheat) — Game Ban 신고 API와 밴 운영 권장사항의 공식 설명.
 - Greg Hoglund, Gary McGraw, *Exploiting Online Games: Cheating Massively Distributed Systems* (Addison-Wesley, 2007) — 치트 기법 분류의 고전(공격자 관점 이해용).
 - Abraham Wald, "Sequential Tests of Statistical Hypotheses" (*Annals of Mathematical Statistics* 16(2), 1945) — SPRT의 원전. 로그 우도비 누적과 $A,B$ 경계 유도.
 - Abraham Wald, Jacob Wolfowitz, "Optimum Character of the Sequential Probability Ratio Test" (*Annals of Mathematical Statistics* 19(3), 1948) — 주어진 $(\alpha,\beta)$에서 SPRT가 기대 표본 수를 최소화한다는 최적성 증명.

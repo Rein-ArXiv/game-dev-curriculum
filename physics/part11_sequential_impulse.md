@@ -329,7 +329,7 @@ step 시작에 *이전 누적 λ 의 impulse 를 강체 속도에 적용*. veloc
 
 | | warm start 없음 | warm start 있음 |
 |---|---|---|
-| 평균 iter 수 | 8~10 | 3~5 |
+| 평균 iter 수 (예시) | 8~10 | 3~5 |
 | 큰 시뮬 (수백 contact) | 느림 | 안정 |
 | 시각적 부드러움 | jitter 가능 | 부드러움 |
 
@@ -531,9 +531,9 @@ island를 나누면 무관한 body를 함께 순회하지 않고 독립 작업�
 
 ```cpp
 bool islandAllSleeping = std::all_of(bodies.begin(), bodies.end(),
-    [](Body& b) { return b.IsSleepCandidate(); });
+    [&](int i) { return world.bodies[i].IsSleepCandidate(); });
 if (islandAllSleeping) {
-    for (Body& b : bodies) b.isSleeping = true;
+    for (int i : bodies) world.bodies[i].isSleeping = true;
     continue;     // 이 island 솔버 안 돌림
 }
 ```
@@ -628,5 +628,5 @@ Sequential Impulse 의 핵심은 *누적 임펄스 + warm starting + 반복 보�
 - Box2D 소스 (`b2ContactSolver.cpp`, `b2Island.cpp`) — 산업 reference.
 - Dirk Gregorius, "Robust Contact Creation for Physics Simulations" (GDC 2015) — contact manifold 의 안정성.
 - PhysX SDK Guide, "Temporal Gauss-Seidel" — TGS 산업 구현.
-- Bullet manual, "Constraint Solver" — pseudo-velocity 패턴.
+- Bullet 소스 (`btContactSolverInfo.h` 의 `m_splitImpulse`, `btSequentialImpulseConstraintSolver.cpp`) — split impulse (pseudo-velocity) 패턴.
 - Jorrit Rouwé, Jolt physics 소스 — island-parallel solver.

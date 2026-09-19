@@ -46,7 +46,7 @@ Player p = {42, 10.5f, 20.3f, 5.0f, "Alice"};
 | id     | x      | y      | z      |  16 bytes
 | 0x002A | 0x4128 | 0x41A2 | 0x40A0 |
 +--------+--------+--------+--------+
-| name.data*      | name.length     |  16 bytes
+| name.data*      | name.length     |  std::string 객체: 24~32 bytes
 | 0x7FFF12345678  | 5               |
 +--------+--------+--------+--------+
               ↓ 힙에 할당
@@ -68,7 +68,7 @@ fclose(f);
 
 **1. 포인터 저장**: `name.data`는 현재 프로세스의 주소 `0x7FFF12345678`을 가리킨다. 파일에서 읽어올 때 이 주소는 의미 없다.
 
-**2. 힙 데이터 누락**: 실제 문자열 "Alice"는 저장되지 않는다.
+**2. 힙 데이터 누락**: 이름이 SSO(Small String Optimization) 한계를 넘으면 문자열 본문은 힙에 있으므로, 객체 바이트만 복사하는 이 코드는 그 데이터를 저장하지 않는다. 한계는 구현마다 달라 libstdc++와 MSVC STL은 15자, libc++는 22자까지 객체 안에 담는다 — `"Alice"`처럼 짧은 이름은 힙 할당 자체가 없어 위 그림의 힙 블록도 생기지 않는다.
 
 **3. 패딩 포함**: 컴파일러가 삽입한 패딩도 그대로 저장된다.
 
@@ -487,7 +487,7 @@ std::cout << player.name();  // 별도로 할당된 std::string
 
 ```cpp
 // 디스크 → 메모리
-std::vector<uint8_t> data = read_file("player.fbs");
+std::vector<uint8_t> data = read_file("player.bin");
 
 // "파싱" (사실상 캐스팅)
 const Player* player = GetPlayer(data.data());
@@ -550,7 +550,7 @@ struct Player {
 **바이너리 포맷:**
 
 ```text
-0x00: [포인터 섹션]
+0x00: [root struct 포인터]
 0x08: [데이터 섹션]
       +00: id (4바이트)
       +04: x (4바이트)
@@ -594,7 +594,7 @@ Cap'n Proto의 zero-copy는 C++ 구조체 포인터로 캐스팅한다는 의미
 #include "world.capnp.h"
 
 // 파일을 메모리에 매핑
-int fd = open("world.capnp", O_RDONLY);
+int fd = open("world.bin", O_RDONLY);
 struct stat sb;
 fstat(fd, &sb);
 
@@ -996,7 +996,7 @@ struct StateDelta {
 [changed_mask: 0x04][z: 2바이트]
 ```
 
-총 3바이트 (원래 18바이트의 16%)
+총 3바이트 (원래 18바이트의 약 17%)
 
 ### 세이브 파일: 안정성이 생명
 
@@ -1224,7 +1224,7 @@ length-prefix, 정렬, 압축 결합과 buffer ownership은 네트워크·저장
  - 게임 엔진의 resource·runtime object representation과 데이터 파이프라인 배경
 
 - Rob Pike, ["The byte order fallacy"](https://commandcenter.blogspot.com/2012/04/byte-order-fallacy.html)
- - 엔디안 문제에 대한 Unix 창시자의 견해
+ - 엔디안 문제에 대한 Plan 9·Go 공동 개발자의 견해
 
 ### 소스 코드 분석
 

@@ -148,31 +148,37 @@ inline int BVH2D::BuildRec(const std::vector<AABB2D>& boxes,
 ```cpp
 inline bool RayAABB2D(Vector2 ro, Vector2 rd, AABB2D box,
                        float& tNear, float& tFar) {
-    tNear = -1e30f;
-    tFar  =  1e30f;
+    double near = -std::numeric_limits<double>::infinity();
+    double far = std::numeric_limits<double>::infinity();
     for (int i = 0; i < 2; ++i) {
-        float ri  = (i == 0) ? ro.x : ro.y;
-        float di  = (i == 0) ? rd.x : rd.y;
-        float lo  = (i == 0) ? box.min.x : box.min.y;
-        float hi  = (i == 0) ? box.max.x : box.max.y;
-        if (std::fabs(di) < 1e-8f) {
+        double ri = (i == 0) ? ro.x : ro.y;
+        double di = (i == 0) ? rd.x : rd.y;
+        double lo = (i == 0) ? box.min.x : box.min.y;
+        double hi = (i == 0) ? box.max.x : box.max.y;
+        if (di == 0.0) {
             if (ri < lo || ri > hi) return false;   // 평행 + 밖
         } else {
-            const float magnitude = std::max(std::fabs(di), 1e-8f);
-            const float invD = std::copysign(1.0f / magnitude, di);
-            float t0 = (lo - ri) * invD;
-            float t1 = (hi - ri) * invD;
+            double t0 = (lo - ri) / di;
+            double t1 = (hi - ri) / di;
             if (t0 > t1) std::swap(t0, t1);
-            tNear = std::max(tNear, t0);
-            tFar  = std::min(tFar,  t1);
-            if (tNear > tFar) return false;
+            near = std::max(near, t0);
+            far = std::min(far, t1);
+            if (near > far) return false;
         }
     }
-    return tFar >= 0;
+    const auto toFloat = [](double value) {
+        const double limit = std::numeric_limits<float>::max();
+        if (value > limit) return std::numeric_limits<float>::infinity();
+        if (value < -limit) return -std::numeric_limits<float>::infinity();
+        return static_cast<float>(value);
+    };
+    tNear = toFloat(near);
+    tFar = toFloat(far);
+    return far >= 0;
 }
 ```
 
-math part17 의 *NaN-safe 분기 버전*. 광선 방향이 *축에 평행* (rd ≈ 0) 이면 *ro 가 slab 안* 검사 — NaN 회피. `else` 가지의 `magnitude` 하한과 `copysign` 은 그 분기 문턱 바로 위 (`|di| ≈ 1e-8`) 에서 `1/di` 가 `inf` 로 튀지 않게 부호를 유지한 채 크기만 묶는다.
+입력 좌표와 방향은 유한하며 AABB의 min ≤ max를 전제한다. `<limits>`를 포함하고, 정확히 0인 방향 성분만 평행으로 처리한다. 작은 비영 방향도 충분히 큰 t에서 slab에 도달할 수 있으므로 epsilon으로 0 취급하면 유효 교차를 놓친다. 차이와 나눗셈은 double로 계산해 float 역수의 overflow와 `0 * infinity`를 피한다. 반환 t가 float 표현 범위를 넘으면 명시적으로 infinity로 변환한다. BVH는 닫힌 구간 `[0, tMax]`를 검사하므로 끝점 접촉과 시작점 내부의 t=0도 hit이다.
 
 ## 4. 트래버설 + 방문 노드 trace
 
@@ -206,7 +212,7 @@ inline RayTraversalResult BVH2D::Trace(const std::vector<AABB2D>& boxes,
                 float oTn, oTf;
                 if (RayAABB2D(ro, rd, boxes[(size_t)objIdx], oTn, oTf)) {
                     float t = std::max(oTn, 0.0f);
-                    if (t < r.hitT) {
+                    if (t <= r.hitT && (!r.hit || t < r.hitT)) {
                         r.hitT = t;
                         r.hit  = true;
                         r.hitObjIdx = objIdx;
@@ -368,7 +374,7 @@ $ ./build/Release/math_core_tests.exe step06
 step06: 1 case(s), 87 check(s), 0 failure(s)
 ```
 
-87 개 중 40 개는 "각 객체가 정확히 한 leaf 에 있다" 는 객체별 확인이고, 나머지가 구조 불변식과 3,000 광선 대조의 집계다.
+87 개 중 40 개는 "각 객체가 정확히 한 leaf 에 있다" 는 객체별 확인이고, 30 개가 구조 불변식 (노드 수·순열 길이 2, 내부 노드 23 개의 구간 연속, 집계 5), 3 개가 3,000 광선 대조의 집계, 나머지 14 개가 slab 단독·3 박스 트리·거리 가지치기·빈 빌드의 소형 단위 검사다.
 
 ---
 

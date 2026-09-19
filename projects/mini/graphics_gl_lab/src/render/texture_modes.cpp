@@ -29,7 +29,7 @@ void TextureRegistry::GenProcedural(int size, std::vector<uint8_t>& rgba) const 
     rgba.resize((size_t)size * (size_t)size * 4);
     for (int y = 0; y < size; ++y) {
         for (int x = 0; x < size; ++x) {
-            // 체크보드 + 색 그라데이션 + 약간의 노이즈.
+            // 체크보드 + 색 그라데이션 (sin 파동).
             int cell = ((x / 32) + (y / 32)) & 1;
             float u = (float)x / (float)size;
             float v = (float)y / (float)size;

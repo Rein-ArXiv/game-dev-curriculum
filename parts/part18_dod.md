@@ -273,8 +273,8 @@ class Entity {
     float health;          // 4 bytes
 
     // Cold data (가끔 사용)
-    std::string name;              // 64+ bytes
-    std::string description;       // 64+ bytes
+    std::string name;              // 32 bytes
+    std::string description;       // 32 bytes
     Texture* icon;                 // 8 bytes
     std::vector<Achievement> achievements;  // 24+ bytes
     EntityStats detailedStats;     // 128+ bytes

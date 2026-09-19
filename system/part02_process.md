@@ -6,7 +6,7 @@
 
 프로그램을 작성하고, 컴파일하고, 실행한다. 그러나 실행 버튼을 누르는 순간, 정적인 바이너리 파일은 어떻게 살아 움직이는 프로세스가 되는가. 더 나아가 `fork`를 호출하면 프로세스가 복제된다고 하는데, 메모리 전체를 복사하는 것인가. 그렇다면 왜 `fork`는 그렇게 빠른가.
 
-이 글은 운영체제의 가장 핵심적인 추상화인 프로세스의 본질을 분해한다. 리눅스 커널이 프로세스를 어떻게 표현하고, 생성하고, 관리하는지를 `task_struct`, `do_fork`, `copy_process`, `execve`, `wait`까지 코드 레벨에서 따라간다.
+이 글은 운영체제의 가장 핵심적인 추상화인 프로세스의 본질을 분해한다. 리눅스 커널이 프로세스를 어떻게 표현하고, 생성하고, 관리하는지를 `task_struct`, `kernel_clone`, `copy_process`, `execve`, `wait`까지 코드 레벨에서 따라간다.
 
 특히 fork-exec 모델, Copy-on-Write, 그리고 스레드와 프로세스의 통일된 추상화인 `clone`에 집중한다. 이 세 가지가 UNIX 프로세스 모델의 핵심이며, 컨테이너와 PID 네임스페이스로 이어지는 분기점이다.
 
@@ -16,8 +16,8 @@
 ## 목차
 1. [프로세스란 무엇인가](#1-프로세스란-무엇인가)
 2. [task_struct: 리눅스가 프로세스를 표현하는 방법](#2-task_struct-리눅스가-프로세스를-표현하는-방법)
-3. [프로세스 상태 머신](#3-프로세스-상태-머신)
-4. [fork의 내부](#4-fork의-내부)
+3. [프로세스 상태 머신](#3-프로세스-상태-머신-task_running에서-exit_zombie까지)
+4. [fork의 내부](#4-fork의-내부-kernel_clone에서-copy_process까지)
 5. [Copy-on-Write: 왜 fork가 빠른가](#5-copy-on-write-왜-fork가-빠른가)
 6. [exec: 프로세스 이미지 교체](#6-exec-프로세스-이미지-교체)
 7. [프로세스 계층: init, 부모, 자식, 고아, 좀비](#7-프로세스-계층-init-부모-자식-고아-좀비)
@@ -46,9 +46,9 @@
 
 1960년대 후반, Multics 프로젝트는 복잡하고 느렸다. Ken Thompson과 Dennis Ritchie는 단순함을 추구하며 UNIX를 설계했다. 그들은 프로세스를 운영체제의 중심 추상화로 삼았다.
 
-Dennis Ritchie는 1974년 논문 "The UNIX Time-Sharing System"에서 이렇게 썼다:
+Dennis Ritchie와 Ken Thompson은 1974년 논문 "The UNIX Time-Sharing System"에서 이렇게 썼다:
 
-> "A process is the execution of an image. An image is a computer execution environment."
+> "An image is a computer execution environment. ... A process is the execution of an image."
 
 UNIX의 프로세스 모델은 혁명적이었다. 프로세스 생성을 위해 `fork`와 `exec`를 분리한 설계는 파이프, I/O 리다이렉션, 백그라운드 실행 등 강력한 기능을 가능하게 했다.
 
@@ -102,7 +102,7 @@ struct task_struct {
 };
 ```
 
-이 구조체는 **1000줄이 넘는** 방대한 크기다. "약 1.7KB"라는 수치는 Robert Love의 *Linux Kernel Development*에 나오는 2.6 커널·32비트 기준이고, 현대 x86-64 5.x 커널에서는 커널 설정에 따라 수 KB(대략 7~10KB) 수준이다. `sudo grep task_struct /proc/slabinfo`의 objsize로 직접 확인할 수 있다.
+이 구조체는 5.15 기준 **약 780줄**에 달하는 방대한 크기다. "약 1.7KB"라는 수치는 Robert Love의 *Linux Kernel Development*에 나오는 2.6 커널·32비트 기준이고, 현대 x86-64 5.x 커널에서는 커널 설정에 따라 수 KB(대략 7~10KB) 수준이다. `sudo grep task_struct /proc/slabinfo`의 objsize로 직접 확인할 수 있다.
 
 ### 핵심 필드 분석
 
@@ -175,7 +175,7 @@ struct files_struct {
 
 ```c
 struct signal_struct {
-    atomic_t sigcnt;                 /* 참조 카운터 */
+    refcount_t sigcnt;               /* 참조 카운터 */
     atomic_t live;                   /* 살아있는 스레드 수 */
     struct list_head thread_head;    /* 스레드 리스트 */
 
@@ -282,7 +282,7 @@ for_each_process(task) {
 
 `init_task`는 PID 0인 swapper 프로세스다. 모든 프로세스의 조상이다.
 
-## 3. 프로세스 상태 머신: TASK_RUNNING에서 TASK_ZOMBIE까지
+## 3. 프로세스 상태 머신: TASK_RUNNING에서 EXIT_ZOMBIE까지
 
 ### 프로세스 상태 전이
 
@@ -426,10 +426,10 @@ static void release_task(struct task_struct *p)
 ```c
 /* 상태 설정 */
 #define __set_current_state(state_value)    \
-    do { current->state = (state_value); } while (0)
+    do { WRITE_ONCE(current->__state, (state_value)); } while (0)
 
 #define set_current_state(state_value)      \
-    smp_store_mb(current->state, (state_value))
+    smp_store_mb(current->__state, (state_value))
 
 /* 프로세스 깨우기 */
 int wake_up_process(struct task_struct *p);
@@ -443,7 +443,7 @@ void wake_up_interruptible(wait_queue_head_t *wq);
     } while (0)
 ```
 
-## 4. fork의 내부: do_fork에서 copy_process까지
+## 4. fork의 내부: kernel_clone에서 copy_process까지
 
 ### fork 시스템 콜의 역사
 
@@ -721,8 +721,11 @@ struct pid *alloc_pid(struct pid_namespace *ns, pid_t *set_tid,
             /* ... 검증 ... */
         }
 
-        /* PID 할당 */
-        nr = idr_alloc(&tmp->idr, NULL, tid, tid + 1, GFP_KERNEL);
+        /* PID 할당: 지정 tid가 있으면 그 값만, 없으면 [1, pid_max)에서 순환 할당 */
+        if (tid)
+            nr = idr_alloc(&tmp->idr, NULL, tid, tid + 1, GFP_ATOMIC);
+        else
+            nr = idr_alloc_cyclic(&tmp->idr, NULL, 1, pid_max, GFP_ATOMIC);
         if (nr < 0) {
             /* PID 고갈 또는 충돌 */
             goto out_free;
@@ -748,18 +751,20 @@ void wake_up_new_task(struct task_struct *p)
     struct rq_flags rf;
     struct rq *rq;
 
-    /* 런큐 잠금 */
-    rq = task_rq_lock(p, &rf);
+    /* pi_lock만 잡은 상태에서 상태를 바꾼다 */
+    raw_spin_lock_irqsave(&p->pi_lock, rf.flags);
+    WRITE_ONCE(p->__state, TASK_RUNNING);
 
-    /* 프로세스를 TASK_RUNNING으로 설정 */
-    p->state = TASK_RUNNING;
+    /* fork 밸런싱: 런큐를 잠그기 전에 실행할 CPU를 고른다.
+       fork 경로에서 cpus_ptr이 바뀔 수 있고, 앞서 고른 CPU가 hotplug로 사라질 수 있기 때문이다. */
+    __set_task_cpu(p, select_task_rq(p, task_cpu(p), WF_FORK));
+
+    /* 런큐 잠금 */
+    rq = __task_rq_lock(p, &rf);
 
     /* 스케줄링 클래스 초기화 */
     activate_task(rq, p, ENQUEUE_NOCLOCK);
-
-    /* 자식을 부모와 같은 CPU에 배치 (캐시 친화성) */
-    if (task_cpu(p) != this_cpu())
-        set_task_cpu(p, this_cpu());
+    check_preempt_curr(rq, p, WF_FORK);
 
     /* 런큐 잠금 해제 */
     task_rq_unlock(rq, p, &rf);
@@ -1119,7 +1124,7 @@ static int do_execveat_common(int fd, struct filename *filename,
     if (IS_ERR(bprm))
         return PTR_ERR(bprm);
 
-    /* 2. 실행 파일 오픈 */
+    /* 2. 자격증명 준비 (cred_guard_mutex 획득) */
     retval = prepare_bprm_creds(bprm);
     if (retval)
         goto out_free;
@@ -1203,7 +1208,7 @@ int search_binary_handler(struct linux_binprm *bprm)
 
 ### ELF 바이너리 로드: load_elf_binary
 
-ELF는 리눅스의 표준 실행 파일 포맷이다. `load_elf_binary`는 약 **1000줄**에 달하는 복잡한 함수다.
+ELF는 리눅스의 표준 실행 파일 포맷이다. `load_elf_binary`는 5.15 기준 약 **500줄**에 달하는 복잡한 함수다.
 
 ```c
 /* fs/binfmt_elf.c */
@@ -1239,7 +1244,7 @@ static int load_elf_binary(struct linux_binprm *bprm)
     }
 
     /* 4. 기존 프로세스 이미지 제거 */
-    retval = flush_old_exec(bprm);
+    retval = begin_new_exec(bprm);
     if (retval)
         goto out_free_dentry;
 
@@ -1277,10 +1282,10 @@ static int load_elf_binary(struct linux_binprm *bprm)
 }
 ```
 
-### flush_old_exec: 기존 이미지 제거
+### begin_new_exec: 기존 이미지 제거
 
 ```c
-int flush_old_exec(struct linux_binprm *bprm)
+int begin_new_exec(struct linux_binprm *bprm)
 {
     int retval;
 
@@ -1385,7 +1390,7 @@ flowchart TD
     cron --> backup[backup.sh]
 ```
 
-### init 프로세스: 모든 프로세스의 조상
+### init 프로세스: 모든 사용자 공간 프로세스의 조상
 
 커널이 부팅을 완료하면, PID 1로 `/sbin/init`을 실행한다. 이것이 **init 프로세스**다.
 
@@ -1716,6 +1721,9 @@ if (pid > 0) {
     /* 부모: 즉시 종료 */
     exit(0);
 } else if (pid == 0) {
+    /* 자식: 새 세션 생성 (여기서 세션 리더가 된다) */
+    setsid();
+
     /* 자식: 다시 fork */
     pid_t pid2 = fork();
     if (pid2 > 0) {
@@ -1724,7 +1732,7 @@ if (pid > 0) {
     } else if (pid2 == 0) {
         /* 손자: 실제 작업 수행 */
         /* PPID가 init(1)이 됨 */
-        setsid();  /* 새 세션 생성 */
+        /* 세션 리더가 아니므로 제어 터미널을 다시 얻을 수 없다 */
         /* ... 데몬 작업 ... */
     }
 }
@@ -2331,7 +2339,7 @@ $ cat /proc/self/maps
 
 ```text
 address                   perms offset  dev   inode      pathname
-55e123456000,55e123457000 r--p  00000000 08:01 1234567   /usr/bin/bash
+55e123456000-55e123457000 r--p  00000000 08:01 1234567   /usr/bin/bash
 ```
 
 - `address`: 가상 주소 범위

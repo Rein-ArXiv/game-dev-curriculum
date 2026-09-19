@@ -193,7 +193,7 @@ for (int i = 1; i <= N; ++i) {
 
 `sampleCount_` 슬라이더 (8~256) 로 *해상도 직접 조정*. 8 정도면 *각진* 곡선이 보이고, 256 면 *매끄럽다*. *어디서부터 사용자 눈에 매끄러워 보이는가* 를 직접 측정.
 
-추가 시각: 곡선 종류에 따라 *control polygon 또는 접선* 을 회색으로 그려 *4 점이 어떻게 곡선을 만드는가* 를 보여준다.
+추가 시각: 곡선 종류에 따라 *control polygon 은 회색, Hermite 접선은 초록* 으로 그려 *4 점이 어떻게 곡선을 만드는가* 를 보여준다.
 
 <!-- snippet: src/scenes/interpolation_scene.cpp@curve-guides -->
 ```cpp

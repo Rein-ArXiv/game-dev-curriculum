@@ -82,7 +82,7 @@ inline size_t ShortestAtLeast(const std::vector<int64_t>& a, int64_t target,
     size_t l = 0;
     for (size_t r = 0; r < a.size(); ++r) {
         sum += a[r];
-        while (sum >= target) {
+        while (l <= r && sum >= target) {   // target <= 0 이면 l 이 r 을 넘어 a[l] 을 읽으므로 막는다
             if (c) ++c->visited;
             const size_t len = r - l + 1;
             if (len < best) best = len;

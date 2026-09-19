@@ -4,12 +4,15 @@
 
 이 차이가 표현력의 차이를 만든다. "HP가 낮으면 도망"은 임계값 하나로 켜고 끄는 스위치지만, "HP가 낮을수록 도망의 매력이 부드럽게 올라간다"는 곡선이다. 후자는 HP 30%와 31%에서 갑자기 행동이 바뀌지 않고, 여러 요인(HP·탄약·적의 수·거리)이 *경쟁* 하며 상황에 맞는 행동이 자연스럽게 부상한다. The Sims의 NPC가 배고픔·피로·방광·사교 욕구 사이에서 끊임없이 우선순위를 바꾸는 모습, RimWorld 정착민이 일과 휴식과 식사를 오가는 모습이 이 모델의 산물이다.
 
-이 글은 효용 점수를 *어떻게 설계하고 결합하는가* 에 집중한다. 월드 변수를 0~1로 정규화하는 Consideration, 그 정규화에 형태를 주는 Response Curve, 여러 Consideration을 하나의 효용으로 합치는 결합 공식, 그리고 이를 데이터로 조직하는 Decision Score Evaluator와 Infinite Axis Utility System을 차례로 다룬다. 곡선의 수치적 거동, 결합 공식의 수학적 함정, 매 틱 수백 개의 점수를 평가하는 비용을 정량화하고, 마지막으로 점수 폭발과 예측 불가능성이라는 효용 AI의 비용과 그것을 길들이는 디버깅 도구를 정리한다.
+이 글은 효용 점수를 *어떻게 설계하고 결합하는가* 에 집중한다. 월드 변수를 0~1로 정규화하는 Input Axis, 그 축 값에 형태를 주는 Response Curve, 둘을 묶은 단위인 Consideration, 여러 Consideration을 하나의 효용으로 합치는 결합 공식, 그리고 이를 데이터로 조직하는 Decision Score Evaluator와 Infinite Axis Utility System을 차례로 다룬다. 곡선의 수치적 거동, 결합 공식의 수학적 함정, 매 틱 수백 개의 점수를 평가하는 비용을 정량화하고, 마지막으로 점수 폭발과 예측 불가능성이라는 효용 AI의 비용과 그것을 길들이는 디버깅 도구를 정리한다.
 
 ```mermaid
 flowchart LR
-    W[월드 상태<br/>HP, 거리, 탄약] --> N[Consideration<br/>0~1 정규화]
-    N --> C[Response Curve<br/>곡선 변환]
+    W[월드 상태<br/>HP, 거리, 탄약]
+    subgraph CONS [Consideration]
+        N[Input Axis<br/>0~1 정규화] --> C[Response Curve<br/>곡선 변환]
+    end
+    W --> N
     C --> M[결합<br/>곱 또는 가중합]
     M --> S[행동별 효용 점수]
     S --> A[argmax 선택]
@@ -18,7 +21,7 @@ flowchart LR
 이 글의 목표.
 
 1. **기본 발상** — 점수화와 argmax 선택, 결정론과 변주의 트레이드오프.
-2. **Consideration** — 월드 변수의 0~1 정규화와 동적 범위 설계.
+2. **Consideration** — Input Axis의 0~1 정규화와 동적 범위 설계.
 3. **Response Curve** — 선형·다항·로지스틱·지수의 수치 거동과 통일 매개변수화.
 4. **결합 공식** — 가중합과 곱셈, 단조 감소 함정, 보정 공식의 유도.
 5. **Decision Score Evaluator** — 행동+고려요소 묶음, 버킷 필터링, 조기 종료.
@@ -158,7 +161,7 @@ const Action* BoltzmannSelect(const std::vector<Scored>& scored, float tau) {
 
 ## 2. Consideration과 정규화
 
-한 행동의 효용은 보통 단일 변수가 아니라 *여러 고려요소(Consideration)* 에서 나온다. "공격한다"의 매력은 적과의 거리, 내 탄약, 내 HP 등에 동시에 의존한다. 각 Consideration은 하나의 월드 변수를 *0~1 구간으로 정규화* 한 값이다.
+한 행동의 효용은 보통 단일 변수가 아니라 *여러 고려요소(Consideration)* 에서 나온다. "공격한다"의 매력은 적과의 거리, 내 탄약, 내 HP 등에 동시에 의존한다. 각 Consideration은 하나의 월드 변수를 *0~1 구간으로 정규화* 한 축(Input Axis)과, 그 축 값에 형태를 주는 Response Curve의 짝이다. 이 절은 그중 정규화만 본다. Response Curve 는 3절의 주제다.
 
 ### 선형 정규화와 반전
 
@@ -175,7 +178,7 @@ float Normalize(float raw, float minV, float maxV) {
 
 ### 동적 범위 설계가 첫 번째 튜닝이다
 
-정규화에서 흔한 실수는 입력 범위를 잘못 잡는 것이다. 거리 최댓값을 5m로 잡으면 6m 밖의 모든 적이 똑같이 0이 되어 구분이 사라진다. 반대로 최댓값을 500m로 잡으면 실제 교전이 일어나는 0~30m가 전부 0~0.06 구간에 뭉개져, 곡선의 거의 전 구간이 쓰이지 않는다.
+정규화에서 흔한 실수는 입력 범위를 잘못 잡는 것이다. 거리 최댓값을 5m로 잡으면 6m 밖의 모든 적이 똑같이 1(포화)이 되어 구분이 사라진다. 반대로 최댓값을 500m로 잡으면 실제 교전이 일어나는 0~30m가 전부 0~0.06 구간에 뭉개져, 곡선의 거의 전 구간이 쓰이지 않는다.
 
 원칙은 *입력의 의미 있는 동적 범위를 곡선이 충분히 활용하도록* 범위를 정하는 것이다. "의미 있는 범위"란 *그 변화가 의사결정을 바꿀 수 있는* 구간이다. 다음 표는 같은 거리 변수를 세 범위로 잡았을 때 정규화 값이 어떻게 달라지는지 보여준다.
 
@@ -400,7 +403,7 @@ const DSE* SelectBucketed(const std::vector<DSE>& dses, const Context& ctx) {
 }
 ```
 
-`kBucketCutoff`(예: 0.75)는 "이 점수면 더 낮은 버킷은 볼 필요 없다"는 임계다. The Sims와 IAUS가 쓰는 계층적 필터가 이 형태다. 버킷은 곱셈 결합의 단조 감소를 *전역* 차원에서 보완하기도 한다 — 긴급 행동은 자기 버킷 안에서만 경쟁하므로, 고려요소가 적어 점수가 높게 나오는 한가한 행동에 밀리지 않는다.
+`kBucketCutoff`(예: 0.75)는 "이 점수면 더 낮은 버킷은 볼 필요 없다"는 임계다. The Sims와 IAUS가 쓰는 계층적 필터가 이 형태다. 버킷은 곱셈 결합의 단조 감소를 *전역* 차원에서 보완하기도 한다 — 긴급 행동이 컷오프를 넘기면 자기 버킷 안에서만 경쟁하므로, 고려요소가 적어 점수가 높게 나오는 한가한 행동에 밀리지 않는다(컷오프 미달이면 하위 버킷과 전역 argmax로 경쟁한다).
 
 ### 조기 종료 (early-out)
 
@@ -511,8 +514,8 @@ flowchart TB
 
 ### 네 계층
 
-- *Input Axis*: 정규화된 하나의 월드 변수. "무한 축"이라는 이름은 임의 개수의 축(요인)을 자유롭게 조합한다는 뜻이다. 각 축은 월드를 읽어 0~1을 내는 순수 센서(2절)다.
-- *Consideration*: Input Axis + Response Curve. 축 값을 곡선으로 효용 기여로 변환한다(3절).
+- *Input Axis*: 정규화된 하나의 월드 변수. "무한 축"이라는 이름은 임의 개수의 축(요인)을 자유롭게 조합한다는 뜻이다. 각 축은 월드를 읽어 0~1을 내는 순수 센서이며, 2절의 정규화가 이 계층이다.
+- *Consideration*: Input Axis + Response Curve. 축 값을 곡선으로 효용 기여로 변환한다. 2절에서 정의하고 3절에서 곡선을 붙인 그 단위다.
 - *DSE*: action + Consideration들 + 가중치 + 버킷. 5절의 구조와 같다.
 - *Reasoner*: DSE 집합 + 버킷 정책 + 선택 정책(argmax / 가중랜덤 / 상위 N).
 
@@ -651,7 +654,7 @@ void Agent::DebugDraw(DebugRenderer& dr) const {
 
 ## 결론
 
-효용 AI는 의사결정을 이산 조건에서 *연속 점수* 로 옮긴다. 월드 변수를 Consideration으로 정규화하고 Response Curve로 의미를 부여한 뒤, 문제의 의미에 맞는 결합 함수와 선택 정책을 적용한다. 가중합은 보상 가능한 선호, 곱셈은 상호 보상시키지 않을 선호, filter는 실제 불가능 조건에 적합하다. 기하평균은 요소 수 편향을 줄이지만 낮은 비영점 요소의 거부력을 희석하므로 별도의 하드 게이트를 대체하지 않는다.
+효용 AI는 의사결정을 이산 조건에서 *연속 점수* 로 옮긴다. 월드 변수를 Input Axis로 정규화하고 Response Curve로 의미를 부여해 Consideration을 만든 뒤, 문제의 의미에 맞는 결합 함수와 선택 정책을 적용한다. 가중합은 보상 가능한 선호, 곱셈은 상호 보상시키지 않을 선호, filter는 실제 불가능 조건에 적합하다. 기하평균은 요소 수 편향을 줄이지만 낮은 비영점 요소의 거부력을 희석하므로 별도의 하드 게이트를 대체하지 않는다.
 
 The Sims의 광고 모델은 객체가 효용을 광고하게 해 확장성을 얻었고, RimWorld는 같은 철학을 이산 우선순위로 단순화했으며, IAUS는 축·곡선·DSE를 데이터로 만들어 디자이너 주도 튜닝과 행동·타깃 통합 결정을 가능하게 했다. 버킷과 조기 종료는 평균 평가량을 줄일 수 있지만, deadline은 평가 개수 상한·시간 예산·지연 작업 큐로 별도 강제해야 한다. 모멘텀과 hysteresis는 행동 떨림을 줄이되 긴급 전환 조건을 가리지 않도록 설계한다.
 
@@ -661,9 +664,9 @@ The Sims의 광고 모델은 객체가 효용을 광고하게 해 확장성을 �
 
 - Dave Mark, *Behavioral Mathematics for Game AI* (2009) — Response Curve와 효용 결합, 단조 감소 보정의 원전.
 - Dave Mark & Kevin Dill, "Improving AI Decision Modeling Through Utility Theory" (GDC 2010) — IAUS의 공개 발표.
-- Dave Mark, "Architecture Tricks: Managing Behaviors in Time, Space, and Depth" (GDC 2012) — Reasoner·버킷·타깃 평가 구조.
+- Luke Dicken, Dino Dini & Dave Mark, "Architecture Tricks: Managing Behaviors in Time, Space, and Depth" (GDC 2013 AI Summit) — Reasoner·버킷·타깃 평가 구조.
 - Steve Rabin (ed.), *Game AI Pro* 1권, "An Introduction to Utility Theory"와 "Building Utility Decisions into Your Existing Behavior Tree" — 입문 정리와 BT 혼합.
-- Kevin Dill, "Embracing the Dark Art of Mathematical Modeling in Game AI" (GDC 2015) — 곡선 설계 실무.
+- Kevin Dill & Dave Mark, "Embracing the Dark Art of Mathematical Modeling in AI" (GDC 2012 AI Summit) — 곡선 설계 실무.
 - Will Wright / Ken Forbus, The Sims 욕구·광고 모델 디자인 강연 자료 — 객체 광고 기반 욕구 시뮬레이션.
 - Richard Evans & Emily Short, "Versu — A Simulationist Storytelling System" — 사회적 효용 모델의 확장 사례.
 - Richard S. Sutton & Andrew G. Barto, *Reinforcement Learning: An Introduction*, 1st ed., §2.3 — 온도 기반 Softmax Action Selection. 2nd ed., §2.8은 온도 매개변수 없이 선호도 기반 soft-max 분포를 쓰는 Gradient Bandit을 다룬다.

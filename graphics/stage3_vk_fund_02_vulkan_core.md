@@ -288,8 +288,8 @@ sequenceDiagram
     participant Queue
     CPU->>Swapchain: vkAcquireNextImageKHR
     CPU->>Queue: vkQueueSubmit(command buffer)
-    Queue-->>CPU: render finished semaphore
     CPU->>Swapchain: vkQueuePresentKHR
+    Queue-->>Swapchain: render finished semaphore
 ```
 
 `vkAcquireNextImageKHR`는 다음에 그릴 image의 인덱스를 돌려주고, 그 image가 표시 가능해지면 신호할 semaphore를 받는다. 윈도우 크기가 바뀌거나 surface가 invalid 상태가 되면 acquire나 present가 `VK_ERROR_OUT_OF_DATE_KHR`를 돌려주는데, 이때 swapchain을 다시 만들어야 한다. `VK_SUBOPTIMAL_KHR`는 표시는 되지만 최적이 아니라는 신호로, 다음 프레임에 재생성하면 된다.
@@ -461,7 +461,7 @@ discrete GPU에서 `DEVICE_LOCAL` 힙은 VRAM, `HOST_VISIBLE` 힙은 시스템 R
 
 ### Staging과 Allocator
 
-대부분의 텍스처와 정점 버퍼는 device local에 두고, CPU가 host-visible staging buffer에 데이터를 쓴 뒤 `vkCmdCopyBuffer`나 `vkCmdCopyBufferToImage`로 옮긴다. device-local 메모리는 CPU가 직접 map할 수 없으므로 이 staging 단계가 거의 필수다. 작은 uniform buffer는 매 프레임 갱신되므로 host-visible ring buffer로 운영해 복사를 생략한다.
+대부분의 텍스처와 정점 버퍼는 device local에 두고, CPU가 host-visible staging buffer에 데이터를 쓴 뒤 `vkCmdCopyBuffer`나 `vkCmdCopyBufferToImage`로 옮긴다. host-visible이 아닌 device-local 메모리는 CPU가 직접 map할 수 없으므로 이 staging 단계가 거의 필수다. 작은 uniform buffer는 매 프레임 갱신되므로 host-visible ring buffer로 운영해 복사를 생략한다.
 
 ```cpp
 // 큰 정점 데이터를 device-local로 올리는 흐름
@@ -481,9 +481,9 @@ discrete GPU에서 `DEVICE_LOCAL` 힙은 VRAM, `HOST_VISIBLE` 힙은 시스템 R
 
 ```mermaid
 flowchart TB
-    A[Instance + Validation Layer] --> B[Physical Device 선택]
+    A[Instance + Validation Layer + Surface] --> B[Physical Device 선택]
     B --> C[Logical Device + Queue]
-    C --> D[Surface + Swapchain]
+    C --> D[Swapchain]
     D --> E[Image View + Render Pass]
     E --> F[Shader Module + Pipeline Layout]
     F --> G[Graphics Pipeline]

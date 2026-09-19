@@ -86,7 +86,7 @@ struct PacketHeader {
 
 `sequence`는 송신자가 보낸 패킷 번호다. `ack`와 `ackBits`는 반대 방향으로 흐르는 수신 확인 정보다. UDP에는 연결 상태가 없으므로, 양방향 패킷마다 서로의 수신 상태를 실어 보낸다. 별도 ack 패킷이 없다는 점이 요점이다 — 게임은 어차피 양방향으로 초당 수십 패킷이 흐르므로, 수신 확인은 그 흐름에 무임승차한다(piggyback). 한쪽이 보낼 게임 데이터가 없을 때만 keepalive 격의 빈 패킷이 ack 운반을 맡는다.
 
-패킷 헤더는 작아야 한다. 20바이트 헤더를 60Hz로 100명에게 보내면 헤더만 초당 120KB다. sequence를 `uint16_t`로 줄이고(wraparound 처리는 4절과 동일), payloadBytes를 빼고(UDP 길이에서 유도), channelMask를 페이로드 쪽 메시지 프리픽스로 옮기면 헤더는 10바이트 안쪽으로 들어온다. 다만 줄이기 경쟁보다 중요한 것은 헤더가 손실 복구와 통계(손실률·RTT 측정이 전부 이 헤더에서 나온다)를 가능하게 하는 충분한 정보를 갖는 것이다.
+패킷 헤더는 작아야 한다. 20바이트 헤더를 60Hz로 100명에게 보내면 헤더만 초당 120KB다. sequence를 `uint16_t`로 줄이고(wraparound 처리는 4절과 동일), payloadBytes를 빼고(UDP 길이에서 유도), channelMask를 페이로드 쪽 메시지 프리픽스로 옮기면 14바이트가 되고, ack도 `uint16_t`로 줄이고 위의 protocolId→CRC 시드 변형까지 더하면 헤더는 8바이트로 10바이트 안쪽에 들어온다. 다만 줄이기 경쟁보다 중요한 것은 헤더가 손실 복구와 통계(손실률·RTT 측정이 전부 이 헤더에서 나온다)를 가능하게 하는 충분한 정보를 갖는 것이다.
 
 ## 4. Sequence와 Ack Bitfield
 
@@ -161,9 +161,9 @@ private:
 };
 ```
 
-`initialized_`는 초기 상태를 실제 패킷 0과 구분한다. 또 `seq == latest_`를 `diff - 1` 비트 계산 전에 별도로 거르지 않으면, 최신 패킷의 중복 수신에서 unsigned 언더플로와 잘못된 시프트가 발생한다. sequence 윈도우 코드는 첫 패킷·최신 중복·윈도우 경계·정확히 절반 거리·wrap 직전과 직후를 단위 테스트해야 한다.
+`initialized_`는 초기 상태를 실제 패킷 0과 구분한다. 또 `seq == latest_`를 `diff - 1` 비트 계산 전에 별도로 거르지 않으면, 최신 패킷의 중복 수신에서 `diff - 1`이 int로 승격되어 -1이 되고, 음수 시프트라는 미정의 동작이 발생한다. sequence 윈도우 코드는 첫 패킷·최신 중복·윈도우 경계·정확히 절반 거리·wrap 직전과 직후를 단위 테스트해야 한다.
 
-같은 자료구조가 세 가지 일을 동시에 한다 — ack 생성, 중복 패킷 검출(재전송·네트워크 중복 모두), 그리고 손실률 측정(윈도우의 0 비트 비율). 송신 측은 돌아온 ack/ackBits로 "어떤 패킷이 도착했는가"를 알고, 그 패킷에 실었던 reliable 메시지들을 큐에서 지우며, `보낸 시각 - ack 받은 시각`으로 RTT 표본까지 얻는다. 헤더 12바이트가 프로토콜 계측의 전부를 떠받치는 셈이다.
+같은 자료구조가 세 가지 일을 동시에 한다 — ack 생성, 중복 패킷 검출(재전송·네트워크 중복 모두), 그리고 손실률 측정(윈도우의 0 비트 비율). 송신 측은 돌아온 ack/ackBits로 "어떤 패킷이 도착했는가"를 알고, 그 패킷에 실었던 reliable 메시지들을 큐에서 지우며, `ack 받은 시각 - 보낸 시각`으로 RTT 표본까지 얻는다. 헤더 12바이트가 프로토콜 계측의 전부를 떠받치는 셈이다.
 
 ## 5. Reliable과 Unreliable Channel
 
@@ -382,7 +382,7 @@ void CongestionPolicy::Update(const CongestionSignals& s, double now) {
 
 수신 측 delivered-byte feedback은 delivery rate 표본을 만드는 한 재료다. application-limited 구간, ACK compression, loss와 feedback interval을 구분하지 않으면 수신량이 곧 bottleneck capacity라는 결론은 틀린다. BBR도 delivery rate와 minimum RTT를 model에 쓰지만 단순한 최근 1초 수신량 비교와 동일한 알고리즘은 아니다. 게임용 구현은 quality SLO를 지킬 headroom을 두고 제한된 probe로 회복을 탐색할 수 있다. headroom은 70~80% 같은 보편 상수가 아니라 estimator bias, cross traffic와 queue-delay 목표로 정한다.
 
-**페이싱**은 추정과 짝을 이루는 송신 습관이다. 틱마다 모인 패킷을 한 번에 버스트로 쏘면 짧은 큐 스파이크가 생긴다 — 같은 바이트라도 틱 간격에 고르게 흩뿌리면(예: 60Hz 틱에 3패킷이면 5.5ms 간격) 큐 점유가 낮아진다. 소켓 송신을 타이머로 미루는 한 겹의 큐만 있으면 된다.
+**페이싱**은 추정과 짝을 이루는 송신 습관이다. 틱마다 모인 패킷을 한 번에 버스트로 쏘면 짧은 큐 스파이크가 생긴다 — 같은 바이트라도 틱 간격에 고르게 흩뿌리면(예: 60Hz 틱에 3패킷이면 약 5.6ms 간격) 큐 점유가 낮아진다. 소켓 송신을 타이머로 미루는 한 겹의 큐만 있으면 된다.
 
 ### 운전점의 정량 — BDP와 페이싱의 큐 비용
 
@@ -448,7 +448,7 @@ tc qdisc add dev eth0 parent 1:10 handle 10: netem delay 50ms 10ms loss 1%
 - [ENet](http://enet.bespin.org/) — 채널·신뢰성 플래그를 가진 게임용 UDP 라이브러리(이 글 모델의 실물).
 - Fabien Sanglard, [Quake 3 Network Model](https://fabiensanglard.net/quake3/network.php) — unreliable 스냅샷 중심 프로토콜의 원형 분석.
 - [Valve GameNetworkingSockets](https://github.com/ValveSoftware/GameNetworkingSockets) — 채널·신뢰성·암호화를 갖춘 현대적 구현체.
-- Glenn Fiedler, ["Reliability, Ordering and Congestion Avoidance over UDP"](https://gafferongames.com/post/reliability_ordering_and_congestion_avoidance_over_udp/) — 이진 모드 정책의 원형.
+- Glenn Fiedler, ["Reliability and Congestion Avoidance over UDP"](https://gafferongames.com/post/reliability_ordering_and_congestion_avoidance_over_udp/) — 이진 모드 정책의 원형.
 - [RFC 8085: UDP Usage Guidelines](https://www.rfc-editor.org/rfc/rfc8085) — UDP 응용이 지켜야 할 혼잡 제어 의무의 표준 정리.
 - Neal Cardwell 외, ["BBR: Congestion-Based Congestion Control"](https://queue.acm.org/detail.cfm?id=3022184) (ACM Queue 2016) — 대역폭·RTT 직접 추정 모델의 원전. BDP 운전점·ProbeBW 페이싱 게인의 출처.
 - Leonard Kleinrock, "Power and Deterministic Rules of Thumb for Probabilistic Problems in Computer Communications" (Proc. ICC 1979) — 처리량/지연 power 최대점이 BDP에서 성립함을 보인 원전.

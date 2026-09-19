@@ -60,8 +60,8 @@ void CollisionScene::DrawWorld(int cx, int cy, int cw, int ch) {
         auto C = obb.Corners();
         Vector2 poly[4] = {C[0], C[1], C[2], C[3]};
         // 채우기
-        DrawTriangle(poly[0], poly[1], poly[2], fill);
-        DrawTriangle(poly[0], poly[2], poly[3], fill);
+        DrawTriangle(poly[0], poly[2], poly[1], fill);   // raylib 은 화면상 CCW 만 그린다
+        DrawTriangle(poly[0], poly[3], poly[2], fill);
         // 외곽선
         for (int i = 0; i < 4; ++i) {
             DrawLineEx(poly[i], poly[(i + 1) % 4], 2.0f, edge);
@@ -177,7 +177,8 @@ void CollisionScene::DrawWorld(int cx, int cy, int cw, int ch) {
                        (int)S.size(),
                        step.done
                          ? (step.intersect ? "INTERSECT" : "SEPARATED")
-                         : "running");
+                         : (gjkStep_ == static_cast<int>(trace.size()) - 1
+                                ? "INDETERMINATE (limit)" : "running"));
         DrawText(buf, cx + 10, cy + 10, 14,
                    step.done
                      ? (step.intersect ? Color{120, 255, 120, 255}

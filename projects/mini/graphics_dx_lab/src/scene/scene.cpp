@@ -80,8 +80,9 @@ void Scene::EnsureInstanceBuffer(D3D12Context& ctx) {
     }
     const size_t capacity = objects_.size();
     void* mapped = nullptr;
+    static_assert(kInstanceSlots == kFramesInFlight, "instance slots must match frames in flight");
     instanceBuf_ = CreateBufferUpload(ctx.Device(),
-                                       sizeof(Instance) * capacity,
+                                       sizeof(Instance) * capacity * kInstanceSlots,
                                        &mapped);
     BindInstanceStorage((Instance*)mapped, capacity);
 

@@ -84,9 +84,9 @@ void enable_interrupts(void) {
 - syscall이 커널을 호출하듯, hypercall은 하이퍼바이저 호출
 
 ```c
-// arch/x86/xen/enlighten.c (리눅스 커널)
-static inline int HYPERVISOR_set_timer_op(u64 timeout) {
-    return _hypercall1(int, set_timer_op, timeout);
+// arch/x86/include/asm/xen/hypercall.h (리눅스 커널)
+static inline int HYPERVISOR_set_trap_table(struct trap_info *table) {
+    return _hypercall1(int, set_trap_table, table);
 }
 
 #define _hypercall1(type, name, a1)                \
@@ -242,7 +242,7 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu) {
             break;
         case KVM_EXIT_HLT:
             vcpu->arch.mp_state = KVM_MP_STATE_HALTED;
-            r = 1;  // 유저스페이스로 복귀
+            r = 0;  // 유저스페이스로 복귀
             break;
         // ...
         }
@@ -263,7 +263,7 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu) {
 
 ### KVM과 QEMU의 역할 분리
 
-KVM과 QEMU는 같은 물건이 아니다. **KVM**은 리눅스 커널 자체에 내장된 가상화 모듈이며, `/dev/kvm` 인터페이스를 통해 사용자 공간 프로그램이 VT-x/AMD-V를 손쉽게 다룰 수 있게 해주는 API다. CPU 가상화와 EPT/NPT 같은 하드웨어 지원을 추상화하지만, I/O 디바이스 모델은 가지고 있지 않다. **QEMU**는 그 위에서 실제 VM을 실행하는 대표적인 사용자 공간 VMM이다. 디스크/네트워크/그래픽 디바이스를 에뮬레이션하거나 virtio로 페어링하고, KVM이 노출한 vCPU에 명령을 내려 게스트를 돈다. QEMU 외에도 cloud-hypervisor, Firecracker, crosvm 같은 다른 VMM이 KVM API를 사용한다.
+KVM과 QEMU는 같은 물건이 아니다. **KVM**은 리눅스 커널 자체에 내장된 가상화 모듈이며, `/dev/kvm` 인터페이스를 통해 사용자 공간 프로그램이 VT-x/AMD-V를 손쉽게 다룰 수 있게 해주는 API다. CPU 가상화와 EPT/NPT 같은 하드웨어 지원을 추상화하지만, 커널 안에서 에뮬레이션하는 인터럽트 컨트롤러(PIC/IOAPIC/LAPIC)와 PIT를 빼면 I/O 디바이스 모델은 가지고 있지 않다. **QEMU**는 그 위에서 실제 VM을 실행하는 대표적인 사용자 공간 VMM이다. 디스크/네트워크/그래픽 디바이스를 에뮬레이션하거나 virtio로 페어링하고, KVM이 노출한 vCPU에 명령을 내려 게스트를 돈다. QEMU 외에도 cloud-hypervisor, Firecracker, crosvm 같은 다른 VMM이 KVM API를 사용한다.
 
 따라서 "KVM = Kernel + QEMU"라는 표현은 오해를 부른다. 정확히는 "KVM은 커널 가상화 API/모듈, QEMU는 그 위에서 도는 VMM 중 가장 흔한 구현체"다.
 
@@ -324,9 +324,15 @@ ioctl(vmfd, KVM_SET_USER_MEMORY_REGION, &region);
 // 4. vCPU 생성
 int vcpufd = ioctl(vmfd, KVM_CREATE_VCPU, 0);
 
-// 5. vCPU 레지스터 설정
+// 5. vCPU 레지스터 설정 (리셋 직후 CS.base=0xffff0000이므로 실모드 CS를 0으로 내린다)
+struct kvm_sregs sregs;
+ioctl(vcpufd, KVM_GET_SREGS, &sregs);
+sregs.cs.base = 0;
+sregs.cs.selector = 0;
+ioctl(vcpufd, KVM_SET_SREGS, &sregs);
+
 struct kvm_regs regs = {};
-regs.rip = 0x1000;  // 시작 주소
+regs.rip = 0x0;     // 시작 주소 (guest_code를 guest_phys_addr 0x0에 복사)
 regs.rflags = 0x2;  // IF=0, IOPL=0
 ioctl(vcpufd, KVM_SET_REGS, &regs);
 
@@ -341,7 +347,7 @@ for (;;) {
     case KVM_EXIT_IO:
         if (run->io.direction == KVM_EXIT_IO_OUT) {
             // 포트 출력 처리
-            handle_io_out(run->io.port, run->io.data);
+            handle_io_out(run->io.port, (char *)run + run->io.data_offset);
         }
         break;
     case KVM_EXIT_HLT:
@@ -626,10 +632,11 @@ VM 안에서 또 다른 VM 실행:
 int main() {
     struct timespec start, end;
 
-    // 많은 VMM이 CPUID를 intercept하지만 이는 VMCS/VMCB 설정에 따른다.
+    // VT-x에서 CPUID는 VMCS 설정과 무관하게 무조건 VM Exit이고, AMD-V에서만 VMCB intercept 설정에 따른다.
     clock_gettime(CLOCK_MONOTONIC, &start);
     for (int i = 0; i < ITERATIONS; i++) {
-        asm volatile("cpuid" : : "a"(0) : "ebx", "ecx", "edx");
+        unsigned int eax = 0;
+        asm volatile("cpuid" : "+a"(eax) : : "ebx", "ecx", "edx");
     }
     clock_gettime(CLOCK_MONOTONIC, &end);
 

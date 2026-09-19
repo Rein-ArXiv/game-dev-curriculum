@@ -50,7 +50,7 @@ $ ls -lh hello_dynamic
 
 ### 동적 링킹의 등장
 
-1980년대 중반 Sun Microsystems가 SunOS에 공유 라이브러리(shared library)를 도입했다. 핵심 아이디어는 단순하다. 라이브러리 코드를 별도 파일(`.so`)로 분리하고, 실행 파일은 라이브러리 참조만 포함하며, 런타임에 동적 링커가 라이브러리를 로드하고 연결한다.
+1980년대 후반 Sun Microsystems가 SunOS 4.0에 공유 라이브러리(shared library)를 도입했다. 핵심 아이디어는 단순하다. 라이브러리 코드를 별도 파일(`.so`)로 분리하고, 실행 파일은 라이브러리 참조만 포함하며, 런타임에 동적 링커가 라이브러리를 로드하고 연결한다.
 
 동적 실행 파일들은 같은 shared object의 file-backed read-only page를 page cache에서 공유할 수 있다. 반면 relocation으로 수정되는 page, process별 data, TLS와 allocator state는 공유되지 않는다. RSS를 단순 합산하면 shared page를 중복 계산하므로 PSS(Proportional Set Size)와 `smaps`를 이용해 비교한다.
 
@@ -159,17 +159,23 @@ x86-64의 `call` 명령어는 기본적으로 RIP-relative다. 호출 대상까�
 GOT는 외부 심볼의 실제 주소를 저장하는 테이블이다. 각 엔트리는 8바이트(64비트 포인터)다.
 
 ```text
-GOT (Global Offset Table)
-+-------------------+
-| printf의 주소     | <- GOT[0]
-+-------------------+
-| malloc의 주소     | <- GOT[1]
-+-------------------+
-| free의 주소       | <- GOT[2]
-+-------------------+
-| global_var의 주소 | <- GOT[3]
-+-------------------+
+GOT (.got.plt)
++---------------------+
+| .dynamic의 주소     | <- GOT[0] (예약)
++---------------------+
+| link_map            | <- GOT[1] (예약, ld.so가 채움)
++---------------------+
+| _dl_runtime_resolve | <- GOT[2] (예약, ld.so가 채움)
++---------------------+
+| printf의 주소       | <- GOT[3]
++---------------------+
+| malloc의 주소       | <- GOT[4]
++---------------------+
+| free의 주소         | <- GOT[5]
++---------------------+
 ```
+
+앞의 세 자리는 psABI가 정한 예약 엔트리라 외부 함수는 GOT[3]부터 배치된다. 전역 변수 `global_var`의 슬롯은 예약 엔트리가 없는 `.got`에 따로 놓인다.
 
 GOT 자체는 라이브러리의 데이터 섹션에 위치한다. 따라서 PC-relative로 접근 가능하다.
 
@@ -184,11 +190,11 @@ int my_func() {
 }
 ```
 
-PIC로 컴파일하면 다음과 같다.
+PIC로 컴파일하면 기본값은 `call external_func@PLT`로 PLT를 거치고, `-fno-plt`를 주면 GOT를 직접 읽는다.
 
 ```asm
 my_func:
-    call   *external_func@GOT(%rip)    # GOT를 통한 간접 호출
+    call   *external_func@GOTPCREL(%rip)    # GOT를 통한 간접 호출
     ret
 ```
 
@@ -337,15 +343,15 @@ $ objdump -d test | grep -A 10 "\.plt:"
 ### GDB로 GOT 변화 추적
 
 ```bash
-$ gdb ./hello
+$ gdb ./test
 (gdb) break main
 (gdb) run
-(gdb) x/gx 0x4018        # 초기 GOT 엔트리
-0x4018: 0x0000000000001046  # PLT의 push 명령어
+(gdb) x/gx 0x404018        # 초기 GOT 엔트리
+0x404018: 0x0000000000401026  # PLT의 push 명령어
 (gdb) continue
-Hello, ELF!
-(gdb) x/gx 0x4018        # 호출 후
-0x4018: 0x00007ffff7e3d8a0  # libc의 printf
+Hello
+(gdb) x/gx 0x404018        # 호출 후
+0x404018: 0x00007ffff7e3d8a0  # libc의 printf
 ```
 
 첫 호출 후 GOT가 업데이트되었다.
@@ -635,7 +641,7 @@ LD_PRELOAD는 만능이 아니다.
 
 **케이스 A — DT_RPATH는 있고 DT_RUNPATH는 없을 때 (레거시)**
 
-1. DT_RPATH (실행 파일과 그 실행 파일을 로드한 모든 객체의 RPATH가 외부 라이브러리에도 영향을 준다)
+1. DT_RPATH (실행 파일과 그 실행 파일이 로드한 모든 객체의 RPATH가 외부 라이브러리에도 영향을 준다)
 2. LD_LIBRARY_PATH 환경 변수
 3. /etc/ld.so.cache
 4. 기본 시스템 경로 (`/lib`, `/usr/lib`)
@@ -654,11 +660,11 @@ LD_PRELOAD는 만능이 아니다.
 둘 다 ELF 파일에 포함된 검색 경로지만 차이가 있다.
 
 ```bash
-# RPATH 설정 (레거시)
-$ gcc -Wl,-rpath,/opt/mylib -o test test.c
+# RPATH 설정 (레거시). 현대 배포판 기본값이 new dtags라 명시적으로 꺼야 한다
+$ gcc -Wl,-rpath,/opt/mylib -Wl,--disable-new-dtags -o test test.c
 
-# RUNPATH 설정 (modern)
-$ gcc -Wl,-rpath,/opt/mylib -Wl,--enable-new-dtags -o test test.c
+# RUNPATH 설정 (modern, 대부분의 배포판 기본값)
+$ gcc -Wl,-rpath,/opt/mylib -o test test.c
 ```
 
 | 특성 | RPATH | RUNPATH |
@@ -769,17 +775,18 @@ int main() {
 ```
 
 ```bash
-$ gcc -O2 -o dynamic test.c
-$ gcc -O2 -static -o static test.c
+# -fno-builtin이 없으면 printf("")와 루프가 통째로 제거되어 아무것도 측정되지 않는다
+$ gcc -O2 -fno-builtin -o dynamic test.c
+$ gcc -O2 -fno-builtin -static -o static test.c
 
-$ time ./dynamic
-Time: 0.15
+$ ./dynamic
+Time: 1.552550
 
-$ time ./static
-Time: 0.14
+$ ./static
+Time: 1.263017
 ```
 
-차이는 미미하다. 현대 CPU의 분기 예측기가 PLT 점프를 잘 처리하기 때문이다.
+1억 번 호출에서 약 0.29초, 호출당 3ns 안팎의 차이다. 이 값에는 PLT 간접 분기뿐 아니라 정적·동적 libc 구현과 코드 배치 차이가 함께 섞여 있으므로 PLT 비용만 분리한 수치로 읽어서는 안 되며, 실제 비용은 자기 워크로드에서 측정해야 한다.
 
 ### 보안: RELRO
 

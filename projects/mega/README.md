@@ -57,12 +57,13 @@ C++ 컴파일러 외에 **Python 3**가 PATH에 있어야 한다. 계층 규칙 
 `scripts/`의 Python 스크립트이고, 둘 다 끌 수 있는 옵션이 아니기 때문이다 — 끌 수 있는
 게이트는 게이트가 아니다. 없으면 구성 단계에서 이유를 적고 멈춘다.
 
-Live Service와의 실제 token 직렬화·HMAC·UDP 입장 호환성은 저장소 루트에서 다음 명령으로
-재현한다.
+Live Service와의 token 직렬화·HMAC·UDP 입장 호환성은 저장소 루트의 별도 검사 대상이다.
 
 ```powershell
 pwsh -File scripts/check_live_mega.ps1
 ```
+
+이 검사는 API의 배정 결과를 서버의 `--match-id`와 두 `--player-id`로 전달한다. `mega_live_admission_probe`가 제품과 같은 콘텐츠 cooker·패킷 코드를 사용해 두 끝점의 승인과 진행 중인 snapshot을 확인한다. 토큰은 검사 도구의 표준 입력으로 넘긴다. 이는 로컬 제어 프로세스의 단일 매치 인계 검사이며, 자동 fleet 운영이나 게임 결과의 HTTP 제출까지 검증하지 않는다.
 
 플레이 가능한 클라이언트는 `build/bin/Release/mega_defense.exe`, 렌더 없는 권위 프로세스는
 `mega_defense_server.exe`다. 둘은 같은 게임 규칙·콘텐츠·패킷 형식을 링크한다. CMake는 실행
@@ -91,12 +92,14 @@ pwsh -File scripts/check_live_mega.ps1
 로컬 개발 기본 비밀은 두 프로젝트가 공유하지만 외부에 노출해서는 안 된다.
 
 ```powershell
-.\build\bin\Release\mega_defense_server.exe --port 27016 --server-id mega-local-1
+.\build\bin\Release\mega_defense_server.exe --port 27016 --server-id mega-local-1 `
+  --match-id <MATCH_ID> --player-id <PLAYER_1_ID> --player-id <PLAYER_2_ID>
 .\build\bin\Release\mega_defense.exe --join 127.0.0.1 27016 --token <PLAYER_1_GAME_TOKEN>
 .\build\bin\Release\mega_defense.exe --join 127.0.0.1 27016 --token <PLAYER_2_GAME_TOKEN>
 ```
 
 두 토큰은 라이브 서비스가 같은 `MatchId`, `ServerId`로 각 플레이어에게 발급한 값이어야 한다.
+서버 인자의 매치 ID와 두 플레이어 ID도 그 배정과 같아야 한다. 외부 배정 모드는 원문 플레이어 ID를 비교하고 별도 UDP queue 요청을 거부한다. 이 인자는 신뢰된 로컬 제어 프로세스가 설정하는 값이지 클라이언트가 제출하는 명단이 아니다. 외부 배정 인자가 없으면 제품 내부 UDP queue에서 형성한 매치만 허용한다.
 서버는 두 명이 승인된 뒤 시뮬레이션을 시작한다. 배포 비밀은 32바이트 이상의 무작위 값을
 Base64로 인코딩해 양쪽 프로세스의 `LIVE_SERVICE_TOKEN_SECRET`에 동일하게 주입한다.
 

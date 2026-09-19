@@ -360,7 +360,7 @@ std::unique_ptr<IIoBackend> CreateBackend(BackendType type) {
 }  // namespace skl
 ```
 
-팩토리는 현재 존재하는 `ReadBackend`만 생성한다. 이 구조의 핵심은 열거형에서 구현을 선택하는 책임을 한곳에 모으는 것이다. 사용할 수 없는 백엔드를 조용히 read로 폴백시키면 측정 라벨과 실제 실행 경로가 달라지므로, 지원하지 않는 값은 명시적으로 거부해야 한다.
+팩토리는 현재 존재하는 `ReadBackend`만 생성한다. 이 구조의 핵심은 열거형에서 구현을 선택하는 책임을 한곳에 모으는 것이다. 사용할 수 없는 백엔드를 조용히 read로 폴백시키면 측정 라벨과 실제 실행 경로가 달라지므로, 폴백은 조용히 일어나면 안 된다 — 실제로 실행된 backend 타입을 호출자에게 돌려주고 stderr로 알린다.
 
 ## 5. FileIoWorkload의 backend 주입
 
@@ -428,7 +428,7 @@ std::uint64_t FileIoWorkload::RunCycle() {
         throw std::runtime_error("FileIoWorkload::RunCycle: backend is null");
     }
 
-    std::uint64_t checksum = lastChecksum_;
+    std::uint64_t checksum = 0;
     auto onRead = [&](const unsigned char* data, std::size_t bytes) {
         for (std::size_t i = 0; i < bytes; i += kChecksumStride) {
             checksum += data[i];

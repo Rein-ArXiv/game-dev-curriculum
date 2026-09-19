@@ -207,8 +207,9 @@ void TestOverSyncBarriers() {
     CHECK(toPresent.srcStageMask != minimalPresent.srcStageMask);
     CHECK(toPresent.srcAccessMask != minimalPresent.srcAccessMask);
 
-    // 보고서 항목 12 의 계약: Minimal 이 모르는 layout 쌍에서는 두 정책이
-    // 비트 단위로 같은 값을 낸다 (조용히 over-sync 로 떨어진다).
+    // 보고서 항목 12 의 계약: Minimal 이 모르는 layout 쌍 가운데 UNDEFINED 소스·
+    // PRESENT_SRC 대상이 아닌 쌍에서는 두 정책이 비트 단위로 같은 값을 낸다
+    // (조용히 over-sync 로 떨어진다). 그 두 예외에서는 fallback 이 Over-sync 보다 넓다.
     CHECK(!vklab::MinimalPolicyKnowsTransition(
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
@@ -373,7 +374,7 @@ void TestBarrierInjection() {
             vklab::ImageLayoutTransitions(fakeCmd, &b, 1);
             ++recorded;
         }
-        CHECK(recorded == vklab::ExpectedBarrierCalls(inj, 2));
+        CHECK(recorded == (inj.skipBarriers ? 0 : 2));
         CHECK(g_captureCalls == vklab::ExpectedBarrierCalls(inj, 2));
     }
     // snippet-end: barrier-injection-record
@@ -428,8 +429,8 @@ void TestRecordDrawMatchesExpectedSubmissions() {
                   (mode == vklab::DrawMode::PerDraw ? 1u : (uint32_t)n));
             // snippet-end: draw-submission-match
             CHECK(rec.lastMode == (mode == vklab::DrawMode::PerDraw ? 0u : 1u));
-            // mesh 업로드가 없으므로 indexCount 는 0 이지만, RecordDraw 가
-            // Scene 의 indexCount_ 를 그대로 넘기는지는 확인된다.
+            // mesh 업로드가 없어 indexCount_ 가 0 이므로, 이 대조는 RecordDraw 가
+            // 리터럴 0 을 넘기는 변이를 구별하지 못한다 (알려진 검증 공백).
             CHECK(rec.lastIndexCount == scene.IndexCount());
         }
     }
@@ -792,10 +793,10 @@ void TestFrameCompletionTracker() {
         t.OnSubmit(slot, image, value);
         CHECK(t.SlotValue(slot) == value);
         CHECK(t.ImageValue(image) == value);
-        CHECK(value > lastSlotValue[slot]);            // 단조 증가.
-        CHECK(value > lastImageValue[image]);
-        lastSlotValue[slot] = value;
-        lastImageValue[image] = value;
+        CHECK(t.SlotValue(slot) > lastSlotValue[slot]);      // 단조 증가.
+        CHECK(t.ImageValue(image) > lastImageValue[image]);
+        lastSlotValue[slot] = t.SlotValue(slot);
+        lastImageValue[image] = t.ImageValue(image);
     }
 
     // (b) 모드 전환 — fence 추적값과 timeline 값이 서로 오염되지 않는다.
@@ -815,7 +816,7 @@ void TestFrameCompletionTracker() {
     // snippet-end: sync-mode-isolation
 
     // Binary 모드: image 를 마지막으로 쓴 slot 을 기억한다.
-    t.OnSubmit(1, 2, 0);
+    t.OnSubmit(1, 2, 7);                              // 0 이 아닌 값도 Binary 에서는 무시된다.
     CHECK(t.LastSlotForImage(2) == 1);
     CHECK(t.ImageValue(2) == 0);                       // 값은 쓰지 않는다.
     t.OnSubmit(0, 2, 0);
@@ -854,6 +855,70 @@ void TestFrameCompletionTracker() {
     CHECK(r.SlotValue(99) == 0);
     CHECK(r.ImageValue(99) == 0);
     CHECK(r.LastSlotForImage(99) == FrameCompletionTracker::kNoSlot);
+
+    // (d) Binary 과대 대기 — slot fence 는 slot 당 하나뿐이므로, image 를 쓴
+    //     slot 이 그 뒤 다시 제출됐다면 그 fence 는 더 새 작업의 것이다. 그
+    //     재제출이 이미 이전 제출을 기다렸으므로 여기서 또 기다리면 순수한
+    //     과대 대기다. 3 image / 2 slot 라운드로빈에서 F3 부터는 acquire 한
+    //     image 의 마지막 사용이 항상 두 프레임 전이고, 그 slot 은 그 사이
+    //     한 번 더 제출됐다 — 그래서 F3 이후 fence 대기는 한 번도 필요 없다.
+    // snippet-begin: binary-over-wait
+    FrameCompletionTracker b;
+    b.Init(kImages, kSlots);
+    CHECK(b.Mode() == SyncMode::Binary);
+    int staleWaits = 0;                 // 옛 정책(LastSlotForImage)이 걸었을 대기.
+    int neededWaits = 0;                // 새 정책(NeedsFenceWait)이 거는 대기.
+    for (int frame = 0; frame < 12; ++frame) {
+        const int slot = frame % kSlots;
+        const uint32_t image = (uint32_t)(frame % kImages);
+
+        int waitSlot = FrameCompletionTracker::kNoSlot;
+        const bool needs = b.NeedsFenceWait(image, waitSlot);
+        if (b.LastSlotForImage(image) != FrameCompletionTracker::kNoSlot) ++staleWaits;
+        if (needs) {
+            ++neededWaits;
+            CHECK(waitSlot == b.LastSlotForImage(image));
+        } else {
+            CHECK(waitSlot == FrameCompletionTracker::kNoSlot);
+        }
+        // F0..F2 는 image 첫 사용이라 대기가 없고, F3 부터는 위 이유로 없다.
+        CHECK(!needs);
+        b.OnSubmit(slot, image, 0);
+    }
+    CHECK(neededWaits == 0);            // 12 프레임 내내 fence 대기 0.
+    CHECK(staleWaits == 9);             // 옛 정책은 F3..F11 에서 9번 걸었다.
+    // snippet-end: binary-over-wait
+
+    // 같은 image 를 같은 slot 이 연달아 쓰면(예: image 하나짜리 swapchain)
+    // fence 는 여전히 그 제출의 것이므로 대기가 실제로 필요하다.
+    FrameCompletionTracker s;
+    s.Init(1, kSlots);
+    int one = FrameCompletionTracker::kNoSlot;
+    CHECK(!s.NeedsFenceWait(0, one));              // 첫 사용 전에는 대기 없음.
+    s.OnSubmit(0, 0, 0);
+    CHECK(s.NeedsFenceWait(0, one));               // 직전 제출이 그대로 살아 있다.
+    CHECK(one == 0);
+    s.OnSubmit(1, 0, 0);                           // 다른 slot 이 같은 image 를 씀.
+    one = FrameCompletionTracker::kNoSlot;
+    CHECK(s.NeedsFenceWait(0, one));
+    CHECK(one == 1);
+    s.OnSubmit(0, 0, 0);                           // slot 0 재제출 — image 도 갱신.
+    one = FrameCompletionTracker::kNoSlot;
+    CHECK(s.NeedsFenceWait(0, one));
+    CHECK(one == 0);
+
+    // Timeline 모드에서는 fence 대기 판정이 아예 나오지 않는다.
+    CHECK(s.OnSyncModeChanged(SyncMode::Timeline));
+    int none = FrameCompletionTracker::kNoSlot;
+    CHECK(!s.NeedsFenceWait(0, none));
+    // 범위 밖 image 도 조용히 false.
+    CHECK(s.OnSyncModeChanged(SyncMode::Binary));
+    s.OnSubmit(0, 0, 0);
+    CHECK(!s.NeedsFenceWait(99, none));
+    // swapchain 재생성 뒤에는 image 기록이 비므로 대기가 없다.
+    s.OnSwapchainRecreated(2);
+    CHECK(!s.NeedsFenceWait(0, none));
+    CHECK(!s.NeedsFenceWait(1, none));
 }
 
 void TestTimelineCounter() {

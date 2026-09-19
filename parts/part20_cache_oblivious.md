@@ -588,8 +588,8 @@ recursive, ...
 
 Ideal cache 가정:
 - 완전 연관 캐시 (fully associative)
-- LRU 교체 정책
-- 무한 캐시 레벨
+- 최적(omniscient) 교체 정책
+- 2단계 메모리 계층 (이상 캐시 1개 + 임의 크기 주기억)
 
 실제 CPU:
 - Set-associative (보통 8-way)
@@ -752,11 +752,11 @@ Cache-oblivious 알고리즘은 "하드웨어를 모르면서도 최적화한다
 ## 더 읽을거리
 
 - Frigo, Leiserson, Prokop, Ramachandran. "Cache-Oblivious Algorithms" (FOCS 1999).
-- Prokop. ["Cache-Oblivious Algorithms"](https://hdl.handle.net/1721.1/43811) (MIT Master's Thesis, 1999).
+- Prokop. ["Cache-Oblivious Algorithms"](https://hdl.handle.net/1721.1/80568) (MIT Master's Thesis, 1999).
 - Bender, Demaine, Farach-Colton. "Cache-Oblivious B-Trees" (FOCS 2000).
 - Frigo, Strumpen. "Cache Oblivious Stencil Computations" (ICS 2005).
 - Demaine. "Cache-Oblivious Algorithms and Data Structures" (2002). http://erikdemaine.org/papers/BRICS2002/
-- Brodal, Fagerberg. "Cache-Oblivious Data Structures" (2004).
+- Arge, Brodal, Fagerberg. "Cache-Oblivious Data Structures" (2004). Handbook of Data Structures and Applications, Chapter 38.
 - [FFTW (Fastest Fourier Transform in the West)](http://www.fftw.org/) - Cache-oblivious FFT의 실제 구현
 - [ATLAS (Automatically Tuned Linear Algebra Software)](http://math-atlas.sourceforge.net/)
 - Goto, van de Geijn. "Anatomy of High-Performance Matrix Multiplication" (2008).

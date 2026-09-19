@@ -136,6 +136,7 @@ int RunBackendRestart() {
     gnl::ServerConfig config;
     config.tcpPort = ReservePort(SOCK_STREAM, IPPROTO_TCP);
     config.udpPort = ReservePort(SOCK_DGRAM, IPPROTO_UDP);
+    config.loopbackOnly = true;
     if (config.tcpPort == 0 || config.udpPort == 0) return Fail("reserve loopback ports");
     config.workerCount = 1;
     config.prepostedAccepts = 4;

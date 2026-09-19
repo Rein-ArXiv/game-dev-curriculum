@@ -79,7 +79,7 @@ $$
 | Slider (prismatic) | 한 축 외 운동 제거 |
 | Motor | 각속도 = 목표 |
 | Limit | 각도 / 거리 한도 $\theta_{min} \le \theta \le \theta_{max}$ |
-| 비관통 (contact) | $d \ge 0$ (침투 깊이 음수 안 됨) |
+| 비관통 (contact) | $d \ge 0$ (분리 거리 음수 안 됨 = 침투 금지) |
 | 마찰 (friction) | $|F_t| \le \mu F_n$ (Coulomb cone) |
 
 이 모두가 *같은 솔버에서* 풀린다.
@@ -447,7 +447,7 @@ public:
 
     bool SolvePositionConstraint() override {
         // 위치 직접 보정 (NGS)
-        // ... 반환: 침투 해소되었으면 true
+        // ... 반환: 길이 오차 |C| 가 허용 오차 안이면 true
     }
 };
 ```
@@ -509,7 +509,7 @@ Constraint 한 인터페이스 뒤로:
 
 ### 7.1 비관통 제약
 
-법선 방향 침투 깊이 $d$:
+법선 방향 분리 거리 $d$ (침투 시 음수):
 
 $$
 C_n = d \ge 0
@@ -627,7 +627,7 @@ void WarmStart() {
 
 ### 8.2 Bullet
 
-`btTypedConstraint` (관절 기반) + `btSolverConstraint` (충돌 내부) 분리.
+`btTypedConstraint` (사용자가 만드는 관절 객체) + `btSolverConstraint` (관절·접촉이 모두 변환되어 들어가는 솔버 내부 1D 행) 분리.
 
 - *Multibody* 시스템 (Featherstone articulated body algorithm) + *standard rigid body* (sequential impulse) 두 모드.
 - 더 복잡한 *기계 시스템* (robot arms 등) 지원.

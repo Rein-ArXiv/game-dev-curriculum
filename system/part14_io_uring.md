@@ -7,7 +7,7 @@
 
 2019년 Linux 5.1에 io_uring이 등장했다. Jens Axboe가 설계한 이 인터페이스는 공유 SQ/CQ로 여러 작업을 배치하고 completion을 수집한다. 일반 모드의 제출·대기에는 `io_uring_enter`가 필요할 수 있고, SQPOLL 조건에서는 커널 poll thread가 SQ를 소비해 일부 제출 호출을 생략할 수 있다. 핵심은 “항상 시스템 콜 0회”가 아니라 작업별 호출을 batch당 호출로 amortize하고 파일·소켓·타이머 작업을 공통 completion 모델로 표현하는 데 있다.
 
-이 글은 io_uring의 아키텍처, 커널과 사용자 공간 사이의 메모리 순서, 요청·버퍼 수명, 오류와 취소, 등록 자원과 폴링의 트레이드오프를 다룬다.
+이 글은 io_uring의 아키텍처, 요청·버퍼 수명, 오류와 취소, 등록 자원과 폴링의 트레이드오프를 다룬다.
 
 
 ---
@@ -738,7 +738,7 @@ cleanup:
 }
 ```
 
-SQE가 제출된 뒤에는 CQE를 회수하거나 요청을 취소하고 그 완료를 회수하기 전까지 `buffer`, `iov`, `fd`, ring을 파괴하면 안 된다. 위 함수는 제출 성공 뒤 반드시 하나의 CQE를 기다리므로 stack buffer 수명이 유지된다. timeout이나 조기 반환을 추가한다면 취소 요청의 CQE와 원래 요청의 CQE를 모두 구분해 drain하는 규약이 필요하다.
+SQE가 제출된 뒤에는 CQE를 회수하거나 요청을 취소하고 그 완료를 회수하기 전까지 `buffer`, `iov`, `fd`, ring을 파괴하면 안 된다. 위 함수는 제출 성공 뒤 하나의 CQE를 기다리므로 정상 경로에서는 stack buffer 수명이 유지되지만, `io_uring_wait_cqe`가 `-EINTR` 같은 오류를 돌려주는 경로는 CQE를 회수하지 않은 채 `cleanup`으로 빠지므로 그 경우에는 이 규약이 깨진다. timeout이나 조기 반환을 추가한다면 취소 요청의 CQE와 원래 요청의 CQE를 모두 구분해 drain하는 규약이 필요하다.
 
 ### 복수 파일 병렬 읽기
 
@@ -951,7 +951,7 @@ void completion_loop(struct io_uring *ring, int listen_fd)
 매 I/O마다 `fget(fd)`로 파일 객체를 조회하면 오버헤드가 있다. 파일 디스크립터를 사전 등록하여 조회를 생략할 수 있다.
 
 ```c
-#define NR_FILES 1000
+#define NR_FILES 100  /* SQ 링 크기(128)보다 작게 유지한다 */
 
 void use_fixed_files()
 {
@@ -1155,7 +1155,7 @@ void multishot_accept_server(int port)
 }
 ```
 
-**Multishot Recv (5.19+)**
+**Multishot Recv (6.0+)**
 
 ```c
 void multishot_recv(int client_fd)
@@ -1239,7 +1239,7 @@ void sqpoll_mode()
     io_uring_prep_read(sqe, fd, buf, sizeof(buf), 0);
     sqe->user_data = 1;
 
-    io_uring_sqring_wait(&ring);
+    io_uring_submit(&ring);  // 공유 SQ tail 갱신. SQPOLL에서는 NEED_WAKEUP일 때만 syscall이 일어난다
 
     struct io_uring_cqe *cqe;
     io_uring_wait_cqe(&ring, &cqe);
@@ -1369,7 +1369,7 @@ void linked_operations(const char *filename)
     // 방식은 io_uring 의미와 다르다. 다음 두 가지 방식 중 하나를 쓴다.
     //
     // (A) 두 단계 제출: open 완료를 기다린 뒤 read/close를 새로 묶어 제출
-    // (B) IORING_OP_OPENAT2 + 등록된 fd 슬롯(IORING_RSRC_REGISTER) 활용
+    // (B) IORING_OP_OPENAT2 + 등록된 fd 슬롯(direct descriptor, `sqe->file_index`) 활용
     //
     // 아래는 (A)의 단순 형태다.
 
@@ -1516,8 +1516,9 @@ struct io_rings {
     u32 cq_overflow;
     u32 cq_flags;
 
-    // SQ 인덱스 배열
-    u32 sq_array[];
+    // CQE 배열(가변 길이). sq_array는 이 구조체의 멤버가 아니라
+    // cqes 뒤에 따로 붙는 u32 배열이며 ctx->sq_array 포인터가 가리킨다.
+    struct io_uring_cqe cqes[];
 };
 ```
 
@@ -1526,11 +1527,11 @@ struct io_rings {
 ```text
 ┌─────────────────────────────────────┐ 0x0000
 │ struct io_rings (메타데이터)         │
-├─────────────────────────────────────┤ 0x0040
-│ sq_array[128]                       │ SQ 인덱스 (u32 * 128 = 512B)
-├─────────────────────────────────────┤ 0x0240
+├─────────────────────────────────────┤ 0x0030
 │ cqes[256]                           │ CQE 배열 (16B * 256 = 4KB)
-└─────────────────────────────────────┘ 0x1240
+├─────────────────────────────────────┤ 0x1030
+│ sq_array[128]                       │ SQ 인덱스 (u32 * 128 = 512B)
+└─────────────────────────────────────┘ 0x1230
 
 별도 매핑:
 ┌─────────────────────────────────────┐
@@ -1755,8 +1756,8 @@ for_each_registered_file(file)
 io_uring은 커널에 빠르게 추가된 대규모 코드라 보안 취약점도 자주 발견되어 왔다. 대표 사례는 다음과 같다.
 
 - **CVE-2020-29373 (샌드박스 탈출)**: 커널 스레드로 오프로드된 I/O 작업이 요청을 제출한 프로세스의 root 디렉토리(chroot)가 아닌 초기 네임스페이스의 root 기준으로 경로를 탐색해, chroot 격리 밖의 파일에 접근할 수 있었다. `fs_struct`를 async offload context에 잡아 두는 수정은 Linux 5.6에 포함되었고, 영향 범위는 5.6 이전 계열이다.
-- **CVE-2021-41073 (권한 상승)**: `loop_rw_iter`가 사용자 등록 버퍼를 처리할 때 커널 포인터와 사용자 포인터를 혼동하는 type confusion이 있어, 로컬 공격자가 권한 상승에 활용할 수 있었다. 5.14.7에서 수정되었다.
-- Google Project Zero는 2023년 분석("io_uring: New code, new bugs")에서 io_uring이 단기간에 가장 많은 커널 취약점이 보고된 서브시스템 중 하나임을 지적했고, 이 때문에 ChromeOS와 Android는 io_uring 사용을 제한했다.
+- **CVE-2021-41073 (권한 상승)**: `loop_rw_iter`가 provided buffers(`IOSQE_BUFFER_SELECT`)로 고른 버퍼를 처리할 때 커널 포인터와 사용자 포인터를 혼동하는 type confusion이 있어, 로컬 공격자가 권한 상승에 활용할 수 있었다. 5.14.7에서 수정되었다.
+- Google 보안 팀은 2023년 kCTF VRP 분석("Learnings from kCTF VRP's 42 Linux kernel exploits submissions")에서 io_uring이 단기간에 가장 많은 커널 취약점이 보고된 서브시스템 중 하나임을 지적했고, 이 때문에 ChromeOS와 Android는 io_uring 사용을 제한했다.
 
 ### 안전한 사용 가이드
 
@@ -1942,6 +1943,7 @@ void linked_timeout()
     io_uring_queue_init(8, &ring, 0);
 
     struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+    int fd = open("test.dat", O_RDONLY);
     char buf[4096];
     io_uring_prep_read(sqe, fd, buf, sizeof(buf), 0);
     sqe->flags |= IOSQE_IO_LINK;
@@ -1974,6 +1976,9 @@ void cancel_operation()
     struct io_uring ring;
     io_uring_queue_init(16, &ring, 0);
 
+    int slow_fd = open("slow.dat", O_RDONLY);
+    char buf[4096];
+
     struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
     io_uring_prep_read(sqe, slow_fd, buf, sizeof(buf), 0);
     sqe->user_data = 0xEAD;
@@ -1982,7 +1987,7 @@ void cancel_operation()
     sleep(1);
 
     sqe = io_uring_get_sqe(&ring);
-    io_uring_prep_cancel(sqe, 0xEAD, 0);
+    io_uring_prep_cancel64(sqe, 0xEAD, 0);
     sqe->user_data = 0xCACE;
     io_uring_submit(&ring);
 
@@ -2071,7 +2076,7 @@ io_uring은 리눅스 I/O의 패러다임을 바꾸었다. 핵심 정리는 다�
 ## 더 읽을거리
 
 ### 공식 문서
-- Linux kernel documentation: `Documentation/io_uring.rst`
+- io_uring(7) man page: https://man7.org/linux/man-pages/man7/io_uring.7.html
 - Kernel source: `fs/io_uring.c`, `include/uapi/linux/io_uring.h`
 - liburing repository: https://github.com/axboe/liburing
 - liburing documentation: `man io_uring_setup`, `man io_uring_enter`, `man io_uring_register`
@@ -2089,11 +2094,11 @@ io_uring은 리눅스 I/O의 패러다임을 바꾸었다. 핵심 정리는 다�
 
 ### 벤치마크 및 분석
 - ScyllaDB, *How io_uring and eBPF Will Revolutionize Programming in Linux* (2020): https://www.scylladb.com/2020/05/05/how-io_uring-and-ebpf-will-revolutionize-programming-in-linux/
-- Google Project Zero, *io_uring: New code, new bugs* (2023): https://googleprojectzero.blogspot.com/2023/06/io_uring-new-code-new-bugs.html
+- Google Security Blog, *Learnings from kCTF VRP's 42 Linux kernel exploits submissions* (2023): https://security.googleblog.com/2023/06/learnings-from-kctf-vrps-42-linux.html
 
 ### 커널 소스 주요 파일
 - `fs/io_uring.c` 핵심 구현
-- `io_uring/io_uring.c` (5.19+ 분리된 구조)
+- `io_uring/io_uring.c` (6.0+ 분리된 구조)
 - `io_uring/sqpoll.c` SQPOLL 구현
 - `io_uring/opdef.c` 작업 정의
 - `include/uapi/linux/io_uring.h` 사용자 API

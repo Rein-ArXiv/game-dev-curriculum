@@ -84,7 +84,9 @@ void App::InitImGui() {
     d.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     d.NumDescriptors = 1;
     d.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    ctx_.Device()->CreateDescriptorHeap(&d, IID_PPV_ARGS(&imguiHeap_));
+    if (FAILED(ctx_.Device()->CreateDescriptorHeap(&d, IID_PPV_ARGS(&imguiHeap_)))) {
+        throw std::runtime_error("CreateDescriptorHeap(imgui) failed");
+    }
 
     ImGui_ImplWin32_Init(hwnd_);
     ImGui_ImplDX12_Init(ctx_.Device(), kFramesInFlight,

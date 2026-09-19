@@ -564,7 +564,7 @@ void UpdateObject(LooseQuadNode*& currentNode, int objId, AABB newAABB) {
 }
 ```
 
-*대부분의 프레임에서 재삽입 안 함* — 경계 두 배의 효과. 실제 측정에서 *엄격 Quadtree 대비 2~5x* 빠른 동적 갱신.
+*대부분의 프레임에서 재삽입 안 함* — 경계 두 배의 효과. 동적 갱신 이득은 *이동 거리 대비 loose 여유* 와 객체 분포에 따라 달라지므로, 엄격 Quadtree 와의 배수는 갱신 trace 로 측정한다.
 
 ### 6.4 트레이드오프
 
@@ -828,7 +828,7 @@ struct Object {
 - Tomas Akenine-Möller et al., *Real-Time Rendering*, 4th ed., Ch. 19 — Frustum / Occlusion Culling.
 - Hanan Samet, *Foundations of Multidimensional and Metric Data Structures* — 공간 자료구조의 백과사전.
 - Thatcher Ulrich, "Loose Octrees" (Game Programming Gems, 2000) — Loose 변형 원전.
-- Ulf Assarsson, Tomas Möller, ["Optimized View Frustum Culling Algorithms for Bounding Boxes"](https://www.cse.chalmers.se/~uffe/vfc_bbox.pdf) (JGT, 2000) — p-vertex/n-vertex 판정과 그 최적화의 원전.
+- Ulf Assarsson, Tomas Möller, ["Optimized View Frustum Culling Algorithms for Bounding Boxes"](https://www.cse.chalmers.se/~uffe/vfc_bbox.pdf) (JGT, 2000) — n/p-vertex 명명과 그 위의 frustum culling 최적화의 원전 (두 점 판정 자체는 Greene 1994 등 선행 문헌에 귀속).
 - David Eberly, *3D Game Engine Design* — 다양한 가속 구조의 게임 적용.
 - Bullet Physics 소스 (`btDbvtBroadphase.cpp`) — 산업 broad phase 구현.
-- Box2D `b2DynamicTree.cpp` — 2D 동적 트리 산업 표준.
+- Box2D `dynamic_tree.c` (v2.4: `b2_dynamic_tree.cpp`) — 2D 동적 트리 산업 표준.

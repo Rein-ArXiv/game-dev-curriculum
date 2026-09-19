@@ -63,6 +63,9 @@ void SlabAllocator::Deallocate(void* ptr, std::size_t size) {
 
 void SlabAllocator::Reset() {
     for (auto& pool : pools_) {
+        // 한 번도 할당한 적 없는 클래스는 생성자가 엮어 둔 free list 그대로다.
+        // 이 워크로드처럼 한 클래스만 쓰면 나머지 7개 풀의 재구성이 통째로 빠진다.
+        if (pool->AllocCount() == 0) continue;
         pool->Reset();
     }
     ResetLiveBytes();

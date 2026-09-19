@@ -174,5 +174,5 @@ Step 2 의 결과는 “빠른 렌더러”가 아니라 *측정 가능한 렌�
 ## 더 읽을거리
 
 - Khronos, [Vulkan Validation Layers 문서](https://github.com/KhronosGroup/Vulkan-ValidationLayers) — 동기화 검증(sync validation) 활성화 포함.
-- [Vulkan Specification: Queries](https://registry.khronos.org/vulkan/specs/latest/html/chap39.html) — timestampPeriod·쿼리 풀 명세.
+- [Vulkan Specification: Queries](https://docs.vulkan.org/spec/latest/chapters/queries.html) — timestamp query·쿼리 풀 명세.
 - [Tracy Profiler](https://github.com/wolfpld/tracy) — CPU+GPU 통합 프레임 프로파일링의 다음 단계.

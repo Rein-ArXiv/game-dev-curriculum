@@ -52,7 +52,9 @@ ComPtr<ID3D12Resource> CreateBufferStatic(
 
     void* mapped = nullptr;
     D3D12_RANGE rd{0, 0};
-    upload->Map(0, &rd, &mapped);
+    if (FAILED(upload->Map(0, &rd, &mapped))) {
+        throw std::runtime_error("CreateBufferStatic: map failed");
+    }
     std::memcpy(mapped, data, bytes);
     upload->Unmap(0, nullptr);
 
@@ -86,7 +88,9 @@ ComPtr<ID3D12Resource> CreateBufferUpload(
         throw std::runtime_error("CreateBufferUpload failed");
     }
     D3D12_RANGE rd{0, 0};
-    buf->Map(0, &rd, outMapped);     // 영구 Map.
+    if (FAILED(buf->Map(0, &rd, outMapped))) {     // 영구 Map.
+        throw std::runtime_error("CreateBufferUpload: map failed");
+    }
     return buf;
 }
 

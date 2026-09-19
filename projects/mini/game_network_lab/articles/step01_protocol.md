@@ -114,7 +114,7 @@ reserved 필드는 0이어야 한다. 필드를 무시하지 않고 검사하면
 
 ## 순환하는 sequence number
 
-32비트 sequence는 약 42억 뒤 0으로 돌아간다. 단순한 `lhs > rhs`는
+32비트 sequence는 약 43억 뒤 0으로 돌아간다. 단순한 `lhs > rhs`는
 `0xffffffff -> 0`에서 실패한다. 비교하려는 두 값의 거리가 sequence 공간 절반 미만이라는
 윈도우 불변식 아래 signed difference를 사용한다.
 

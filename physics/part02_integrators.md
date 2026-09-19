@@ -163,7 +163,7 @@ Explicit Euler 였으면 *이전 속도로 위치 갱신 후 충돌* → *비일
 
 ## 3. Velocity Verlet — 위치 기반의 토대
 
-위치 + 속도를 *현재 가속도와 다음 가속도의 평균* 으로 갱신. 2차 정확도.
+위치는 *현재 가속도* 로, 속도는 *현재 가속도와 다음 가속도의 평균* 으로 갱신. 2차 정확도.
 
 ### 3.1 식
 
@@ -173,7 +173,7 @@ Explicit Euler 였으면 *이전 속도로 위치 갱신 후 충돌* → *비일
 \vec{v}_{n+1} = \vec{v}_n + \frac{1}{2} (\vec{a}_n + \vec{a}_{n+1}) \Delta t
 ```
 
-*힘이 위치의 함수* 라 가정. 한 step 에 *가속도 2회 평가* 필요.
+*힘이 위치의 함수* 라 가정. 아래 무상태 구현은 한 step 에 *가속도 2회 평가* — $\vec{a}_{n+1}$ 을 다음 step 의 $\vec{a}_n$ 으로 보관하면 step 당 1회로 줄어든다.
 
 ```cpp
 void StepVelocityVerlet(Particle& p,
@@ -583,8 +583,8 @@ void StepRK4(State& s, AccelerationFn a, float t, float dt) {
 - Glenn Fiedler, "Integration Basics" (https://gafferongames.com/post/integration_basics/) — 적분기 비교의 게임 친화적 시각.
 - Hairer, Lubich, Wanner, *Geometric Numerical Integration* — symplectic integrator 의 수학적 표준.
 - David Eberly, *Game Physics*, 2nd ed., Ch. 11, 13 — 미분방정식과 수치 적분.
-- Erin Catto, "Understanding Constraints" (GDC 2014) — Box2D 의 적분기 선택 배경.
+- Erin Catto, "Numerical Methods" (GDC 2015) — Box2D 의 적분기 선택 배경.
 - Jakobsen, "Advanced Character Physics" (GDC 2001) — Verlet + 제약 기반 cloth 의 원전.
 - Müller, Heidelberger, Hennix, Ratcliff, "Position Based Dynamics" (2007) — PBD 의 토대.
-- Hairer, *Symplectic methods for the Newtonian N-body problem* — 행성 시뮬의 RK 한계.
+- Wisdom & Holman, "Symplectic maps for the n-body problem" (Astron. J. 102, 1528, 1991) — 행성 시뮬에서 비symplectic 적분기의 장기 에너지 표류를 피하는 원전.
 - Box2D 소스 `b2Island::Solve` — 산업 semi-implicit + 임펄스 구현.

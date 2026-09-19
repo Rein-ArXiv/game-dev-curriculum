@@ -286,7 +286,7 @@ if (GuiDropdownBox({x, y, w, h},
     allocatorEdit_ = !allocatorEdit_;
 }
 if (!allocatorEdit_) {
-    // 편집 모드가 아닐 때만 결과를 반영 (펼쳐진 동안의 hover 값 무시)
+    // 편집 모드가 아닐 때만 결과를 반영 (선택이 확정되는 프레임에만 값이 바뀐다)
     toggles.allocator = (Allocator)std::clamp(
         allocIdx, 0, kAllocatorCount - 1);
 }
@@ -587,9 +587,9 @@ entities : 10000     entities : [10k ▼]   container: [vector ▼]   ┌──�
 update   : 0.087 ms  allocator: [malloc▼] simd     : [Scalar▼]    │   ⎺⎺⎺⎺⎺⎺⎺ │ 60fps
 draw     : 1.243 ms  layout   : [SoA ▼]   ☐ branchless             │           │
 total    : 1.330 ms                                                 │           │
-fps      : 752.0                                                    │ ⎽⎽⎽⎽⎽⎽⎽⎽⎽ │ 30fps
+fps      : 752.0                                                    │           │
                                                                     └──────────┘
-                                                                       max 1.6 ms
+                                                                       max 16.67 ms
 ```
 
 allocator/layout/container/simd/branch는 회색으로 비활성. entities 콤보만 클릭 가능하다.
@@ -696,7 +696,7 @@ toggles: 2 test(s), 34 check(s), 0 failure(s)
 - 콤보박스가 안 닫힘 → `*Edit_` 멤버를 호출자가 들고 있어야 함, 함수 안 지역 변수면 매 프레임 false로 리셋
 - 그래프가 빈 박스만 그려짐 → `timer.CommitFrame()` 누락
 - 그래프가 화면을 빠져나감 → 자동 줌의 하한(`maxMs < 16.67f`) 누락
-- entities 변경 시 재시작 안 됨 → `prevToggles = toggles` 가 루프 끝이 아닌 시작에 있을 가능성
+- entities 변경 시 재시작 안 됨 → `prevToggles = toggles` 가 `hud.Draw` 와 `RequiresRestart` 사이에 있을 가능성
 
 ---
 
@@ -720,4 +720,4 @@ toggles: 2 test(s), 34 check(s), 0 failure(s)
 - Casey Muratori, "Immediate-Mode Graphical User Interfaces" (2005) — 즉시 모드 GUI 개념의 기원
 - [Dear ImGui](https://github.com/ocornut/imgui) — 더 풀 기능이 필요할 때의 대안
 - [rlImGui](https://github.com/raylib-extras/rlImGui) — raylib + ImGui 어댑터
-- Bryce Adelstein-Lelbach, "Benchmarking C++ Code" (CppCon 2015) — 측정 그래프의 시각적 함정
+- Bryce Adelstein Lelbach, "Benchmarking C++ Code" (CppCon 2015) — 측정 그래프의 시각적 함정

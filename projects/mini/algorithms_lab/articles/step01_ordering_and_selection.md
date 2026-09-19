@@ -105,7 +105,7 @@ void MergeSortStable(std::vector<T>& a, Less less, measure::Counters* c = nullpt
 }
 ```
 
-비교자에 대한 요구는 엄격 약순서다. `<=`를 넘기면 `less(x, x)`가 참이 되어 분할이 경계를 넘고, 정렬이 아니라 범위 밖 접근이 된다. 이 lab의 비교자는 전부 `<`로만 짠다.
+비교자에 대한 요구는 엄격 약순서다. `<=`를 넘기면 `less(x, x)`가 참이 되어 엄격 약순서 계약을 위반한다 — 경계 검사 없이 훑는 분할(`std::sort`의 unguarded partition)에서는 범위 밖 접근이 되고, 이 lab의 Lomuto 분할은 범위는 지키지만 정렬 보장은 계약 밖이다. 이 lab의 비교자는 전부 `<`로만 짠다.
 
 ## 4. 분포 정렬과 실수 키
 
@@ -259,10 +259,10 @@ enum class SortShape {
 
 | shape | arm | compares | moved KiB | P50 ms | P99 ms | peak KiB |
 |---|---|---|---|---|---|---|
-| random | introsort | 3,882,138 | 42,148 | 14.77 | 15.21 | 0 |
+| random | introsort | 3,875,813 | 42,148 | 14.77 | 15.21 | 0 |
 | random | mergesort | 3,333,300 | 28,125 | 19.70 | 20.65 | 1,562 |
 | random | radix8 | 0 | 6,250 | 2.06 | 2.34 | 1,564 |
-| organ-pipe | introsort | 11,727,693 | 125,060 | 17.93 | 28.93 | 0 |
+| organ-pipe | introsort | 11,727,692 | 125,060 | 17.93 | 28.93 | 0 |
 | organ-pipe | mergesort | 1,830,044 | 28,125 | 4.30 | 4.92 | 1,562 |
 | all-equal | radix8 | 0 | 0 | 1.72 | 1.89 | 1,564 |
 | few-keys | counting | 0 | 1,562 | 0.70 | 1.02 | 1,562 |
@@ -271,7 +271,7 @@ enum class SortShape {
 
 - **organ-pipe에서 introsort의 비교 횟수가 random의 3배다.** median-of-three가 매번 최댓값 근처를 고르는 모양이고, P99가 P50의 1.6배로 벌어진다. 깊이 상한이 heapsort로 넘겨 O(n²)는 막지만 상수는 그대로 문다.
 - **all-equal에서 radix의 moved_bytes가 0이다.** 모든 pass의 히스토그램이 한 버킷에 몰려 전부 생략됐다. 생략 판정이 없으면 여기서 네 번 흩뿌린다.
-- **radix8이 radix11보다 대개 빠르다.** 점근만 보면 r = log2(n) ≈ 17 근처가 pass 수를 최소로 만든다. 그런데 실측 최적은 8~11이다. 이유는 상수다 — r=8이면 히스토그램이 256칸(1KiB)이라 L1에 상주하고, r=11이면 2048칸(8KiB)이라 밀려난다. pass 하나를 줄인 이득을 캐시 미스가 먹는다.
+- **radix8이 radix11보다 대개 빠르다.** 점근만 보면 r = log2(n) ≈ 17 근처가 pass 수를 최소로 만든다. 그런데 실측 최적은 8~11이다. 이유는 상수다 — r=8이면 히스토그램이 256칸(size_t 8바이트씩 2KiB)이라 L1에 상주하고, r=11이면 2048칸(16KiB)이라 밀려난다. pass 하나를 줄인 이득을 캐시 미스가 먹는다.
 - **mergesort의 peak가 1,562KiB다.** 이것이 안정성의 공간 가격이고, introsort의 0과 나란히 놓았을 때만 교환으로 보인다.
 
 밀도 스윕은 판단의 입력이 "정수 키인가"가 아니라 n/k임을 보인다.
@@ -302,7 +302,7 @@ quickselect가 전체 정렬보다 10배 빠르고, median-of-medians는 최악 
 
 검사가 실제로 힘을 갖는지는 결함을 주입해 확인한다. 두 개를 넣었다.
 
-**변이 1 — radix의 흩뿌리기를 뒤에서부터.** 각 pass가 안정이어야 전체가 정렬되는데, 역순으로 흩뿌리면 같은 키의 상대 순서가 pass마다 뒤집힌다. 최종 순서는 여전히 비내림차순이라 "정렬됨" 검사는 통과한다.
+**변이 1 — radix의 흩뿌리기를 뒤에서부터.** 각 pass가 안정이어야 전체가 정렬되는데, 역순으로 흩뿌리면 같은 키의 상대 순서가 pass마다 뒤집힌다. 유효 digit이 둘 이상인 입력에서는 상위 digit 오름차순·하위 digit 내림차순이 되어 최종 순서도 비내림차순이 아니게 되고, 유효 digit이 하나뿐인 입력에서만 "정렬됨" 검사를 통과한다.
 
 ```cpp
 // 주입한 결함
@@ -312,12 +312,12 @@ for (size_t z = n; z-- > 0;) { const Rec& r = (*src)[z]; (*dst)[count[(r.key >> 
 ```text
   ok   order_search_bounds
   FAIL order_sort_contract
-  ok   order_ordered_key
+  FAIL order_ordered_key
   ok   order_selection
-algo_tests: 1230 check(s) failed
+algo_tests: 27 check(s) failed
 ```
 
-`oracle::Stable`이 잡는다. tag가 없었다면 이 결함은 어떤 검사도 통과했을 것이다.
+`oracle::NonDecreasing`과 `oracle::Stable`이 함께 잡고, `OrderedKey` 검사도 radix로 정렬하므로 같이 죽는다. 유효 digit이 하나뿐인 입력에서는 순서 검사가 통과하므로, 그 경우를 잡는 것은 tag를 보는 `oracle::Stable`뿐이다.
 
 **변이 2 — `OrderedKey`의 부호 분기 제거.** `return u;`로 바꾸면 양수는 여전히 단조지만 음수가 전부 양수 위로 올라간다. `order_ordered_key`가 죽는다.
 
@@ -338,7 +338,7 @@ cmake --build build --config Release
   ok   order_sort_contract
   ok   order_ordered_key
   ok   order_selection
-algo_tests[step01]: 4/4 passed (856 check(s))
+algo_tests[step01]: 4/4 passed (905 check(s))
 ```
 
 시드 무작위 property 층도 같은 계약을 훨씬 넓은 입력에서 확인한다.
@@ -355,7 +355,7 @@ algo_tests[properties]: 2/2 passed (총 1800 표본, seed 20260824)
 
 `비퇴화` 비율은 자명하게 통과하지 않은 표본의 몫이다. 이 값이 하한 아래로 떨어지면 property는 통과하면서도 아무것도 강제하지 않는 상태가 되므로, 하네스가 그 비율에도 단언을 건다.
 
-측정 표는 별도 실행이다. `algo_bench`는 통과·실패로 갈리지 않으므로 검증이 아니다 — 다만 각 팔에 답 대조를 걸어 두어, 틀린 팔은 표에 오르기 전에 프로세스가 죽는다.
+측정 표는 별도 실행이다. `algo_bench`는 통과·실패로 갈리지 않으므로 검증이 아니다 — 다만 선택 팔에는 답 대조를, 정렬 팔에는 비내림차순 스캔을 걸어 두어, 그 검사에 걸리는 팔은 표에 오르기 전에 프로세스가 죽는다(정렬 팔의 원소 보존·안정성은 `algo_tests`만 검사한다).
 
 ```powershell
 .\build\Release\algo_bench.exe --sort

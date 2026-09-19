@@ -113,6 +113,13 @@ public:
         tail.store((current_tail + 1) % Size, std::memory_order_release);
         return true;
     }
+
+    // 소비자가 호출: 지금 읽을 수 있는 최소 개수
+    size_t size() const {
+        size_t h = head.load(std::memory_order_acquire);
+        size_t t = tail.load(std::memory_order_relaxed);
+        return (h + Size - t) % Size;
+    }
 };
 ```
 
@@ -171,8 +178,8 @@ constexpr size_t SAMPLE_RATE = 48000;
 constexpr size_t BUFFER_SIZE = 4096;
 
 class AudioBuffer {
-    RingBuffer<float, BUFFER_SIZE> leftChannel;
-    RingBuffer<float, BUFFER_SIZE> rightChannel;
+    SPSCRingBuffer<float, BUFFER_SIZE> leftChannel;
+    SPSCRingBuffer<float, BUFFER_SIZE> rightChannel;
 
 public:
     // 오디오 콜백에서 호출 (생산자)
@@ -267,11 +274,17 @@ public:
 
     // 객체 반환
     void release(T* obj) {
-        // 포인터로부터 인덱스 계산
-        size_t index = obj - objects.data();
+        // 다른 배열의 포인터를 빼는 것 자체가 UB이므로 소속을 정수로 먼저 확인한다.
+        const uintptr_t base = reinterpret_cast<uintptr_t>(objects.data());
+        const uintptr_t addr = reinterpret_cast<uintptr_t>(obj);
+        if (addr < base || addr >= base + sizeof(T) * PoolSize) {
+            // 이 풀의 객체가 아니다
+            return;
+        }
 
-        if (index >= PoolSize || !inUse[index]) {
-            // 잘못된 객체 또는 이중 해제
+        size_t index = (addr - base) / sizeof(T);
+        if (!inUse[index]) {
+            // 이중 해제
             return;
         }
 
@@ -372,7 +385,8 @@ public:
     void emit(const glm::vec3& position, const glm::vec3& velocity, float lifetime) {
         Particle* p = pool.acquire();
         if (!p) {
-            // 풀이 가득참 - 가장 오래된 파티클 재활용
+            // 풀이 가득참 - 활성 목록의 맨 앞 파티클을 재활용한다.
+            // update()의 swap-pop이 순서를 흩뜨리므로 가장 오래된 파티클이라는 보장은 없다.
             if (!activeParticles.empty()) {
                 p = activeParticles.front();
                 activeParticles.erase(activeParticles.begin());
@@ -887,7 +901,7 @@ Sparse Set 기반 ECS는 충분히 빠르지만, 대규모 게임(엔티티 수�
 
 1. **간접 참조**: Sparse 배열을 거쳐 dense 배열에 접근
 2. **분산된 메모리**: 각 컴포넌트 타입이 별도 배열에 저장
-3. **SIMD 활용 부족**: 다른 타입의 컴포넌트가 섞여 있음
+3. **SIMD 활용 부족**: 여러 컴포넌트를 함께 순회할 때 sparse 배열을 거친 교차 조회가 끼어들어 인덱스가 정렬되지 않는다
 
 Unity DOTS, Flecs 등 현대 ECS 엔진은 **Archetype** 기반 아키텍처를 사용하여 이를 해결한다.
 
@@ -1020,24 +1034,27 @@ public:
     }
 
     // 쿼리: 특정 컴포넌트를 가진 모든 엔티티 순회
-    template<typename... Components>
-    void query(std::function<void(Components&...)> callback) {
+    template<typename... Components, typename Fn>
+    void query(Fn&& callback) {
         for (auto& [archetypeID, storage] : archetypes) {
             if (!hasAllComponents<Components...>(storage)) continue;
 
-            // 순회 (각 컴포넌트의 SoA 배열을 같은 인덱스로 접근)
-            size_t count = storage.entities.size();
-            for (size_t i = 0; i < count; ++i) {
-                callback(storage.getArray<Components>()[i]...);
-            }
+            // 순회 (컴포넌트 배열은 루프 밖에서 한 번만 찾는다)
+            auto run = [&](auto*... arrays) {
+                size_t count = storage.entities.size();
+                for (size_t i = 0; i < count; ++i) {
+                    callback((*arrays)[i]...);
+                }
+            };
+            run(&storage.getArray<Components>()...);
         }
     }
 
 private:
     template<typename... Components>
     bool hasAllComponents(const ArchetypeStorage& storage) {
-        return (storage.componentArrays.find(std::type_index(typeid(Components))) !=
-                storage.componentArrays.end() && ...);
+        return ((storage.componentArrays.find(std::type_index(typeid(Components))) !=
+                 storage.componentArrays.end()) && ...);
     }
 };
 ```
@@ -1061,7 +1078,7 @@ public struct Velocity : IComponentData {
 public partial struct MovementSystem : IJobEntity {
     public float DeltaTime;
 
-    // 자동으로 [Position, Velocity] Archetype만 쿼리
+    // Position과 Velocity를 모두 가진 archetype을 자동으로 쿼리 (Health 등이 더 있어도 매치된다)
     void Execute(ref Position position, in Velocity velocity) {
         position.Value += velocity.Value * DeltaTime;
     }

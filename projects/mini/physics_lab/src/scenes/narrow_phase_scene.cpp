@@ -519,9 +519,9 @@ void NarrowPhaseScene::DrawPanel(int panelX, int panelY, int panelW, int panelH)
         GuiLabel(Rectangle{(float)(panelX + 8), (float)y, 240, 18},
                   "agree (depth diff < 1.5 px)");
     } else {
-        DrawRectangle(panelX + 6, y, 248, 18, Color{120, 90, 30, 200});
+        DrawRectangle(panelX + 6, y, 248, 18, Color{200, 60, 60, 220});
         GuiLabel(Rectangle{(float)(panelX + 8), (float)y, 240, 18},
-                  "boundary / numerical mismatch");
+                  "DISAGREE: boundary / numerical mismatch");
     }
 }
 

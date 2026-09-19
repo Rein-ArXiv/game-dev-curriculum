@@ -91,7 +91,8 @@ std::vector<std::byte> EncodeControl(ControlType type,
 
 bool FrameDecoder::Push(std::span<const std::byte> bytes) {
     if (failed_) return false;
-    if (bytes.size() > kMaxBufferedControlBytes - BufferedBytes()) {
+    if (BufferedBytes() >= kMaxBufferedControlBytes ||
+        bytes.size() > kMaxBufferedControlBytes) {
         failed_ = true;
         return false;
     }

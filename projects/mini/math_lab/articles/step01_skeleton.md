@@ -196,7 +196,7 @@ int main(int argc, char** argv) {
 
 ## 4. Scene 인터페이스
 
-`math_lab` 의 모든 토픽이 *한 Scene* 으로 구현된다. 인터페이스가 단순 — 5개 함수.
+`math_lab` 의 모든 토픽이 *한 Scene* 으로 구현된다. 인터페이스가 단순 — 6개 함수.
 
 <!-- snippet: src/scenes/iscene.h -->
 ```cpp
@@ -491,7 +491,9 @@ int main() {
             prevIdx = activeIdx;
         }
 
+        DragHandle::BeginFrame();          // 클릭 후보 초기화
         scenes[activeIdx]->Update(GetFrameTime());
+        DragHandle::EndFrame();            // 후보 중 가장 가까운 한 개만 capture
 
         BeginDrawing();
         ClearBackground(Color{12, 14, 18, 255});
@@ -567,7 +569,7 @@ $ ./build/Release/math_core_tests.exe step01
 step01: 1 case(s), 19 check(s), 0 failure(s)
 ```
 
-이 검증이 자명하지 않다는 근거: `contentH` 에서 `kFooterH` 를 빼는 항을 지우면 `CHECK(Near(L.canvas.y + L.canvas.height, L.footer.y))` 가 그 자리에서 깨진다 — 캔버스가 푸터 아래로 24px 넘어간 상태다. 화면에서는 푸터 글자가 캔버스에 가려지는 정도로만 보여 놓치기 쉬운 종류다.
+이 검증이 자명하지 않다는 근거: `contentH` 에서 `kFooterH` 를 빼는 항을 지우면 `CHECK(Near(L.canvas.y + L.canvas.height, L.footer.y))` 가 그 자리에서 깨진다 — 캔버스가 푸터 아래로 24px 넘어간 상태다. 화면에서는 푸터가 마지막에 덮어 그려져 넘친 24px 이 푸터 밑에 숨는 정도라 놓치기 쉬운 종류다.
 
 ---
 
@@ -575,7 +577,7 @@ step01: 1 case(s), 19 check(s), 0 failure(s)
 
 Step 1 에서 만든 것.
 
-1. **Scene 인터페이스** — 각 수학 토픽이 한 Scene 으로 캡슐화. 5개 함수 (`OnEnter / OnExit / Update / DrawWorld / DrawPanel / Name`).
+1. **Scene 인터페이스** — 각 수학 토픽이 한 Scene 으로 캡슐화. 6개 함수 (`OnEnter / OnExit / Update / DrawWorld / DrawPanel / Name`).
 2. **DragHandle** — 거의 모든 Scene 의 입력 위젯. 프로세스 전체에서 *한 번에 한 핸들만 잡힘* (BeginFrame / EndFrame 으로 후보 중 가장 가까운 한 개만 capture).
 3. **scene_chrome** — 상단 탭 / 우측 패널 / 하단 푸터 + 레이아웃 계산. Scene 은 *자기 영역에만 집중*.
 4. **FrameTimer** — `BeginFrame / EndFrame` + EMA 로 ms / fps 안정 표시.

@@ -570,7 +570,7 @@ void RenderSpatial(const Listener& l, const Speaker& s, AudioBuffer& out) {
     glm::vec3 rel = glm::inverse(l.orient) * (s.pos - l.pos);   // 청자 로컬 좌표
     float dist = glm::length(rel);
 
-    float att = 1.0f / (1.0f + dist * 0.1f);   // 거리 감쇠 (역제곱 근사/롤오프)
+    float att = 1.0f / (1.0f + dist * 0.1f);   // 거리 감쇠 (역거리 롤오프 — 진폭 1/d 근사)
     if (dist > MAX_HEAR_DIST) { /* 무음 */ return; }
 
     // HRIR 컨볼루션: rel 방향에 해당하는 좌/우 임펄스 응답을 골라 적용
@@ -812,7 +812,7 @@ struct VoiceTelemetry {
 ### 비용 최적화
 
 - *DTX + VAD* — 실제 발화율만큼 무음 미디어 전송을 줄인다. 제어 패킷·keepalive·배경 소음 오검출을 포함해 절감률을 측정한다.
-- *우선순위 포워딩 K 상한* — 대형 채널 egress 를 `(N-1)·b` 에서 `K·b` 로.
+- *우선순위 포워딩 K 상한* — 대형 채널 egress 를 `N(N-1)·b` 에서 `N·K·b` 로(수신자 1인 download 는 `(N-1)·b` 에서 `K·b` 로).
 - *지역 분산 + edge PoP* — 광역망 통과 비용·지연 동시 절감.
 - *예약 용량 / 장기 약정* — 예측 가능한 기준 부하의 단가를 낮출 수 있지만 공급자·지역·약정 기간·중도 해지 위험을 함께 계산한다.
 

@@ -1,6 +1,6 @@
 ## 들어가며
 
-들에서 *강체의 6 자유도 동역학* 을 완성했다. 입자에서 강체로, 병진에서 회전까지. 이제 *여러 강체가 한 월드에 함께 있을 때* 의 토픽으로 옮겨간다. *충돌 (collision)*.
+한 강체의 *6 자유도 동역학* 은 갖춰졌다. 입자에서 강체로, 병진에서 회전까지. 이제 *여러 강체가 한 월드에 함께 있을 때* 의 토픽으로 옮겨간다. *충돌 (collision)*.
 
 N 개 강체의 *모든 쌍* 을 검사하면 *naive $O(N^2)$*. 100 개 강체 = 5000 쌍, 1000 개 = 50만 쌍, 1만 개 = 5천만 쌍. 한 프레임 16.6ms 안에 *수천만 충돌 검사 + 응답* 은 불가능. *대부분의 쌍이 멀리 떨어져* 있어 사실상 검사 자체가 *낭비*.
 
@@ -216,7 +216,10 @@ struct Endpoint {
 std::vector<Endpoint> endpointsX;
 // 모든 AABB 에 대해 min·max endpoint 2개씩 push
 std::sort(endpointsX.begin(), endpointsX.end(),
-           [](auto& a, auto& b) { return a.value < b.value; });
+           [](auto& a, auto& b) {
+               if (a.value != b.value) return a.value < b.value;
+               return a.isMin && !b.isMin;   // 같은 좌표면 min 먼저 — 경계 접촉을 overlap 으로 본다
+           });
 ```
 
 $O(N \log N)$. 한 번만.
@@ -455,7 +458,7 @@ void DynamicAabbTree::MoveProxy(int proxyId, AABB2D newAabb) {
 두 트리의 *동시 트래버설* 로 페어 추출.
 
 ```cpp
-void CollectPairs(int aIdx, int bIdx,
+void DynamicAabbTree::CollectPairs(int aIdx, int bIdx,
                    std::vector<std::pair<int,int>>& pairs) {
     const DbvtNode& a = nodes_[aIdx];
     const DbvtNode& b = nodes_[bIdx];
@@ -657,11 +660,11 @@ Broad phase 의 출력은 *후보 쌍* 이다. 이 후보 쌍은 정밀 충돌 �
 
 ## 더 읽을거리
 
-- Christer Ericson, *Real-Time Collision Detection*, Ch. 7~8 — broad phase 종합 정리.
-- Erin Catto, "Dynamic Trees" (GDC 2019) — Box2D 의 DBVT 설계 디테일.
+- Christer Ericson, *Real-Time Collision Detection*, Ch. 6~7 — BVH 와 공간 분할 (uniform grid·sort-and-sweep) 의 종합 정리.
+- Erin Catto, "Dynamic Bounding Volume Hierarchies" (GDC 2019) — Box2D 의 DBVT 설계 디테일.
 - Bullet Physics manual, "Broadphase Collision Detection" — Bullet 의 두 broad phase 비교.
 - Box2D 소스 (`b2DynamicTree.cpp`, `b2BroadPhase.cpp`) — 산업 reference 구현.
 - Bullet 소스 (`btAxisSweep3.cpp`, `btDbvtBroadphase.cpp`) — SAP 와 DBVT 비교 가능한 두 구현.
 - Karras, "Maximizing Parallelism in the Construction of BVHs, Octrees, and k-d Trees" (HPG 2012) — GPU broad phase 빌드.
 - Tomas Akenine-Möller et al., *Real-Time Rendering*, Ch. 19 — frustum culling 의 broad phase 와의 공통점.
-- Erwin Coumans, "Continuous Collision Detection in Bullet" — broad phase 가 CCD 와 결합되는 패턴.
+- Erwin Coumans, "Continuous Collision Detection and Physics" (2005 draft) — Bullet 의 conservative advancement 기반 CCD.

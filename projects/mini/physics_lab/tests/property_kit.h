@@ -130,6 +130,7 @@ PropertyResult RunProperty(const char* caseName, const char* property,
         std::string violation = check(input);
         if (violation.empty()) continue;
         ++result.failures;
+        if (result.failures > 3) continue;   // 셋까지만 찍고 나머지는 세기만 한다
 
         const std::string original         = dump(input);
         const std::string originalViolation = violation;
@@ -163,10 +164,9 @@ PropertyResult RunProperty(const char* caseName, const char* property,
 
         // 같은 결함이 표본마다 반복되면 보고가 로그를 덮는다. 셋까지만 찍고
         // 나머지는 세기만 한다.
-        if (result.failures >= 3) {
+        if (result.failures == 3) {
             std::cerr << "  (같은 property 에서 반례 3 개를 찍었다 — 나머지 표본은"
                          " 세기만 한다)\n";
-            break;
         }
     }
     return result;

@@ -141,7 +141,7 @@ $$
 \text{용량} \approx \frac{T}{K}\cdot S + T\cdot d, \qquad \text{최악 Seek} \approx (K-1)\cdot c_{\text{tick}}
 $$
 
-K를 키우면 키프레임 용량($\frac{T}{K}S$)이 줄지만 Seek 시간($K \cdot c_{\text{tick}}$)이 는다. 격투처럼 S가 작으면 K를 작게(잦은 키프레임) 둬 Seek을 즉시로 만들고, FPS처럼 S가 크면 K를 키워 용량을 아낀다. *측정으로 정하는 다이얼* 이다.
+K를 키우면 키프레임 용량($\frac{T}{K}S$)이 줄지만 Seek 시간($(K-1)\cdot c_{\text{tick}}$)이 는다. 격투처럼 S가 작으면 K를 작게(잦은 키프레임) 둬 Seek을 즉시로 만들고, FPS처럼 S가 크면 K를 키워 용량을 아낀다. *측정으로 정하는 다이얼* 이다.
 
 ### 비교 표
 
@@ -163,7 +163,7 @@ hybrid의 “부분 결정론”은 저절로 생기는 성질이 아니다. inp
 |---|---|---|
 | floating-point 실행 차이 | FMA / x87 중간 정밀도 / SIMD 폭 / 수학 라이브러리 | 연산·compiler·target 계약 고정 |
 | `time` / `rand` | 전역 가변 상태 | 결정론적 PRNG + 시드 *기록* |
-| 컨테이너 순회 순서 | `unordered_map` 해시 무작위화 | `vector` + 정렬 키 |
+| 컨테이너 순회 순서 | `unordered_map` 의 구현·rehash 의존 순서 | `vector` + 정렬 키 |
 | 포인터 주소 의존 | 정렬·해시 키로 주소 사용 | 안정적 ID |
 | 멀티스레드 | reduction·conflict 적용 순서 비결정 | deterministic partition과 merge order |
 | 외부 라이브러리 | 내부 상태·version·build option | 실행 계약 고정 + state hash 검증 |
@@ -294,7 +294,7 @@ struct StateDelta {
 
 변하지 않은 object를 생략하면 delta 크기는 전체 entity 수보다 dirty entity·field 수에 비례한다. 산술 예로 200개 중 20개가 바뀌고 각 delta가 2B ID, 1B mask, 평균 8B payload라면 `20×11=220B`다. 32B state 200개를 기록한 6.4KB와 비교하면 약 29배 작지만, 실제 비율은 ID 폭, change density, entropy와 baseline invalidation을 trace에서 측정해야 한다. 정적 map data는 replay에 반복 기록하지 않고 map/content hash로 참조할 수도 있다.
 
-복원 비용이 대가다. Seek 시 *키프레임부터 델타를 순차 적용* 해야 하므로, 키프레임 간격 K가 곧 *최대 적용 횟수*. 압축률과 Seek 시간이 K로 맞물린다 (1절).
+복원 비용이 대가다. Seek 시 *키프레임부터 델타를 순차 적용* 해야 하므로, 키프레임 간격이 K면 *최대 적용 횟수* 는 K-1. 압축률과 Seek 시간이 K로 맞물린다 (1절).
 
 ### 가변 정밀도 위치
 
@@ -514,9 +514,9 @@ Expected<GameState, SeekError> SeekTo(
 
     // delta[t]는 tick t 처리 후의 상태로 전이시키는 record라는 계약.
     for (uint32_t tick = it->tick + 1; tick <= targetTick; ++tick) {
-        const StateDelta* delta = r.deltaIndex.Find(tick);
-        if (!delta) return Unexpected(SeekError::MissingDelta);
-        ApplyDelta(s, *delta);
+        const HybridReplay::DeltaFrame* frame = r.deltaIndex.Find(tick);
+        if (!frame) return Unexpected(SeekError::MissingDelta);
+        for (const StateDelta& d : frame->changes) ApplyDelta(s, d);
     }
 
     return s;

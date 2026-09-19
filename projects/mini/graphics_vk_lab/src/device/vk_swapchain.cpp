@@ -126,6 +126,7 @@ void VkSwapchain::CreateImageViews(VkContext& ctx) {
         vi.subresourceRange.layerCount = 1;
         if (vkCreateImageView(ctx.Device(), &vi, nullptr, &views_[i]) !=
             VK_SUCCESS) {
+            views_[i] = VK_NULL_HANDLE;   // 실패한 명령의 출력 인자는 미정의다.
             for (VkImageView view : views_) {
                 if (view) vkDestroyImageView(ctx.Device(), view, nullptr);
             }

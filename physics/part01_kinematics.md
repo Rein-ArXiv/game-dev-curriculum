@@ -532,7 +532,7 @@ $$
 운동학 변수가 NaN 이 되면 *후속 모든 적분이 NaN*. 시각적으로는 *객체 사라짐*. 디버그 신호.
 
 - $\vec{x}$ 또는 $\vec{v}$ 의 임의 성분이 `std::isfinite` 가 false.
-- *속도가 한 step 에 비현실적으로 큼* (예: $10^9$) → 다음 step 에 위치 overflow → NaN.
+- *속도가 한 step 에 비현실적으로 큼* (예: $10^9$) → 위치가 한 step 만에 월드 밖으로 벗어난다. float 위치 자체가 overflow 하려면 $\Delta t = 1/60$ 에서 $v > 2 \times 10^{40}$ 이 필요하므로, NaN 보다 이 신호가 먼저 잡힌다.
 
 진입 시점에서 즉시 break 하는 assert 가 *원인 추적의 표준*. NaN 이 *전파된 후 발견* 하면 시점 추적 불가.
 
@@ -561,8 +561,8 @@ $$
 
 - Glenn Fiedler, "Fix Your Timestep!" (https://gafferongames.com/post/fix_your_timestep/) — 고정 timestep + accumulator 의 표준 참조.
 - Ian Millington, *Game Physics Engine Development*, 2nd ed., Ch. 1~3 — 게임 물리의 운동학 기초.
-- Erin Catto, "Understanding Constraints" (GDC 2014) — Box2D 의 적분기 선택 배경.
-- Christer Ericson, *Real-Time Collision Detection*, Ch. 1 — 게임 시뮬레이션 루프 구조.
+- Erin Catto, "Numerical Methods" (GDC 2015) — Box2D 의 적분기 선택 배경.
+- Christer Ericson, *Real-Time Collision Detection*, Ch. 2 — 충돌 검사 설계 요인과 시뮬레이션 환경 변수 (순차 vs 동시 이동, 이산 vs 연속 이동).
 - David Baraff, "Physically Based Modeling" (SIGGRAPH course notes) — 적분기 비교의 학술 표준.
 - Hairer et al., *Geometric Numerical Integration* — Symplectic integrator 의 수학적 토대.
 - Box2D 소스 (`b2World::Step`) — 산업 표준 시뮬 루프.

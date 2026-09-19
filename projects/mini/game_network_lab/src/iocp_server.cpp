@@ -291,7 +291,8 @@ private:
 
         sockaddr_in address{};
         address.sin_family = AF_INET;
-        address.sin_addr.s_addr = htonl(INADDR_ANY);
+        address.sin_addr.s_addr =
+            htonl(config_.loopbackOnly ? INADDR_LOOPBACK : INADDR_ANY);
         address.sin_port = htons(config_.tcpPort);
         if (bind(listener_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) ==
                 SOCKET_ERROR ||
@@ -326,7 +327,8 @@ private:
         }
         sockaddr_in address{};
         address.sin_family = AF_INET;
-        address.sin_addr.s_addr = htonl(INADDR_ANY);
+        address.sin_addr.s_addr =
+            htonl(config_.loopbackOnly ? INADDR_LOOPBACK : INADDR_ANY);
         address.sin_port = htons(config_.udpPort);
         if (bind(udpSocket_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) ==
             SOCKET_ERROR) {

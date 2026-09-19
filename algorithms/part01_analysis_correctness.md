@@ -77,7 +77,7 @@ Big-O는 정확한 실행 시간도, 최악 비용 자체도 아니다. 어떤 �
 
 `Ω(g(n))`은 하한이고, `Θ(g(n))`은 상한과 하한이 같은 증가율임을 뜻한다.
 
-대표적인 하한 예가 비교 기반 정렬의 최악 `Ω(n log n)` 비교다. 이 하한의 결정 트리 유도(순열 `n!`개를 구분하려면 트리 높이가 `log2(n!) = Θ(n log n)` 이상)와 Stirling 양측 경계는 비교 정렬을 다루는 정렬·탐색·해시 장이 한 번 깊게 소유하므로 여기서는 결과만 인용한다. 분석에서 중요한 점은 이 하한이 정렬 문제 자체의 절대 한계가 아니라 "비교만으로 분기한다"는 연산 모델의 전제에 묶여 있다는 사실이다. 정수 키의 범위가 제한되어 키를 주소로 직접 쓸 수 있으면 counting sort처럼 이 하한 밖에서 동작한다. 즉 하한은 문제가 아니라 채택한 모델의 성질이다.
+대표적인 하한 예가 비교 기반 정렬의 최악 `Ω(n log n)` 비교다. 이 하한의 결정 트리 유도(순열 `n!`개를 구분하려면 트리 높이가 `log2(n!) = Θ(n log n)` 이상)와 Stirling 양측 경계는 여기서 다시 전개하지 않고 결과만 인용한다. 분석에서 중요한 점은 이 하한이 정렬 문제 자체의 절대 한계가 아니라 "비교만으로 분기한다"는 연산 모델의 전제에 묶여 있다는 사실이다. 정수 키의 범위가 제한되어 키를 주소로 직접 쓸 수 있으면 counting sort처럼 이 하한 밖에서 동작한다. 즉 하한은 문제가 아니라 채택한 모델의 성질이다.
 
 ### 숨겨진 상수와 교차점
 
@@ -215,7 +215,7 @@ Merge sort는 $a=b=2$라 $n^{\log_2 2}=n$이고 $f(n)=\Theta(n)=\Theta(n\log^0 n
 
 ### 정리가 닿지 않는 틈
 
-세 경우는 전부를 덮지 않는다. 경우 1과 2 사이, 2와 3 사이에는 $f$가 $n^{\log_b a}$보다 크지만 "다항적으로는" 크지 않은(로그 인수 차이뿐인) 틈이 있고, 경우 3의 정칙성 조건이 깨지는 점화식도 있다. 대표 예가 다음이다.
+세 경우는 전부를 덮지 않는다. 경우 1과 2 사이, 2와 3 사이에는 $f$가 $n^{\log_b a}$와 "다항적으로는" 차이 나지 않는(작든 크든 로그 인수 차이뿐인) 틈이 있고, 경우 3의 정칙성 조건이 깨지는 점화식도 있다. 대표 예가 다음이다.
 
 $$
 T(n)=2T(n/2)+\frac{n}{\log n}
@@ -233,7 +233,7 @@ $$
 
 ### 정확성과 종료
 
-재귀 정확성은 더 작은 입력에 대해 알고리즘이 맞다고 가정하는 귀납 구조와 base case가 필요하다. 귀납 가정이 성립하려면 재귀 호출의 입력이 base case를 향해 엄격히 줄어들어야 한다. base case가 문제를 충분히 줄이지 않거나 재귀 입력이 감소하지 않으면 종료하지 않는다. 예컨대 정수 나눗셈으로 크기를 줄이는 재귀에서 `n/2`가 `n=1`에서 다시 1이 되는 경계를 base case로 끊지 않으면 무한 재귀에 빠진다.
+재귀 정확성은 더 작은 입력에 대해 알고리즘이 맞다고 가정하는 귀납 구조와 base case가 필요하다. 귀납 가정이 성립하려면 재귀 호출의 입력이 base case를 향해 엄격히 줄어들어야 한다. base case가 문제를 충분히 줄이지 않거나 재귀 입력이 감소하지 않으면 종료하지 않는다. 예컨대 정수 나눗셈으로 크기를 줄이는 재귀에서 올림 절반 `n - n/2`가 `n=1`에서 다시 1이 되는 경계를 base case로 끊지 않으면 무한 재귀에 빠진다.
 
 ## 6. 무작위 알고리즘
 
@@ -558,7 +558,7 @@ UDP 위 프로토콜이 메시지 순서를 보장한다고 가정하면 구현 
   그래프에 길이 K 이상의 단순 경로가 존재하는가?
 
 증명서:
-  정점 K개가 나열된 경로
+  정점 K+1개가 나열된 경로(간선 K개)
 
 검증:
   정점 중복이 없는지, 연속한 정점마다 간선이 있는지 O(K + E_lookup)에 확인
@@ -671,7 +671,7 @@ Contradict(p):
 - Donald E. Knuth, *The Art of Computer Programming*, Vol. 1, §1.2.10–1.2.11 — 점근 표기와 분석의 원전.
 - Mohamad Akra, Louay Bazzi, "On the Solution of Linear Recurrence Equations", *Computational Optimization and Applications* 10(2), 1998 — Master 정리가 닿지 않는 불균등 분할·로그 인수 점화식을 일반화한 Akra-Bazzi 방법의 원전.
 - Robert E. Tarjan, "Amortized Computational Complexity", *SIAM J. Algebraic Discrete Methods* 6(2), 1985 — 회계법·잠재 함수법의 원전.
-- Rajeev Motwani, Prabhakar Raghavan, *Randomized Algorithms* (Cambridge, 1995) — Las Vegas/Monte Carlo, Bloom filter 분석.
+- Rajeev Motwani, Prabhakar Raghavan, *Randomized Algorithms* (Cambridge, 1995) — Las Vegas/Monte Carlo 구분과 무작위 알고리즘 분석의 표준 교과서.
 - Burton H. Bloom, "Space/Time Trade-offs in Hash Coding with Allowable Errors", *CACM* 13(7), 1970 — Bloom filter 원전과 false positive 식.
 - Ulrich Drepper, "What Every Programmer Should Know About Memory" (2007) — 캐시·메모리 계층의 실제 비용 모델.
 - Jon Bentley, *Programming Pearls*, 2nd ed. (Addison-Wesley, 2000) — 비용 모델과 실측을 잇는 알고리즘 엔지니어링 관점.

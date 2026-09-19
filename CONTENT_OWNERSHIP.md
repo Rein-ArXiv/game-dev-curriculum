@@ -126,9 +126,9 @@ Linux 커널의 세부 기능을 많이 안다고 운영체제의 핵심 모델�
 
 | 분류 | 현재 범위 | 처리 방향 |
 |---|---|---|
-| 공통 핵심 | boot, process, virtual memory, allocator, syscall, interrupt, scheduler, sync | 유지하되 아키텍처·커널 버전 의존성을 명시한다. |
+| 공통 핵심 | boot, process, virtual memory, allocator, syscall, interrupt, signal, scheduler, sync | 유지하되 아키텍처·커널 버전 의존성을 명시한다. |
 | 공통 핵심 | ELF, dynamic linking, filesystem, block I/O, async I/O, IPC, network stack | 유지하고 오류 경로·수명·성능 모델을 강화한다. |
-| 전문 심화 | driver, virtualization, container, security, eBPF, kernel debugging | 게임 개발 공통 필수에서 분리한다. 독립 사고 모델이 약하면 핵심 장에 흡수하고, 커널 전문성이 충분하면 선택 심화로 표시한다. |
+| 전문 심화 | Windows IOCP, driver, virtualization, container, security, eBPF, kernel debugging | 게임 개발 공통 필수에서 분리한다. 독립 사고 모델이 약하면 핵심 장에 흡수하고, 커널 전문성이 충분하면 선택 심화로 표시한다. |
 
 DAMON의 sampling·adaptive region·working-set 관측은 가상 메모리 장에 흡수하고 sysfs·도구 사용법 중심의 독립 장은 제외했다. TTY의 line discipline·PTY·job control은 시그널 장에, loadable module의 refcount·unload protocol은 드라이버 장에 흡수해 세 개의 Linux 기능별 독립 장을 제거했다. eBPF와 커널 디버깅은 `system/part22_kernel_observability.md`의 관측·검증·안전한 확장 모델로 통합했다.
 

@@ -12,7 +12,7 @@
 4. 좌측 stats 텍스트 + 우측 두 그래프(cycle ms, throughput) 의 ImGui HUD
 5. CMake 한 번으로 빌드되는 프로젝트 구조 + 의존성 설치 스크립트
 
-현재 범위 밖의 확장에서 토글 패널, IO 백엔드 5종(read/pread/mmap/aio/io_uring), 동기화 4종, 스케줄링 3종, 컨텍스트 스위치 2종, 그리고 strace·perf·ftrace 측정 시각화가 추가된다. 이 단계에서는 *측정 인프라의 토대* 만 깔고, 그 위에 read 한 가지로 도는 baseline 워크로드를 단단히 만든다.
+현재 범위 밖의 확장에서 토글 패널, IO 백엔드 5종(read/pread/mmap/aio/io_uring), 동기화 4종, 스케줄링 4종, 컨텍스트 스위치 2종, 그리고 strace·perf·ftrace 측정 시각화가 추가된다. 이 단계에서는 *측정 인프라의 토대* 만 깔고, 그 위에 read 한 가지로 도는 baseline 워크로드를 단단히 만든다.
 
 ---
 
@@ -358,7 +358,7 @@ void FileIoWorkload::GenerateFixture(std::size_t fileCount,
 constexpr std::size_t kChecksumStride = 4096;
 
 std::uint64_t FileIoWorkload::RunCycle() {
-    std::uint64_t checksum = lastChecksum_;
+    std::uint64_t checksum = 0;
     std::uint64_t bytes    = 0;
 
     for (const auto& path : paths_) {
@@ -720,7 +720,7 @@ int main(int /*argc*/, char** /*argv*/) {
     hud.Init(kWindowW, kWindowH);
 ```
 
-OpenGL 3.2 Core Profile은 ImGui의 OpenGL3 백엔드 최소 요구치. WSL2 + WSLg 의 Mesa d3d12 백엔드가 이 정도는 지원한다.
+OpenGL 3.2 Core Profile은 ImGui의 OpenGL3 백엔드 최소 요구치가 아니라(백엔드 자체는 데스크톱 GL 2.x부터 지원) 이 lab이 고른 값이다. WSL2 + WSLg 의 Mesa d3d12 백엔드가 이 정도는 지원한다.
 
 `SDL_GL_SetSwapInterval(0)` 으로 VSync를 끈다. 측정이 모니터 16.67ms 갭에 묶이지 않게 한다 (parts_perf_lab의 `SetTargetFPS(0)` 와 같은 의도).
 
@@ -818,10 +818,10 @@ cmake --build build -j
 ```text
 files       : 16  x  1.05 MB
 cycle ms    :   3.421
-throughput  :  4900.7 MB/s
+throughput  :  4904.2 MB/s
 last bytes  : 16777216
 total cycles: 1247
-total MB    : 20916.5
+total MB    : 20921.2
 fixture dir : /tmp/system_kernel_lab_data
 ```
 

@@ -220,6 +220,7 @@ struct History {
         f.state = s;
         memcpy(f.inputs, in, sizeof(Input) * MAX_PLAYERS);
         f.stateHash = HashState(s);
+        memset(f.confirmed, 0, sizeof(f.confirmed)); // 슬롯 재사용 시 이전 tick 의 확정 플래그를 지운다
     }
 };
 ```
@@ -260,7 +261,7 @@ flowchart LR
 
 ### 적응형 버퍼 — Sleep / Speedup
 
-상대 입력이 *너무 빨리 / 너무 늦게 도착* 할 때 *프레임 타이밍 조정*. GGPO 의 *time sync* — 두 클라이언트의 *프레임 어드밴티지* 를 ±1 이내로 수렴시킨다.
+상대 입력이 *너무 빨리 / 너무 늦게 도착* 할 때 *프레임 타이밍 조정*. GGPO 의 *time sync* — 두 클라이언트의 *프레임 어드밴티지* 차이가 불감대(기본 3프레임)를 넘을 때만 앞선 쪽을 최대 9프레임까지 쉬게 해 좁힌다.
 
 ```cpp
 int frameAdvantage = localFrame - confirmedRemoteFrame;   // 내가 얼마나 앞섰나

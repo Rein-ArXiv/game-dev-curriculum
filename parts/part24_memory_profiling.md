@@ -114,11 +114,11 @@ Valgrind의 Memcheck 도구는 모든 바이트를 추적한다:
 - **Addressability**: 이 주소에 접근할 권한이 있는가?
 - **Definedness**: 이 값은 초기화되었는가?
 
-각 메모리 바이트마다 2개의 비트를 유지한다:
+각 메모리 바이트마다 A 비트 1개와, 데이터 비트마다 하나씩 붙는 V 비트 8개를 유지한다:
 
 ```text
-A bit (Addressable):  0 = 접근 금지, 1 = 접근 가능
-V bit (Valid/Defined): 0 = 미초기화, 1 = 초기화됨
+A bit (Addressable):  바이트당 1개. 0 = 접근 금지, 1 = 접근 가능
+V bit (Valid/Defined): 데이터 비트당 1개(바이트당 8개). 0 = 미초기화, 1 = 초기화됨
 ```
 
 ```c
@@ -242,8 +242,7 @@ Shadow Value     int8 부호값   Meaning
   0xF3            -13          Stack right redzone
   0xF5            -11          Stack use-after-return
   0xF8             -8          Stack use-after-scope
-  0xFA             -6          Heap left redzone
-  0xFB             -5          Heap right redzone
+  0xFA             -6          Heap left redzone (힙 우측 redzone도 같은 값을 쓴다)
   0xFD             -3          Heap freed memory (use-after-free)
 ```
 
@@ -453,7 +452,7 @@ UBSan 비용은 활성화한 검사, recovery mode, 코드 성격과 compiler에
 
 ### 누수 탐지: Reachability Analysis
 
-LeakSanitizer(LSan)는 스택·레지스터·전역과 allocator가 아는 allocation을 root로 보수적 reachability를 계산해 도달 불가능한 allocation을 보고한다. 일부 플랫폼에서는 ASan 빌드에 통합되어 종료 시 실행되지만 지원·기본 활성화 여부는 플랫폼과 runtime 옵션에 따라 다르다. ASan의 경계 검출과 LSan의 누수 검출은 구분해야 한다.
+LeakSanitizer(LSan)는 스택·레지스터·전역·TLS를 root로 보수적 reachability를 계산해, allocator가 아는 allocation 중 어디에서도 도달할 수 없는 것을 보고한다. 일부 플랫폼에서는 ASan 빌드에 통합되어 종료 시 실행되지만 지원·기본 활성화 여부는 플랫폼과 runtime 옵션에 따라 다르다. ASan의 경계 검출과 LSan의 누수 검출은 구분해야 한다.
 
 ```c
 void leak_example() {
@@ -720,8 +719,8 @@ allocated by thread T0 here:
 
 ```cpp
 // Before:
-int width = (rect.width() + 3) / 4 * 4;  // 4바이트 정렬
-// 하지만 height는 그대로...
+size_t buffer_size = rect.width() * rect.height() * 4;  // 정렬 전 width로 할당
+// 하지만 그리기는 4바이트 정렬된 stride를 쓴다...
 
 // After:
 int stride = (rect.width() + 3) / 4 * 4;
@@ -945,7 +944,7 @@ OSS-Fuzz는 이 조합을 대규모로 운영하는 사례다. 수백 개 오픈
 
 - **Application Verifier (AppVerif)**: heap, handle, lock에 대한 동적 검증 도구. `HEAP_TAIL_CHECKING_ENABLED`는 `HeapAlloc`에 넘기는 플래그가 아니라 GFlags/Application Verifier가 프로세스 heap 검증을 위해 활성화하는 모드다. `HeapValidate`와 PageHeap 같은 진단 기능과 조합한다.
 - **PageHeap**: Windows의 디버그 힙 모드. 모든 할당을 페이지 경계에 정렬하고 가드 페이지를 두어 overflow를 즉시 segfault로 만든다. 메모리 사용량이 폭증하므로 짧은 재현용 빌드에 한정해 켠다.
-- **MSVC의 `/fsanitize=address`**: Visual Studio 2019 16.9부터 ASan을 공식 지원한다. Linux의 ASan과 같은 인프라이며, Windows 환경에서도 같은 진단을 받을 수 있다.
+- **MSVC의 `/fsanitize=address`**: Visual Studio 2019 16.9부터 ASan을 공식 지원한다. Linux의 ASan과 같은 compiler-rt 인프라를 쓰지만 검출 범위가 같지는 않다. 누수 검출(LSan)이 없고, stack-use-after-return은 별도 컴파일러 옵션을 요구하며, initialization order fiasco·intra-object overflow·container overflow 같은 검사는 포함되지 않는다.
 - **clang-tidy on Windows**: clang-cl 툴체인 위에서 동작한다. Visual Studio가 직접 통합한다.
 
 게임 콘솔은 공개 범위가 제한된 SDK별 메모리·GPU 진단 도구를 제공할 수 있다. 기능과 지원 이름은 SDK 버전에 따라 달라지므로 공개 PC 도구와 같은 검출 범위를 가정하지 말고 해당 플랫폼 문서에서 heap guard, allocation trace와 GPU residency 기능을 확인한다.

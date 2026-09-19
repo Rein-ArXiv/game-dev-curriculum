@@ -610,7 +610,7 @@ vec3 GetVelocityAtPoint(const RigidBody3D& body, vec3 worldPoint) {
 flowchart LR
     Center[질량중심 충돌] --> Trans[순수 병진]
     Edge[모서리 충돌] --> Both[병진 + 회전]
-    FarEdge[멀리 모서리] --> Spin[큰 회전 + 작은 병진]
+    FarEdge[멀리 모서리] --> Spin[더 큰 회전 + 같은 병진]
 ```
 
 당구공이 *센터 vs 모서리에 맞을 때* 의 차이. 게임의 *물리 시뮬이 사실적으로 보이는* 결정적 요소.
@@ -649,6 +649,6 @@ flowchart LR
 - Goldstein, Poole, Safko, *Classical Mechanics*, Ch. 5 — Euler 방정식의 표준.
 - David Baraff, "Rigid Body Simulation" (SIGGRAPH Course Notes) — 쿼터니언 적분의 게임 친화적 유도.
 - PhysX SDK Guide, "Mass Properties" — 산업의 inertia 계산 API.
-- Box2D 소스 (`b2PolygonShape::ComputeMass`) — 2D 다각형 관성 계산.
+- Box2D v2.4 소스 (`b2PolygonShape::ComputeMass`) — 2D 다각형 관성 계산.
 - Bullet `btRigidBody::integrateVelocities` — 3D 회전 적분 산업 구현.
-- Erwin Coumans, Bullet Physics SDK Manual — 쿼터니언 적분·각속도 frame 관례의 산업 기준.
+- Erwin Coumans, Bullet Physics SDK Manual — btQuaternion / btMatrix3x3 방향 표현 선택과 강체 API 의 개관 (적분식·frame 관례는 소스 쪽).

@@ -75,7 +75,7 @@ void ProjectionScene::DrawWorld(int cx, int cy, int cw, int ch) {
 
         // 축 라벨
         // snippet-begin: depth-graph-labels
-        DrawText("View Z (near → far)", gx + gw / 2 - 60,
+        DrawText("View Z (near -> far)", gx + gw / 2 - 60,
                   gy + gh + 6, 12, Color{200, 200, 200, 255});
         DrawText("NDC z", gx - 50, gy + gh / 2, 12, Color{200, 200, 200, 255});
         DrawText("0", gx - 16, gy + gh - 6, 12, Color{200, 200, 200, 255});

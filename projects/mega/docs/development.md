@@ -407,10 +407,13 @@ HMAC-SHA256으로 보호한다. 전용 서버는 서명을 상수 시간으로 �
 계수기는 움직이지 않는다. 클라이언트 실행 형식은 다음과 같다.
 
 ```powershell
-.\build\bin\Release\mega_defense_server.exe --port 27016 --server-id mega-local-1
+.\build\bin\Release\mega_defense_server.exe --port 27016 --server-id mega-local-1 `
+  --match-id <MATCH_ID> --player-id <PLAYER_1_ID> --player-id <PLAYER_2_ID>
 .\build\bin\Release\mega_defense.exe --join 127.0.0.1 27016 --token <PLAYER_1_GAME_TOKEN>
 .\build\bin\Release\mega_defense.exe --join 127.0.0.1 27016 --token <PLAYER_2_GAME_TOKEN>
 ```
+
+외부 API의 배정은 신뢰된 로컬 제어 프로세스가 위 인자로 넘긴다. 서버는 매치 ID와 두 플레이어의 원문 ID를 토큰과 대조하고, 이 모드에서는 UDP queue 요청을 거부한다. 인자가 없는 서버는 제품 내부 queue에서 형성한 명단을 사용한다. `scripts/check_live_mega.ps1`은 로컬 인계와 두 끝점의 승인·snapshot 수신을 확인한다. 자동 fleet agent·heartbeat·결과 제출을 구현한 것은 아니다.
 
 개발 기본 비밀은 `live_service_lab`과 일치해 로컬 실습을 단순화한다. 배포에서는 두 프로세스에
 같은 32바이트 이상 비밀을 Base64로 넣은 `LIVE_SERVICE_TOKEN_SECRET`을 주입해야 한다. 토큰은

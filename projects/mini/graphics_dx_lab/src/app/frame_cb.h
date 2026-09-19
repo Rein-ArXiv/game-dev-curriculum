@@ -17,7 +17,12 @@ struct FrameCB {
     float               time;
     DirectX::XMFLOAT3   lightDir;
     float               pad;
+    // 루트 CBV 에 넘기는 GPU 가상 주소는 256바이트 정렬이어야 하므로
+    // (D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT) 프레임 슬롯 stride 인
+    // sizeof(FrameCB) 를 256 으로 채운다. 셰이더는 앞 96바이트만 읽는다.
+    float               slotPad[40];
 };
+static_assert(sizeof(FrameCB) == 256, "FrameCB slot stride must be 256 bytes");
 
 struct CameraSetup {
     DirectX::XMFLOAT3 eye{60.0f, 40.0f, 60.0f};

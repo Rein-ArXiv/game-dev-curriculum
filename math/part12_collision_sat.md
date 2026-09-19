@@ -69,7 +69,7 @@ flowchart LR
 
 분리 평면은 *연속적으로 무한히 많다*. 모두 검사하면 무한 비용. 그러나 *볼록 도형의 면 법선과 변 방향* 만 *유한 후보* 로 검사하면 충분하다는 게 SAT의 실용적 명제.
 
-**유한 후보 정리**: 두 볼록 다각형/다면체에 대해 *분리축이 존재하면, 그 분리축은 다음 후보 중 하나에 평행하다*.
+**유한 후보 정리**: 두 볼록 다각형/다면체에 대해 *분리되어 있으면, 다음 후보 중 적어도 하나가 분리축이다*.
 
 - (2D) 두 다각형의 *변의 법선*.
 - (3D) 두 다면체의 *면의 법선* 또는 *두 도형 변의 외적*.
@@ -607,19 +607,15 @@ if (dot(centerDelta, axis) < 0) normal = -normal;
 ### 7.4 침투 해소
 
 ```cpp
-void ResolvePenetration(Body& a, Body& b, SATResult sat) {
+// splitA 는 a 가 떠맡는 몫 (0~1). 나머지 1 - splitA 를 b 가 맡아 두 이동량의 합이 정확히 depth.
+void ResolvePenetration(vec3& posA, vec3& posB, SATResult sat, float splitA) {
     if (!sat.isColliding) return;
-    // 질량 비율로 push 분배
-    float total = a.invMass + b.invMass;
-    if (total <= 0) return;  // 둘 다 정적
-    float ratioA = a.invMass / total;
-    float ratioB = b.invMass / total;
-    a.position -= sat.normal * sat.depth * ratioA;
-    b.position += sat.normal * sat.depth * ratioB;
+    posA -= sat.normal * (sat.depth * splitA);
+    posB += sat.normal * (sat.depth * (1.0f - splitA));
 }
 ```
 
-*역 질량 비율* 로 분배. 정적 (invMass = 0) 도형은 안 움직이고 *동적 도형만* 더 많이 밀린다.
+기하가 정하는 것은 *분리 방향 (normal) 과 총 이동량 (depth)* 까지다. 두 도형이 그 depth 를 어떻게 나눠 갖는지 — 한쪽만 밀지, 반씩 밀지, 질량에 따라 밀지 — 는 질량과 motion type 을 아는 동역학 모델의 몫이다.
 
 ### 7.5 Contact Manifold
 
@@ -739,7 +735,7 @@ SAT 의 *후보 폭증* 과 *곡면 부적합* 이 한계다. *GJK + EPA* 는 �
 - Dirk Gregorius, "The Separating Axis Test between Convex Polyhedra" (GDC 2013) — Gauss Map 기반 SAT 최적화.
 - David Eberly, *Game Physics* — 충돌·물리 알고리즘의 종합.
 - Erin Catto (Box2D 저자) GDC talks — 2D 물리 엔진의 SAT 활용.
-- Box2D 소스 (`box2d/src/collision/`) — 산업 표준 2D 충돌.
+- Box2D v2.4 소스 (`box2d/src/collision/`; v3 은 `src/` 평면 구조) — 산업 표준 2D 충돌.
 - Bullet Physics (`bullet3/src/BulletCollision/NarrowPhaseCollision/`) — 3D SAT 구현.
 - Real-Time Rendering, 4th ed., Ch. 22 — 그래픽스 관점의 충돌·교차.
-- V-HACD (KhronosGroup) — 볼록 분해의 산업 표준 라이브러리.
+- V-HACD (Khaled Mamou, `kmammou/v-hacd`) — 볼록 분해의 산업 표준 라이브러리.

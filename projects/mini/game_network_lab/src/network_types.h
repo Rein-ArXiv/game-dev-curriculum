@@ -48,6 +48,9 @@ struct ServerConfig {
     std::uint32_t prepostedDatagrams = 32;
     std::uint32_t maxConnections = 4096;
     std::size_t maxQueuedSendBytesPerConnection = 256 * 1024;
+    // true: 127.0.0.1 에만 bind. 테스트와 단일 PC 실행용 — 외부 인터페이스를 열지
+    // 않으므로 Windows 방화벽의 "이 앱의 통신 허용" 알림이 뜨지 않는다.
+    bool loopbackOnly = false;
 };
 
 class IServerBackend {

@@ -95,7 +95,7 @@ void TestFrameTimerHistory() {
         timer.EndFrame();
     }
     CHECK(timer.HistoryHead() == 2);
-    CHECK(timer.History().size() == (size_t)gllab::FrameTimer::kHistorySize);
+    CHECK(timer.History()[1] < last2);   // 슬롯 1 은 링이 한 바퀴 돌아 빈 프레임으로 덮어썼다.
 }
 
 // step02 가 추가한 프레임 카운터 — Reset 이 일곱 칸을 모두 되돌리는가.
@@ -305,7 +305,7 @@ void TestBindingCosts() {
 
 // lighting_bindings.cpp 의 실제 갱신 계획과 헤더의 예측 모델을 맞댄다.
 // Apply 의 per-call 루프는 BuildPerCallUniformNames 를 그대로 순회하므로,
-// 그 루프를 무력화하면 CountBindingCost 도 함께 무너져 여기서 죽는다.
+// 그 이름 목록을 만드는 루프를 무력화하면 CountBindingCost 도 함께 무너져 여기서 죽는다.
 void TestCountedBindingCostMatchesModel() {
     const gllab::BindingMode modes[] = {
         gllab::BindingMode::PerCallUniform,
@@ -411,7 +411,9 @@ void TestBlockBytes() {
             h = h > 1 ? h / 2 : 1;
         }
         CHECK(gllab::ExpectedMipChainBytes(m, 512, 512) == total);
-        // mip chain 은 base level 보다 크고 4/3 배를 넘지 않는다.
+        // mip chain 은 base level 보다 크고, 2×2·1×1 레벨이 블록 하나를 통째로
+        // 차지하는 패딩 몫(압축 포맷에서 최대 약 27 B)을 빼면 4/3 배를 넘지 않는다.
+        // 아래 + 64 가 그 패딩 몫의 여유다.
         const int base = gllab::BlockBytesFor(m, 512, 512);
         CHECK(total > base);
         CHECK(total <= base * 4 / 3 + 64);

@@ -31,8 +31,8 @@ DX11의 Immediate Context가 호출 한 줄 뒤에서 자동으로 처리하던 
 | 메모리 residency | 드라이버 자동 | 앱이 `MakeResident`/`Evict` |
 | 셰이더 상수 패치 | `XXSetConstantBuffers` | Root Signature + Heap |
 | 파이프라인 상태 | 분산된 set 호출 N개 | PSO 한 객체 |
-| 명령 기록 | 단일 Immediate Context | N개 Command List 병렬 |
-| 멀티 큐 | Deferred Context (드라이버 의존) | Direct / Compute / Copy 큐 명시 |
+| 명령 기록 | 단일 Immediate Context (Deferred Context 는 드라이버 의존) | N개 Command List 병렬 |
+| 멀티 큐 | 없음 (제출은 Immediate Context 하나) | Direct / Compute / Copy 큐 명시 |
 | 동기화 | 드라이버 자동 | Fence 명시 |
 
 ### 사라진 추상화: 자동 상태 추적과 residency
@@ -96,7 +96,7 @@ mip 체인이나 텍스처 배열 같은 큰 자원은 자원 전체가 아니�
 
 ```cpp
 barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-// 또는 0 .. (MipLevels * ArraySize - 1) 중 한 인덱스
+// 또는 0 .. (MipLevels * ArraySize * PlaneCount - 1) 중 한 인덱스
 ```
 
 Subresource 단위 추적이 의미를 가지는 대표 사례가 셰이더로 mip을 생성하는 패스다. 0번 mip을 셰이더 리소스로 읽어 1번 mip을 UAV로 쓰고, 다시 1번을 읽어 2번을 쓰는 식으로 진행할 때, mip마다 State가 다른 시점이 존재한다. 이때 자원 전체를 한 State로 묶으면 표현할 수 없고, Subresource별로 `PIXEL_SHADER_RESOURCE`와 `UNORDERED_ACCESS`를 따로 지정해야 한다.
@@ -251,11 +251,11 @@ allocator->Reset();                          // 메모리 풀을 통째로 비�
 cmdList->Reset(allocator.Get(), nullptr);    // List 를 다시 열린 상태로
 ```
 
-`allocator->Reset`은 풀에 쌓인 명령 메모리를 한 번에 회수한다. 따라서 GPU가 그 명령들을 아직 실행 중일 때 호출하면 미정의 동작이며, 실행 완료를 펜스로 확인한 뒤에만 안전하다. 반면 `cmdList->Reset`은 List가 가리키던 Allocator만 비어 있다면 GPU가 그 List의 명령을 실행 중이어도 호출할 수 있다. List 자체는 명령을 보관하지 않고 Allocator에 흘려보내기만 하기 때문이다.
+`allocator->Reset`은 풀에 쌓인 명령 메모리를 한 번에 회수한다. 따라서 GPU가 그 명령들을 아직 실행 중일 때 호출하면 미정의 동작이며, 실행 완료를 펜스로 확인한 뒤에만 안전하다. 반면 `cmdList->Reset`은 넘기는 Allocator가 다른 기록 중인 List에 묶여 있지만 않다면 GPU가 그 List의 명령을 실행 중이어도 호출할 수 있다. List 자체는 명령을 보관하지 않고 Allocator에 흘려보내기만 하기 때문이다.
 
 ### Frame in Flight 패턴
 
-CPU가 다음 프레임의 명령을 기록하는 동안 GPU가 현재 프레임을 그리게 하려면, 프레임마다 별도의 Allocator와 List가 필요하다. GPU가 N번 프레임을 그리는 사이 CPU가 N+1번 프레임을 기록하려면, N번 프레임이 쓰던 Allocator를 건드리지 않아야 하기 때문이다.
+CPU가 다음 프레임의 명령을 기록하는 동안 GPU가 현재 프레임을 그리게 하려면, 프레임마다 별도의 Allocator가 필요하다(List는 `Reset`으로 Allocator를 갈아 끼우며 하나를 재사용해도 되지만, 아래 예제는 슬롯마다 하나씩 둔다). GPU가 N번 프레임을 그리는 사이 CPU가 N+1번 프레임을 기록하려면, N번 프레임이 쓰던 Allocator를 건드리지 않아야 하기 때문이다.
 
 ```cpp
 constexpr UINT FRAMES_IN_FLIGHT = 3;
@@ -298,7 +298,7 @@ void BeginFrame() {
 
 - **NVIDIA Pascal 이전**: 그래픽스와 컴퓨트가 같은 엔진에서 컨텍스트 스위칭으로 번갈아 돌아, 비동기 컴퓨트의 이득이 작거나 오히려 손해인 경우가 있었다.
 - **NVIDIA Turing 이후**: 그래픽스와 컴퓨트를 진정으로 동시에 실행하는 비동기 컴퓨트를 지원한다.
-- **AMD GCN/RDNA**: ACE(Async Compute Engine)가 여러 컴퓨트 큐를 동시에 받아들여, 세대에 따라 2~4개의 컴퓨트 워크로드를 병렬로 처리한다. 비동기 컴퓨트의 이득이 상대적으로 크다.
+- **AMD GCN/RDNA**: ACE(Async Compute Engine)가 여러 컴퓨트 큐를 동시에 받아들여, 세대에 따라 2~8개의 ACE가 각각 독립 큐를 여럿 관리하며 컴퓨트 워크로드를 병렬로 처리한다. 비동기 컴퓨트의 이득이 상대적으로 크다.
 - **Intel Arc**: 복수 엔진 토폴로지를 갖지만 워크로드에 따라 실효 병렬성이 달라진다.
 
 따라서 비동기 컴퓨트를 적용했다고 무조건 빨라진다고 가정하면 안 된다. PIX on Windows, AMD의 RGP(Radeon GPU Profiler), NVIDIA Nsight 같은 도구로 실제 GPU 타임라인을 확인해, 두 엔진이 정말 겹쳐서 돌고 있는지 측정한 뒤에 판단한다.
@@ -394,7 +394,7 @@ Shader Visible Heap은 GPU 메모리에 살고 셰이더가 실행 중에 직접
 ```cpp
 D3D12_DESCRIPTOR_HEAP_DESC desc{};
 desc.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-desc.NumDescriptors = 1000000;     // Tier 2 이상에서 Shader Visible 은 1M 까지
+desc.NumDescriptors = 1000000;     // Shader Visible 은 Tier 1 부터 1M 까지 (Tier 3 는 그 이상)
 desc.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 
 ComPtr<ID3D12DescriptorHeap> heap;
@@ -439,7 +439,7 @@ cmdList->SetDescriptorHeaps(1, heap.GetAddressOf());   // 먼저 Heap 바인딩
 cmdList->SetGraphicsRootDescriptorTable(rootParamIdx, gpuHandle);
 ```
 
-`SetDescriptorHeaps`로 Heap을 큐에 바인딩하는 단계를 빠뜨리면 GPU 핸들이 가리키는 곳이 무효가 된다. 디스크립터 작성은 CPU가 미리 해 두고, 드로우 시점에는 GPU 핸들 오프셋을 root parameter 슬롯에 묶는 가벼운 작업만 남는 것이 이 모델의 장점이다.
+`SetDescriptorHeaps`로 Heap을 명령 리스트에 바인딩하는 단계를 빠뜨리면 GPU 핸들이 가리키는 곳이 무효가 된다. 디스크립터 작성은 CPU가 미리 해 두고, 드로우 시점에는 GPU 핸들 오프셋을 root parameter 슬롯에 묶는 가벼운 작업만 남는 것이 이 모델의 장점이다.
 
 ### 페이지네이션과 Bindless
 

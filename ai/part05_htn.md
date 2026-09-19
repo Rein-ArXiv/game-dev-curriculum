@@ -129,6 +129,7 @@ struct WorldState {
         mask |= (1ull << k);
         if (v) values |= (1ull << k); else values &= ~(1ull << k);
     }
+    bool Get(WSKey k) const { return (values >> k) & 1ull; }
     // this(현재 상태)가 cond(전제조건)을 만족하는가
     bool Satisfies(const WorldState& cond) const {
         // cond.mask 가 켜진 비트만 비교
@@ -311,7 +312,11 @@ Domain의 핵심 설계 가치는 *데이터 주도성* 이다. Tasks·Methods·
   "primitives": {
     "MoveToCover": { "pre": ["CoverAvailable"], "eff": ["AtCover"],         "op": "Op_MoveToCover" },
     "Shoot":       { "pre": ["AmmoOK"],         "eff": ["-AmmoOK"],         "op": "Op_Shoot" },
-    "Reload":      { "pre": [],                 "eff": ["AmmoOK","-IsReloading"], "op": "Op_Reload" }
+    "Reload":      { "pre": [],                 "eff": ["AmmoOK","-IsReloading"], "op": "Op_Reload" },
+    "Aim":         { "pre": [],                 "eff": [],                  "op": "Op_Aim" },
+    "Flank":       { "pre": ["AtCover"],        "eff": ["EnemyInRange"],    "op": "Op_Flank" },
+    "Investigate": { "pre": ["HeardNoise"],     "eff": ["-HeardNoise"],     "op": "Op_Investigate" },
+    "Patrol":      { "pre": [],                 "eff": [],                  "op": "Op_Patrol" }
   }
 }
 ```
@@ -509,13 +514,13 @@ $$N=\frac{s^{h+1}-1}{s-1}\approx\frac{s}{s-1}\,L=\Theta(L).$$
 
 게임이 이 지수를 피하는 이유는 둘이다. 전순서(§1)는 *앞 작업의 effect가 뒤 작업 전제를 즉시 거른다* — 막힘이 잎이 아니라 분해 도중 일찍 드러나, 가지가 $m^{C}$로 자라기 전에 잘린다. 그리고 강한 전제(작업당 매칭 메서드가 보통 1개)는 유효 $m$을 1에 가깝게 눌러 $m^{C}\to 1$로 붕괴시킨다. 실측 선형성은 $m\approx1$의 결과이지 알고리즘이 주는 보장이 아니다.
 
-**GOAP와의 분기 대조.** 같은 깊이 $d$에서 GOAP A*의 탐색 트리는 적용 가능한 행동 수 $b\le|A|$로 분기해 최악 $O(b^{d})$이며 상한은 상태 공간 크기 $2^{P}$다. HTN은 분기를 *Compound 노드에서 $m$개 메서드* 로만, 그것도 결정 지점 $C\le d$곳에서만 한다.
+**GOAP와의 분기 대조.** 같은 깊이 $d$에서 GOAP A*의 탐색 트리는 적용 가능한 행동 수 $b\le|A|$로 분기해 최악 $O(b^{d})$이며 상한은 상태 공간 크기 $2^{P}$다. HTN은 분기를 *Compound 노드에서 $m$개 메서드* 로만, 그것도 결정 지점 $C$곳에서만 한다(각 Method가 하위 작업을 2개 이상 펼치면 $C\le d$지만, 하위 작업 1개짜리 Method 사슬에서는 $C$가 $d$를 넘을 수 있다).
 
 | 양 | GOAP | HTN |
 |---|---|---|
 | 분기 위치 | 모든 상태 | Compound 노드만 |
 | 분기 폭 | $b\le\lvert A\rvert$ | $m$(적용 메서드) |
-| 최악 탐색량 | $O(b^{d})$, 상한 $2^{P}$ | $O(m^{C})$, $C\le d$ |
+| 최악 탐색량 | $O(b^{d})$, 상한 $2^{P}$ | $O(m^{C})$ |
 | 행동 풀 $\lvert A\rvert{=}20$·$d{=}6$ | $20^{6}\approx6.4\times10^{7}$ | $C{=}4,m{=}3\Rightarrow 3^{4}=81$ |
 
 디자이너가 분해를 짜는 노동이 곧 런타임 분기 $\lvert A\rvert^{d}$를 컴파일 타임 $m^{C}$로 바꾼다. 위 절 마지막 문장의 정량형이 이 표다.
@@ -676,7 +681,7 @@ flowchart LR
 
 차이를 구체화하기 위해 같은 문제를 두 방식이 어떻게 푸는지 본다. 목표는 "적을 사살한다", 가용 행동은 `MoveToCover`, `Flank`, `Aim`, `Shoot`, `Reload` 다.
 
-GOAP는 목표 `EnemyDead=true` 에서 역방향으로 탐색한다. EnemyDead를 만드는 행동은 Shoot(effect: `EnemyDead`). Shoot의 전제는 `AmmoOK & InRange`. AmmoOK를 만드는 건 Reload, InRange를 만드는 건 MoveToCover나 Flank. 이렇게 *전제를 충족하는 행동을 거슬러* 가며 A*로 최단(또는 최저 비용) 시퀀스를 찾는다. 탄약이 없고 엄폐가 필요한 상황이면 `[Reload, MoveToCover, Aim, Shoot]` 같은 시퀀스가 *탐색으로* 도출된다 — 디자이너가 이 순서를 적어 둔 적이 없어도.
+GOAP는 목표 `EnemyDead=true` 에서 역방향으로 탐색한다. EnemyDead를 만드는 행동은 Shoot(effect: `EnemyDead`). Shoot의 전제는 `AmmoOK & InRange`. AmmoOK를 만드는 건 Reload, InRange를 만드는 건 MoveToCover나 Flank. 이렇게 *전제를 충족하는 행동을 거슬러* 가며 A*로 최단(또는 최저 비용) 시퀀스를 찾는다. 탄약이 없고 엄폐가 필요한 상황이면 `[Reload, MoveToCover, Shoot]` 같은 시퀀스가 *탐색으로* 도출된다 — 디자이너가 이 순서를 적어 둔 적이 없어도.
 
 HTN은 6절의 트레이스처럼 EngageEnemy를 *분해* 한다. 디자이너가 적어 둔 Method 중 매칭되는 것을 골라 펼치고, 막히면 폴백 Method로 백트래킹한다. 같은 상황에서 `[Reload, Aim, Shoot]` 가 나오는데, 이 시퀀스의 *모양은 디자이너가 Method로 정해 둔 것* 이다. GOAP가 탐색으로 발견하는 조합을, HTN은 디자이너가 미리 설계한다.
 

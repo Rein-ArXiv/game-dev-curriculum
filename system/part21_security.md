@@ -32,15 +32,16 @@
 ```bash
 $ ls -l /bin/bash
 -rwxr-xr-x 1 root root 1183448 Feb  18  2024 /bin/bash
- ││││││││
- │││││││└─ other: execute
- ││││││└── other: read
- │││││└─── other: write (없음)
- ││││└──── group: execute
- │││└───── group: read
- ││└────── group: write (없음)
- │└─────── owner: execute
- └──────── owner: read/write
+ │││││││││
+ ││││││││└─ other: execute
+ │││││││└── other: write (없음)
+ ││││││└─── other: read
+ │││││└──── group: execute
+ ││││└───── group: write (없음)
+ │││└────── group: read
+ ││└─────── owner: execute
+ │└──────── owner: write
+ └───────── owner: read
 ```
 
 **3개의 ID로 판단:**
@@ -113,8 +114,8 @@ drwxrwsr-x 2 root staff 4096 Dec 24 10:00 /shared
 $ chmod +t /tmp
 $ ls -ld /tmp
 drwxrwxrwt 20 root root 4096 Dec 24 10:00 /tmp
-        ^
-        └─ 't' = sticky bit
+         ^
+         └─ 't' = sticky bit
 ```
 
 ### DAC의 근본적 한계
@@ -122,8 +123,9 @@ drwxrwxrwt 20 root root 4096 Dec 24 10:00 /tmp
 **문제 1: root의 절대 권력**
 ```c
 // fs/namei.c
-if (capable(CAP_DAC_OVERRIDE))  // root는 이 권한 보유
-    return 0;  // 모든 권한 검사 우회
+if (!(mask & MAY_EXEC) || (inode->i_mode & S_IXUGO))
+    if (capable_wrt_inode_uidgid(idmap, inode, CAP_DAC_OVERRIDE))  // root는 이 권한 보유
+        return 0;  // 읽기/쓰기 검사 우회 (실행은 실행 비트가 하나라도 있어야 한다)
 ```
 
 **문제 2: 소유자의 재량**
@@ -726,7 +728,7 @@ struct sock_fprog prog = {
 };
 
 // 적용
-// NNP가 켜지지 않으면 비특권 사용자는 PR_SET_SECCOMP가 EPERM으로 실패한다.
+// NNP가 켜지지 않으면 비특권 사용자는 PR_SET_SECCOMP가 EACCES로 실패한다.
 if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) perror("nnp");
 if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) < 0) perror("seccomp");
 
@@ -916,16 +918,17 @@ write_file("/proc/self/gid_map", "0 1000 1");
 // 3. 다른 namespace 생성 (이제 권한 있음)
 unshare(CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWNET);
 
-// 4. Capability 제한
+// 4. 루트 변경 (CAP_SYS_CHROOT 가 아직 있을 때)
+chroot("/var/lib/container/rootfs");
+chdir("/");
+
+// 5. Capability 제한
 cap_t caps = cap_init();
 cap_set_proc(caps);
 
-// 5. Seccomp 적용
+// 6. Seccomp 적용 (NNP 를 먼저 켜야 CAP_SYS_ADMIN 없이도 필터를 설치할 수 있다)
+prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
 prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog);
-
-// 6. 루트 변경
-chroot("/var/lib/container/rootfs");
-chdir("/");
 
 // 7. 컨테이너 프로세스 실행
 execve("/bin/sh", ...);
@@ -950,7 +953,7 @@ void choose_random_location(unsigned long input,
                            unsigned long output,
                            unsigned long *virt_addr) {
     unsigned long random = get_boot_seed();  // 부팅 시 엔트로피
-    unsigned long offset = random % (512 * 1024 * 1024);  // 최대 512MB
+    unsigned long offset = random % (1024 * 1024 * 1024);  // 최대 1GB (KASLR 활성 빌드의 KERNEL_IMAGE_SIZE)
 
     *virt_addr = KERNEL_IMAGE_START + offset;
     // 예: 0xffffffff81000000 + 0x12345000
@@ -1104,8 +1107,9 @@ CONFIG_X86_SHADOW_STACK=y
 # 1. 전용 사용자 생성
 $ useradd -r -s /bin/false nginx
 
-# 2. Capability로 포트 바인딩
-$ setcap cap_net_bind_service=+ep /usr/sbin/nginx
+# 2. Capability로 포트 바인딩: setcap 대신 5의 unit에서 AmbientCapabilities= 로 부여한다
+#    (5의 ProtectSystem=strict 가 rootfs 를 nosuid 로 재마운트해 커널이 파일 capability 를 읽지 않고,
+#     NoNewPrivileges=yes 아래서는 실행 전 permitted 에 없던 capability 를 파일 capability 로 새로 얻을 수도 없다)
 
 # 3. AppArmor 프로필
 $ cat /etc/apparmor.d/usr.sbin.nginx
@@ -1141,6 +1145,7 @@ $ cat nginx-seccomp.json
 $ cat /etc/systemd/system/nginx.service
 [Service]
 User=nginx
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes

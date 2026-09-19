@@ -206,7 +206,7 @@ GPU 비용.
 |---|---|---|---|
 | 8 | 0.2 | 0.4 | 1.5 |
 | 32 | 0.6 | 0.4 | 3.0 |
-| 64 | 1.2 | 0.4 | 5.8 |
+| 64 | 1.2 | 0.4 | 5.5 |
 
 per-call 의 CPU 가 *광원에 정비례* 늘어남이 분명. UBO 는 *일정* (한 회 호출). GPU 는 *광원 수에 정비례* — fragment shader 의 loop.
 
@@ -285,7 +285,7 @@ CHECK(gllab::CountBindingCost(gllab::BindingMode::UBO, 8).uniformUpdates ==
       gllab::CountBindingCost(gllab::BindingMode::UBO, 64).uniformUpdates);
 ```
 
-`CountBindingCost` 는 `Apply` 의 per-call 루프가 순회하는 uniform 이름 목록을 그대로 세므로, 그 루프를 지우면 예측값도 함께 무너져 테스트가 죽는다.
+`CountBindingCost` 는 `Apply` 의 per-call 루프가 순회하는 uniform 이름 목록 (`BuildPerCallUniformNames`) 을 그대로 세므로, 그 목록을 만드는 루프를 무력화하면 예측값이 함께 무너져 여기서 죽는다. `Apply` 쪽 루프만 지우면 예측값은 남고 아래 렌더 테스트가 갈린다.
 
 렌더 쪽은 실제 컨텍스트에서 `Apply` 를 호출해 카운터 증가분이 그 예측과 정확히 일치하는지 확인한다 — 셰이더에 없는 uniform 은 `glUniform` 호출 자체가 없으므로, 계수 규칙이 실제 GL 호출 수와 어긋나면 여기서 갈라진다.
 

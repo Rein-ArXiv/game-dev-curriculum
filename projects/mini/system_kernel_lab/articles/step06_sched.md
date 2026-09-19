@@ -129,15 +129,30 @@ ApplySchedToCurrentThread(schedType_);
 
 bool ApplySchedToCurrentThread(SchedType type) {
     switch (type) {
-        case SchedType::Default:
+        case SchedType::Default: {
             // 명시적 reset. 현재 스레드를 기본 정책으로.
-            ::setpriority(PRIO_PROCESS, SklGettid(), 0);
-            {
-                sched_param p{};
-                p.sched_priority = 0;
-                ::pthread_setschedparam(::pthread_self(), SCHED_OTHER, &p);
+            // 둘 다 시도하고, 하나라도 실패하면 stderr + false.
+            bool ok = true;
+            if (::setpriority(PRIO_PROCESS,
+                              static_cast<id_t>(SklGettid()), 0) != 0) {
+                std::fprintf(stderr,
+                    "skl: setpriority(nice=0) failed: %s — keeping current "
+                    "nice. Check ulimit -e and CAP_SYS_NICE.\n",
+                    std::strerror(errno));
+                ok = false;
             }
-            return true;
+            sched_param p{};
+            p.sched_priority = 0;
+            const int rc = ::pthread_setschedparam(::pthread_self(),
+                                                    SCHED_OTHER, &p);
+            if (rc != 0) {
+                std::fprintf(stderr,
+                    "skl: pthread_setschedparam(SCHED_OTHER) failed: %s — "
+                    "keeping current policy\n", std::strerror(rc));
+                ok = false;
+            }
+            return ok;
+        }
 
         case SchedType::Nice:
             return ApplyNice(10);
@@ -152,6 +167,13 @@ bool ApplySchedToCurrentThread(SchedType type) {
     return true;
 }
 ```
+
+`Default` 는 "아무것도 안 하는 분기" 가 아니다. `nice` 를 *내리는* 방향(+10 → 0)은
+권한이 필요하다 — `RLIMIT_NICE` 여유(`ulimit -e`)도 `CAP_SYS_NICE` 도 없으면
+`setpriority` 가 `EACCES` 로 실패하고 스레드는 `nice +10` 인 채로 남는다. 이때 `true` 를
+돌려주면 호출 측이 기록하는 "정책이 적용됐다" 가 거짓이 된다. 그래서 이 분기도 예외
+없이 계약을 지킨다 — 실패를 stderr 로 알리고 `false`. 다만 한쪽이 실패해도 다른 한쪽은
+그대로 시도한다. 되돌릴 수 있는 만큼은 되돌리는 것이 best-effort 폴백의 뜻이다.
 
 ### ApplyNice
 
@@ -263,7 +285,8 @@ bool ApplyCgroupCpuWeight(int weight) {
     const std::string dir = CurrentCgroupV2Path();
     if (dir.empty()) {
         std::fprintf(stderr,
-            "skl: cgroup v2 not detected — keeping default\n");
+            "skl: no usable cgroup v2 path (not detected, or SKL_CGROUP_DIR does "
+            "not approve it) — keeping default\n");
         return false;
     }
     CaptureOriginalCgroupWeight(dir);
@@ -304,7 +327,7 @@ cat /proc/self/cgroup
 ls -la /sys/fs/cgroup/user.slice/user-1000.slice/session-3.scope/cpu.weight
 ```
 
-쓰기 권한이 없으면 `chmod` 로 줄 수 없다 (cgroup 파일은 가상 파일시스템). systemd의 cgroup delegation 설정이 필요하다. 이 lab은 *환경에 따라 동작 여부가 갈리는* 토글이라 *실패 시 안내 + 폴백* 패턴이 본질.
+쓰기 권한이 없으면 `chmod` 로 줄 수 없다 (파일이 root 소유라 비소유자는 chmod 할 수 없다). systemd의 cgroup delegation 설정이 필요하다. 이 lab은 *환경에 따라 동작 여부가 갈리는* 토글이라 *실패 시 안내 + 폴백* 패턴이 본질.
 
 ### systemd-run으로 깨끗한 cgroup에서 실행
 
@@ -467,9 +490,9 @@ sched apply : NO (see stderr / N/A)
 workers     : 4
 files       : 16  x  1.05 MB
 cycle ms    :   5.421
-throughput  :  3093.9 MB/s
+throughput  :  3094.9 MB/s
 total cycles: 482
-total MB    : 8079.7
+total MB    : 8086.6
 ```
 
 sched는 두 줄이다. `sched req` 는 *현재 토글 값*, `sched apply` 는 *그 정책이 실제로 적용됐는지* 를 보여준다. 실패 원인은 stats에 담기지 않고 *stderr 메시지* 로 안내하므로, 도구를 터미널에서 실행하면 그 메시지를 함께 볼 수 있다.
@@ -533,7 +556,7 @@ sudo setcap cap_sys_nice+ep ./build/system_kernel_lab
 ### 검증 체크리스트
 
 - SCHED_FIFO 선택 시 stderr에 *Operation not permitted* → 권한 부족. `setcap` 또는 sudo로 실행.
-- cgroup 선택 시 stderr에 *cgroup v2 not detected* → v1 또는 hybrid cgroup. systemd 기반 최신 Linux는 보통 v2.
+- cgroup 선택 시 stderr에 *refusing to modify the current cgroup* → `SKL_CGROUP_DIR` 미설정 또는 경로 불일치(v2 는 검출된 상태). 메시지가 알려 주는 경로를 그대로 export 한다. 그 줄 없이 *no usable cgroup v2 path* 만 나오면 v1 또는 hybrid cgroup. systemd 기반 최신 Linux는 보통 v2.
 - cgroup 선택 시 stderr에 *writing ... failed: Permission denied* → cgroup delegation 부재. systemd-run --user --scope 로 새 cgroup 안에서 실행.
 - 부하 없이 토글 변경에 *효과 없음* → 정상. stress-ng 등으로 부하 추가.
 - SCHED_FIFO 선택 시 *시스템 전체가 멈춰 보임* → 실시간 워커가 너무 많이 CPU 점유. 워커 수를 줄이거나, 권한을 제거하고 default 정책으로 되돌린다.
@@ -590,8 +613,27 @@ void TestSchedThreadPolicyFallback() {
             CHECK(param.sched_priority == 50);
         // ... (else: SKL_REQUIRE_SCHED=fifo 가 걸려 있으면 폴백을 실패로 센다)
         }
+        // 주입: Default 의 nice 복원이 실패하면 false 가 나와야 한다.
+        {
+            ScopedFault fault("setpriority:0:EACCES");
+            CHECK(!skl::ApplySchedToCurrentThread(skl::SchedType::Default));
+            CHECK(skl::FaultInjectionCount("setpriority") == 1);
+        }
         // 실패했든 성공했든 스레드는 살아 있고 기본으로 돌아갈 수 있어야 한다.
-        CHECK(skl::ApplySchedToCurrentThread(skl::SchedType::Default));
+        // 다만 nice +10 → 0 은 권한이 필요한 방향이라 무권한 기기에서는 실패가
+        // 정상이다 — 반환값을 그냥 통과시키는 대신 getpriority 로 되물어
+        // 반환값과 실제 nice 가 서로 맞는지를 단언한다.
+        errno = 0;
+        const int niceBefore = ::getpriority(PRIO_PROCESS, 0);
+        CHECK(errno == 0);
+        CHECK(niceBefore == 10);
+        const bool defaultOk =
+            skl::ApplySchedToCurrentThread(skl::SchedType::Default);
+        errno = 0;
+        const int niceAfter = ::getpriority(PRIO_PROCESS, 0);
+        CHECK(errno == 0);
+        CHECK(niceAfter == (defaultOk ? 0 : 10));
+        // ...
         {
             // 원상 복원 확인 — FIFO 가 성공했던 경우에도 SCHED_OTHER 로
             // 돌아와야 뒤의 검사가 실시간 우선순위를 물려받지 않는다.
@@ -606,6 +648,8 @@ void TestSchedThreadPolicyFallback() {
     worker.join();
 }
 ```
+
+`Default` 복원도 같은 대조를 받는다. 주입으로 `setpriority` 를 `EACCES` 로 만들면 어느 기기에서든 `false` 가 나와야 하고, 주입을 푼 복원에서는 `getpriority` 로 커널에 되물어 *반환값과 실제 nice 가 맞는지* 를 본다 — `true` 면 `nice 0`, `false` 면 `nice +10` 이 그대로 남아 있어야 한다. `nice +10 → 0` 은 우선순위를 *올리는* 방향이라 `RLIMIT_NICE` 여유가 없는 보통 머신에서는 `EACCES` 로 실패하는 것이 정상이다. 반환값을 `CHECK` 로 그냥 통과시키면 그 자리에서는 *무엇도 검사하지 않는* 셈이 된다.
 
 `무주입: nice 를 올리는 것은 권한이 필요 없다` 줄이 대조군이다. 실패만 확인하면 *항상 `false` 를 돌려주는* 구현도 통과한다. `nice` 를 올리는 쪽은 일반 사용자도 되므로, 같은 함수가 조건에 따라 두 답을 낸다는 것을 여기서 보인다.
 
@@ -634,6 +678,7 @@ stdout (`/tmp/out.txt`):
 ```text
 [ run  ] step06  sched thread policy fallback
   SCHED_FIFO applied without injection: no (expected without CAP_SYS_NICE)
+  Default nice reset: 10 -> 10 (EACCES; nice +10 kept, false returned)
   SCHED_FIFO success path: skipped (no privilege; fallback verified)
 [  ok  ] step06  sched thread policy fallback
 [ run  ] step06  sched cgroup fallback
@@ -649,10 +694,12 @@ stderr (`/tmp/err.txt`):
 skl: setpriority(nice=10) failed: Permission denied — keeping default
 skl: pthread_setschedparam(SCHED_FIFO, prio=50) failed: Operation not permitted — keeping default. Check ulimit -r and CAP_SYS_NICE.
 skl: pthread_setschedparam(SCHED_FIFO, prio=50) failed: Operation not permitted — keeping default. Check ulimit -r and CAP_SYS_NICE.
+skl: setpriority(nice=0) failed: Permission denied — keeping current nice. Check ulimit -e and CAP_SYS_NICE.
+skl: setpriority(nice=0) failed: Permission denied — keeping current nice. Check ulimit -e and CAP_SYS_NICE.
 skl: refusing to modify the current cgroup. Set SKL_CGROUP_DIR exactly to '/sys/fs/cgroup/init.scope' only for a delegated, disposable benchmark cgroup.
-skl: cgroup v2 not detected — keeping default
+skl: no usable cgroup v2 path (not detected, or SKL_CGROUP_DIR does not approve it) — keeping default
 skl: refusing to modify the current cgroup. Set SKL_CGROUP_DIR exactly to '/sys/fs/cgroup/init.scope' only for a delegated, disposable benchmark cgroup.
-skl: cgroup v2 not detected — keeping default
+skl: no usable cgroup v2 path (not detected, or SKL_CGROUP_DIR does not approve it) — keeping default
 skl: reading /sys/fs/cgroup/init.scope/cpu.weight failed — keeping default
 skl: writing /sys/fs/cgroup/init.scope/cpu.weight failed: Permission denied — keeping default
 ```

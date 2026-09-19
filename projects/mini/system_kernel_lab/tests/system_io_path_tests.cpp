@@ -40,6 +40,7 @@
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -730,6 +731,51 @@ void PrintDrainStats(const char* label,
               << " leftoverCqes=" << st.leftoverCqes << '\n';
 }
 
+void CheckCallbackExceptionCleanup(const skl::BackendType* types, std::size_t count) {
+    constexpr std::size_t kRequest = 64 * 1024;
+    SizedFixture fixture({kRequest, kRequest, kRequest, kRequest}, "callback");
+    for (std::size_t i = 0; i < count; ++i) {
+        if (!skl::BackendCompiledIn(types[i])) continue;
+        auto backend = MakeExact(types[i]);
+        const auto fdBefore = OpenFdCount();
+        ScopedFault observe("aio_return:100000000:EIO");
+        int callbacks = 0;
+        bool caught = false;
+        try {
+            backend->RunCycle(fixture.Paths(), kRequest,
+                [&](const unsigned char*, std::size_t) {
+                    ++callbacks;
+                    throw std::runtime_error("callback sentinel");
+                });
+        } catch (const std::runtime_error& e) {
+            caught = std::string(e.what()) == "callback sentinel";
+        }
+        CHECK(caught);
+        CHECK(callbacks == 1);
+        CHECK(OpenFdCount() == fdBefore);
+        if (types[i] == skl::BackendType::Aio) {
+            CHECK(skl::FaultCallCount("aio_return") == fixture.Paths().size());
+        }
+        if (types[i] == skl::BackendType::Uring) {
+            auto* uring = dynamic_cast<skl::UringBackend*>(backend.get());
+            CHECK(uring != nullptr);
+            if (uring) CHECK(uring->LastDrainStats().requestCqes == fixture.Paths().size());
+        }
+        const auto after = RunOneCycle(*backend, fixture.Paths(), kRequest);
+        CHECK(!after.threw);
+        CHECK(after.bytes == fixture.ExpectedBytes(kRequest));
+        CHECK(OpenFdCount() == fdBefore);
+    }
+}
+
+void TestSyncCallbackExceptions() {
+    CheckCallbackExceptionCleanup(kSyncBackends, 2);
+}
+
+void TestAsyncCallbackExceptions() {
+    CheckCallbackExceptionCleanup(kAsyncBackends, 2);
+}
+
 // io_uring: 대기 API 가 죽어 사이클을 포기할 때 IORING_OP_ASYNC_CANCEL 을 걸고
 // *원 요청 CQE 와 취소 요청 CQE 를 모두* 수확해야 한다. CQE 개수로 센다.
 //
@@ -817,6 +863,20 @@ void TestUringCancelDrainsBothCqes() {
     }
     CHECK(OpenFdCount() == fdBefore);
 
+    // A timeout is not evidence that the kernel released the buffers.
+    {
+        const std::string spec = "io_uring_wait_cqe:0:EIO:1,io_uring_drain_wait:0:"
+            + std::to_string(ETIME) + ":3";
+        ScopedFault fault(spec);
+        const auto bad = RunOneCycle(*backend, fixture.Paths(), kRequest);
+        CHECK(bad.threw);
+        CHECK(skl::FaultInjectionCount("io_uring_drain_wait") == 3);
+        CHECK(backend->LastDrainStats().requestCqes == kFiles);
+        CHECK(backend->LastDrainStats().cancelCqes == kFiles);
+        CHECK(backend->LastDrainStats().leftoverCqes == 0);
+        CHECK(OpenFdCount() == fdBefore);
+    }
+
     const CycleResult after = RunOneCycle(*backend, fixture.Paths(), kRequest);
     CHECK(!after.threw);
     CHECK(after.bytes == fixture.ExpectedBytes(kRequest));
@@ -833,11 +893,13 @@ const skl_test::StepCase kCases[] = {
      &TestShortReadContractSyncBackends},
     {3, "fifo rejected by pread/mmap",
      &TestFifoRejectedByNonStreamBackends},
+    {3, "sync callback exception cleanup",  &TestSyncCallbackExceptions},
     {4, "short read contract (aio/io_uring)",
      &TestShortReadContractAsyncBackends},
     {4, "fifo blocking async wait EINTR",   &TestFifoBlockingAsyncWaitEintr},
     {4, "aio cancel drains every request",  &TestAioCancelDrainsEveryRequest},
     {4, "io_uring cancel drains both cqes", &TestUringCancelDrainsBothCqes},
+    {4, "async callback exception cleanup", &TestAsyncCallbackExceptions},
 };
 
 }  // namespace

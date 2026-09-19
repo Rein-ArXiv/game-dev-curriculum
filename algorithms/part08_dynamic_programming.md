@@ -212,7 +212,7 @@ $$
 ```text
 삭제: dp[i-1][j] + delete_cost
 삽입: dp[i][j-1] + insert_cost
-대체/일치: dp[i-1][j-1] + replace_cost
+대체/일치: dp[i-1][j-1] + (A[i-1]=B[j-1] ? 0 : replace_cost)
 ```
 
 비용이 음수이거나 작업 sequence에 상호작용이 있으면 단순 recurrence 전제가 달라진다.
@@ -233,7 +233,7 @@ Interval DP는 연속 구간 `[l,r)`의 답을 작은 구간으로 분할한다.
 
 ### Matrix-chain multiplication
 
-행렬 $A_i$의 크기가 $p_{i-1}\times p_i$일 때 곱셈 순서에 따라 scalar multiplication 수가 달라진다.
+행렬 $A_i$의 크기가 $p_{i-1}\times p_i$일 때 곱셈 순서에 따라 scalar multiplication 수가 달라진다. 이 점화식은 관례대로 닫힌 구간 $[i..j]$, 즉 $A_i\cdots A_j$의 최소 비용을 $dp[i][j]$로 둔다.
 
 $$
 dp[i][j]=\min_{i\le k<j}

@@ -17,7 +17,7 @@
 5. [Futex: 사용자 공간 동기화의 핵심](#5-futex-사용자-공간-동기화의-핵심)
 6. [RCU: Read-Copy-Update의 혁명](#6-rcu-read-copy-update의-혁명)
 7. [Per-CPU 변수: 동기화 없는 동기화](#7-per-cpu-변수-동기화-없는-동기화)
-8. [시퀀스 락 Seqlock: 쓰기 우선 동기화](#8-시퀀스-락-seqlock-쓰기-우선-동기화)
+8. [시퀀스 락 (Seqlock): lockless reader와 직렬화된 writer](#8-시퀀스-락-seqlock-lockless-reader와-직렬화된-writer)
 
 
 ---
@@ -177,7 +177,7 @@ struct mutex {
 ```c
 void mutex_lock(struct mutex *lock) {
     // Fast Path: 락이 비어있으면 즉시 획득
-    if (atomic_long_try_cmpxchg_acquire(&lock->owner, 0, current))
+    if (atomic_long_try_cmpxchg_acquire(&lock->owner, &(unsigned long){0}, (unsigned long)current))
         return;
 
     // Slow Path: 슬립
@@ -194,7 +194,7 @@ static void __mutex_lock_slowpath(struct mutex *lock) {
     for (;;) {
         set_current_state(TASK_UNINTERRUPTIBLE);
 
-        if (atomic_long_try_cmpxchg_acquire(&lock->owner, 0, current))
+        if (atomic_long_try_cmpxchg_acquire(&lock->owner, &(unsigned long){0}, (unsigned long)current))
             break;
 
         schedule();  // 스케줄러에게 CPU 양보
@@ -231,7 +231,7 @@ static bool mutex_optimistic_spin(struct mutex *lock) {
         if (owner && !owner_on_cpu(owner))
             break;
 
-        if (atomic_long_try_cmpxchg_acquire(&lock->owner, 0, current)) {
+        if (atomic_long_try_cmpxchg_acquire(&lock->owner, &(unsigned long){0}, (unsigned long)current)) {
             osq_unlock(&lock->osq);
             return true;
         }
@@ -305,10 +305,11 @@ void wait_for_completion(struct completion *x) {
 void complete(struct completion *x) {
     unsigned long flags;
 
-    spin_lock_irqsave(&x->wait.lock, flags);
-    x->done++;
-    __wake_up_locked(&x->wait, TASK_NORMAL, 1);
-    spin_unlock_irqrestore(&x->wait.lock, flags);
+    raw_spin_lock_irqsave(&x->wait.lock, flags);
+    if (x->done != UINT_MAX)
+        x->done++;
+    swake_up_locked(&x->wait);
+    raw_spin_unlock_irqrestore(&x->wait.lock, flags);
 }
 ```
 
@@ -460,7 +461,8 @@ static struct futex_hash_bucket futex_queues[1 << FUTEX_HASHBITS];
 long do_futex(u32 __user *uaddr, int op, u32 val) {
     union futex_key key;
     struct futex_hash_bucket *hb;
-    struct futex_q *q;
+    struct futex_q wait_q = { .task = current };  // FUTEX_WAIT용 대기 항목
+    struct futex_q *q;                            // FUTEX_WAKE 순회용
 
     // 가상 주소 -> 물리 페이지 매핑
     get_futex_key(uaddr, &key);
@@ -471,9 +473,11 @@ long do_futex(u32 __user *uaddr, int op, u32 val) {
     switch (op) {
     case FUTEX_WAIT:
         // 대기 큐에 추가
+        wait_q.key = key;
+
         spin_lock(&hb->lock);
         if (*uaddr == val) {  // 재검증 (race 방지)
-            plist_add(&q->list, &hb->chain);
+            plist_add(&wait_q.list, &hb->chain);
             spin_unlock(&hb->lock);
             schedule();  // 슬립
         } else {
@@ -513,7 +517,7 @@ if (*futex == 2)  // (1)
 *futex = 2;  // 다시 2로 설정
 ```
 
-Thread A는 `futex_wait`에서 영원히 대기할 수 있다. 커널의 재검증 로직이 이를 방지한다.
+커널의 재검증은 `*uaddr == val` 한 번의 비교라, 값이 떠났다가 같은 값으로 돌아온 이 경우에는 참이 되어 Thread A를 그대로 대기 큐에 넣는다. 재검증이 실제로 걸러내는 것은 값이 `val`과 다르게 남은 lost wakeup 창뿐이다. 이 인터리빙에서 A를 구하는 것은 값 2를 "대기자 있음"으로 약속하고 unlock이 `hb->lock` 순서 아래에서 반드시 `FUTEX_WAKE`를 보내는 사용자 공간 프로토콜이다.
 
 **우선순위 역전**:
 
@@ -525,7 +529,7 @@ High Priority Task -> Futex -> Low Priority Task (락 소유)
 Medium이 Low를 선점하면? High는 무한 대기. 해결책: **우선순위 상속 (PI Futex)**
 
 ```c
-syscall(SYS_futex, futex_addr, FUTEX_LOCK_PI, 0);
+syscall(SYS_futex, futex_addr, FUTEX_LOCK_PI, 0, NULL, NULL, 0);
 ```
 
 커널은 락 소유자의 우선순위를 일시적으로 상승시킨다.

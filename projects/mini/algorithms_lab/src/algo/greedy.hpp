@@ -74,7 +74,7 @@ struct Item { int64_t weight; int64_t value; };
 // 분할 가능 배낭은 탐욕이 *최적* 이다 — 밀도 높은 순으로 담다가 마지막을 쪼갠다.
 // 쪼갤 수 있다는 것이 교환 논증의 마지막 단계를 완성한다. 0/1 제약이 붙는 순간
 // 그 단계가 사라지고 탐욕은 근사조차 보장하지 못한다.
-// 반환은 정확도 손실을 피하려 value*capacity 스케일의 유리수 분자로 준다.
+// 반환은 분할 가능 최적값 그 자체(double)다 — 마지막 물건의 몫만 value*room/weight 로 계산한다.
 inline double FractionalKnapsack(std::vector<Item> items, int64_t capacity) {
     std::vector<size_t> id(items.size());
     for (size_t i = 0; i < items.size(); ++i) id[i] = i;
@@ -204,7 +204,7 @@ inline int64_t CoinGreedy(std::vector<int64_t> coins, int64_t amount) {
 
 // snippet-begin: greedy-rent-or-buy
 // 스키 대여 문제. 하루 대여 1, 구매 B. 며칠 탈지 모르는 채로 결정해야 한다.
-// break-even 전략(B 일치 대여한 뒤 구매)의 경쟁비는 2 - 1/B 이하다.
+// break-even 전략(B-1 일치 대여한 뒤 B 일째 구매)의 경쟁비는 2 - 1/B 이하다.
 // 이 함수는 그 상계와 실측 최악비를 함께 낼 수 있게 비용 둘을 돌려준다.
 struct RentOrBuy {
     int64_t online  = 0;

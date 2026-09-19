@@ -82,7 +82,7 @@ DrawLine(gx, gy,      gx,      gy + gh, Color{180, 180, 180, 255});
 
 <!-- snippet: src/scenes/projection_scene.cpp@depth-graph-labels -->
 ```cpp
-DrawText("View Z (near → far)", gx + gw / 2 - 60,
+DrawText("View Z (near -> far)", gx + gw / 2 - 60,
           gy + gh + 6, 12, Color{200, 200, 200, 255});
 DrawText("NDC z", gx - 50, gy + gh / 2, 12, Color{200, 200, 200, 255});
 DrawText("0", gx - 16, gy + gh - 6, 12, Color{200, 200, 200, 255});
@@ -276,7 +276,7 @@ GuiSlider(Rectangle{(float)(px + 8), (float)(y + 18), 220, 16},
            nullptr, nullptr, &kahanBig_, 0.0f, 100000.0f);
 ```
 
-N 이 1M 까지 — 한 프레임 안에 *naive + kahan 두 합산* 을 끝내야 60fps 안전. 1M float 덧셈 두 번 = 약 2~3ms. 안전 범위.
+N 이 1M 까지 — 한 프레임 안에 double 참값 루프, 시계열 루프의 naive + kahan, 그리고 `NaiveSum` / `KahanSum` 까지 *O(N) 합산 다섯 개* 를 끝내야 60fps 안전. 1M 덧셈 다섯 번 = 약 5ms (MSVC /O2 실측 4.8ms). 안전 범위.
 
 ## 8. 빌드와 실행 결과 + math_lab 의 마무리
 
@@ -301,7 +301,7 @@ cmake --build build --config Release
 
 이 Scene 의 계산은 전부 `src/algo/depth.h` 와 `src/algo/kahan.h` 로 나와 있어, 화면을 띄우지 않고도 위 수치가 그대로 검사된다. 이 step 이 `tests/core_tests.cpp` 에 추가한 것은 네 개다 — `depth/std_vs_reverse`, `kahan/compensated_sum`, 그리고 이 Scene 이 쓰지는 않지만 `src/algo/mat.h` 로 들어온 계산부를 검사하는 `vector/cross_project_reflect` 와 `matrix/inverse_orthogonal_trs`.
 
-깊이 쪽은 끝점 네 개 (`StdNdcZ(-n)=0`, `StdNdcZ(-f)=1`, reverse 는 각각 1 과 0) 로 시작하지만, 끝점만 보면 두 함수를 통째로 뒤바꿔도 통과할 수 있다. 그래서 전 구간을 41 지점으로 훑어 *단조성* 과 *`reverse == 1 - std`* 를 함께 건다.
+깊이 쪽은 끝점 네 개 (`StdNdcZ(-n)=0`, `StdNdcZ(-f)=1`, reverse 는 각각 1 과 0) 로 시작하지만, 끝점 네 개는 함수별 기대값을 고정하므로 두 함수를 통째로 뒤바꾸면 첫 CHECK 부터 걸리지만, 끝점만 맞춘 다른 매핑 — 예컨대 거리 선형 `(-z-n)/(f-n)` 과 그 여집합 — 은 통과한다. 그래서 전 구간을 41 지점으로 훑어 *단조성* 과 *`reverse == 1 - std`* 를 함께 걸고, 절반 거리의 값을 두 CHECK 로 더 본다 — 선형 매핑을 실제로 걸러내는 것은 이 마지막 둘이다.
 
 <!-- snippet: tests/core_tests.cpp@step08-depth-reverse -->
 ```cpp
@@ -442,9 +442,9 @@ $ ./build/Release/math_core_tests.exe step08
 [step08] kahan/compensated_sum ........... 8 checks, 0 failed
 [step08] vector/cross_project_reflect .... 1208 checks, 0 failed
 [step08] matrix/inverse_orthogonal_trs ... 322 checks, 0 failed
-[step08] matrix/inverse-roundtrip ........ 3 checks, 0 failed  (3000 samples, 1417 non-degenerate, 0 skipped, worst 0.235x on '|det(M) - sx sy sz|')
-[step08] matrix/compose-vs-apply ......... 3 checks, 0 failed  (2000 samples, 2000 non-degenerate, 0 skipped, worst 0.022x on '|(A B) p - A (B p)|')
-[step08] matrix/quat-agreement ........... 3 checks, 0 failed  (3000 samples, 2549 non-degenerate, 0 skipped, worst 0.312x on 'max|R^T R - I|')
+[step08] matrix/inverse-roundtrip ........ 3 checks, 0 failed  (3000 samples, 1386 non-degenerate, 0 skipped, worst 0.250x on '|det(M) - sx sy sz|')
+[step08] matrix/compose-vs-apply ......... 3 checks, 0 failed  (2000 samples, 2000 non-degenerate, 0 skipped, worst 0.021x on '|(A B) v - A (B v)| (direction)')
+[step08] matrix/quat-agreement ........... 3 checks, 0 failed  (3000 samples, 2480 non-degenerate, 0 skipped, worst 0.312x on 'max|R^T R - I|')
 step08: 7 case(s), 1635 check(s), 0 failure(s)
 ```
 

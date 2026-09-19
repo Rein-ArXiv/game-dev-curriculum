@@ -171,7 +171,7 @@ $$
 \text{IPC} = \frac{\text{instructions}}{\text{cycles}}
 $$
 
-로 계산할 수 있지만 낮은 IPC만으로 memory bound를 증명할 수는 없다. Halt, frequency 변화, frontend stall, dependency도 IPC를 낮춘다. Cache miss, stalled cycle, bandwidth, wall time을 함께 본다.
+로 계산할 수 있지만 낮은 IPC만으로 memory bound를 증명할 수는 없다. Frequency 변화, frontend stall, dependency도 IPC를 낮춘다. Cache miss, stalled cycle, bandwidth, wall time을 함께 본다.
 
 Counter가 hardware slot보다 많으면 kernel이 multiplex한다. 이때 각 event의 enabled time과 running time으로 scaling한 추정치가 나오므로 짧은 실행에서는 오차가 커질 수 있다.
 
@@ -397,7 +397,7 @@ Sanitizer를 켠 build는 timing과 memory layout이 달라진다. Sanitizer에�
 
 ### KGDB
 
-KGDB는 serial 또는 network transport를 통해 GDB가 kernel을 멈추고 register, memory, breakpoint를 검사하게 한다. 정밀하지만 CPU를 정지시키므로 timer, lock timeout, distributed timing을 깨뜨린다.
+KGDB는 serial transport(kgdboc)를 통해 GDB가 kernel을 멈추고 register, memory, breakpoint를 검사하게 한다. 정밀하지만 CPU를 정지시키므로 timer, lock timeout, distributed timing을 깨뜨린다.
 
 KGDB에 적합한 문제:
 

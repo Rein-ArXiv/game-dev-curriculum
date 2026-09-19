@@ -469,7 +469,8 @@ Bitmap을 사용하면 free slot을 매우 빠르게 찾을 수 있다:
 // Free slot 찾기 (CTZ: Count Trailing Zeros)
 unsigned long bitmap = slab->bitmap[idx];
 int free_bit = __builtin_ctzl(~bitmap);  // 하드웨어 명령어, O(1)
-void* ptr = slab->base + free_bit * size_class;
+size_t slot = idx * (8 * sizeof(unsigned long)) + free_bit;  // word 인덱스 반영
+void* ptr = slab->base + slot * size_class;
 ```
 
 CTZ 계열 연산은 지원 ISA에서 고정된 수의 명령으로 구현할 수 있어 전체 free list를 선형 탐색하는 것보다 유리하다. 정확한 latency와 throughput은 명령 선택, 입력 의존성, 마이크로아키텍처에 따라 달라지므로 "항상 한 사이클"로 고정해서는 안 된다. 또한 비트맵 word가 모두 사용 중일 때 `ctz(0)`을 호출하지 않도록 상위 수준에서 빈 word를 판별해야 한다.
@@ -708,7 +709,8 @@ public:
         for (int i = 0; i < used_slots_ && total < n; ++i) {
             Entry& e = slots_[i];
             int to_move = std::min(e.count, n - total);
-            memcpy(&batch[total], e.objects, to_move * sizeof(void*));
+            memcpy(&batch[total], &e.objects[e.count - to_move],
+                   to_move * sizeof(void*));
             total += to_move;
             e.count -= to_move;
         }
@@ -842,7 +844,7 @@ tcmalloc의 Per-CPU mode는 front-end 캐시 수를 활성 스레드 수가 아�
 
 ### 핵심 아이디어: Page-Local Free List
 
-전통적인 할당자(tcmalloc, jemalloc)는 크기 클래스별로 전역 free list를 유지한다:
+많은 할당자는 크기 클래스별로 중앙 free list를 유지한다(ptmalloc2의 bin, tcmalloc의 CentralFreeList가 그 예다):
 
 ```cpp
 전역 Free List (64바이트):
@@ -902,20 +904,21 @@ void* mi_malloc(size_t size) {
     // 3. 현재 페이지
     mi_page_t* page = heap->pages[bin];
 
-    // 4. Local free list (락 없음, 빠름!)
-    if (page->local_free != NULL) {
-        mi_block_t* block = page->local_free;
-        page->local_free = block->next;
+    // 4. Free list (락 없음, 빠름!)
+    if (page->free != NULL) {
+        mi_block_t* block = page->free;
+        page->free = block->next;
         return block;
     }
 
-    // 5. Thread free list 수확
-    if (page->thread_free != NULL) {
-        mi_page_collect_free(page);  // thread_free → local_free 이동
+    // 5. local_free와 원격 free list 수확
+    if (page->local_free != NULL ||
+        mi_atomic_load_relaxed(&page->xthread_free) != 0) {
+        mi_page_collect_free(page);  // xthread_free → local_free → free 병합
         // 재시도
-        if (page->local_free != NULL) {
-            mi_block_t* block = page->local_free;
-            page->local_free = block->next;
+        if (page->free != NULL) {
+            mi_block_t* block = page->free;
+            page->free = block->next;
             return block;
         }
     }
@@ -950,12 +953,12 @@ void mi_free(void* ptr) {
         uintptr_t tfree;
 
         do {
-            tfree = mi_atomic_load_relaxed(&page->thread_freed);
+            tfree = mi_atomic_load_relaxed(&page->xthread_free);
             block->next = (mi_block_t*)(tfree & ~0x3);
         } while (!mi_atomic_cas_weak_release(
-            &page->thread_freed,
+            &page->xthread_free,
             tfree,
-            (uintptr_t)block
+            (uintptr_t)block | (tfree & 0x3)   // 상태 비트 보존
         ));
     }
 }
@@ -1510,7 +1513,7 @@ g++ bench.cpp -fopenmp -lmimalloc -o bench_mimalloc
 
 2. **glibc malloc 소스 코드**
  https://sourceware.org/git/?p=glibc.git;a=blob;f=malloc/malloc.c
- ptmalloc2 구현 전체 (14,000+ 라인)
+ ptmalloc2 구현 전체 (약 6,000 라인)
 
 3. **glibc Malloc Internals Wiki**
  https://sourceware.org/glibc/wiki/MallocInternals

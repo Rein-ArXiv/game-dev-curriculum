@@ -18,8 +18,6 @@ endif()
 # raylib을 FetchContent로 가져온다. 별도 시스템 설치 불필요.
 include(FetchContent)
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(BUILD_GAMES    OFF CACHE BOOL "" FORCE)
-set(SUPPORT_MODULE_RAUDIO OFF CACHE BOOL "" FORCE)  # 오디오 불필요
 
 FetchContent_Declare(
     raylib

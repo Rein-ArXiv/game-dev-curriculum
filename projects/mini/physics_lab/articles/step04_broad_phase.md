@@ -171,7 +171,7 @@ for (auto& [key, bucket] : grid) {
 }
 ```
 
-`seen` 의 hash set 으로 *이미 검사한 쌍을 skip*. cellSize 가 너무 작으면 *대부분 박스가 4 셀 점유 → seen lookup 비용이 dominant*. cellSize 가 너무 크면 *Brute 에 가까워짐*.
+`seen` 의 hash set 으로 *이미 검사한 쌍을 skip*. cellSize 가 너무 작으면 *박스마다 점유 셀이 $(2h/c + 1)^2$ 개로 불어나 (cellSize = 2 × bodyHalf 에서 이미 4 셀, bodyHalf 와 같으면 9 셀) → 등록 + seen lookup 비용이 dominant*. cellSize 가 너무 크면 *Brute 에 가까워짐*.
 
 *경험적 좋은 값* — cellSize ≈ 2 ~ 4 × bodyHalf. 우리 Scene 의 슬라이더로 직접 조정 가능.
 
@@ -238,7 +238,7 @@ msHist_.Push((float)algoUs);
 
 **N = 100, body half = 8, 균등 분포, 속도 100 px/s.**
 
-캔버스 1000 × 700 → 셀 60 px 격자로 약 17 × 12 = 204 셀. 평균 box 점유 셀 ≈ 1 ~ 2. 평균 셀당 box ≈ 0.5.
+캔버스 1000 × 664 → 셀 60 px 격자로 약 17 × 12 = 204 셀. 평균 box 점유 셀 ≈ 1 ~ 2. 평균 셀당 box ≈ 0.5.
 
 - Brute: candidates = 4950. AabbOverlap 4950 번. 측정값 ~30 us.
 - SAP: candidates ≈ 200 ~ 400 (x-overlap pair 만). 정렬 + sweep 비용. 측정값 ~50 us.
@@ -256,7 +256,7 @@ msHist_.Push((float)algoUs);
 
 **N = 200, cellSize = 8 (너무 작음), bodyHalf = 8.**
 
-각 body 가 4 셀 차지 → dedupe 비용 폭증. Hash 가 *Brute 보다 느려질 수 있음*. cell size 슬라이더로 조정하며 *최적점이 어디인지* 직접 측정.
+각 body 가 9 셀 (축당 3 셀) 을 차지 → dedupe 비용 폭증. Hash 가 *Brute 보다 느려질 수 있음*. cell size 슬라이더로 조정하며 *최적점이 어디인지* 직접 측정.
 
 **N = 200, *모든 body 가 한 줄에 배치*** (SAP 의 약점):
 

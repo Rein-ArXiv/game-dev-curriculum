@@ -83,7 +83,7 @@ inline float Smoothstep(float t) { return t * t * (3.0f - 2.0f * t); }
 inline float Quintic(float t)    { return t * t * t * (t * (t * 6 - 15) + 10); }
 ```
 
-- *Smoothstep* — 1차·2차 미분 연속 (C¹). Value 노이즈에 충분.
+- *Smoothstep* — 1차 미분 연속 (C¹), 2차 미분은 셀 경계에서 끊긴다. Value 노이즈에 충분.
 - *Quintic* — 1차·2차 미분 모두 연속 (C²). Perlin 의 *기울기 부드러움* 을 위해 필수. math part10 의 표준.
 
 ## 3. Value · Perlin · Simplex 구현
@@ -242,7 +242,7 @@ void NoiseScene::OnEnter() {
 ```cpp
 void NoiseScene::RebuildIfNeeded() {
     if (!dirty_) return;
-    // ... 캔버스 크기가 변했으면 pixels_ 재할당 ...
+    // ... pixels_ 크기가 texW_ * texH_ (256×256 고정) 와 다르면 재할당 ...
     auto sample = [&](float x, float y, uint32_t s) -> float {
         switch (kind_) {
             case Kind::Value:   return nz::Value2D(x, y, s) * 2.0f - 1.0f;
@@ -276,7 +276,7 @@ void NoiseScene::RebuildIfNeeded() {
 
 `Value2D` 는 *[0, 1]* 범위 — `* 2.0f - 1.0f` 로 *[-1, 1]* 로 매핑해 다른 둘과 같은 형식. 클램프 + 8-bit 양자화로 그레이스케일.
 
-다만 *세 노이즈의 실제 출력 범위가 같지 않다*. seed=7 로 20 만 표본 + 격자 스캔을 돌려 재면 `Perlin2D` 는 약 *[-0.535, 0.535]*, `Simplex2D` 는 약 *[-0.684, 0.684]* 다 — 둘 다 교과서의 *[-1, 1]* 보다 좁다. 원인은 `Grad2` 가 축 정렬 단위 벡터 4 종만 쓰기 때문 (표준 구현은 길이 √2 급 그래디언트 12 종을 쓰고, `Simplex2D` 의 `70.0` 은 그 표준 구현에서 온 정규화 상수다). 그래서 위의 `v * 0.5 + 0.5` 매핑에서 *Value 는 0~255 를 전부 쓰고 Perlin 은 약 59~196, Simplex 는 약 40~215 만 쓴다* — 세 토글을 나란히 볼 때 *대비 차이* 가 먼저 눈에 들어온다는 점을 감안하고 봐야 한다.
+다만 *세 노이즈의 실제 출력 범위가 같지 않다*. seed=7 로 20 만 표본 + 격자 스캔을 돌려 재면 `Perlin2D` 는 약 *[-0.535, 0.535]*, `Simplex2D` 는 약 *[-0.684, 0.684]* 다 — 둘 다 교과서의 *[-1, 1]* 보다 좁다. 원인은 `Grad2` 가 축 정렬 단위 벡터 4 종만 쓰기 때문 (Gustavson 의 표준 구현은 3D 용 12 종 표를 2D 로 투영해 대각 √2 4 종 + 축 정렬 단위 4 종을 쓰고, `Simplex2D` 의 `70.0` 은 그 표준 구현에서 온 정규화 상수다). 그래서 위의 `v * 0.5 + 0.5` 매핑에서 *Value 는 0~255 를 전부 쓰고 Perlin 은 약 59~196, Simplex 는 약 40~215 만 쓴다* — 세 토글을 나란히 볼 때 *대비 차이* 가 먼저 눈에 들어온다는 점을 감안하고 봐야 한다.
 
 ## 6. Dirty flag 로 재계산 절감
 
@@ -423,7 +423,7 @@ if (!obs.Bound("|Simplex2D| over measured bound", std::fabs((double)simplex),
 
 상계가 헐거우면 성질이 자명해진다. 그래서 이 property 에는 조항이 하나 더 붙는다 — *관측 최댓값이 선언한 상계의 70% 이상* 이어야 한다. 실행 요약이 그 두 수를 그대로 찍는다. 기본 표본 6,000 개에서 최대 |Perlin| = 0.534333, 상계 0.536244 (99.6%). `--scale=200` (120 만 표본) 으로 늘리면 0.535241 까지 올라가 스캔값에 3e-6 까지 붙고, `|Simplex2D|` 의 최댓값은 0.684005 로 헤더 주석의 0.684 와 정확히 맞는다.
 
-Simplex 쪽에는 조합을 다 세는 오라클이 없다. 상계는 여전히 *실측* 이고 property 는 거기에 1% 여유를 붙여 고정할 뿐이다. 이것이 지키는 것은 "값이 [−0.684, 0.684] 안이라는 법칙" 이 아니라 "그라디언트 집합이나 정규화 상수 `70.0` 이 바뀌면 즉시 드러난다" 는 회귀 방어다. 두 상계의 성격이 다르다는 것을 계약 문자열에도 적어 뒀다 — `scanned bound` 대 `measured bound`.
+Simplex 쪽에는 조합을 다 세는 오라클이 없다. 상계는 여전히 *실측* 이고 property 는 거기에 1% 여유를 붙여 고정할 뿐이다. 이것이 지키는 것은 "값이 [−0.684, 0.684] 안이라는 법칙" 이 아니라 "그라디언트 집합이나 정규화 상수 `70.0` 이 범위를 *넓히는* 쪽으로 바뀌면 즉시 드러난다" 는 회귀 방어다. 두 상계의 성격이 다르다는 것을 계약 문자열에도 적어 뒀다 — `scanned bound` 대 `measured bound`.
 
 나머지 둘.
 
@@ -443,9 +443,9 @@ $ ctest --test-dir build -C Release -R math_step04_noise --output-on-failure
 ```text
 $ ./build/Release/math_core_tests.exe step04
 [step04] noise/value_perlin_simplex_fbm .. 91 checks, 0 failed
-[step04] noise/range-bounds .............. 4 checks, 0 failed  (6000 samples, 4706 non-degenerate, 0 skipped, worst 0.996x on '|Perlin2D| over scanned bound' = 0.534333 of 0.536244)
-[step04] noise/fbm-average ............... 3 checks, 0 failed  (2000 samples, 1090 non-degenerate, 0 skipped, worst 0.969x on '|FBM(Perlin)| over base bound')
-[step04] noise/lattice-seam .............. 3 checks, 0 failed  (3000 samples, 2160 non-degenerate, 0 skipped, worst 0.100x on '|Perlin across cell seam|')
+[step04] noise/range-bounds .............. 4 checks, 0 failed  (6000 samples, 4631 non-degenerate, 0 skipped, worst 0.992x on '|Perlin2D| over scanned bound' = 0.531951 of 0.536244)
+[step04] noise/fbm-average ............... 3 checks, 0 failed  (2000 samples, 1141 non-degenerate, 0 skipped, worst 0.969x on '|FBM(Perlin)| over base bound')
+[step04] noise/lattice-seam .............. 3 checks, 0 failed  (3000 samples, 2191 non-degenerate, 0 skipped, worst 0.100x on '|Perlin across cell seam|')
 step04: 4 case(s), 101 check(s), 0 failure(s)
 ```
 

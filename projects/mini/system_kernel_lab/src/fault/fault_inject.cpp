@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <limits>
 #include <vector>
 
 namespace skl {
@@ -64,6 +65,9 @@ bool ParseUnsigned(const std::string& token, std::size_t* out) {
     std::size_t value = 0;
     for (const char c : token) {
         if (c < '0' || c > '9') return false;
+        const auto digit = static_cast<std::size_t>(c - '0');
+        if (value > (std::numeric_limits<std::size_t>::max() - digit) / 10)
+            return false;
         value = value * 10 + static_cast<std::size_t>(c - '0');
     }
     *out = value;

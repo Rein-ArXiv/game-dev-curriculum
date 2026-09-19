@@ -130,7 +130,7 @@ mip의 실제 픽셀 데이터는 `GenerateMips`(DX11) 또는 컴퓨트 셰이�
 | UAV | 셰이더 무순서 읽기/쓰기 | `ID3D11UnorderedAccessView` | CBV/SRV/UAV Heap |
 | CBV | 상수 버퍼 | (DX11은 버퍼를 직접 바인딩) | CBV/SRV/UAV Heap |
 
-DX12의 디스크립터 힙(Descriptor Heap)은 뷰들을 담는 GPU 가시 배열이다. RTV와 DSV는 별도 힙에 모이고, SRV/UAV/CBV는 같은 힙(CBV_SRV_UAV)을 공유한다. 셰이더가 인덱스로 디스크립터에 접근하므로, 셰이더 가시 힙은 보통 하나의 큰 배열로 만들고 그 안에 수천 개의 뷰를 배치한다. DX11은 디스크립터 힙 개념을 노출하지 않고, 뷰 객체를 슬롯에 직접 바인딩한다.
+DX12의 디스크립터 힙(Descriptor Heap)은 뷰(디스크립터)들을 담는 연속 배열이다. RTV와 DSV는 별도 힙에 모이고, SRV/UAV/CBV는 같은 힙(CBV_SRV_UAV)을 공유한다. 셰이더가 인덱스로 디스크립터에 접근하므로, 셰이더 가시 힙은 보통 하나의 큰 배열로 만들고 그 안에 수천 개의 뷰를 배치한다. DX11은 디스크립터 힙 개념을 노출하지 않고, 뷰 객체를 슬롯에 직접 바인딩한다.
 
 ### SRV — 가장 자주 쓰이는 View
 
@@ -195,7 +195,7 @@ device->CreateUnorderedAccessView(hdrTex.Get(), &uav, &uavObj);
 | `DEFAULT` | O | O | X | X | VRAM | 정적 자원, 렌더 타겟 |
 | `IMMUTABLE` | O | X | X | X | VRAM | 생성 후 불변 (텍스처 / 메시) |
 | `DYNAMIC` | O | X | X | `Map` | 시스템 RAM 또는 Write-Combined | 매 프레임 갱신 (상수 버퍼) |
-| `STAGING` | X | X | O | O | 시스템 RAM | GPU → CPU 데이터 회수 |
+| `STAGING` | 복사만 | 복사만 | O | O | 시스템 RAM | GPU → CPU 데이터 회수 |
 
 `IMMUTABLE`은 생성 시점에 데이터를 한 번 넣고 영원히 바뀌지 않는 자원이다. 드라이버는 이 자원을 가장 빠른 VRAM에 자유롭게 배치할 수 있고, 어떤 동기화도 걱정하지 않는다. 정적 메시와 텍스처의 기본 선택이다. `DEFAULT`는 GPU가 읽고 쓸 수 있어 렌더 타겟이나 컴퓨트 출력에 쓰지만, CPU가 직접 손댈 수 없어 갱신은 `UpdateSubresource`를 거친다.
 
@@ -269,7 +269,7 @@ device->CreateCommittedResource(
     nullptr, IID_PPV_ARGS(&uploadBuf));
 ```
 
-`UPLOAD` 힙 자원은 생성 시 `D3D12_RESOURCE_STATE_GENERIC_READ` 상태여야 하고, 그 상태에서 변하지 않는다. CPU가 쓰고 GPU가 복사 소스로 읽는 두 역할만 하기 때문이다.
+`UPLOAD` 힙 자원은 생성 시 `D3D12_RESOURCE_STATE_GENERIC_READ` 상태여야 하고, 그 상태에서 변하지 않는다. CPU가 쓰고 GPU는 읽기만 하며, `GENERIC_READ`가 복사 소스·정점/인덱스/상수 버퍼·셰이더 리소스 등 읽기 상태 전부의 합집합이라 전환할 필요가 없기 때문이다.
 
 ### UMA와 Resizable BAR
 
@@ -291,7 +291,7 @@ if (arch.UMA) {
 
 ### Custom Heap
 
-`CUSTOM` 힙은 메모리 풀(CPU 측 L0인지 GPU 측 L1인지)과 CPU 페이지 속성(Write-Combined인지 Write-Back인지)을 직접 지정한다. UMA에서 읽기와 쓰기를 모두 캐시하는 Write-Back 통합 메모리를 잡거나, ReBAR가 켜진 디스크리트 GPU에서 L1 풀에 CPU 접근을 붙이는 조합이 가능하다. 일반 게임 코드에서는 거의 쓰지 않지만, 엔진의 메모리 관리자나 드라이버 특화 최적화에서 등장한다. 잘못된 풀/속성 조합은 디바이스 생성 실패를 부르므로, `D3D12_FEATURE_DATA_ARCHITECTURE`로 환경을 확인한 뒤에 쓴다.
+`CUSTOM` 힙은 메모리 풀(CPU 측 L0인지 GPU 측 L1인지)과 CPU 페이지 속성(Write-Combined인지 Write-Back인지)을 직접 지정한다. UMA에서 읽기와 쓰기를 모두 캐시하는 Write-Back 통합 메모리를 잡거나, ReBAR가 켜진 디스크리트 GPU에서 L1 풀에 CPU 접근을 붙이는 조합이 가능하다. 일반 게임 코드에서는 거의 쓰지 않지만, 엔진의 메모리 관리자나 드라이버 특화 최적화에서 등장한다. 잘못된 풀/속성 조합은 힙·자원 생성 실패(`E_INVALIDARG`)를 부르므로, `D3D12_FEATURE_DATA_ARCHITECTURE`로 환경을 확인한 뒤에 쓴다.
 
 ## 5. Resource와 View의 관계
 
@@ -391,7 +391,8 @@ CreateBufferInHeap(D3D12_HEAP_TYPE_UPLOAD,
 
 // 2. Map + memcpy + Unmap (오직 쓰기만)
 void* mapped = nullptr;
-uploadBuf->Map(0, nullptr, &mapped);
+D3D12_RANGE noRead{0, 0};            // CPU 는 읽지 않는다
+uploadBuf->Map(0, &noRead, &mapped);
 memcpy(mapped, vertexData, bufferSize);
 uploadBuf->Unmap(0, nullptr);
 

@@ -144,7 +144,7 @@ Heap: [prev | next | GameObject] -> [prev | next | GameObject] -> ...
 
 Intrusive List:
 Heap: [GameObject with embedded links] -> [GameObject with embedded links]
-       116B                                 116B
+       별도 node allocation 없음          별도 node allocation 없음
 ```
 
 `std::list<T>`는 일반적으로 링크와 `T`를 **같은 노드 할당 안에** 저장한다. 노드와 객체를 따로 두 번 할당하는 구조가 아니다. intrusive list의 차이는 이미 존재하는 객체 안의 링크를 사용해 별도 list node allocation을 없애고, 한 객체가 여러 자료구조의 수명 정책과 독립적으로 링크를 가질 수 있다는 데 있다.
@@ -398,6 +398,9 @@ private:
 Iterator 구현도 간결해진다:
 
 ```cpp
+// 이 Iterator는 훅 타입이 OwnedListNode<T>인 변형을 전제한다.
+// 즉 IntrusiveList의 인자도 `OwnedListNode<T> T::*NodePtr`가 되어야 한다.
+// 훅이 위의 plain ListNode인 채로 아래 static_cast를 쓰면 UB다.
 template<typename T>
 struct OwnedListNode : ListNode {
     T* owner = nullptr;
@@ -700,7 +703,7 @@ player->Update();  // dangling pointer
 
 ```cpp
 plf::colony<GameObject> entities;
-GameObject* player = &entities.emplace(/*...*/);
+GameObject* player = &*entities.emplace(/*...*/);
 
 for (int i = 0; i < 1000; i++) {
     entities.emplace(/*...*/);  // 새 요소 추가
@@ -733,7 +736,7 @@ player 포인터는 다른 원소의 삽입·삭제로 이동하지 않음
 plf::colony<Entity> entities;
 
 // 플레이어 포인터 저장
-Entity* player = &entities.emplace(/*player data*/);
+Entity* player = &*entities.emplace(/*player data*/);
 
 // 게임 루프
 while (running) {
@@ -1031,6 +1034,6 @@ int main() {
 - Linux 커널 `list.h` — <https://github.com/torvalds/linux/blob/master/include/linux/list.h>
 - [Boost.Intrusive 공식 문서](https://www.boost.org/doc/libs/release/doc/html/intrusive.html); Ion Gaztañaga, "Intrusive Containers"
 - [plf::colony](https://github.com/mattreecebentley/plf_colony), 표준화 제안 P0447 (`std::hive`)
-- Niklas Frykholm, "In-Depth: Intrusive Lists" — <https://www.gamedeveloper.com/programming/in-depth-intrusive-lists>
-- Richard Fabian, *Data-Oriented Design*; Jason Gregory, *Game Engine Architecture* 5장
+- John McCutchan, "In-Depth: Intrusive Lists" — <https://www.gamedeveloper.com/programming/in-depth-intrusive-lists>
+- Richard Fabian, *Data-Oriented Design*; Jason Gregory, *Game Engine Architecture* 3판 6장 "Engine Support Systems"
 - Chandler Carruth, "Efficiency with Algorithms, Performance with Data Structures" (CppCon 2014) — <https://www.youtube.com/watch?v=fHNmRkzxHWs>

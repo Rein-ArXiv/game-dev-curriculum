@@ -126,8 +126,8 @@ ctest --test-dir build -C Release --output-on-failure
 ctest --test-dir build -C Release -R math_step05_collision --output-on-failure
 ./build/Release/math_core_tests.exe step05
 # [step05] collision/sat_vs_gjk ............ 14 checks, 0 failed
-# [step05] collision/sat-gjk-agree ......... 4 checks, 0 failed  (5000 samples, 734 non-degenerate, 1 skipped, worst 0.000x)
-# [step05] collision/axis-witness .......... 4 checks, 0 failed  (2500 samples, 2131 non-degenerate, 0 skipped, worst 0.004x on '|separating axis| - 1')
+# [step05] collision/sat-gjk-agree ......... 4 checks, 0 failed  (5000 samples, 755 non-degenerate, 0 skipped, worst 0.000x)
+# [step05] collision/axis-witness .......... 4 checks, 0 failed  (2500 samples, 2099 non-degenerate, 0 skipped, worst 0.004x on '|separating axis| - 1')
 # [step05] collision/rigid-invariance ...... 4 checks, 0 failed  (3000 samples, 456 non-degenerate, 0 skipped, worst 0.000x)
 # step05: 4 case(s), 26 check(s), 0 failure(s)
 ```

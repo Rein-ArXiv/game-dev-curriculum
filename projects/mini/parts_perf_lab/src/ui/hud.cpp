@@ -289,7 +289,7 @@ void Hud::DrawFrameGraph(const FrameTimer& timer, int x, int y, int w, int h) {
     DrawText(label, x + 6, y + 4, 12, GRAY);
 
     // 우측 상단: 라인 범례.
-    const int legendX = x + w - 158;
+    const int legendX = x + w - 160;
     const int legendY = y + 4;
     DrawRectangle(legendX, legendY,     8, 8, Color{200, 220, 255, 220});
     DrawText("frame",     legendX + 12, legendY,     10, LIGHTGRAY);

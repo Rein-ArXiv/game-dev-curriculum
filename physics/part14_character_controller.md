@@ -294,7 +294,7 @@ if (length(displacement) < 1e-5f) break;
 이 알고리즘이 *Quake 의 `PM_FlyMove`* 와 같음. 1996 년부터의 FPS 표준. *id Tech 엔진* 의 reference 구현.
 
 ```c
-// Quake3 의 cm_trace.c + bg_pmove.c
+// Quake3 의 cm_trace.c + bg_slidemove.c (PM_SlideMove)
 // pm->velocity 를 따라 sweep, hit normal 로 clip, 반복
 ```
 
@@ -354,7 +354,7 @@ vec3 MoveWithStep(UprightCapsule cap, vec3 horizDisplacement, const World& world
     if (!downHit.hit || !IsWalkable(downHit.normal)) {
         return baseCap.center;  // 절벽 또는 오를 수 없는 경사다.
     }
-    cap.center -= up * (downHit.t * downDistance);
+    cap.center -= up * std::max(downHit.t * downDistance - kSkin, 0.0f);
 
     // step이 실제 전진을 개선하지 않으면 일반 이동을 선택한다.
     float stepProgress = dot(cap.center - originalCenter, moveDir);
@@ -372,7 +372,7 @@ vec3 MoveWithStep(UprightCapsule cap, vec3 horizDisplacement, const World& world
 
 계단은 *연속된 step* — 각 step 마다 step-up + slide + step-down. 자연스럽게 오른다.
 
-step 사이 *짧은 시간에 여러 stair 통과* — Move-and-slide 의 iteration 안에서 *한 번에 처리*.
+한 프레임에는 위 3 단계 sweep 을 한 번만 수행한다 — `stepHeight` 안에 드는 챌면만 넘고, Move-and-slide 자체는 챌면 (수직 면) 에서 멈춘다.
 
 ### 4.5 후보를 버리는 조건
 
@@ -438,7 +438,7 @@ if (onGround) {
 if (onGround && downwardMovement) {
     SweepHit hit = SweepCapsule(cap, vec3{0,-1,0}, kSnapDistance, world);
     if (hit.hit && IsWalkable(hit.normal)) {
-        cap.center.y -= hit.t * kSnapDistance;
+        cap.center.y -= std::max(hit.t * kSnapDistance - kSkin, 0.0f);   // skin 만큼 여유
     }
 }
 ```
@@ -617,6 +617,7 @@ $$
 int  jumpsRemaining = 2;
 if (jumpPressed && jumpsRemaining > 0) {
     state.verticalVelocity = jumpPower;
+    state.onGround = false;               // 같은 frame 의 리셋 방지
     jumpsRemaining--;
 }
 // 지면 도달 시 리셋
@@ -720,11 +721,11 @@ struct CharacterState {
 
 ## 더 읽을거리
 
-- Quake 3 소스 (`code/qcommon/cm_trace.c`, `code/game/bg_pmove.c`) — Move-and-slide 의 산업 reference.
+- Quake 3 소스 (`code/qcommon/cm_trace.c`, `code/game/bg_slidemove.c`, `code/game/bg_pmove.c`) — Move-and-slide 의 산업 reference (`PM_SlideMove` 는 `bg_slidemove.c`).
 - Casey Muratori, "Character Movement" — 게임 친화적 컨트롤러 설명.
 - PhysX SDK Guide, "Character Controller" — PhysX `PxController` 산업 구현.
 - Jolt physics 소스 (`CharacterVirtual.cpp`) — 모던 컨트롤러 reference.
 - Unreal Engine 문서, "Character Movement Component" — 산업 풍부 기능.
 - Unity Manual, "Character Controller" — built-in CC API.
 - Sebastian Lague, "Coding Adventure: Character Movement" — 시각적 설명.
-- Gaffer on Games, "Networked Physics" — 네트워크 환경의 캐릭터 컨트롤러.
+- Gaffer on Games, "Networked Physics" — 물리 시뮬레이션의 네트워크 동기화 (lockstep · snapshot · state sync).

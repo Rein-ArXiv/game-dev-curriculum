@@ -140,7 +140,7 @@ Canonical condition을 둔다.
 탐색 순서는 정확성을 바꾸지 않지만 tree 크기를 크게 바꾼다.
 
 - 가장 제약이 많은 변수(MRV)를 먼저 선택한다.
-- 실패 가능성이 높은 값을 먼저 시도해 contradiction을 일찍 찾는다.
+- 값은 성공 가능성이 높은 쪽, 즉 이웃 domain을 가장 적게 제한하는 값(least-constraining value)을 먼저 시도한다 — fail-first는 변수 선택의 원리이지 값 선택의 원리가 아니다.
 - 최적화에서는 좋은 incumbent를 빨리 얻는 값을 먼저 시도한다.
 
 Ordering heuristic의 효과는 instance 분포에 의존하므로 방문 node 수를 측정한다.

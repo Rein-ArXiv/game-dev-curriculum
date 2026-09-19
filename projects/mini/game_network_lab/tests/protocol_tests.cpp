@@ -88,7 +88,7 @@ void TestFraming() {
     Require(decoder.Push(std::span(frame).first(3)), "push first fragment");
     Require(!decoder.Pop().has_value(), "partial header must wait");
     Require(decoder.Push(std::span(frame).subspan(3, 7)), "push second fragment");
-    Require(!decoder.Pop().has_value(), "partial payload must wait");
+    Require(!decoder.Pop().has_value(), "partial header must still wait");
     Require(decoder.Push(std::span(frame).subspan(10)), "push final fragment");
     auto decodedFrame = decoder.Pop();
     Require(decodedFrame.has_value(), "complete frame");
@@ -101,8 +101,12 @@ void TestFraming() {
     merged.insert(merged.end(), second.begin(), second.end());
     FrameDecoder mergedDecoder;
     Require(mergedDecoder.Push(merged), "push merged frames");
-    Require(mergedDecoder.Pop()->type == ControlType::Hello, "first merged frame");
-    Require(mergedDecoder.Pop()->type == ControlType::Ping, "second merged frame");
+    auto firstMerged = mergedDecoder.Pop();
+    Require(firstMerged.has_value() && firstMerged->type == ControlType::Hello,
+            "first merged frame");
+    auto secondMerged = mergedDecoder.Pop();
+    Require(secondMerged.has_value() && secondMerged->type == ControlType::Ping,
+            "second merged frame");
     gnl_test::Observe("3+7+" + std::to_string(frame.size() - 10) +
                       " byte pushes -> 1 frame, one " +
                       std::to_string(merged.size()) + "B push -> 2 frames");
@@ -247,6 +251,17 @@ void TestFrameBufferCap() {
         Require(!decoder.Push(std::vector<std::byte>(kCap + 1)),
                 "a single oversized push is refused");
         Require(decoder.Failed(), "a single oversized push fails the decoder");
+    }
+    {
+        // A frame that was already complete when the cap was exceeded must not
+        // leak out of the failed decoder either.
+        FrameDecoder decoder;
+        const auto hello = EncodeControl(ControlType::Hello, {});
+        Require(decoder.Push(hello), "a complete frame fits under the cap");
+        Require(!decoder.Push(std::vector<std::byte>(kCap + 1)),
+                "an oversized push behind a buffered frame is refused");
+        Require(decoder.Failed(), "the oversized push fails the decoder");
+        Require(!decoder.Pop().has_value(), "a failed decoder does not pop the earlier frame");
     }
     gnl_test::Observe("accumulation cap " + std::to_string(kCap) +
                       "B accepted, cap+1 refused in one push and in two");

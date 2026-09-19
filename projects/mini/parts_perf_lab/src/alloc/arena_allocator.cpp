@@ -17,26 +17,29 @@ ArenaAllocator::~ArenaAllocator() {
 }
 
 void* ArenaAllocator::Allocate(std::size_t size, std::size_t alignment) {
-    if (!buffer_) return nullptr;
+    if (!buffer_ || size == 0) return nullptr;
     if (!IsValidAlignment(alignment)) return nullptr;
 
     // 현재 head 주소를 정렬에 맞춰 올림한다.
     const std::uintptr_t base    = reinterpret_cast<std::uintptr_t>(buffer_);
     const std::uintptr_t current = base + used_;
-    const std::uintptr_t aligned = AlignUp(current, alignment);
-    const std::size_t    padding = static_cast<std::size_t>(aligned - current);
+    const std::size_t padding =
+        (alignment - (current & (alignment - 1))) & (alignment - 1);
 
     // 버퍼 한도 검사. 한 번 넘기면 nullptr 반환 (assert는 측정 흐름을 깨므로 피한다).
-    if (used_ + padding + size > capacity_) {
+    const std::size_t remaining = capacity_ - used_;
+    if (padding > remaining || size > remaining - padding) {
         return nullptr;
     }
 
+    void* result = buffer_ + used_ + padding;
     used_ += padding + size;
     RecordAlloc(size);
-    return reinterpret_cast<void*>(aligned);
+    return result;
 }
 
-void ArenaAllocator::Deallocate(void* /*ptr*/, std::size_t size) {
+void ArenaAllocator::Deallocate(void* ptr, std::size_t size) {
+    if (!ptr) return;
     // Arena의 핵심: 개별 free는 무의미. 통계만 기록하고 메모리는 그대로 둔다.
     // Reset이 일괄 회수한다.
     RecordFree(size);

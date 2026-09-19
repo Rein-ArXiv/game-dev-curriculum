@@ -542,11 +542,15 @@ $$
 
 ```cpp
 // C 의 지원 함수만으로 광선 x(t) = t*delta 를 캐스트한다.
-bool ConvexRayCast(const Convex& C, vec3 delta, float& tOut, vec3& normalOut) {
+// 반환은 2.3 의 CastStatus 다. bool 로 접으면 5.2 의 Failed 가 사라진다.
+CastStatus ConvexRayCast(const Convex& C, vec3 delta, float& tOut, vec3& normalOut) {
     float t = 0.0f;
     vec3  x = vec3(0.0f);
     vec3  n = vec3(0.0f);
     Simplex W;                              // C 위의 점들
+
+    tOut = 1.0f;                            // miss 경로의 t. 4.6 의 Miss 와 같은 값이다
+    normalOut = vec3(0.0f);
 
     vec3 v = x - C.Support(-delta);         // C 에서 x 를 향하는 방향
     if (length_squared(v) < kEpsSq) v = vec3(1.0f, 0.0f, 0.0f);
@@ -556,9 +560,9 @@ bool ConvexRayCast(const Convex& C, vec3 delta, float& tOut, vec3& normalOut) {
         vec3 w = x - p;
         if (dot(v, w) > 0.0f) {             // x 가 지지 평면 바깥이다
             float vd = dot(v, delta);
-            if (vd >= 0.0f) return false;   // 광선이 이 반공간에 못 들어간다
+            if (vd >= 0.0f) return CastStatus::Miss;   // 광선이 이 반공간에 못 들어간다
             t -= dot(v, w) / vd;            // 평면까지만 전진한다
-            if (t > 1.0f) return false;
+            if (t > 1.0f) return CastStatus::Miss;
             x = t * delta;
             n = v;                          // 마지막 전진의 방향이 법선 후보다
             W.Clear();                      // x 가 바뀌어 최근접 계산을 다시 한다
@@ -568,17 +572,21 @@ bool ConvexRayCast(const Convex& C, vec3 delta, float& tOut, vec3& normalOut) {
         W.ReduceToSupporting();
     }
     tOut = std::clamp(t, 0.0f, 1.0f);
+    if (length_squared(v) > kEpsSq) {       // v 가 수렴하지 못한 채 반복 상한에 걸렸다
+        return CastStatus::Failed;          // 5.2 의 Failed. 이때의 t 는 t* 의 하한이다
+    }
     if (length_squared(n) < kEpsSq) {       // 전진이 한 번도 없었다 = 원점이 처음부터 C 안
         tOut = 0.0f;
-        normalOut = vec3(0.0f);
-        return true;                        // 호출부가 2.4절 정책(InitialOverlap)으로 처리
+        return CastStatus::InitialOverlap;  // 호출부가 2.4절 정책으로 처리
     }
     normalOut = normalize(n);
-    return true;
+    return CastStatus::Hit;
 }
 ```
 
 `W.Clear()` 는 단순화다. 전진 후에도 기존 점들은 여전히 $C$ 의 점이므로 유지할 수 있지만, $\vec x$ 가 바뀌었으니 최근접 계산은 반드시 다시 해야 한다. 유지하면 지원 함수 호출이 줄고, 비우면 코드가 단순해진다.
+
+이 코드는 $d = 0$ 에서 멈춘다. 2.5 의 목표 여유 $\delta$ 를 남기려면 지원 함수를 $\delta$ 만큼 팽창시킨다 — `C.Support(v)` 자리에 `C.Support(v) + delta * normalize(v)` 를 쓰면 반환되는 $t$ 가 간격이 $\delta$ 로 줄어드는 첫 시각이 되고, 5.3 이 요구하는 분리 상태 종료를 얻는다.
 
 반환 법선은 마지막 전진에서의 $\hat v$ 다. 그것은 $C$ 의 그 점에서의 바깥 법선이고, $C = B \ominus A$ 의 구성상 표적 $B$ 표면의 바깥 법선과 같다. 구 대 구로 검산하면 $C$ 는 중심 $\vec c_B - \vec c_A$ 인 구이고 원점 쪽 표면의 바깥 법선은 $B$ 가 $A$ 를 마주 보는 면의 법선과 일치한다.
 
@@ -753,4 +761,4 @@ float SpeculativeNormalVelocityBound(float separation, float dt) {
 - Paul Firth, "Speculative Contacts" (2011) — 접촉을 미리 만들어 관통을 막는 접근의 설명.
 - Bullet Physics 소스 (`btContinuousConvexCollision.cpp`, `btGjkConvexCast.cpp`) — 각운동 상한을 포함한 산업 구현.
 - Jolt Physics 소스 (`ShapeCast.h`, `CastConvexVsTriangles.cpp`) — 모던 엔진의 캐스트 계약과 초기 겹침 처리.
-- PhysX SDK Guide, "Scene Queries" — sweep 질의의 초기 겹침 플래그와 정밀도 옵션.
+- PhysX SDK Guide, "Geometry Queries" — sweep 질의의 초기 겹침 플래그와 정밀도 옵션.

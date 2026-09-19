@@ -2,7 +2,7 @@
 
 ## 컨셉
 
-이 lab 은 **동일한 강체 시뮬을 여러 통합기(integrator)·충돌 응답·Broad Phase 로 돌려놓고 수치 안정성과 비용 차이를 측정**한다. N 개의 강체가 중력·접촉·제약 조건 아래 움직이는 워크로드를 고정해두고, 통합기를 Explicit Euler 에서 RK4 까지, 응답을 Penalty 에서 PBD 까지, Broad Phase 를 brute 에서 Spatial Hash 까지 토글한다. 토글이 바뀌는 순간 에너지 보존 그래프가 발산하거나 수렴하는 모습을 그대로 본다.
+이 lab 은 **Scene 마다 고정한 워크로드를 여러 통합기(integrator)·충돌 응답·Broad Phase 로 돌려놓고 수치 안정성과 비용 차이를 측정**한다. 조화 진동자 위에서 통합기를 Explicit Euler 에서 RK4 까지, 중력 아래 원 더미 위에서 응답을 Penalty 에서 PBD 까지, 등속 AABB 무리 위에서 Broad Phase 를 brute 에서 Spatial Hash 까지 토글한다. 토글이 바뀌는 순간 에너지 보존 그래프가 발산하거나 수렴하는 모습을 그대로 본다.
 
 ## 짝 시리즈
 
@@ -189,4 +189,4 @@ physics 시리즈에서 "Explicit Euler 가 발산하는 dt 를 Semi-implicit �
 
 ## 거대 프로젝트와의 관계
 
-거대 프로젝트에는 강체 충돌·Sequential Impulse 모듈과 테스트가 있지만 현재 고정 경로 디펜스 제품은 이를 직접 호출하지 않는다. 디펜스의 적과 발사체는 경로 이동과 단순 교차 판정만으로 충분하기 때문이다. 이 lab은 강체, 관절, 로프나 천이 실제 제품 요구사항이 될 때 적분기·Broad Phase·Impulse·PBD를 선택할 측정 근거를 만든다.
+거대 프로젝트의 디펜스 제품은 발사체 명중과 스플래시 판정에 강체 충돌 모듈의 `CollideCircleCircle` 을 모든 맵에서 직접 호출하고, procgen 맵의 잔해 시뮬(`physics/world.hpp`)에서는 적분기·광역 탐색·Sequential Impulse 까지 돈다 — 기본 classic 맵에서는 잔해 물리가 돌지 않는다. 이 lab은 그 선택(적분기·Broad Phase·Impulse·PBD)의 측정 근거를 만들고, 관절·로프·천은 제품 요구사항이 될 때의 여지로 남긴다.

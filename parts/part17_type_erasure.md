@@ -104,12 +104,40 @@ class function<R(Args...)> {
     struct VTable {
         R (*invoke)(void*, Args...);
         void (*destroy)(void*);
-        void (*copy)(void* dst, const void* src);
+        // 버퍼 경로면 dst에 placement new 하고 nullptr을, 힙 경로면 새로 할당한 포인터를 반환한다.
+        void* (*copy)(void* dst, const void* src);
+        // 버퍼 경로 전용. 힙 경로는 포인터만 옮기므로 호출되지 않는다.
+        void (*move)(void* dst, void* src);
     };
 
     const VTable* vtable_ = nullptr;
 
+    void* obj() noexcept { return heap_ptr_ ? heap_ptr_ : buffer_; }
+    const void* obj() const noexcept { return heap_ptr_ ? heap_ptr_ : buffer_; }
+
+    void reset() noexcept {
+        if (vtable_) {
+            vtable_->destroy(obj());
+            heap_ptr_ = nullptr;
+            vtable_ = nullptr;
+        }
+    }
+
+    void take_from(function& src) noexcept {
+        if (!src.vtable_) return;
+        if (src.heap_ptr_) {
+            heap_ptr_ = src.heap_ptr_;          // 힙 객체는 포인터만 훔친다
+            src.heap_ptr_ = nullptr;
+        } else {
+            src.vtable_->move(buffer_, src.buffer_);
+        }
+        vtable_ = src.vtable_;
+        src.vtable_ = nullptr;
+    }
+
 public:
+    function() = default;
+
     template<typename F>
     function(F f) {
         using Functor = std::decay_t<F>;
@@ -124,16 +152,36 @@ public:
         }
     }
 
-    R operator()(Args... args) {
-        void* obj_ptr = heap_ptr_ ? heap_ptr_ : buffer_;
-        return vtable_->invoke(obj_ptr, std::forward<Args>(args)...);
+    function(const function& other) {
+        if (other.vtable_) {
+            heap_ptr_ = other.vtable_->copy(buffer_, other.obj());
+            vtable_ = other.vtable_;
+        }
     }
 
-    ~function() {
-        if (vtable_) {
-            void* obj_ptr = heap_ptr_ ? heap_ptr_ : buffer_;
-            vtable_->destroy(obj_ptr);
+    function(function&& other) noexcept { take_from(other); }
+
+    function& operator=(const function& other) {
+        if (this != &other) {
+            function tmp(other);   // 복사가 던져도 *this는 그대로 남는다
+            reset();
+            take_from(tmp);
         }
+        return *this;
+    }
+
+    function& operator=(function&& other) noexcept {
+        if (this != &other) {
+            reset();
+            take_from(other);
+        }
+        return *this;
+    }
+
+    ~function() { reset(); }
+
+    R operator()(Args... args) {
+        return vtable_->invoke(obj(), std::forward<Args>(args)...);
     }
 
 private:
@@ -153,8 +201,21 @@ private:
                     delete functor;
                 }
             },
-            [](void* dst, const void* src) {
-                new(dst) Functor(*static_cast<const Functor*>(src));
+            [](void* dst, const void* src) -> void* {
+                const auto* s = static_cast<const Functor*>(src);
+                if constexpr (InBuffer) {
+                    new(dst) Functor(*s);
+                    return nullptr;
+                } else {
+                    return new Functor(*s);
+                }
+            },
+            [](void* dst, void* src) {
+                if constexpr (InBuffer) {
+                    auto* s = static_cast<Functor*>(src);
+                    new(dst) Functor(std::move(*s));
+                    s->~Functor();
+                }
             }
         };
         return vtable;
@@ -226,12 +287,30 @@ class any {
 
     struct VTable {
         void (*destroy)(void*);
-        void (*copy)(void* dst, const void* src);
+        // 버퍼 경로면 dst에 placement new 하고 nullptr을, 힙 경로면 새로 할당한 포인터를 반환한다.
+        void* (*copy)(void* dst, const void* src);
+        // 버퍼 경로 전용. 힙 경로는 포인터만 옮기므로 호출되지 않는다.
         void (*move)(void* dst, void* src);
     };
     const VTable* vtable_ = nullptr;
 
+    void take_from(any& src) noexcept {
+        if (!src.vtable_) return;
+        if (src.heap_ptr_) {
+            heap_ptr_ = src.heap_ptr_;          // 힙 객체는 포인터만 훔친다
+            src.heap_ptr_ = nullptr;
+        } else {
+            src.vtable_->move(buffer_, src.buffer_);
+        }
+        type_ = src.type_;
+        vtable_ = src.vtable_;
+        src.type_ = nullptr;
+        src.vtable_ = nullptr;
+    }
+
 public:
+    any() = default;
+
     template<typename T>
     any(T value) {
         using ValueType = std::decay_t<T>;
@@ -245,6 +324,44 @@ public:
 
         type_ = &typeid(ValueType);
         vtable_ = &get_vtable<ValueType>();
+    }
+
+    any(const any& other) {
+        if (other.vtable_) {
+            heap_ptr_ = other.vtable_->copy(buffer_, other.data());
+            type_ = other.type_;
+            vtable_ = other.vtable_;
+        }
+    }
+
+    any(any&& other) noexcept { take_from(other); }
+
+    any& operator=(const any& other) {
+        if (this != &other) {
+            any tmp(other);        // 복사가 던져도 *this는 그대로 남는다
+            reset();
+            take_from(tmp);
+        }
+        return *this;
+    }
+
+    any& operator=(any&& other) noexcept {
+        if (this != &other) {
+            reset();
+            take_from(other);
+        }
+        return *this;
+    }
+
+    ~any() { reset(); }
+
+    void reset() noexcept {
+        if (vtable_) {
+            vtable_->destroy(data());
+            heap_ptr_ = nullptr;
+            type_ = nullptr;
+            vtable_ = nullptr;
+        }
     }
 
     bool has_value() const noexcept { return type_ != nullptr; }
@@ -271,10 +388,25 @@ public:
 private:
     template<typename T>
     static const VTable& get_vtable() {
+        constexpr bool in_buffer = sizeof(T) <= BufferSize &&
+                                   std::is_nothrow_move_constructible_v<T>;
         static const VTable vt = {
-            [](void* obj) { static_cast<T*>(obj)->~T(); },
-            [](void* dst, const void* src) { new(dst) T(*static_cast<const T*>(src)); },
-            [](void* dst, void* src) { new(dst) T(std::move(*static_cast<T*>(src))); }
+            [](void* obj) {
+                auto* p = static_cast<T*>(obj);
+                if constexpr (in_buffer) { p->~T(); } else { delete p; }
+            },
+            [](void* dst, const void* src) -> void* {
+                const auto* s = static_cast<const T*>(src);
+                if constexpr (in_buffer) { new(dst) T(*s); return nullptr; }
+                else { return new T(*s); }
+            },
+            [](void* dst, void* src) {
+                if constexpr (in_buffer) {
+                    auto* s = static_cast<T*>(src);
+                    new(dst) T(std::move(*s));
+                    s->~T();
+                }
+            }
         };
         return vt;
     }
@@ -442,7 +574,7 @@ using DataVariant = std::variant<IntData, FloatData, StringData>;
 std::vector<DataVariant> vec_variant;
 ```
 
-이 네 표현은 저장 레이아웃까지 같게 만들지 않으면 호출 방식만 비교할 수 없다. `unique_ptr<Data>`는 pointee를 흩어 놓고, `any`는 구현과 타입 크기에 따라 SBO/heap이 갈리며, `variant`는 가장 큰 대안의 크기와 정렬을 모든 원소가 부담한다.
+이 세 표현은 저장 레이아웃까지 같게 만들지 않으면 호출 방식만 비교할 수 없다. `unique_ptr<Data>`는 pointee를 흩어 놓고, `any`는 구현과 타입 크기에 따라 SBO/heap이 갈리며, `variant`는 가장 큰 대안의 크기와 정렬을 모든 원소가 부담한다.
 
 `variant`의 가능한 이점은 다음과 같다.
 
@@ -521,6 +653,27 @@ public:
             }
             other.vtable_ = nullptr;
         }
+    }
+
+    unique_function& operator=(unique_function&& other) noexcept {
+        if (this != &other) {
+            if (vtable_) {
+                vtable_->destroy(heap_ptr_ ? heap_ptr_ : buffer_);
+                vtable_ = nullptr;
+                heap_ptr_ = nullptr;
+            }
+            if (other.vtable_) {
+                vtable_ = other.vtable_;
+                if (other.heap_ptr_) {
+                    heap_ptr_ = other.heap_ptr_;
+                    other.heap_ptr_ = nullptr;
+                } else {
+                    vtable_->move(buffer_, other.buffer_);
+                }
+                other.vtable_ = nullptr;
+            }
+        }
+        return *this;
     }
 
     R operator()(Args... args) {
@@ -660,7 +813,7 @@ on_damage(25);  // player.health = 75
 
 | 타입 | 크기 | 힙 할당 |
 |------|:----:|:-------:|
-| `std::function<void(int)>` | 32 bytes | 때로 |
+| `std::function<void(int)>` | 32 bytes (libstdc++ 기준; libc++ 48, MSVC x64 64) | 때로 |
 | `delegate<void(int)>` | 16 bytes | 없음 |
 | 함수 포인터 | 8 bytes | 없음 |
 
@@ -760,7 +913,7 @@ for (const auto& shape : shapes) {
 1. **Non-intrusive**: 상속 불필요, 기존 타입 그대로 사용.
 2. **Value semantics**: 복사 가능, 스택 저장 가능.
 3. **Type-safe**: 컴파일 타임 체크.
-4. **확장 가능**: 새 연산 추가 시 기존 코드 수정 불필요.
+4. **확장 가능**: 새 타입 추가 시 기존 코드 수정 불필요(새 연산은 `concept_t`와 `model_t` 수정이 필요하다).
 
 ### 실전 예제: Document Storage
 
@@ -929,8 +1082,8 @@ Tagged Union의 극한 최적화:
 직접 배열의 압도적 성능:
 
 ```cpp
-std::vector<Circle> circles;
-std::vector<Rectangle> rectangles;
+std::vector<CircleData> circles;
+std::vector<RectangleData> rectangles;
 
 for (auto& c : circles) total += c.area();
 for (auto& r : rectangles) total += r.area();

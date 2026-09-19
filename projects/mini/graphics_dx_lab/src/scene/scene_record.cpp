@@ -72,6 +72,9 @@ void Scene::Draw(ID3D12GraphicsCommandList* cmd,
                   ID3D12PipelineState* secondaryPso,
                   float /*t*/,
                   GlCounters& counters) {
+    // 프레임마다 인스턴스 슬롯을 돌린다. BeginFrame 이 kFramesInFlight 프레임 전의
+    // 완료를 보장하므로, 같은 슬롯을 다시 쓰는 시점에는 GPU 가 그 슬롯을 다 읽었다.
+    instanceSlot_ = (instanceSlot_ + 1) % kInstanceSlots;
     RecordDraw(cmd, mode, rsPolicy, psoPolicy, rootSig, primaryPso, secondaryPso,
                counters);
 }
@@ -88,12 +91,14 @@ void Scene::RecordDraw(ID3D12GraphicsCommandList* cmd,
     // 매 프레임 instance 데이터 업데이트 — Upload heap 영구 map.
     // 저장소가 연결되지 않은 헤드리스 경로에서는 건너뛴다.
     if (instanceMapped_ != nullptr) {
+        // 이번 프레임 슬롯의 구간만 쓴다 — 앞 프레임 슬롯은 GPU 가 아직 읽는 중일 수 있다.
+        Instance* dst = instanceMapped_ + instanceSlot_ * instanceCapacity_;
         const size_t writable = (std::min)(objects_.size(), instanceCapacity_);
         for (size_t i = 0; i < writable; ++i) {
             const auto& o = objects_[i];
             XMMATRIX m = ComputeInstanceModel(o.axis, o.angle, o.position);
-            XMStoreFloat4x4(&instanceMapped_[i].model, XMMatrixTranspose(m));
-            instanceMapped_[i].color = { o.color.x, o.color.y, o.color.z, 1.0f };
+            XMStoreFloat4x4(&dst[i].model, XMMatrixTranspose(m));
+            dst[i].color = { o.color.x, o.color.y, o.color.z, 1.0f };
         }
     }
     // snippet-end: instance-upload
@@ -132,7 +137,8 @@ void Scene::RecordDraw(ID3D12GraphicsCommandList* cmd,
         // Instance buffer 를 Root SRV (t0) 로 노출 — 셰이더가 SV_InstanceID 로 인덱싱.
         if (instanceBuf_) {
             cmd->SetGraphicsRootShaderResourceView(
-                2, instanceBuf_->GetGPUVirtualAddress());
+                2, instanceBuf_->GetGPUVirtualAddress()
+                   + instanceSlot_ * instanceCapacity_ * sizeof(Instance));
         }
         // Root constants 의 첫 DWORD 를 *Instanced 모드 표시* 로 사용.
         UINT useInstancing = 1;

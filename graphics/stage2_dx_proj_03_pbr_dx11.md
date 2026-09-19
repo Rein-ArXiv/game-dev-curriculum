@@ -282,7 +282,7 @@ float3 IBL(float3 N, float3 V, float3 albedo, float metallic, float roughness, f
 }
 ```
 
-`prefilter * (F0 * envBRDF.x + envBRDF.y)`가 split-sum의 두 조각(환경맵 적분 × BRDF LUT)을 곱하는 부분이다. roughness에 `(maxMip - 1)`을 곱해 밉을 고르면 하드웨어 삼선형 필터가 인접 밉을 보간해 거칠기가 연속적으로 변해도 끊김이 없다. 디퓨즈에 $k_D=(1-F)(1-\text{metallic})$을 곱하는 것은 직접광과 동일하다. (거친 금속의 어두워짐을 막는 Kulla-Conty 보정은 BRDF LUT에 보정 채널을 함께 굽는 방식으로 더할 수 있다 — 이론은 전역 조명 문서 참고.)
+`prefilter * (F0 * envBRDF.x + envBRDF.y)`가 split-sum의 두 조각(환경맵 적분 × BRDF LUT)을 곱하는 부분이다. roughness에 `(maxMip - 1)`을 곱해 밉을 고르면 하드웨어 삼선형 필터가 인접 밉을 보간해 거칠기가 연속적으로 변해도 끊김이 없다. 디퓨즈에 $k_D=(1-F)(1-\text{metallic})$을 곱하는 것은 직접광과 동일하다. (거친 금속의 어두워짐을 막는 Kulla-Conty 보정은 BRDF LUT에 보정 채널을 함께 굽는 방식으로 더할 수 있다.)
 
 
 ---

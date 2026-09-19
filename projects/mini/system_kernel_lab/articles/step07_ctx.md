@@ -88,7 +88,7 @@ flowchart TD
     K1 -->|swapcontext| DT
 ```
 
-컨텍스트 스위치는 *유저 공간 register save/restore*. 커널을 거치지 않아 *훨씬 빠르다*.
+컨텍스트 스위치는 *유저 공간 register save/restore*. 커널 스케줄러를 거치지 않아 *훨씬 빠르다* (다만 glibc `swapcontext` 는 시그널 마스크 저장·복원을 위해 `rt_sigprocmask` 시스템 콜을 매번 한 번 부른다).
 
 비용:
 - 코루틴 컨텍스트 스위치: 보통 **수십~수백 나노초** (callee-saved register 저장·복원 정도). 측정 환경에 따라 변한다.
@@ -208,9 +208,11 @@ while (true) {
 
 ### driver를 별도 스레드로 둔 이유
 
-driver 자체를 *메인 GUI 스레드*에 두면 GUI가 사이클이 끝날 때까지 *멈춘다*. 코루틴이 동기 read를 호출하면 그 시간 동안 GUI가 freeze.
+driver를 GUI 메인 스레드에 그대로 두지 않는 이유는 GUI freeze 방지가 아니다 — `RunCycleCoroutine` 자체가 GUI 스레드에서 동기 호출되고 ack를 yield 스핀으로 기다리므로, driver가 어느 스레드에 있든 GUI는 사이클이 끝날 때까지 이미 멈춘다. 실제 근거는 둘이다.
 
-driver를 *별도 스레드* 에 두고, GUI 스레드(메인)는 `RunCycleCoroutine` 에서 *cycleSeq 시그널* 만 보내고 *완료 ack* 만 기다린다. driver는 그 신호를 받아 dispatch 시작.
+첫째, pthread 워커 풀의 *cycleSeq + ack* 패턴과 대칭을 맞추기 위해서다. GUI 스레드는 `RunCycleCoroutine` 에서 *cycleSeq 시그널* 만 보내고 *완료 ack* 만 기다리는 구조를 두 모드에서 동일하게 유지한다. driver는 그 신호를 받아 dispatch 시작.
+
+둘째, sched 토글(`ApplySchedToCurrentThread`, SCHED_FIFO일 때의 idle sleep 포함)을 GUI 스레드가 아니라 워커 측 스레드에만 적용하기 위해서다. driver 스레드가 자신의 스케줄링 정책을 설정하고, GUI 스레드의 정책은 건드리지 않는다.
 
 ```cpp
 void FileIoWorkload::RunCycleCoroutine() {
@@ -239,7 +241,7 @@ void FileIoWorkload::RunCycleCoroutine() {
 
 ```cpp
 void FileIoWorkload::CoroBody(std::size_t coroIdx) {
-    auto* backend = coroBackends_[coroIdx].get();
+    auto* backend = coroBackends_.front().get();
 
     for (;;) {
         // 작업 큐에서 한 개 pop.
@@ -526,7 +528,7 @@ throughput으로 보면 코루틴 모드는 *workers = 1 (단일 스레드)* 와
 - coroutine 모드 진입 시 *세그폴트* → ucontext stack 부족. `kCoroStackSize` 를 128 KB 이상으로 늘려 본다.
 - coroutine 모드의 *결과 checksum이 pthread와 다름* → 작업 큐 처리, coroutine idx 전달, 또는 checksum 누적 순서 문제. `LastChecksum()` 을 비교해 어느 모드에서 달라지는지 먼저 좁힌다.
 - coroutine 모드의 *cycle ms가 pthread보다 작음* → 측정 노이즈 또는 워커 수가 코어 수를 크게 초과해 pthread가 손해 본 경우. workerCount = 4 + 코어 수 4 시나리오에서 다시 본다.
-- `-Wno-deprecated-declarations` 빠짐 → ucontext_t 사용에 대한 경고가 빌드에 가득. 옵션 추가.
+- ucontext 관련 deprecated 경고는 Linux/glibc + GCC 에서는 나오지 않는다(헤더에 deprecated 속성이 없다). CMake 의 `-Wno-deprecated-declarations` 는 다른 툴체인용 보험일 뿐이라 빠져 있어도 빌드는 조용하다.
 
 ### 측정의 정직성
 
@@ -610,7 +612,7 @@ system_fault_tests --step=7: 1/17 check(s) run, 0 failed
 세 가지 결정이 이 단계의 토대를 만들었다.
 
 1. **driver-중심 round-robin** — 코루틴 간 직접 swap이 아니라 driver가 모든 dispatch를 결정. 코드 흐름이 명확하고 *어느 코루틴이 done인지* 추적이 쉽다.
-2. **driver 별도 스레드** — GUI 메인 스레드가 사이클 동안 freeze하지 않게. cycleSeq + ack 패턴이 pthread 모드와 *대칭* 이다.
+2. **driver 별도 스레드** — sched 토글(`ApplySchedToCurrentThread`, SCHED_FIFO idle sleep)을 GUI 스레드가 아니라 워커 측에만 적용하기 위해. cycleSeq + ack 패턴이 pthread 모드와 *대칭* 이다.
 3. **trampoline + idx 인자 전달** — `makecontext` 의 정수 인자로 coroutine idx를 넘기고, `self` 만 정적 pass-through로 둔다. context entry는 사이클마다 다시 만들어 종료된 context 재진입을 피한다.
 
 여기까지의 코드는 backend / sync / sched / ctx / workers 다섯 차원의 측정 변수를 갖춘다. 다만 측정 채널은 여전히 *cycle ms · throughput* 두 개뿐이다. 시스템 콜 카운트, 컨텍스트 스위치 카운트, 페이지 폴트 카운트 같은 *직접 카운터* 를 보려면 측정 채널 확장이 필요하다.

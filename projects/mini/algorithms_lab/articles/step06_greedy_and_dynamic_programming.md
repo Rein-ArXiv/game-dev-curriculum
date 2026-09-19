@@ -61,7 +61,7 @@ EDD(마감 오름차순 처리)는 최대 지연을 최소화한다. 여기서�
 // 분할 가능 배낭은 탐욕이 *최적* 이다 — 밀도 높은 순으로 담다가 마지막을 쪼갠다.
 // 쪼갤 수 있다는 것이 교환 논증의 마지막 단계를 완성한다. 0/1 제약이 붙는 순간
 // 그 단계가 사라지고 탐욕은 근사조차 보장하지 못한다.
-// 반환은 정확도 손실을 피하려 value*capacity 스케일의 유리수 분자로 준다.
+// 반환은 분할 가능 최적값 그 자체(double)다 — 마지막 물건의 몫만 value*room/weight 로 계산한다.
 inline double FractionalKnapsack(std::vector<Item> items, int64_t capacity) {
     // ...
 }
@@ -141,7 +141,7 @@ CHECK(double(greedy.cost) <= double(best) * HarmonicBound(8) + 1e-9);
 <!-- snippet: src/algo/greedy.hpp@greedy-rent-or-buy -->
 ```cpp
 // 스키 대여 문제. 하루 대여 1, 구매 B. 며칠 탈지 모르는 채로 결정해야 한다.
-// break-even 전략(B 일치 대여한 뒤 구매)의 경쟁비는 2 - 1/B 이하다.
+// break-even 전략(B-1 일치 대여한 뒤 B 일째 구매)의 경쟁비는 2 - 1/B 이하다.
 // 이 함수는 그 상계와 실측 최악비를 함께 낼 수 있게 비용 둘을 돌려준다.
 struct RentOrBuy {
     int64_t online  = 0;
@@ -202,7 +202,7 @@ inline int64_t Knapsack1D(const std::vector<Item>& items, int64_t capacity,
     const size_t cap = size_t(capacity < 0 ? 0 : capacity);
     std::vector<int64_t> dp(cap + 1, 0);
     for (const Item& it : items) {
-        if (it.weight <= 0) continue;
+        if (it.weight < 0) continue;   // 무게 0 인 물건도 0/1 의미 그대로 한 번만 더해진다
         const size_t weight = size_t(it.weight);
         if (weight > cap) continue;
         if (descending) {
@@ -370,7 +370,7 @@ inline int64_t BitmaskMinTour(const std::vector<std::vector<int64_t>>& cost,
 
 **분기 한정이 노드 93개로 끝난다.** 2²² = 4,194,304가지 조합을 완화 상계로 잘라 낸 결과다. capacity 2,000에서 DP보다 60배 빠르다. 다만 이것은 이 입력의 성질이다 — 완화가 느슨해지는 입력(가치와 무게가 무관한 경우)에서는 가지치기가 잘 안 되고 지수로 되돌아간다.
 
-**밀도 탐욕의 gap이 1.38%다.** capacity 60에서는 0이고 2,000에서는 1.38%. 용량이 클수록 "마지막에 남는 자투리"의 상대 비중이 줄어 탐욕이 좋아진다. 이 값은 상계가 아니라 이 입력의 실측이며, 앞의 (10,60)/(20,100)/(30,120) 반례에서는 27%였다.
+**밀도 탐욕의 gap이 1.38%다.** capacity 60에서는 0이고 2,000에서는 1.38%. 이 벤치는 무게 상한을 용량의 4분의 1로 잡아 무게가 용량에 비례하므로, 용량이 커져도 "마지막에 남는 자투리"의 상대 비중은 줄지 않는다 — 두 값의 차이는 용량의 효과가 아니라 두 입력의 성질이다. 이 값은 상계가 아니라 이 입력의 실측이며, 앞의 (10,60)/(20,100)/(30,120) 반례에서는 27%였다.
 
 ### 집합 덮개의 gap
 

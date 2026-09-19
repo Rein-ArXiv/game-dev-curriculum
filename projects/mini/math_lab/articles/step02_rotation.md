@@ -49,7 +49,7 @@ int   newMode  = GuiToggleGroup(Rectangle{(float)(px + 8), (float)y, 130, 22},
 mode_ = (modeIdx == 0) ? Mode::Euler : Mode::SlerpVsNlerp;
 ```
 
-`GuiToggleGroup` 은 반환값도 인덱스로 돌려주지만 이 Scene 은 `&modeIdx` 로 받은 값만 쓴다 — `/W4` 에서 미사용 경고가 나지 않게 `(void)newMode;` 로 명시적으로 버린다.
+`GuiToggleGroup` 은 raygui 4.0 에서 인덱스를 `&modeIdx` 로만 돌려주고 반환값은 항상 0 이라 이 Scene 은 `&modeIdx` 로 받은 값만 쓴다 — `/W4` 에서 미사용 경고가 나지 않게 `(void)newMode;` 로 명시적으로 버린다.
 
 ## 2. 쿼터니언 유틸 헤더
 
@@ -169,7 +169,7 @@ DrawWorld 에서 표시.
 <!-- snippet: src/scenes/rotation_scene.cpp@gimbal-warning -->
 ```cpp
 if (mode_ == Mode::Euler && EulerNearGimbalLock(yaw_)) {
-    DrawText("GIMBAL LOCK — pitch and roll collapsed onto same axis",
+    DrawText("GIMBAL LOCK - pitch and roll collapsed onto same axis",
               cx + 10, cy + 30, 14, Color{255, 100, 100, 255});
 }
 ```
@@ -245,7 +245,7 @@ DrawArrow3D(offset, Vector3Add(offset, ez), Color{120, 160, 255, 255}, 0.04f);
 
 `DrawArrow3D` 는 이 cpp 의 익명 네임스페이스에 있는 한 줄짜리 래퍼로, 안에서 `DrawCylinderEx` 를 부른다. `Vector3` 에는 `operator+` 가 없으므로 끝점은 raymath 의 `Vector3Add` 로 만든다.
 
-색상 컨벤션: *X = 빨강, Y = 초록, Z = 파랑* (math part06 의 표준). 이 컨벤션이 *Maya·Blender·Unity·Unreal 모두 공통* 이라 사용자가 색만 보고 축을 인식 가능.
+색상 컨벤션: *X = 빨강, Y = 초록, Z = 파랑*. 이 컨벤션이 *Maya·Blender·Unity·Unreal 모두 공통* 이라 사용자가 색만 보고 축을 인식 가능.
 
 큐브 자체는 *비대칭 사이즈* (`{0.9, 0.55, 0.35}`) 로 — 회전을 *어떻게 했는지* 보이려면 *축 대칭 큐브* 보다 *길쭉한 박스* 가 효과적.
 
@@ -309,7 +309,7 @@ CHECK(slerpRatio < 1.05f);
 CHECK(nlerpRatio > 1.3f);
 ```
 
-Nlerp 쪽 하한이 핵심이다. 상한만 있으면 `QuatSlerp` 본문을 `QuatNlerp` 로 바꿔치기해도 *두 값이 같이 움직여* 통과할 수 있다. 두 방향을 함께 잡아야 판별이 된다.
+Nlerp 쪽 하한이 핵심이다. 상한만 있으면 `QuatNlerp` 본문을 `QuatSlerp` 로 바꿔치기해도 *두 값이 같이 움직여* 통과할 수 있다. 두 방향을 함께 잡아야 판별이 된다.
 
 `quaternion/gimbal_lock` — 짐벌락을 *경고 문구* 가 아니라 불변식으로 쓴다. 가운데 축 (yaw) 이 +90° 면 바깥 두 축이 한 자유도로 축약되므로, pitch 와 roll 을 *같은 양만큼 밀어도* 회전이 변하지 않아야 한다. 175 개 (pitch, roll, 미는 양) 조합에서 최악의 `1-|dot|` 을 잰다.
 
@@ -346,11 +346,12 @@ inline float GenerateParam(Rng& rng, const ParamSpec& spec) {
 
     const float anchors[4] = {spec.lo, spec.hi, spec.simplest, 0.0f};
     if (bucket < 75u) {
-        const float value = anchors[rng.Next() & 3u];
+        // 상위 2비트 — LCG 하위 비트는 직전 bucket 과 결정론적으로 얽힌다.
+        const float value = anchors[rng.Next() >> 30];
         return (value < spec.lo || value > spec.hi) ? spec.simplest : value;
     }
     // ...
-    float base = anchors[rng.Next() & 3u];
+    float base = anchors[rng.Next() >> 30];
     if (base < spec.lo || base > spec.hi) base = spec.simplest;
     float value = base + span * 1e-4f * (rng.Unit() * 2.0f - 1.0f);
     // ...
@@ -407,7 +408,7 @@ if (arc >= 1.5f) {
 }
 ```
 
-생성기도 독립 난수 나열이 아니다. 시작 회전 `a` 를 뽑은 뒤 `b` 를 *`a` 에서 정확히 `arcAngle` 라디안 떨어진 회전으로 구성* 한다. 호의 길이가 파라미터로 잡혀 있어야 "0.5 rad 짜리 호를 32 등분하면 현이 0.0156 이고 성분 오차는 1e-7 대" 라는 계산이 성립하고, 그래야 1.02 라는 상한에 근거가 생긴다.
+생성기도 독립 난수 나열이 아니다. 시작 회전 `a` 를 뽑은 뒤 `b` 를 *`a` 에서 정확히 `arcAngle` 라디안 떨어진 회전으로 구성* 한다. 호의 길이가 파라미터로 잡혀 있어야 "0.5 rad 회전 (쿼터니언 호 0.25 rad) 을 32 등분하면 현이 0.0078 이고 성분 오차는 1e-7 대" 라는 계산이 성립하고, 그래야 1.02 라는 상한에 근거가 생긴다.
 
 표본 수는 CI 부담과의 절충이다. 기본값(4,000 · 4,000 · 4,000 · 800)은 매 커밋에 도는 크기이고, 오래 도는 캠페인은 같은 실행 파일에 `--scale=25` 를 준다. `--seed=` 로 master seed 를 갈아 끼울 수 있고, 반례가 나오면 축소된 파라미터와 재현 명령 한 줄이 `stderr` 로 나온다.
 
@@ -424,10 +425,10 @@ $ ./build/Release/math_core_tests.exe step02
 [step02] quaternion/identities ........... 9 checks, 0 failed
 [step02] quaternion/slerp_uniform_speed .. 6 checks, 0 failed
 [step02] quaternion/gimbal_lock .......... 2 checks, 0 failed
-[step02] quat/norm-preserved ............. 3 checks, 0 failed  (4000 samples, 3366 non-degenerate, 0 skipped, worst 0.375x on '|norm(axis-angle) - 1|')
-[step02] quat/compose-assoc .............. 3 checks, 0 failed  (4000 samples, 2912 non-degenerate, 0 skipped, worst 0.125x on '1 - |dot(left, right)|')
-[step02] quat/double-cover ............... 3 checks, 0 failed  (4000 samples, 3351 non-degenerate, 1 skipped, worst 0.188x on '1 - |dot(slerp(a,b), slerp(a,-b))|')
-[step02] quat/slerp-uniform .............. 3 checks, 0 failed  (800 samples, 402 non-degenerate, 0 skipped, worst 0.344x on 'nlerp chord max/min - 1 (control floor)')
+[step02] quat/norm-preserved ............. 3 checks, 0 failed  (4000 samples, 3373 non-degenerate, 0 skipped, worst 0.375x on '|norm(axis-angle) - 1|')
+[step02] quat/compose-assoc .............. 3 checks, 0 failed  (4000 samples, 2821 non-degenerate, 0 skipped, worst 0.125x on '1 - |dot(left, right)|')
+[step02] quat/double-cover ............... 3 checks, 0 failed  (4000 samples, 3313 non-degenerate, 2 skipped, worst 0.188x on '1 - |dot(slerp(a,b), slerp(a,-b))|')
+[step02] quat/slerp-uniform .............. 3 checks, 0 failed  (800 samples, 412 non-degenerate, 0 skipped, worst 0.344x on 'nlerp chord max/min - 1 (control floor)')
 step02: 7 case(s), 29 check(s), 0 failure(s)
 ```
 

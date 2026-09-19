@@ -84,6 +84,27 @@ bool SendOversizedDatagrams(std::uint16_t port) {
     return true;
 }
 
+// The server binds its sockets after CreateProcess/fork returns. A burst sent
+// before the UDP socket exists is dropped by the kernel, and the case would
+// silently degrade into the plain smoke run. The backend binds TCP and UDP
+// before Start() returns, so a loopback TCP connect proves both are ready.
+bool WaitUntilListening(std::uint16_t tcpPort, int timeoutMs) {
+    sockaddr_in server{};
+    server.sin_family = AF_INET;
+    server.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    server.sin_port = htons(tcpPort);
+    for (int elapsed = 0; elapsed <= timeoutMs; elapsed += 50) {
+        SocketHandle socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (socket == kInvalidSocket) return false;
+        const bool connected = connect(socket, reinterpret_cast<sockaddr*>(&server),
+                                       sizeof(server)) == 0;
+        CloseSocket(socket);
+        if (connected) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return false;
+}
+
 #if defined(_WIN32)
 bool Spawn(const std::string& command, PROCESS_INFORMATION& process) {
     std::string mutableCommand = command;
@@ -128,8 +149,9 @@ int WaitFor(pid_t process) {
 
 // Both cases drive the same two real processes over loopback sockets. The only
 // difference is the burst of oversized datagrams sent before the honest client:
-// with it the run also proves that failed receive completions were reposted, so
-// error datagrams cannot drain the preposted receive depth.
+// on the IOCP backend it also proves that failed receive completions were
+// reposted, so error datagrams cannot drain the preposted receive depth; the
+// epoll backend has no preposted depth and only has to discard the burst.
 int RunProcessSmoke(bool sendOversizedFirst) {
 #if defined(_WIN32)
     WSADATA data{};
@@ -147,17 +169,20 @@ int RunProcessSmoke(bool sendOversizedFirst) {
     PROCESS_INFORMATION serverProcess{};
     const std::string serverCommand = "\"" + server + "\" --tcp-port " +
         std::to_string(tcpPort) + " --udp-port " + std::to_string(udpPort) +
-        " --duration 4";
+        " --duration 4 --loopback";
     if (!Spawn(serverCommand, serverProcess)) return 3;
 #else
     const std::string server = (directory / "game_server").string();
     const std::string client = (directory / "game_client").string();
     const pid_t serverProcess = Spawn({server, "--tcp-port", std::to_string(tcpPort),
-        "--udp-port", std::to_string(udpPort), "--duration", "4"});
+        "--udp-port", std::to_string(udpPort), "--duration", "4", "--loopback"});
     if (serverProcess <= 0) return 3;
 #endif
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    if (!WaitUntilListening(tcpPort, 5000)) {
+        std::cerr << "process smoke failed: server never started listening\n";
+        return 7;
+    }
     if (sendOversizedFirst) {
         if (!SendOversizedDatagrams(udpPort)) return 4;
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

@@ -140,6 +140,9 @@ struct Vertex {
     }
 };
 
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/hash.hpp>   // std::hash<glm::vec3>, std::hash<glm::vec2>
+
 namespace std {
 template<> struct hash<Vertex> {
     size_t operator()(const Vertex& v) const {
@@ -578,7 +581,7 @@ vkCreateImage(device, &colorImgInfo, nullptr, &colorMsaaImage);
 
 ### 깊이도 같은 샘플 수로
 
-서브패스의 모든 첨부는 샘플 수가 같아야 한다. 컬러를 4×로 만들면 깊이도 4×로 다시 만든다.
+서브패스의 컬러 첨부와 깊이 첨부는 샘플 수가 같아야 한다(resolve 첨부는 반대로 1 샘플이어야 한다). 컬러를 4×로 만들면 깊이도 4×로 다시 만든다.
 
 ```cpp
 VkImageCreateInfo depthImgInfo{};   // 위와 같은 base 설정
@@ -631,6 +634,8 @@ depthMsaa.format = depthFormat;
 depthMsaa.samples = samples;
 depthMsaa.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
 depthMsaa.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+depthMsaa.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+depthMsaa.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 depthMsaa.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 depthMsaa.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
@@ -700,10 +705,10 @@ features.sampleRateShading = VK_TRUE;
 VkPipelineMultisampleStateCreateInfo ms{};
 ms.rasterizationSamples = samples;
 ms.sampleShadingEnable = VK_TRUE;
-ms.minSampleShading = 0.25f;   // 표본의 최소 25% 에서 셰이더 실행
+ms.minSampleShading = 0.5f;    // 표본의 최소 50% 에서 셰이더 실행
 ```
 
-`minSampleShading`은 한 픽셀에서 최소 몇 비율의 표본을 독립 실행할지의 하한이다. 4× MSAA에서 `1.0`이면 4개 표본 모두 셰이더를 실행해 픽셀당 셰이더 비용이 네 배가 된다. `0.25`이면 표본 중 한 개꼴로 실행해 비용은 기본 MSAA와 비슷하면서도, 표본별로 보간 위치가 달라져 알파 경계의 표현이 개선된다.
+`minSampleShading`은 한 픽셀에서 최소 몇 비율의 표본을 독립 실행할지의 하한이다. 4× MSAA에서 `1.0`이면 4개 표본 모두 셰이더를 실행해 픽셀당 셰이더 비용이 네 배가 된다. `0.5`이면 표본 4개 중 2개꼴로 실행해 비용을 두 배로 억제하면서도, 표본별로 보간 위치가 달라져 알파 경계의 표현이 개선된다. `0.25`는 4×에서 max(⌈0.25×4⌉, 1) = 1회라 기본 MSAA와 같아져 이득이 없다.
 
 ### 셰이더 측
 
@@ -744,6 +749,6 @@ ms.alphaToCoverageEnable = VK_TRUE;
 ## 더 읽을거리
 
 - [glTF 2.0 Specification](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html) — 접근자·버퍼 뷰·PBR 머티리얼의 표준.
-- [tinygltf](https://github.com/syoyo/tinygltf) / [tinyobjloader](https://github.com/tinyobjloader/tinyobjloader) — 본문 로더의 저장소.
+- [tinygltf](https://github.com/syoyo/tinygltf) / [tinyobjloader](https://github.com/tinyobjloader/tinyobjloader) — 본문 로더의 저장소. tinygltf는 v3부터 C11 API(`tiny_gltf_v3.h`)가 mainline이고, 본문이 쓰는 C++ `tiny_gltf.h`는 `attic/`에 보존되어 있다.
 - [Vulkan Tutorial: Depth buffering / Loading models / Multisampling](https://vulkan-tutorial.com/Depth_buffering) — 같은 경로의 입문 구현 자료.
-- ARM, [Mali GPU Best Practices](https://developer.arm.com/documentation/101897/latest/) — 타일 기반 GPU 에서의 MSAA 비용 근거.
+- ARM, [Arm GPU Best Practices Developer Guide](https://developer.arm.com/documentation/101897/latest/) — 타일 기반 GPU 에서의 MSAA 비용 근거.

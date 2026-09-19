@@ -102,7 +102,7 @@ T Lerp(T a, T b, float t) {
 }
 ```
 
-자주 사용하는 *최적화 형태* `a + (b - a) * t`. 곱셈이 한 번 적은 것처럼 보이지만 컴파일러가 보통 같은 코드로 최적화. 부동소수점 정밀도 측면에서는 두 형태가 *키 양 끝에서 비트 단위 차이* 가 있을 수 있다 — 일반 게임 코드에서는 무관.
+자주 사용하는 *최적화 형태* `a + (b - a) * t`. 곱셈이 한 번 적다. 부동소수점은 분배법칙이 성립하지 않아 두 식은 다른 함수이고, 컴파일러도 (`-ffast-math` 없이는) 서로 바꿔 최적화하지 않는다. 부동소수점 정밀도 측면에서는 두 형태가 *키 양 끝에서 비트 단위 차이* 가 있을 수 있다 — 일반 게임 코드에서는 무관.
 
 ### 2.2 적용 가능한 타입
 
@@ -110,7 +110,7 @@ T Lerp(T a, T b, float t) {
 |---|---|
 | `float`, `double` | 직접 적용 |
 | `vec2`, `vec3`, `vec4` | 성분별 |
-| 색상 (RGB, RGBA) | 성분별 (다만 *gamma* 주의 — 2.7절) |
+| 색상 (RGB, RGBA) | 성분별 (다만 *gamma* 주의 — 2.4절) |
 | 시간, 알파, 스칼라 매개변수 | 직접 |
 
 쿼터니언과 행렬은 *Lerp 가 직접 적용 안 됨*. 결과가 *단위 길이가 아니거나* *직교성 깨진다*. 쿼터니언은 Slerp/Nlerp (3절), 행렬은 *분해 후 보간* (또는 쿼터니언 변환).
@@ -127,7 +127,7 @@ vec3 Path(const std::vector<vec3>& keys, float t) {
 }
 ```
 
-t = 0 ~ N (N개 키) 으로 *키 사이를 직선으로 잇기*. 결과 곡선이 *각 키에서 꺾인다* — *방향이 갑자기 변한다*. C0 만 보장.
+t = 0 ~ N-1 (N개 키) 으로 *키 사이를 직선으로 잇기*. 결과 곡선이 *각 키에서 꺾인다* — *방향이 갑자기 변한다*. C0 만 보장.
 
 캐릭터가 이런 경로를 따라가면 *매 키에서 즉시 방향 전환* — 자연스럽지 않음. 키 사이 곡선을 부드럽게 잇는 *Hermite·Catmull-Rom* 이 필요.
 
@@ -545,7 +545,7 @@ flowchart LR
     Curve --> ArcLen[호 길이 매개화<br/>점 사이 거리 균등]
 ```
 
-곡선이 *완만한 부분* 에서는 t 변화당 거리가 작고, *급격히 휘는 부분* 에서는 거리가 크다. *캐릭터가 t 균등 변화로 움직이면 속도가 들쭉날쭉*.
+t 변화당 거리는 곡률이 아니라 *속도 벡터의 크기* $|\vec{p}'(t)|$ 가 정한다 — 제어점이 *몰린 구간* 에서는 작고, *벌어진 구간* 에서는 크다. *캐릭터가 t 균등 변화로 움직이면 속도가 들쭉날쭉*.
 
 ### 7.2 호 길이 (arc length)
 
@@ -790,7 +790,6 @@ Newton 또는 이분 탐색으로 *x = t 에 해당하는 매개변수* 를 찾�
 - Ron Goldman, *Pyramid Algorithms* — Bezier·B-Spline의 알고리즘적 접근.
 - Robert Penner, "Easing functions" — UI Easing 카탈로그의 표준.
 - Freya Holmer, "The Beauty of Bezier Curves" (YouTube) — Bezier·Hermite의 시각적 직관.
-- 3Blue1Brown, "Bezier Curves" — de Casteljau의 우아한 영상 설명.
-- *Computer Aided Geometric Design* (Farin) — CAD 곡선의 종합 레퍼런스.
+- *Curves and Surfaces for Computer Aided Geometric Design* (Farin) — CAD 곡선의 종합 레퍼런스.
 - DOTween / LeanTween 라이브러리 소스 — 게임의 트윈 시스템 산업 사례.
 - CSS `cubic-bezier` 사양 — 웹의 표준 easing.

@@ -160,15 +160,14 @@ inline size_t ComponentsWithout(size_t n, const std::vector<algo::Csr::Edge>& ed
     for (size_t s = 0; s < n; ++s) {
         if (s == removed || seen[s]) continue;
         ++comps;
-        std::vector<uint32_t> stack{uint32_t(s)};
+        std::vector<uint32_t> queue{uint32_t(s)};   // FIFO 로 훑는다 — 이름 그대로 BFS
         seen[s] = 1;
-        while (!stack.empty()) {
-            const uint32_t u = stack.back();
-            stack.pop_back();
+        for (size_t head = 0; head < queue.size(); ++head) {
+            const uint32_t u = queue[head];
             for (uint32_t v : adj[u]) {
                 if (seen[v]) continue;
                 seen[v] = 1;
-                stack.push_back(v);
+                queue.push_back(v);
             }
         }
     }
@@ -236,15 +235,14 @@ inline std::vector<uint32_t> ComponentIdByBfs(size_t n,
     uint32_t next = 0;
     for (size_t s = 0; s < n; ++s) {
         if (comp[s] != uint32_t(-1)) continue;
-        std::vector<uint32_t> stack{uint32_t(s)};
+        std::vector<uint32_t> queue{uint32_t(s)};   // FIFO 로 훑는다 — 이름 그대로 BFS
         comp[s] = next;
-        while (!stack.empty()) {
-            const uint32_t u = stack.back();
-            stack.pop_back();
+        for (size_t head = 0; head < queue.size(); ++head) {
+            const uint32_t u = queue[head];
             for (uint32_t v : adj[u]) {
                 if (comp[v] != uint32_t(-1)) continue;
                 comp[v] = next;
-                stack.push_back(v);
+                queue.push_back(v);
             }
         }
         ++next;
@@ -309,7 +307,7 @@ inline int64_t BruteKnapsack(const std::vector<algo::Item>& items, int64_t capac
     return best;
 }
 
-// 동전 교환의 진짜 최소 개수. BFS 로 푼다 — greedy 와 골격이 다르다.
+// 동전 교환의 진짜 최소 개수. 금액 오름차순 1차원 DP 로 푼다 — greedy 와 골격이 다르다.
 inline int64_t ExactCoinCount(const std::vector<int64_t>& coins, int64_t amount) {
     if (amount < 0) return -1;
     std::vector<int64_t> best(size_t(amount) + 1, -1);

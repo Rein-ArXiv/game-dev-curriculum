@@ -179,7 +179,7 @@ $V$번째 pass에서도 개선되는 정점이 있으면 시작점에서 도달 
 
 ### Floyd-Warshall
 
-정점 번호 $0..k-1$만 중간 정점으로 허용한 최단 거리를 $D^{(k)}[i][j]$라 하자.
+정점 번호 $0..k$만 중간 정점으로 허용한 최단 거리를 $D^{(k)}[i][j]$라 하자.
 
 $$
 D^{(k)}[i][j]=\min\left(D^{(k-1)}[i][j],
@@ -240,7 +240,7 @@ $$
 h(u)\le w(u,v)+h(v)
 $$
 
-이면 consistent다. 경로를 따라 부등식을 합하면 admissibility를 얻는다. 또한 relaxation 경로에서
+이면 consistent다. $h(\text{goal})=0$이면 경로를 따라 부등식을 합해 admissibility를 얻는다. 또한 relaxation 경로에서
 
 $$
 f(v)=g(u)+w(u,v)+h(v)\ge g(u)+h(u)=f(u)

@@ -698,9 +698,9 @@ COM(Component Object Model)은 명시적 vtable을 사용한다.
 
 ```cpp
 struct IUnknownVTable {
-    HRESULT (*QueryInterface)(void* this, REFIID riid, void** ppv);
-    ULONG (*AddRef)(void* this);
-    ULONG (*Release)(void* this);
+    HRESULT (*QueryInterface)(void* This, REFIID riid, void** ppv);
+    ULONG (*AddRef)(void* This);
+    ULONG (*Release)(void* This);
 };
 
 struct IUnknown {
@@ -776,10 +776,11 @@ MSVC ABI:
 
 | 오프셋 | 내용 |
 |--------|------|
+| -8 | RTTICompleteObjectLocator* |
 | 0 | &vfunc1 (vptr 위치) |
 | +8 | &vfunc2 |
 
-(type_info는 별도 구조)
+(RTTICompleteObjectLocator는 type_info 자체가 아니라 type_info와 클래스 계층 서술자를 가리키는 별도 구조다. 두 표의 오프셋은 모두 64비트 기준이며, 32비트에서는 포인터 폭이 4바이트라 절반씩 줄어든다.)
 
 ### 다중 상속에서의 차이
 
@@ -801,7 +802,7 @@ class C : public A, public B { };
 |------|-------------|------|
 | vbase offset 저장 | vtable 앞 | 별도 vbtable |
 | 추가 포인터 | 없음 | vbptr (8 bytes) |
-| 접근 방식 | vtable[-16] 읽기 | vbtable 참조 |
+| 접근 방식 | vtable의 vbase offset 슬롯 읽기(offset_to_top보다 앞, 가상 기반 개수만큼 아래로 내려감) | vbtable 참조 |
 
 ### 실무적 함정
 
@@ -819,7 +820,7 @@ Base* b = CreateObject();  // DLL에서 반환
 b->f();  // 크래시
 ```
 
-GCC는 vptr이 offset 0을 가리킨다고 가정하지만, MSVC는 다른 레이아웃을 사용한다. 해결책:
+단일 상속의 단순한 경우에는 두 ABI 모두 vptr을 객체 offset 0에 두지만, 이름 맹글링, 가상 소멸자가 차지하는 슬롯 수, RTTI 구조, 다중·가상 상속의 레이아웃이 서로 달라 한쪽이 만든 객체를 다른 쪽이 안전하게 호출할 수 없다. 해결책:
 
 1. 같은 컴파일러 사용.
 2. C 인터페이스로 경계 노출.
@@ -842,7 +843,7 @@ GCC는 vptr이 offset 0을 가리킨다고 가정하지만, MSVC는 다른 레�
 
 ```bash
 # GCC
-g++ -fdump-class-hierarchy myclass.cpp
+g++ -fdump-lang-class myclass.cpp
 
 # Clang
 clang++ -Xclang -fdump-vtable-layouts myclass.cpp
@@ -899,7 +900,10 @@ void print_vtable(void* obj, int num_entries = 5) {
 class Base {
     uint32_t vptr_guard_ = 0xDEADBEEF;  // vptr 직후
 public:
-    virtual void check_integrity() {
+    virtual ~Base() = default;
+
+    // 검사 자체를 가상 함수로 만들면 손상된 vptr을 먼저 역참조하게 된다.
+    void check_integrity() const {
         if (vptr_guard_ != 0xDEADBEEF) {
             throw std::runtime_error("vptr corruption detected!");
         }
@@ -934,7 +938,7 @@ C++의 가상 함수는 우아한 추상화이지만, 공짜가 아니다. 핵�
 ## 더 읽을거리
 
 - [Itanium C++ ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi.html) - vtable 레이아웃의 사실상 표준
-- [C++ Standard (ISO/IEC 14882)](https://isocpp.org/std/the-standard) - 가상 함수 명세 (§9.3.2, §11.7)
+- [C++ Standard (ISO/IEC 14882)](https://isocpp.org/std/the-standard) - 가상 함수 명세 (§9.2.3 [dcl.fct.spec], §11.7.3 [class.virtual])
 - [MSVC x64 Calling Convention](https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention) - Microsoft ABI 중 호출 규약 부분; C++ 객체 레이아웃 전체 명세는 아님
 - [cppreference: virtual function specifier](https://en.cppreference.com/w/cpp/language/virtual)
 - Stan Lippman, "Inside the C++ Object Model", Addison-Wesley, 1996 - vtable/vptr의 바이블

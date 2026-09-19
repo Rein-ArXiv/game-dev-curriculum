@@ -42,7 +42,7 @@
 | 100 | 모든 모드 | 거의 모든 GPU idle |
 | 1,000 | Individual | CPU 드로우콜 (~3 ms) |
 | 1,000 | Instanced | 거의 idle |
-| 10,000 | Individual | CPU 압도 (50+ ms) |
+| 10,000 | Individual | CPU 압도 (~30 ms) |
 | 10,000 | Instanced | GPU 약간 (~3 ms) |
 | 100,000 | Individual | CPU 폭주 (수백 ms) |
 | 100,000 | Instanced | GPU 약간 (~10 ms — fragment fill) |
@@ -154,7 +154,12 @@ void MsaaTarget::EnsureSize(int width, int height, MsaaSamples samples) {
 
 <!-- snippet: src/render/msaa_target.cpp#MsaaTarget::Recreate -->
 ```cpp
-if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+// 거부된 storage 요청은 GL 이 무시한다 — 직전 할당이 남아 FBO 가 COMPLETE 일 수 있다.
+bool storageFailed = false;
+while (glGetError() != GL_NO_ERROR) storageFailed = true;
+
+if (storageFailed ||
+    glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
     current_        = MsaaSamples::Off;
     requested_      = MsaaSamples::Off;
     fallbackNotice_ = true;
@@ -294,7 +299,7 @@ CHECK(msaa.TakeFallbackNotice());
 CHECK(!msaa.TakeFallbackNotice());
 ```
 
-폴백 후 `Current()` 와 `Requested()` 가 함께 Off 로 맞춰져야 매 프레임 재시도가 생기지 않고, 통지가 정확히 한 번만 소비되어야 로그가 같은 줄로 넘치지 않는다. 폴백을 조용히 삼키도록 바꾸면 이 다섯 단언이 함께 실패한다.
+폴백 후 `Current()` 와 `Requested()` 가 함께 Off 로 맞춰져야 매 프레임 재시도가 생기지 않고, 통지가 정확히 한 번만 소비되어야 로그가 같은 줄로 넘치지 않는다. 폴백을 조용히 삼키도록 바꾸면 앞의 네 단언이 함께 실패하고, 통지를 소비하지 않도록 바꾸면 마지막 단언이 실패한다.
 
 여전히 자동 검증 밖인 것도 분명하다. 오브젝트 수와 MSAA 샘플 수에 따른 *시간* 변화는 GPU·드라이버마다 달라 고정 기대값을 둘 수 없으므로 패널 그래프로만 읽는다.
 

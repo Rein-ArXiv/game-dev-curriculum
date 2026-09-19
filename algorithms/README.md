@@ -75,7 +75,7 @@ CLRS의 분석·증명 체계와 *The Algorithm Design Manual*의 문제 모델�
 | 09 조합 탐색·flow·matching | `articles/step07_flow_matching_and_search.md` | 최대 유량 3팔과 **max-flow == min-cut certificate**, 이분 매칭 ⇔ 부분집합 전수, 헝가리안 ⇔ 모든 순열, CSP의 Apply/Undo 상태 해시와 대칭 파괴 |
 | 10 무손실 압축 | `articles/step08_lossless_compression.md` | canonical Huffman의 Kraft 등식과 H ≤ L < H+1, LZ round-trip과 겹침 복사, 적대적 입력에 대한 복호기 거부, range coder |
 
-검증 규모는 고정 사례 45개(520,876 CHECK) + 시드 무작위 property 11종(6,950 표본)이고, CTest는 전체 1개 + step별 8개 + property 1개 + bench smoke 1개로 11개다. 무력화 변이는 15건 주입해 14건이 검출됐고, 생존한 1건은 `step08`에 사유와 함께 기록돼 있다 — Kraft 검사가 잡지 못하는 손상을 checksum이 어차피 잡으므로, 그 변이는 "검사가 잡는 척"하지 않고 생존으로 남겼다.
+검증 규모는 고정 사례 45개(520,927 CHECK) + 시드 무작위 property 11종(6,950 표본)이고, CTest는 전체 1개 + step별 8개 + property 1개 + bench smoke 1개로 11개다. 무력화 변이는 15건 주입해 14건이 검출됐고, 생존한 1건은 `step08`에 사유와 함께 기록돼 있다 — Kraft 검사가 잡지 못하는 손상을 checksum이 어차피 잡으므로, 그 변이는 "검사가 잡는 척"하지 않고 생존으로 남겼다.
 
 **mega가 흡수한 것.** 위 알고리즘 중 게임에 실제 이유가 있는 여섯 개는 `projects/mega`의 제품 경로에 들어가 있다(`include/algo/`). 리플레이 본문의 canonical Huffman, 미로 생성의 Kruskal + DSU, 건설 가능 칸 판정의 절단점, 해금 그래프의 위상 정렬 + SCC, 입장 토큰 스캔의 Aho-Corasick, 스냅샷 관련도 상위 K의 quickselect다. 흡수의 기준은 "알고리즘이 멋있는가"가 아니라 **임시 구현을 교체하거나 없던 기능을 만드는가**이며, 그 이유를 만들지 못한 알고리즘은 lab에만 둔다.
 
@@ -88,7 +88,7 @@ CLRS의 분석·증명 체계와 *The Algorithm Design Manual*의 문제 모델�
 | §2 예제와 property<br>§3 입력 생성과 shrinking | `projects/mini/math_lab/tests/property.h` + `tests/core_tests.cpp` | property 13개 · 표본 42,300개. `math_core_tests --properties`. 반례는 축소 뒤 `--seed`·`--sample` 재현 명령으로 출력 |
 | §3 shrinking (독립 하네스) | `projects/mini/physics_lab/tests/property_kit.h` + `tests/physics_property_tests.cpp` | property 5개(볼록쌍 1500표본 · 강체 장면 · bit 결정성). 탐욕+재시작 축소, 재현 명령 `physics_property_tests <case> <seed>` |
 | §5 Metamorphic·differential | 같은 두 lab | math: SAT ⇔ GJK 판정 일치, 행렬 ⇔ 쿼터니언 샌드위치, 강체 변환·균등 스케일 불변. physics: SAT 깊이 ⇔ EPA 깊이 ⇔ 참조 MTD |
-| §7 수치·확률 검증 | 같은 두 lab | 허용 오차를 통과시키려고 키우지 않고 float 단위 반올림(2⁻²⁴) 횟수에서 유도한다. 각 property의 `contract` 문자열이 그 근거를 적는다 |
+| §7 수치·확률 검증 | 같은 두 lab | 허용 오차를 통과시키려고 키우지 않고 float 단위 반올림(2⁻²⁴) 횟수에서 유도한다. math_lab은 각 property의 `contract` 문자열에, physics_lab은 검사 옆 소스 주석에 그 근거를 적는다 |
 | §9 비신뢰 입력과 자원 상한 | `projects/mini/languages_lab/src/fuzz.hpp` + `src/tests.cpp` | fuzz 배터리 4개 · 표본 80,000개. 문법 유도 생성 · 토큰/opcode 변형. 실행 예산·스택 상한·검증기 거부 어휘·진단 위치를 친다 |
 | §10 지속 가능한 검증 절차 | `projects/mega` — `tests/test_profile_isolation.cpp` | 검증이 실행 순서에 의존하지 않게 만드는 자리. 누적이 제품 기능임을 확인하고, `--profile PATH --fresh-profile`이 실행 횟수와 무관하게 같은 결과를 내는지, **그 인자를 빼면 실제로 갈리는지**(음성 대조)까지 본다 |
 

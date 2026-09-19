@@ -121,7 +121,7 @@ glGetIntegerv(GL_MAX_DRAW_BUFFERS, &maxDrawBuf);
 
 ### 깊이 통합 vs 분리 첨부
 
-깊이와 스텐실은 두 가지 방식으로 묶을 수 있다. `GL_DEPTH_ATTACHMENT`와 `GL_STENCIL_ATTACHMENT`에 *각각* 묶거나, `GL_DEPTH_STENCIL_ATTACHMENT` 하나에 *통합 포맷*(`GL_DEPTH24_STENCIL8`)을 묶는다. 통합 포맷을 분리 슬롯에 묶거나 분리 포맷을 통합 슬롯에 묶으면 완전성 검사에서 걸린다. 하드웨어 다수가 깊이와 스텐실을 *같은 메모리 영역에 인터리브* 해 저장하므로, 스텐실이 필요하면 통합 포맷을 쓰는 쪽이 일관적이다.
+깊이와 스텐실은 두 가지 방식으로 묶을 수 있다. `GL_DEPTH_ATTACHMENT`와 `GL_STENCIL_ATTACHMENT`에 *각각* 묶거나, `GL_DEPTH_STENCIL_ATTACHMENT` 하나에 *통합 포맷*(`GL_DEPTH24_STENCIL8`)을 묶는다. 분리 포맷을 통합 슬롯에 묶으면 완전성 검사에서 걸린다. 하드웨어 다수가 깊이와 스텐실을 *같은 메모리 영역에 인터리브* 해 저장하므로, 스텐실이 필요하면 통합 포맷을 쓰는 쪽이 일관적이다.
 
 ### 컬러 첨부 슬롯의 의미
 
@@ -518,7 +518,7 @@ glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4,
                                   GL_DEPTH24_STENCIL8, w, h);
 ```
 
-샘플 수는 모든 첨부에서 동일해야 한다. 요청한 샘플 수가 하드웨어 한계를 넘으면 드라이버가 더 낮은 수로 클램프할 수 있다. 실제로 할당된 샘플 수는 `glGetRenderbufferParameteriv(..., GL_RENDERBUFFER_SAMPLES,...)`로 확인한다. 지원되는 최대 샘플 수는 `GL_MAX_SAMPLES`로 질의한다.
+샘플 수는 모든 첨부에서 동일해야 한다. 요청한 샘플 수가 `GL_MAX_SAMPLES`(포맷별 상한 포함)를 넘으면 오류로 실패하고, 성공한 경우 실제 샘플 수는 요청값 이상으로 올림 배정될 수 있다. 실제로 할당된 샘플 수는 `glGetRenderbufferParameteriv(..., GL_RENDERBUFFER_SAMPLES,...)`로 확인한다. 지원되는 최대 샘플 수는 `GL_MAX_SAMPLES`로 질의한다.
 
 ### MSAA 텍스처
 
@@ -568,7 +568,7 @@ glBlitFramebuffer(0, 0, w, h, 0, 0, w, h,
                   GL_COLOR_BUFFER_BIT, GL_NEAREST);
 ```
 
-MSAA → 비-MSAA blit은 *해상도 동일 + GL_NEAREST* 만 허용된다(7절 참고). 다른 해상도로 가려면 resolve 후 별도 blit으로 두 단계. blit resolve는 단순 평균(box filter)을 쓰므로, 더 정교한 resolve가 필요하면 위의 `sampler2DMS` 수동 경로로 가중 평균을 직접 구현한다.
+MSAA → 비-MSAA blit은 *해상도 동일* 이 강제되고 컬러의 필터 인자는 무시된다(깊이/스텐실은 `GL_NEAREST`만, 7절 참고). 다른 해상도로 가려면 resolve 후 별도 blit으로 두 단계. blit resolve는 단순 평균(box filter)을 쓰므로, 더 정교한 resolve가 필요하면 위의 `sampler2DMS` 수동 경로로 가중 평균을 직접 구현한다.
 
 ### 깊이 첨부는 resolve가 까다롭다
 
@@ -740,12 +740,14 @@ while (!glfwWindowShouldClose(window)) {
 
     // 3) Horizontal Blur
     glBindFramebuffer(GL_FRAMEBUFFER, bloom.fboBlur1);
+    glViewport(0, 0, bloom.w, bloom.h);
     glUseProgram(blurHProgram);
     BindTexture(0, bloom.texBright);
     DrawFullscreenQuad();
 
     // 4) Vertical Blur
     glBindFramebuffer(GL_FRAMEBUFFER, bloom.fboBlur2);
+    glViewport(0, 0, bloom.w, bloom.h);
     glUseProgram(blurVProgram);
     BindTexture(0, bloom.texBlur1);
     DrawFullscreenQuad();
@@ -795,11 +797,11 @@ void main() {
 
 ### 디버깅 체크리스트
 
-- 화면이 검정 → HDR FBO의 깊이 첨부 누락(완전성 검사 실패), `glDrawBuffers` 미설정, 또는 리사이즈 후 viewport 미갱신
+- 화면이 검정 → HDR FBO의 컬러 첨부 누락·스토리지 미할당(완전성 검사 실패), `glDrawBuffers` 미설정, 또는 리사이즈 후 viewport 미갱신
 - 블룸이 안 보임 → bright pass의 임계값이 너무 높음, 또는 메인 패스가 LDR(`RGBA8`)로 적재되어 1.0 이상 값이 클램프됨
 - 블룸이 사각형 격자처럼 보임 → 블러 패스의 샘플링이 `GL_NEAREST`로 되어 있음
 - 블룸 빛이 화면 반대편 가장자리로 샘 → 블러 텍스처의 wrap이 `GL_REPEAT`(→ `GL_CLAMP_TO_EDGE`로)
-- 색이 너무 어두움 → 메인 패스에서 sRGB 텍스처를 Linear로 자동 변환받았는데 셰이더에서 또 `pow(2.2)`를 적용 (4절 검수 항목)
+- 색이 너무 어두움 → 메인 패스에서 sRGB 텍스처를 Linear로 자동 변환받았는데 셰이더에서 또 `pow(2.2)`를 적용
 - 색이 너무 밝음 → `GL_FRAMEBUFFER_SRGB` + 셰이더의 `pow(1/2.2)` 동시 적용
 - 윈도우 키웠을 때 일부만 그려짐 → FBO 첨부 해상도와 viewport 불일치 (리사이즈 핸들러 누락)
 
@@ -808,7 +810,7 @@ void main() {
 
 ## 결론
 
-FBO는 *어디에 그릴지* 의 추상화다. 텍스처 첨부는 셰이더 입력으로 다시 읽는 길을 열고, 렌더버퍼 첨부는 한 번 쓰고 버리는 자원에 더 효율적인 메모리 배치를 허용한다. MRT로 한 셰이더 호출이 여러 컬러 첨부에 동시 출력하면 디퍼드 셰이딩 같은 모델이 가능해진다. `glBlitFramebuffer`는 FBO 사이 픽셀 복사와 MSAA resolve를 한 호출에 처리하지만, 깊이/스텐실은 동일 해상도 + GL_NEAREST만 허용되고 MSAA resolve와 scaling은 한 호출에 합쳐지지 않는 한정 조건이 있다.
+FBO는 *어디에 그릴지* 의 추상화다. 텍스처 첨부는 셰이더 입력으로 다시 읽는 길을 열고, 렌더버퍼 첨부는 한 번 쓰고 버리는 자원에 더 효율적인 메모리 배치를 허용한다. MRT로 한 셰이더 호출이 여러 컬러 첨부에 동시 출력하면 디퍼드 셰이딩 같은 모델이 가능해진다. `glBlitFramebuffer`는 FBO 사이 픽셀 복사와 MSAA resolve를 한 호출에 처리하지만, 깊이/스텐실은 GL_NEAREST만 허용되고 MSAA resolve와 scaling은 한 호출에 합쳐지지 않는 한정 조건이 있다.
 
 세 가지 트레이드오프가 이 글의 핵심이다.
 

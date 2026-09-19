@@ -290,13 +290,11 @@ Virtual Address (48 bits used out of 64)
 
 ```text
 Page Table Entry (64 bits)
-┌─┬─┬──┬──┬───┬─┬─┬─┬─┬─┬─────────────────────────────┐
-│N│A│PG│WT│PCD│A│D│P│W│U│  Physical Frame Number     │
-│X│V│ │  │   │ │ │ │/│/│  (PFN) or Next Level Table │
-│ │L│  │  │   │ │ │ │R│S│                             │
-└─┴─┴──┴──┴───┴─┴─┴─┴─┴─┴─────────────────────────────┘
- 63 ↑  12                                              0
-    AVL bits
+┌──┬─────┬─────────────────────────────┬────┬─┬─┬─┬─┬───┬───┬───┬───┬─┐
+│NX│ AVL │  Physical Frame Number      │AVL │G│P│D│A│PCD│PWT│U/S│R/W│P│
+│  │     │  (PFN) or Next Level Table  │    │ │S│ │ │   │   │   │   │ │
+└──┴─────┴─────────────────────────────┴────┴─┴─┴─┴─┴───┴───┴───┴───┴─┘
+ 63 62:52             51:12             11:9 8 7 6 5  4   3   2   1  0
 ```
 
 주요 비트들:
@@ -967,7 +965,7 @@ $ echo 2 > /proc/sys/vm/overcommit_memory
 
 ```c
 // mm/filemap.c
-void filemap_fault(struct vm_fault *vmf)
+vm_fault_t filemap_fault(struct vm_fault *vmf)
 {
     // 요청된 페이지
     page = find_or_create_page(mapping, offset);
@@ -1129,7 +1127,8 @@ struct vm_area_struct {
 #define VM_MAYSHARE 0x00000080  // 공유로 변경 가능
 
 #define VM_GROWSDOWN    0x00000100  // 스택처럼 아래로 성장
-#define VM_GROWSUP      0x00000200  // 위로 성장
+#define VM_UFFD_MISSING 0x00000200  // userfaultfd 미매핑 추적
+// VM_GROWSUP은 독립 비트가 아니라 VM_ARCH_1이며 x86-64에서는 VM_NONE(0)이다
 
 #define VM_DENYWRITE    0x00000800  // 매핑된 파일에 대한 쓰기 거부 (5.15에서 제거됨)
 #define VM_LOCKED       0x00002000  // 페이지 잠금 (스왑 방지)
@@ -1175,7 +1174,7 @@ $ cat /proc/self/maps
 
 ### VMA 탐색: 레드-블랙 트리
 
-프로세스가 수백 개의 VMA를 가질 수 있다. 빠른 탐색을 위해 Linux는 VMA를 레드-블랙 트리로 관리한다.
+프로세스가 수백 개의 VMA를 가질 수 있다. 빠른 탐색을 위해 Linux는 5.15까지 VMA를 레드-블랙 트리로 관리했고, 6.1부터는 maple tree로 관리한다.
 
 ```c
 // mm/mmap.c
@@ -1877,7 +1876,7 @@ Process A                 Process B
 0xFFFFFFFFFF600000 - ...                : vsyscall, fixmap 등
 ```
 
-KASLR이 켜져 있으면 직접 매핑, vmalloc, vmemmap의 기준 주소(`page_offset_base` 등)가 부팅마다 랜덤화된다. 4.20 이전 커널 문서에는 직접 매핑 기점이 `0xFFFF880000000000`으로 나오는데, KAISER/KPTI 대응 과정에서 LDT 리맵 영역이 끼어들며 `0xFFFF888000000000`으로 이동했다.
+KASLR이 켜져 있으면 직접 매핑, vmalloc, vmemmap의 기준 주소(`page_offset_base` 등)가 부팅마다 랜덤화된다. 4.20 이전 커널 문서에는 직접 매핑 기점이 `0xFFFF880000000000`으로 나오는데, KAISER/KPTI 대응 과정에서 LDT 리맵 영역이 끼어들며 `0xFFFF888000000000`으로 이동했다. 위 표는 KASLR이 꺼진 기준 레이아웃이다. KASLR이 켜지면 커널 이미지 매핑 창(`KERNEL_IMAGE_SIZE`)이 1GB로 넓어지면서 모듈 매핑 시작 주소(`MODULES_VADDR`)가 `0xFFFFFFFFC0000000`으로 밀리므로, 커널 텍스트 심볼이 `0xFFFFFFFFA0000000` 이상에 나타날 수 있다.
 
 ### 직접 매핑 (Direct Mapping)
 
@@ -2126,7 +2125,7 @@ Linux DAMON(Data Access MONitor)은 sample interval, aggregation interval, regio
 4. **TLB**: 주소 변환 캐싱으로 성능 향상, 적중률이 매우 중요
 5. **페이지 폴트**: Minor/Major/Invalid 세 종류, 요구 페이징의 핵심
 6. **요구 페이징**: 필요할 때만 메모리 할당, 빠른 시작과 메모리 효율
-7. **mm_struct와 VMA**: 프로세스 주소 공간 관리, 레드-블랙 트리로 효율적 탐색
+7. **mm_struct와 VMA**: 프로세스 주소 공간 관리, 5.15까지는 레드-블랙 트리·6.1부터는 maple tree로 효율적 탐색
 8. **mmap**: 파일과 메모리 매핑, 공유 메모리, 명시적 사용자 버퍼 복사를 피하는 I/O
 9. **스왑**: 디스크를 확장 메모리로 사용, LRU 기반 페이지 교체
 10. **커널 주소 공간**: 사용자/커널 분할, 직접 매핑, KASLR
@@ -2147,9 +2146,9 @@ Linux DAMON(Data Access MONitor)은 sample interval, aggregation interval, regio
 - Peter J. Denning, "The Working Set Model for Program Behavior" (CACM, 1968)
 - Moritz Lipp et al., "Meltdown: Reading Kernel Memory from User Space" (USENIX Security, 2018)
 - [Intel 64 and IA-32 Architectures Software Developer's Manual, Vol. 3](https://software.intel.com/sdm) - Ch. 4 Paging
-- [Linux Kernel Documentation](https://www.kernel.org/doc/html/latest/) - `Documentation/vm/`, `Documentation/x86/x86_64/mm.txt`
+- [Linux Kernel Documentation](https://www.kernel.org/doc/html/latest/) - `Documentation/admin-guide/mm/`, `Documentation/arch/x86/x86_64/mm.rst`
 - [LWN.net Memory Management](https://lwn.net/Kernel/Index/#Memory_management)
 - [Linux Kernel DAMON Documentation](https://docs.kernel.org/mm/damon/index.html)
-- SeongJae Park et al., "DAMON: Data Access Monitor" (Linux Kernel Summit, 2021)
+- SeongJae Park, Yunjae Lee, Heon Y. Yeom, "Profiling Dynamic Data Access Patterns with Controlled Overhead and Quality" (Middleware '19 Industry Track, 2019)
 - man pages: `mmap(2)`, `mprotect(2)`, `madvise(2)`, `brk(2)`, `proc(5)`
 - 소스: `mm/`, `arch/x86/mm/` (https://elixir.bootlin.com/linux/latest/source)

@@ -303,7 +303,7 @@ void TestRootSigPolicyCallCounts() {
     // Per-Draw -> 드로우마다 한 번, 전부 같은 루트 시그니처 포인터.
     RecordResult perDraw;
     RunRecord(perDraw, 100, dxlab::DrawMode::PerDraw,
-              dxlab::RootSigPolicy::PerDraw, dxlab::PsoSwitchPolicy::PerDraw);
+              dxlab::RootSigPolicy::PerDraw, dxlab::PsoSwitchPolicy::PerPass);
     CHECK(perDraw.cmd.rootSigSets.size() == 100);
     for (auto* rs : perDraw.cmd.rootSigSets) CHECK(rs == FakeRootSig());
     CHECK(perDraw.counters.rootSigSets == 100);
@@ -549,6 +549,7 @@ void TestBackBufferBarrierSequence() {
     CHECK(entry == 1);
     CHECK(exit == 1);
     CHECK(cmd.barriers.size() == 2);
+    if (cmd.barriers.size() < 2) return;   // 아래 인덱싱은 위 판정이 참일 때만 안전하다.
 
     const auto& first = cmd.barriers[0].list[0].Transition;
     const auto& second = cmd.barriers[1].list[0].Transition;
@@ -717,7 +718,7 @@ std::string ReadLabSource(const char* relative) {
 }
 
 // `//` 줄 주석 제거. UTF-8 후속 바이트는 항상 0x80 이상이라 '/' 와 겹치지 않으므로
-// 바이트 단위 주사로 충분하다. (이 파일들에 블록 주석·문자열 리터럴은 없다.)
+// 바이트 단위 주사로 충분하다. (이 파일들에 블록 주석은 없고, 문자열 리터럴 안에 `//` 가 나오지 않는다.)
 std::string StripLineComments(const std::string& text) {
     std::string out;
     out.reserve(text.size());

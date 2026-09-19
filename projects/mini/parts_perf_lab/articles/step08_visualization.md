@@ -297,7 +297,7 @@ std::snprintf(label, sizeof(label), "max %.2f ms", maxMs);
 DrawText(label, x + 6, y + 4, 12, GRAY);
 
 // 우측 상단: 라인 범례.
-const int legendX = x + w - 158;
+const int legendX = x + w - 160;
 const int legendY = y + 4;
 DrawRectangle(legendX,        legendY, 8, 8, Color{200, 220, 255, 220});
 DrawText("frame",     legendX + 12,  legendY,    10, LIGHTGRAY);
@@ -367,7 +367,7 @@ simd     = Scalar     ← SIMD 경로는 이미 마스크 기반이라 branchles
 branchless = off  →  on
 ```
 
-이 도구의 경계 반사 분기는 매 프레임 *대부분 false* 다. 한 프레임에 경계를 넘는 점은 전체의 1% 미만이라 branch predictor의 적중률이 99%를 넘고, 분기 예측 미스로 인한 ms 차이는 거의 나타나지 않는다. 그래서 branchless 토글이 만드는 차이는 분기 예측이 아니라 *컴파일러가 핫 루프 전체를 자동 벡터화할 수 있는지* 에서 온다. branchless on이 *살짝* 빠른 정도로 보일 가능성이 높다. *극적인 차이* 가 아니라 *방향성이 일관* 한지를 본다.
+이 도구의 경계 반사 분기는 매 프레임 *대부분 false* 다. 한 프레임에 경계를 넘는 점은 전체의 1% 미만이라 branch predictor의 적중률이 99%를 넘고, 분기 예측 미스로 인한 ms 차이는 거의 나타나지 않는다. 그래서 branchless 토글이 만드는 차이는 분기 예측이 아니라 *양쪽 분기를 모두 계산하는 추가 비용* 에서 온다. 경계에 닿지 않는 99% 이상의 점에도 반사와 clamp를 무조건 걸기 때문에 branchless on이 오히려 *조금 느리게* 보일 가능성이 높다. *극적인 차이* 가 아니라 *방향성이 일관* 한지를 본다.
 
 만약 차이가 거의 없다면 그 자체가 결과다 — branchless가 항상 이기는 게 아니라는 사실, predictor가 충분히 영리한 경우는 분기 코드가 더 짧아 명령 캐시에 유리할 수도 있다는 사실이 보인다. 도구가 *환상을 깨는* 사례.
 
@@ -382,7 +382,7 @@ simd     = AVX2
 allocator = Malloc → Arena → Pool → Slab
 ```
 
-토글을 바꿀 때마다 *alloc 라인만* 변하고 *frame 라인은 그대로* 여야 한다. 만약 frame 라인까지 변한다면, 도구의 *측정 분리* 가 깨졌다는 신호다. Pool로 바꾸면 alloc ms가 가장 낮고 (O(1) push/pop), Arena도 낮고 (bump pointer), Malloc은 상대적으로 높고, Slab은 size class 라우팅 비용 때문에 Pool보다 조금 높을 수 있다.
+토글을 바꿀 때마다 *alloc 라인만* 변하고 *frame 라인은 그대로* 여야 한다. 만약 frame 라인까지 변한다면, 도구의 *측정 분리* 가 깨졌다는 신호다. Arena로 바꾸면 alloc ms가 가장 낮고 (Reset이 bump pointer를 0으로 되돌리는 한 줄), Pool도 낮고 (O(1) push/pop에 Reset의 free list 재구성만 더해진다), Malloc은 상대적으로 높고, Slab은 프레임마다 여덟 개 클래스 풀 전부를 Reset하느라 Pool의 열 배 안팎까지 올라간다.
 
 이 시나리오는 *수치를 보지 않아도* 시각화만으로 검증된다 — alloc 라인이 토글 변경 시점에 *수직 점프* 하고 frame 라인은 평탄하다면, 분리는 정상이다.
 

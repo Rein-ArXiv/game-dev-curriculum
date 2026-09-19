@@ -12,12 +12,13 @@
 1. [Hot Path vs Cold Path: 파레토 법칙](#1-hot-path-vs-cold-path-파레토-법칙)
 2. [Instruction Cache의 본질](#2-instruction-cache의-본질)
 3. [분기 예측과 코드 레이아웃](#3-분기-예측과-코드-레이아웃)
-4. [`__attribute__((hot))`과 `__attribute__((cold))`](#4-__attributehot과-__attributecold)
+4. [`__attribute__((hot))`과 `__attribute__((cold))`](#4-__attribute__hot-과-__attribute__cold)
 5. [함수 아웃라이닝](#5-함수-아웃라이닝-function-outlining)
 6. [링크 타임 최적화와 코드 레이아웃](#6-링크-타임-최적화와-코드-레이아웃)
 7. [실전 예제: JSON 파서 최적화](#7-실전-예제-json-파서-최적화)
 8. [실전 팁과 안티패턴](#8-실전-팁과-안티패턴)
 9. [측정과 프로파일링](#9-측정과-프로파일링)
+10. [고급 주제: Code Layout 알고리즘](#10-고급-주제-code-layout-알고리즘)
 
 
 ---
@@ -126,12 +127,15 @@ process:
     js .error               ; 음수면 점프
 .hot_path:
     xor eax, eax            ; sum = 0
+    test esi, esi           ; n == 0?
+    je .done                ; 0이면 루프를 건너뜀
     xor ecx, ecx            ; i = 0
 .loop:
     add eax, [rdi+rcx*4]
     inc ecx
     cmp ecx, esi
     jl .loop
+.done:
     ret
 
 .error:                     ; Cold path 코드
@@ -158,9 +162,7 @@ L1 I-cache와 uop cache, iTLB 용량은 제한적이지만 함수 소스 크기�
 - 정렬 padding, set 충돌과 shared-library 경계
 ```
 
-Intel의 "Intel 64 and IA-32 Architectures Optimization Reference Manual"[^1]:
-
-> "Minimize the code size of frequently executed code paths to improve instruction cache hit rate."
+Intel의 "Intel 64 and IA-32 Architectures Optimization Reference Manual"[^1]은 hot 코드의 정렬과 배치를 다루며, 분기 대상과 루프 진입점을 캐시 라인 경계에 맞추라고 권고한다.
 
 ## 3. 분기 예측과 코드 레이아웃
 
@@ -565,9 +567,13 @@ clang -fbasic-block-sections=labels -O2 code.c -o program
 # Perf 프로파일 수집
 perf record -e cycles -j any,u -- ./program
 
-# Propeller로 재컴파일
-clang -fbasic-block-sections=list -O2 \
-  -fprofile-sample-use=perf.prof code.c -o program_opt
+# perf 프로파일을 컴파일러/링커 프로파일로 변환 (원시 perf.data를 그대로 받는다)
+generate_propeller_profiles --binary=program --profile=perf.data \
+  --cc_profile=cc_profile.txt --ld_profile=ld_profile.txt
+
+# Propeller로 재컴파일 + 재링크
+clang -fbasic-block-sections=list=cc_profile.txt -O2 code.c -o program_opt \
+  -fuse-ld=lld -Wl,--symbol-ordering-file=ld_profile.txt
 ```
 
 BOLT vs Propeller:
@@ -620,7 +626,7 @@ JsonToken parse_value(const char*& p) {
             log_error("Expected 'null'");
             return JsonToken::Error;
         }
-    } else if (isdigit(*p) || *p == '-') {
+    } else if (isdigit(static_cast<unsigned char>(*p)) || *p == '-') {
         return JsonToken::Number;
     } else {
         log_error("Unexpected character");
@@ -656,7 +662,7 @@ JsonToken parse_value(const char*& p) {
     if (c == '"') return JsonToken::String;
     if (c == '{') return JsonToken::Object;
     if (c == '[') return JsonToken::Array;
-    if (isdigit(c) || c == '-') return JsonToken::Number;
+    if (isdigit(static_cast<unsigned char>(c)) || c == '-') return JsonToken::Number;
 
     // Less common cases
     if (c == 't') {
@@ -962,7 +968,7 @@ Hot/Cold 코드 분리는 의미를 보존하면서 instruction working set과 l
 
 ### 공식 문서 및 매뉴얼
 
-[^1]: Intel Corporation. "Intel 64 and IA-32 Architectures Optimization Reference Manual". https://www.intel.com/content/www/us/en/architecture-and-technology/64-ia-32-architectures-optimization-manual.html (Section 3.4.1: Code Alignment)
+[^1]: Intel Corporation. "Intel 64 and IA-32 Architectures Optimization Reference Manual". https://www.intel.com/content/www/us/en/architecture-and-technology/64-ia-32-architectures-optimization-manual.html (Section 3.4.1.4: Code Alignment)
 
 [^2]: Fog, Agner. "The microarchitecture of Intel, AMD and VIA CPUs". https://www.agner.org/optimize/ (Chapter 3: Branch Prediction)
 
@@ -978,7 +984,7 @@ Hot/Cold 코드 분리는 의미를 보존하면서 instruction working set과 l
 
 [^7]: Shen, Han, et al. "Propeller: A Profile Guided, Relinking Optimizer for Warehouse-Scale Applications". ASPLOS 2023. (Google)
 
-[^8]: Newell, Andrew and Pupyrev, Sergey. "Improved Basic Block Reordering". IEEE Transactions on Computers, 2020. (ExtTSP 알고리즘)
+[^8]: Newell, Andy and Pupyrev, Sergey. "Improved Basic Block Reordering". IEEE Transactions on Computers, 2020. (ExtTSP 알고리즘)
 
 ### 기술 블로그
 
@@ -1009,4 +1015,4 @@ Hot/Cold 코드 분리는 의미를 보존하면서 instruction working set과 l
 
 - Drepper, Ulrich. "What Every Programmer Should Know About Memory". 2007. https://people.freebsd.org/~lstewart/articles/cpumemory.pdf (Section 3.4: Instruction Cache)
 - Fog, Agner. "Optimizing software in C++". https://www.agner.org/optimize/optimizing_cpp.pdf (Chapter 8: Optimizing for Speed)
-- Marwedel, Peter, & Goossens, Gert (eds.). *Code Generation for Embedded Processors*. Springer, 1995.
+- Marwedel, Peter, & Goossens, Gert (eds.). *Code Generation for Embedded Processors*. Kluwer Academic Publishers, 1995.

@@ -188,7 +188,7 @@ D3D11_INPUT_ELEMENT_DESC layout[] = {
 
 각 항목의 두 번째 인자는 Semantic 인덱스다. `TEXCOORD0`, `TEXCOORD1`처럼 같은 이름을 여러 번 쓸 때 이 인덱스로 구분한다. 위 레이아웃은 정점 하나가 36바이트임을 정의한다. POSITION 12바이트, NORMAL 12바이트, TEXCOORD 8바이트, 그리고 COLOR가 `R8G8B8A8_UNORM`이라 4바이트다. COLOR를 `float4`로 받아도 입력 어셈블러가 `UNORM` 4바이트를 0~1 범위의 `float4`로 자동 확장하므로, 정점 버퍼에서 16바이트가 아닌 4바이트만 차지한다. 색상처럼 정밀도가 덜 중요한 속성을 8비트로 저장하면 정점당 12바이트를 절약한다.
 
-문자열 매칭의 이점은 정점 포맷을 바꿀 때 드러난다. 속성의 순서를 바꾸거나 중간에 새 속성을 끼워 넣어도, Semantic 이름만 같으면 셰이더 코드를 고칠 필요가 없다. `location` 번호 기반에서는 중간에 속성을 추가하면 뒤따르는 모든 번호가 밀려 셰이더와 CPU 양쪽을 모두 손봐야 한다.
+문자열 매칭의 이점은 정점 포맷을 바꿀 때 드러난다. 속성의 순서를 바꾸거나 중간에 새 속성을 끼워 넣어도, Semantic 이름만 같으면 셰이더 코드를 고칠 필요가 없다. `location` 번호 기반에서는 번호 자체에 의미가 없어, 새 속성에 붙인 번호를 셰이더 소스와 CPU 측 속성 인덱스 양쪽에서 따로 맞춰야 한다.
 
 ### 시스템 Semantic
 
@@ -314,7 +314,7 @@ HLSL 소스는 그대로 GPU에서 돌지 않는다. 컴파일러가 중간 표�
 | 항목 | FXC | DXC |
 |---|---|---|
 | 백엔드 | 자체 컴파일러 | LLVM/Clang 기반 |
-| 출력 | DXBC (D3D Bytecode) | DXIL (D3D Intermediate Language) |
+| 출력 | DXBC (D3D Bytecode) | DXIL (DirectX Intermediate Language) |
 | Shader Model | 5.x까지 | 6.0 이상 |
 | SPIR-V 출력 | 미지원 | `-spirv` 플래그로 지원 |
 | 16비트 타입 | 미지원 | `float16_t`, `int16_t` |
@@ -374,7 +374,7 @@ SM 6.6에서는 디스크립터 힙을 셰이더에서 직접 인덱싱할 수 �
 struct PSInput { float2 uv : TEXCOORD0; uint texIdx : TEXIDX; };
 
 float4 PSMain(PSInput input) : SV_Target {
-    Texture2D<float4> tex = ResourceDescriptorHeap[input.texIdx];
+    Texture2D<float4> tex = ResourceDescriptorHeap[NonUniformResourceIndex(input.texIdx)]; // 인덱스가 드로우 안에서 달라지므로 필수
     SamplerState      s   = SamplerDescriptorHeap[0];
     return tex.Sample(s, input.uv);
 }
@@ -394,7 +394,7 @@ Shader Model은 셰이더가 쓸 수 있는 기능의 버전 표시다. 하드�
 | 6.1 | | Barycentric, ViewInstancing |
 | 6.2 | | `float16_t`, `int16_t` 명시적 16비트 타입 |
 | 6.3 | | DXR 1.0 (Ray Tracing) |
-| 6.4 | | int8/int4 dot product, ML 가속 명령 |
+| 6.4 | | int8 packed dot product(`dot4add_*8packed`) · half `dot2add` — ML 가속 명령, Variable Rate Shading |
 | 6.5 | | DXR 1.1 (Inline RT), Mesh Shader, Sampler Feedback |
 | 6.6 | | 64비트 Atomic, ResourceDescriptorHeap, 동적 자원 |
 | 6.7 | | 고급 텍스처 연산, Quad 통신 확장 |
@@ -410,7 +410,7 @@ GPU는 스레드를 하나씩 실행하지 않는다. 32개 또는 64개의 스�
 StructuredBuffer<float>   input  : register(t0);
 RWStructuredBuffer<float> output : register(u0);
 
-[numthreads(32, 1, 1)]
+[numthreads(128, 1, 1)]   // 128 은 4~128 인 모든 wave 폭의 배수라 wave 마다 출력 슬롯이 겹치지 않는다
 void CSMain(uint tid : SV_DispatchThreadID) {
     float v = input[tid];
 

@@ -70,10 +70,6 @@ typedef struct Arena {
 } Arena;
 
 void* arena_alloc_aligned(Arena* a, size_t size, size_t align);
-
-void* arena_alloc(Arena* a, size_t alloc_size, size_t align) {
-    return arena_alloc_aligned(a, alloc_size, align);
-}
 ```
 
 **성능 특성:**
@@ -169,7 +165,7 @@ void arena_reset(Arena* a) {
     /* 디버그 모드: 메모리 초기화로 use-after-free 감지
        (offset을 0으로 만들기 전에 채워야 한다) */
     #ifdef DEBUG
-    memset(a->base, 0xCD, a->offset);
+    memset(a->base, 0xDD, a->offset);
     #endif
 
     a->offset = 0;
@@ -430,8 +426,9 @@ typedef struct Particle {
 Pool* particle_pool =
     pool_create(sizeof(Particle), _Alignof(Particle), 10000);
 
-/* 파티클 발생 */
-void emit_particle(float x, float y, float z) {
+/* 파티클 발생: 성공하면 active 목록에 등록한다 */
+void emit_particle(Particle** active_particles, int* count,
+                   float x, float y, float z) {
     Particle* p = pool_alloc(particle_pool);
     if (!p) {
         /* Pool 고갈: 가장 오래된 파티클 재사용 등의 전략 */
@@ -445,6 +442,9 @@ void emit_particle(float x, float y, float z) {
     p->position[2] = z;
     p->lifetime = 5.0f;
     p->size = 1.0f;
+
+    /* 등록해야 update_particles가 수명을 관리하고 pool에 반환한다. */
+    active_particles[(*count)++] = p;
 }
 
 /* 파티클 업데이트 */
@@ -1649,16 +1649,18 @@ Pool이 객체를 반드시 한 캐시 라인에 여러 개 넣는 것은 아니
 전형적인 게임 엔진은 영구 메모리, 프레임 임시 메모리, 객체 풀, 스택을 분리해서 관리한다.
 
 ```cpp
+// §6의 ArenaResource를 그대로 재사용한다. std::pmr::memory_resource 구현이므로
+// PMR 컨테이너에 바로 넘길 수 있고 reset()으로 O(1) 회수한다.
 class GameMemorySystem {
-    ArenaAllocator permanent_arena_{512u << 20};   // 512MB
-    ArenaAllocator frame_arena_{128u << 20};       // 128MB
+    ArenaResource permanent_arena_{512u << 20};   // 512MB
+    ArenaResource frame_arena_{128u << 20};       // 128MB
 
     Pool<Entity, 100'000>    entity_pool_;
     Pool<Transform, 100'000> transform_pool_;
     Pool<RenderMesh, 50'000> mesh_pool_;
     Pool<Particle, 1'000'000> particle_pool_;
 
-    ArenaAllocator physics_arena_{64u << 20};      // Bullet Physics 전용
+    ArenaResource physics_arena_{64u << 20};      // Bullet Physics 전용
     Pool<AudioBuffer, 1'000>  audio_pool_;
     Pool<NetPacket, 10'000>   packet_pool_;
 
@@ -1673,6 +1675,18 @@ public:
     void* alloc_frame(size_t size, size_t align) {
         return frame_arena_.allocate(size, align);
     }
+
+    // reset()은 소멸자를 실행하지 않으므로 T는 trivially destructible이어야 한다.
+    template <typename T>
+    T* alloc_frame() {
+        static_assert(std::is_trivially_destructible_v<T>,
+                      "frame arena reset은 소멸자를 실행하지 않는다");
+        return ::new (frame_arena_.allocate(sizeof(T), alignof(T))) T();
+    }
+
+    // PMR 컨테이너 생성자에 넘길 resource 핸들
+    std::pmr::memory_resource* frame_resource()     { return &frame_arena_; }
+    std::pmr::memory_resource* permanent_resource() { return &permanent_arena_; }
 
     Entity*  spawn_entity()        { return entity_pool_.allocate(); }
     void     destroy_entity(Entity* e) { entity_pool_.deallocate(e); }
@@ -1694,14 +1708,14 @@ void GameEngine::update(float dt) {
     auto* frustum = memory_.alloc_frame<Frustum>();
     extract_frustum(view, proj, frustum);
 
-    std::pmr::vector<Entity*> visible(&frame_arena_);
+    std::pmr::vector<Entity*> visible(memory_.frame_resource());
     cull_entities(frustum, visible);
 
     // 파티클 (pool)
     update_particle_system(dt);
 
     // 렌더 커맨드 (frame arena)
-    std::pmr::vector<RenderCommand> commands(&frame_arena_);
+    std::pmr::vector<RenderCommand> commands(memory_.frame_resource());
     for (Entity* e : visible)
         commands.push_back(build_render_command(e));
 
@@ -1712,21 +1726,24 @@ void GameEngine::update(float dt) {
 ### 레벨 로딩
 
 ```c
-void load_level(const char* path, GameMemorySystem& mem) {
-    arena_reset(&mem.permanent_arena);   // 이전 레벨 데이터 삭제
+/* §1의 C Arena를 직접 받는다. 영구 arena와 scratch arena를 분리해야
+   마커의 LIFO 계약이 지켜진다. 같은 arena에 마커를 걸고 그 뒤에서 메시를
+   할당하면 temp_arena_end가 메시까지 되감는다. */
+void load_level(const char* path, Arena* permanent, Arena* scratch) {
+    arena_reset(permanent);   /* 이전 레벨 데이터 삭제 */
 
-    auto temp = temp_arena_begin(&mem.permanent_arena);
+    Temp_Arena_Memory temp = temp_arena_begin(scratch);
 
-    char* json = arena_alloc(&mem.permanent_arena, 10u << 20);
+    char* json = arena_alloc(scratch, 10u << 20);
     load_file(path, json);
-    JSON* parsed = parse_json(json, &mem.permanent_arena);
+    JSON* parsed = parse_json(json, scratch);
 
     for (int i = 0; i < parsed->mesh_count; i++) {
-        Mesh* mesh = arena_alloc(&mem.permanent_arena, sizeof(Mesh));
-        load_mesh(parsed->meshes[i], mesh, &mem.permanent_arena);
+        Mesh* mesh = arena_alloc(permanent, sizeof(Mesh));
+        load_mesh(parsed->meshes[i], mesh, permanent);
     }
 
-    temp_arena_end(temp);   // JSON 파싱 데이터 회수, 메시는 유지
+    temp_arena_end(temp);   /* JSON 회수, 메시는 permanent에 유지 */
 }
 ```
 
@@ -1878,7 +1895,7 @@ public:
 
 ```text
 Frame Arena (128 MB):
-[################################...........................]
+[################################................................................]
 Total: 134,217,728 bytes, Used: 54,832,128 bytes (40.9%)
 
 Breakdown:
@@ -1894,7 +1911,7 @@ Breakdown:
 
 ```c
 #ifdef DEBUG
-void pool_free_debug(Pool* pool, void* ptr) {
+void pool_free_debug(SizeClassPool* pool, void* ptr) {
     BlockHeader* h = get_header(ptr);
     if (is_in_free_list(pool, h)) {
         fprintf(stderr, "ERROR: Double free at %p\n", ptr);
@@ -1953,7 +1970,7 @@ Particle pool: 12,789 / 1,000,000 used
 | 할당자 | 제약 | 보상 |
 |--------|------|------|
 | Arena | 개별 해제 불가 | 짧고 예측 가능한 할당 경로 |
-| Pool | 크기 고정 | 단편화 제거, 캐시 효율 |
+| Pool | 크기 고정 | 외부 단편화 제거, 주소 안정성과 빠른 개별 재사용 |
 | Stack | LIFO 순서 | 스코프 관리, 누수 방지 |
 | Buddy | 2의 거듭제곱 | 병합 가능, 외부 단편화 감소 |
 | Slab | 크기·정렬 고정 | backing allocation과 크기 분류 비용 회피 |
@@ -1969,7 +1986,7 @@ C++17 `std::pmr`은 이 전통을 표준 인터페이스로 옮겨놓았다. are
 
 ## 더 읽을거리
 
-- Ginger Bill, "Memory Allocation Strategies" 시리즈: [Part 2 Linear/Arena](https://www.gingerbill.org/article/2019/02/08/memory-allocation-strategies-002/), [Part 3 Free Lists and Buddy](https://www.gingerbill.org/article/2019/02/15/memory-allocation-strategies-003/)
+- Ginger Bill, "Memory Allocation Strategies" 시리즈: [Part 2 Linear/Arena](https://www.gingerbill.org/article/2019/02/08/memory-allocation-strategies-002/), [Part 5 Free List](https://www.gingerbill.org/article/2021/11/30/memory-allocation-strategies-005/), [Part 6 Buddy](https://www.gingerbill.org/article/2021/12/02/memory-allocation-strategies-006/)
 - Jason Gregory, *Game Engine Architecture* 3rd Ed., Chapter 5.2 Memory Management
 - Bonwick, J. (1994), "The Slab Allocator: An Object-Caching Kernel Memory Allocator", USENIX Summer
 - Wilson et al. (1995), "Dynamic Storage Allocation: A Survey and Critical Review"
@@ -1983,4 +2000,4 @@ C++17 `std::pmr`은 이 전통을 표준 인터페이스로 옮겨놓았다. are
 - EASTL source and documentation: <https://github.com/electronicarts/EASTL>
 - LLVM `BumpPtrAllocatorImpl`: <https://llvm.org/doxygen/classllvm_1_1BumpPtrAllocatorImpl.html>
 - Facebook Folly Arena: <https://github.com/facebook/folly/blob/main/folly/memory/Arena.h>
-- Emery Berger et al., "Hoard: A Scalable Memory Allocator", ASPLOS 2000
+- Emery Berger et al., "Hoard: A Scalable Memory Allocator for Multithreaded Applications", ASPLOS 2000

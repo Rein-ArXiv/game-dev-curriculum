@@ -67,7 +67,7 @@ for (std::size_t i = 0; i < count_; ++i) {
 수동 SIMD 코드를 모든 환경에서 그대로 컴파일하면 두 가지 문제가 생긴다.
 
 1. **비-x86 플랫폼**: ARM (Apple Silicon, 모바일 등)에서 `<immintrin.h>` 가 없거나 `__m128` 타입이 정의되지 않는다. 컴파일 자체가 실패.
-2. **x86 안에서도 명령 셋 차이**: SSE2는 모든 x86-64에서 보장되지만 AVX2는 추가 옵션 (`/arch:AVX2`, `-mavx2`) 이 필요. 옵션 없이 AVX2 인트린식을 쓰면 컴파일러가 *target specific option mismatch* 류 오류를 낸다.
+2. **x86 안에서도 명령 셋 차이**: SSE2는 모든 x86-64에서 보장되지만 AVX2는 추가 옵션 (`/arch:AVX2`, `-mavx2`) 이 필요. 옵션 없이 AVX2 인트린식을 쓰면 GCC/Clang은 *target specific option mismatch* 류 오류를 내고, MSVC는 진단 없이 컴파일해 AVX2 명령을 그대로 방출한다.
 
 해결 방법: *컴파일 시점 매크로 가드*.
 
@@ -121,11 +121,17 @@ endif()
 
 if(PERF_LAB_ENABLE_AVX2)
     if(PERF_LAB_TARGET_X86)
+        # 앱 타깃과 테스트 타깃에 동일하게 부여한다. 테스트에 주지 않으면
+        # UpdateAVX2 가 매크로 가드 때문에 테스트 바이너리에서 아예 컴파일되지
+        # 않아 AVX2 경로가 무검증으로 남는다.
         target_compile_definitions(${PROJECT_NAME} PRIVATE PERF_LAB_AVX2=1)
+        target_compile_definitions(parts_core_tests PRIVATE PERF_LAB_AVX2=1)
         if(MSVC)
             target_compile_options(${PROJECT_NAME} PRIVATE /arch:AVX2)
+            target_compile_options(parts_core_tests PRIVATE /arch:AVX2)
         else()
             target_compile_options(${PROJECT_NAME} PRIVATE -mavx2 -mfma)
+            target_compile_options(parts_core_tests PRIVATE -mavx2 -mfma)
         endif()
     else()
         message(WARNING
@@ -173,7 +179,7 @@ void SoASimulation::Update(float dt, SimdWidth simd, bool /*branchless*/) {
 - Intel CPU에서 옵션 OFF → SSE/AVX2 토글 모두 SSE 또는 scalar
 - AVX2/FMA 지원 x86/x64 CPU에서 옵션 ON → SSE/AVX2 토글 각각 해당 경로
 
-주의할 점은 *런타임 CPU 기능 검출은 아직 없다는 것* 이다. AVX2/FMA 옵션으로 빌드한 바이너리에서 AVX2 토글을 실제로 선택하려면 실행 CPU가 AVX2와 FMA를 지원해야 한다. 지원하지 않는 CPU에서 AVX2 경로를 실행하면 illegal instruction이 날 수 있다. 이 실험 도구는 빌드 옵션을 명시적으로 켠 개발 환경에서 측정한다는 전제를 둔다.
+주의할 점은 *런타임 CPU 기능 검출은 아직 없다는 것* 이다. `/arch:AVX2`(`-mavx2 -mfma`)는 타깃 전체에 붙으므로 scalar·SSE 경로까지 VEX 인코딩으로 컴파일된다. 그래서 이 옵션으로 빌드한 바이너리는 SIMD 토글과 무관하게 실행 CPU가 AVX2와 FMA를 지원해야 하고, 지원하지 않는 CPU에서는 시작 직후 illegal instruction이 날 수 있다. 이 실험 도구는 빌드 옵션을 명시적으로 켠 개발 환경에서 측정한다는 전제를 둔다.
 
 ## 3. SSE2 안전 select 패턴
 
@@ -638,4 +644,4 @@ simd: 1 test(s), 5 check(s), 0 failure(s)
 - [Wojciech Muła — articles (optimization, SIMD, algorithms)](http://0x80.pl/notesen.html) — SSE/AVX 실전 패턴 글 색인
 - [Compiler Explorer (godbolt.org)](https://godbolt.org/) — 자동 벡터화 결과를 어셈블리로 직접 확인
 - [SIMD-everywhere (sse2neon)](https://github.com/DLTcollab/sse2neon) — x86 SSE 인트린식을 ARM NEON으로 매핑하는 어댑터 헤더
-- Bryce Adelstein-Lelbach, "Benchmarking C++ Code" (CppCon 2015) — SIMD 비교 측정의 함정
+- Bryce Adelstein Lelbach, "Benchmarking C++ Code" (CppCon 2015) — SIMD 비교 측정의 함정

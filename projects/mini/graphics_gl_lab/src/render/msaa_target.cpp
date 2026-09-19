@@ -48,6 +48,9 @@ bool MsaaTarget::TakeFallbackNotice() {
 }
 
 void MsaaTarget::Recreate() {
+    // 이전 호출이 남긴 에러 플래그가 아래 storage 판정을 오염시키지 않게 비운다.
+    while (glGetError() != GL_NO_ERROR) {}
+
     int n = MsaaCount(current_);
 
     glBindRenderbuffer(GL_RENDERBUFFER, colorRb_);
@@ -63,8 +66,15 @@ void MsaaTarget::Recreate() {
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
                                GL_RENDERBUFFER, depthRb_);
 
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        // FBO 가 깨지면 MSAA 비활성으로 폴백 + 호출자에게 한 번 알린다.
+    // 거부된 storage 요청은 GL 이 *무시* 한다 (GL 4.5 §2.3.1) — 직전 할당이 그대로
+    // 남아 FBO 가 여전히 COMPLETE 일 수 있으므로 상태 검사만으로는 못 잡는다.
+    bool storageFailed = false;
+    while (glGetError() != GL_NO_ERROR) storageFailed = true;
+
+    if (storageFailed ||
+        glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        // storage 가 거부됐거나 FBO 가 깨지면 MSAA 비활성으로 폴백 + 호출자에게
+        // 한 번 알린다.
         current_        = MsaaSamples::Off;
         requested_      = MsaaSamples::Off;
         fallbackNotice_ = true;

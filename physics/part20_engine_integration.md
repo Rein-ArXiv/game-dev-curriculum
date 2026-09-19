@@ -21,7 +21,7 @@
 7. **멀티스레드 + island 분할**.
 8. **디버그 + 시각화 + 도구**.
 
-이 글이 마치면 *완성된 물리 엔진* 의 *모듈 배치 / 라이선스 / 결정 패턴* 이 명확하다.
+이 글이 마치면 *완성된 물리 엔진* 의 *모듈 배치 / 결정 패턴* 이 명확하다.
 
 
 ---
@@ -680,7 +680,7 @@ TEST(Physics, BoxFallsAndLandsOnGround) {
 - *Layer 매트릭스* — 충돌 페어 설정.
 - *시뮬 미리보기* — 게임 외에서 *물리만 시뮬*.
 
-Unity 의 *Physics Window*, Unreal 의 *PhAT*, 자체 엔진의 자체 도구.
+Unity 의 *Physics Debugger*, Unreal 의 *PhAT*, 자체 엔진의 자체 도구.
 
 ### 8.8 전체 구조 정리
 
