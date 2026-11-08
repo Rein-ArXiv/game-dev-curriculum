@@ -1,0 +1,18 @@
+{
+  "name": "game-dev-curriculum-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "site:generate": "node scripts/site-generate.mjs",
+    "site:dev": "npm run site:generate && vitepress dev site --host 127.0.0.1",
+    "site:build": "npm run site:generate && vitepress build site && npm run site:check",
+    "site:preview": "vitepress preview site --host 127.0.0.1",
+    "site:check": "node scripts/site-check-output.mjs"
+  },
+  "devDependencies": {
+    "markdown-it-mathjax3": "4.3.2",
+    "mermaid": "11.17.2",
+    "vitepress": "1.6.4",
+    "vue": "3.5.45"
+  }
+}

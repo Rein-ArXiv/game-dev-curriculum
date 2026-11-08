@@ -82,3 +82,9 @@ REDESIGN_*.md
 
 # DB lab benchmark/test output, not source fixtures
 /projects/mini/db_lab/*.wal
+
+# Documentation site dependencies and reproducible output
+node_modules/
+/site/content/
+/site/.vitepress/dist/
+/site/.vitepress/cache/
