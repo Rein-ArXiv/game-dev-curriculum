@@ -162,14 +162,14 @@ struct UniformData {
 };                     // 총 192 byte
 ```
 
-`mat4`는 std140 레이아웃에서 16바이트 정렬을 요구하고 `mat4` 자체가 64바이트라 자연스럽게 맞는다. 그러나 `vec3`를 uniform 멤버로 넣을 때 함정이 생긴다. std140에서 `vec3`는 16바이트 정렬을 받아 뒤에 4바이트 패딩이 붙는다. C++ 구조체의 `glm::vec3`(12바이트)와 셰이더의 `vec3`(정렬 후 16바이트)가 어긋나면 그 뒤의 모든 멤버가 밀린다. 안전한 습관은 uniform 구조체 멤버에 `alignas(16)`을 명시하거나, `vec3` 대신 `vec4`를 쓰고 w를 버리는 것이다.
+`mat4`는 std140 레이아웃에서 16바이트 정렬을 요구하고 `mat4` 자체가 64바이트라 자연스럽게 맞는다. `vec3`의 base alignment는 16이지만 데이터 크기는 12이므로, 바로 뒤에 오는 scalar는 offset 12에 놓일 수 있다. 즉 `vec3` 뒤에 4바이트 패딩이 항상 붙는다고 일반화하면 틀린다. 패딩이 필요한 경우는 `vec3`가 배열의 원소일 때, 행렬 stride, 또는 뒤따르는 멤버가 더 높은 정렬을 요구할 때다. C++ 구조체의 `glm::vec3`(12바이트)와 셰이더 레이아웃이 어긋날 수 있으므로, 안전한 습관은 실제 offset을 `offsetof`/`sizeof`나 셰이더 reflection으로 대조하거나, `vec3` 대신 `vec4`를 쓰고 w를 버려 명시적으로 packing하는 것이다.
 
 ```cpp
 struct UniformData {
     glm::mat4 model;
     glm::mat4 view;
     glm::mat4 proj;
-    alignas(16) glm::vec3 lightDir;  // vec3 뒤 std140 정렬 강제
+    alignas(16) glm::vec3 lightDir;  // 멤버 정렬을 16바이트로 고정
 };
 ```
 
@@ -266,7 +266,7 @@ flowchart LR
     View --> Sampler[VkSampler]
 ```
 
-device local에 두는 이유는 대역폭이다. discrete GPU에서 VRAM 대역폭은 수백 GB/s에 이르지만, host visible 메모리(시스템 RAM)는 PCIe를 거쳐 보통 한 자릿수~십수 GB/s에 머문다. 텍스처는 매 프레임 여러 번 샘플되므로 device local에 두는 것이 fragment 처리량을 좌우한다. 정점/인덱스 버퍼도 같은 이유로 staging을 거쳐 device local에 올린다.
+device local에 두는 이유는 대역폭이다. discrete GPU에서 VRAM 대역폭은 수백 GB/s에 이르지만, host visible 메모리(시스템 RAM)는 PCIe를 거쳐 보통 한 자릿수~십수 GB/s에 머문다. 텍스처는 매 프레임 여러 번 샘플되므로 device local에 두는 것이 fragment 처리량을 좌우한다. 정점/인덱스 버퍼도 같은 이유로 staging을 거쳐 device local에 올린다. 다만 `DEVICE_LOCAL`과 `HOST_VISIBLE`은 배타 속성이 아니다. 통합 GPU나 ReBAR가 활성화된 시스템에서는 device local 힙이 host visible이면서 CPU가 map 가능한 경우도 있다. 아키텍처 이름만으로 staging copy를 생략할 수 있다고 단정하지 말고, `vkGetPhysicalDeviceMemoryProperties`로 실제 heap/memory type의 `HOST_VISIBLE`·`HOST_COHERENT` 여부와 mapping·동기화 계약, 포맷·usage 제약을 확인한 뒤에만 무복사 경로를 선택한다.
 
 ### Staging buffer 채우기
 
@@ -396,7 +396,7 @@ TransitionImage(cmd, textureImage,
     VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
 ```
 
-stage/access를 잘못 잡으면 검증 레이어가 `SYNC-HAZARD` 경고를 낸다. 이 텍스처를 프래그먼트 셰이더가 읽는데 dst stage를 `COLOR_ATTACHMENT_OUTPUT`처럼 너무 늦은 단계로 잡거나 dstAccess를 비워 두면, 복사 완료와 셰이더 읽기 사이의 의존성이 빠질 수 있다. 반대로 `VERTEX_SHADER`처럼 더 이른 단계를 지정하면 논리적으로 뒤따르는 프래그먼트 단계까지 범위에 들어가므로 안전하지만 필요 이상으로 보수적이다. 이런 동기화 버그는 특정 드라이버와 타이밍에서만 재현될 수 있으므로 validation layer의 synchronization validation을 켜고 확인한다.
+stage/access를 잘못 잡으면 검증 레이어가 `SYNC-HAZARD` 경고를 낸다. 이 텍스처를 프래그먼트 셰이더가 읽는데 dst stage를 `COLOR_ATTACHMENT_OUTPUT`처럼 너무 늦은 단계로 잡거나 dstAccess를 비워 두면, 복사 완료와 셰이더 읽기 사이의 의존성이 빠질 수 있다. 여기서 *실행 의존성*과 *메모리 접근 범위*를 구분해야 한다. `VERTEX_SHADER`처럼 더 이른 stage를 지정하면 실행 순서상 뒤따르는 프래그먼트 단계까지 논리적으로 넓어질 수 있지만, access scope는 명시한 stage에 한정되므로 VS의 `SHADER_READ`만 지정해서는 프래그먼트 셰이더의 read 가시성을 보장하지 못한다. 따라서 실제 consumer인 `FRAGMENT_SHADER`와 `SHADER_READ`를 지정해야 하며, `ALL_GRAPHICS`/`ALL_COMMANDS`도 해당 읽기를 포함하는 조건에서만 대안이 된다. 이런 동기화 버그는 특정 드라이버와 타이밍에서만 재현될 수 있으므로 validation layer의 synchronization validation을 켜고 확인한다.
 
 ### CopyBufferToImage
 
@@ -654,4 +654,4 @@ vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0);
 
 - [Vulkan Tutorial: Vertex buffers](https://vulkan-tutorial.com/Vertex_buffers/Vertex_buffer_creation) 및 이어지는 Uniform buffers·Texture mapping 장 — 본문 다섯 단계와 1:1 대응.
 - [Sascha Willems, Vulkan Examples](https://github.com/SaschaWillems/Vulkan) — 자원 패턴별 단문 예제의 보고.
-- [Vulkan Guide: Descriptor Dynamic Offset](https://docs.vulkan.org/guide/latest/descriptor_dynamic_offset.html) — 동적 uniform/storage buffer offset의 정렬과 바인딩 규칙.
+- [Vulkan Guide: Descriptor Dynamic Offset](https://docs.vulkan.org/guide/latest/descriptor_dynamic_offset.html) — 이 장은 정적 descriptor set을 쓰므로 직접 근거는 아니다. 여러 객체의 offset을 동적으로 바꾸는 후속 확장에서 참고할 추가 읽을거리다.

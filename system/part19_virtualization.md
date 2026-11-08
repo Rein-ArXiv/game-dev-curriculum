@@ -73,9 +73,11 @@ void enable_interrupts(void) {
     asm volatile("sti");  // 특권 명령어
 }
 
-// Xen 반가상화 리눅스
+// Xen 반가상화 리눅스 (아래 함수명은 설명용 의사 코드다. 실제 Xen API의
+// event-channel/upcall masking 함수 원형과 버전은 버전 고정 header와
+// 대조하기 전까지 단정하지 않는다.)
 void enable_interrupts(void) {
-    HYPERVISOR_enable_interrupts();  // 하이퍼콜
+    HYPERVISOR_enable_interrupts();  // 하이퍼콜 (의사 코드)
 }
 ```
 
@@ -189,18 +191,39 @@ static void vmx_vcpu_run(struct kvm_vcpu *vcpu) {
     vmcs_writel(GUEST_RSP, vcpu->arch.regs[VCPU_REGS_RSP]);
 
     // 3. VM Entry
+    //
+    // 성공한 VM-entry 뒤 VM-exit는 VMCS의 HOST_RIP/HOST_RSP에 등록한
+    // exit trampoline으로 진입한다. 따라서 아래 C 문장은 VM-exit 복귀
+    // 지점이 아니라, VMLAUNCH가 VM-fail(CF=1 또는 ZF=1)로 실패했을 때만
+    // fall-through하는 경로다.
+    u32 cf, zf;
     asm volatile(
-        "vmlaunch\n\t"  // 또는 vmresume
-        : : : "memory"
+        "vmlaunch\n\t"
+        "setc %0\n\t"   // VM-fail(CF)
+        "setz %1\n\t"   // VM-fail(ZF)
+        : "=r"(cf), "=r"(zf)
+        :
+        : "memory", "cc"
     );
 
-    // 이 코드는 VM Exit 후에야 실행됨!
+    if (cf || zf) {
+        // VM entry 실패: VMCS 설정/상태를 점검하고 오류로 반환한다.
+        return;
+    }
+
+    // 정상 복귀는 HOST_RIP trampoline이 담당한다. 여기서는 도달하지 않는다.
+}
+
+// exit trampoline (VMCS의 HOST_RIP/HOST_RSP가 가리킨다)
+static void vmx_exit_handler(void)
+{
+    // VM-exit reason을 읽고 처리한 뒤, 이미 launch된 VMCS는 VMRESUME으로 재진입한다.
 }
 ```
 
 **VMLAUNCH vs VMRESUME:**
-- VMLAUNCH: 새 VM 첫 실행
-- VMRESUME: 이미 실행됐던 VM 재개
+- VMLAUNCH: `VMCLEAR` 뒤 VMCS를 초기 상태로 두고 새 VM을 첫 실행
+- VMRESUME: 이미 launch된 VMCS를 재개. 첫 launch 이후의 exit 복귀 재진입은 VMRESUME을 쓴다.
 
 ### VM Exit: 하이퍼바이저로 복귀
 
@@ -554,8 +577,14 @@ static void handle_tx(struct vhost_net *net) {
         write(tapfd, hva, len);
 
         // 4. used ring 업데이트
+        //    slot은 shared used.idx가 아니라 로컬 monotonic used_idx로 계산한다.
         vring->used.ring[used_idx % queue_size].id = desc_idx;
-        vring->used.idx++;
+        vring->used.ring[used_idx % queue_size].len = len;
+
+        // descriptor body를 먼저 쓰고 publish fence 뒤에 shared idx를 공개한다.
+        smp_wmb();
+        used_idx++;
+        vring->used.idx = used_idx;
         last_avail_idx++;
     }
 
@@ -563,6 +592,8 @@ static void handle_tx(struct vhost_net *net) {
     eventfd_signal(irqfd, 1);
 }
 ```
+
+used slot index는 shared `used.idx`를 매번 새로 읽는 대신 로컬에서 monotonic하게 증가시켜 `% queue_size`로 위치를 구한다. 여러 completion을 게시해도 각기 다른 slot을 갱신하려면 이 로컬 index를 전진시켜야 한다. descriptor body를 먼저 쓴 뒤 `smp_wmb()` 같은 publish barrier로 shared `used.idx`를 공개하고, 게스트는 index를 acquire로 관측한 뒤 slot을 읽는다. used ring에 게시된 뒤에는 해당 descriptor를 게스트가 다시 소유하므로 하이퍼바이저는 재사용하지 않는다.
 
 **성능 개선:**
 - VM Exit 횟수: 패킷당 1회 → 배치 단위 1회
@@ -661,10 +692,12 @@ int main() {
 #define SIZE (1UL << 30)  // 1GB
 
 int main() {
-    char *buf = malloc(SIZE);
+    // volatile로 compiler가 touch 자체를 제거하지 못하게 한다.
+    volatile char *buf = malloc(SIZE);
     struct timespec start, end;
 
-    // 첫 접근 - EPT 위반으로 페이지 할당
+    // 첫 접근 - guest demand-zero fault, host page 할당, cache/TLB,
+    // EPT violation이 섞인 합성 first-touch 비용
     clock_gettime(CLOCK_MONOTONIC, &start);
     for (size_t i = 0; i < SIZE; i += 4096)
         buf[i] = 1;
@@ -674,7 +707,7 @@ int main() {
         (end.tv_nsec - start.tv_nsec);
     printf("First access: %lld ms\n", first_ns / 1000000);
 
-    // 두 번째 접근 - EPT 캐싱됨
+    // 두 번째 접근 - 이미 채워진 변환/TLB 재사용 비용
     clock_gettime(CLOCK_MONOTONIC, &start);
     for (size_t i = 0; i < SIZE; i += 4096)
         buf[i] = 2;
@@ -684,11 +717,11 @@ int main() {
         (end.tv_nsec - start.tv_nsec);
     printf("Second access: %lld ms\n", second_ns / 1000000);
 
-    free(buf);
+    free((void *)buf);
 }
 ```
 
-첫 접근에는 게스트의 demand-zero page fault, 호스트 backing page 준비, nested page-table 채움, cache/TLB cold state가 함께 섞일 수 있다. 두 번째 접근과의 차이를 모두 EPT 하나의 비용으로 돌리면 안 된다. guest major/minor fault, KVM exit reason, host fault, EPT/NPT walk 관련 hardware counter를 함께 기록해야 원인을 분리할 수 있다.
+첫 접근에는 게스트의 demand-zero page fault, 호스트 backing page 준비, nested page-table 채움, cache/TLB cold state가 함께 섞일 수 있다. compiler가 touch를 제거하지 않도록 `volatile`로 막고, 게스트 fault와 호스트 fault, EPT violation을 구별해 계측해야 한다. 두 번째 접근과의 차이를 모두 EPT 하나의 비용으로 돌리면 안 되며, 측정값은 합성 first-touch 비용으로 표기한다. guest major/minor fault, KVM exit reason, host fault, EPT/NPT walk 관련 hardware counter를 함께 기록해야 원인을 분리할 수 있다.
 
 
 ---

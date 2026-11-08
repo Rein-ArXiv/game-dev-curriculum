@@ -49,6 +49,8 @@ void spin_unlock(spinlock_t *lock) {
 }
 ```
 
+락 워드의 원자적 변경만으로는 보호 데이터의 publication이 보장되지 않는다. 해제(unlock)는 release 연산, 획득(lock)은 acquire 연산이어야 하며, `volatile`이나 relaxed store/`atomic_set`은 컴파일러·CPU 재배치를 막지 못한다. 아래 ticket/MCS/rwlock 예제의 unlock에 나오는 일반 store와 `atomic_set`은 release 연산으로 표기한다.
+
 이 코드의 핵심은 **이중 루프** 구조다. 외부 루프는 Test-And-Set으로 락 획득을 시도하고, 내부 루프는 단순 읽기만 수행한다. 왜 이렇게 나눴을까?
 
 ### 캐시 코히런시와 MESI 프로토콜
@@ -88,12 +90,12 @@ typedef struct {
 void arch_spin_lock(arch_spinlock_t *lock) {
     u16 ticket = atomic_fetch_add(&lock->next, 1);
 
-    while (READ_ONCE(lock->owner) != ticket)
+    while (smp_load_acquire(&lock->owner) != ticket)
         cpu_relax();
 }
 
 void arch_spin_unlock(arch_spinlock_t *lock) {
-    lock->owner++;
+    smp_store_release(&lock->owner, lock->owner + 1);  // release
 }
 ```
 
@@ -140,7 +142,7 @@ void mcs_lock(struct mcs_lock **lock, struct mcs_lock *node) {
     if (prev != NULL) {
         prev->next = node;
         // 자신의 로컬 플래그를 대기
-        while (node->locked)
+        while (smp_load_acquire(&node->locked))
             cpu_relax();
     }
 }
@@ -152,7 +154,7 @@ void mcs_unlock(struct mcs_lock **lock, struct mcs_lock *node) {
         while (node->next == NULL)
             cpu_relax();
     }
-    node->next->locked = 0;  // 다음 스레드 깨우기
+    smp_store_release(&node->next->locked, 0);  // release로 다음 스레드를 깨운다
 }
 ```
 
@@ -189,17 +191,20 @@ static void __mutex_lock_slowpath(struct mutex *lock) {
 
     spin_lock(&lock->wait_lock);
     list_add_tail(&waiter.list, &lock->wait_list);
-    spin_unlock(&lock->wait_lock);
+    set_current_state(TASK_UNINTERRUPTIBLE);
 
     for (;;) {
-        set_current_state(TASK_UNINTERRUPTIBLE);
-
         if (atomic_long_try_cmpxchg_acquire(&lock->owner, &(unsigned long){0}, (unsigned long)current))
             break;
 
+        spin_unlock(&lock->wait_lock);
         schedule();  // 스케줄러에게 CPU 양보
+        spin_lock(&lock->wait_lock);
+        set_current_state(TASK_UNINTERRUPTIBLE);
     }
 
+    list_del(&waiter.list);  // 획득 시 대기 큐에서 제거
+    spin_unlock(&lock->wait_lock);
     set_current_state(TASK_RUNNING);
 }
 ```
@@ -210,6 +215,7 @@ Fast Path는 **언락 비용 없는** 원자적 연산이다. 경합이 없으�
 2. `TASK_UNINTERRUPTIBLE` 상태로 전환
 3. `schedule` 호출하여 CPU 양보
 4. 깨어나면 다시 락 획득 시도
+5. 획득에 성공하면 `wait_lock`을 잡은 채 대기 큐 항목을 제거하고 실행 상태로 복귀
 
 ### Optimistic Spinning
 
@@ -373,7 +379,7 @@ void write_lock(rwlock_t *rw) {
 }
 
 void write_unlock(rwlock_t *rw) {
-    atomic_set(&rw->cnt, 0);
+    atomic_set_release(&rw->cnt, 0);  // 보호 데이터를 공개하는 release store
     spin_unlock(&rw->lock);
 }
 ```
@@ -463,6 +469,7 @@ long do_futex(u32 __user *uaddr, int op, u32 val) {
     struct futex_hash_bucket *hb;
     struct futex_q wait_q = { .task = current };  // FUTEX_WAIT용 대기 항목
     struct futex_q *q;                            // FUTEX_WAKE 순회용
+    int woken = 0;
 
     // 가상 주소 -> 물리 페이지 매핑
     get_futex_key(uaddr, &key);
@@ -472,32 +479,43 @@ long do_futex(u32 __user *uaddr, int op, u32 val) {
 
     switch (op) {
     case FUTEX_WAIT:
-        // 대기 큐에 추가
         wait_q.key = key;
 
         spin_lock(&hb->lock);
+        set_current_state(TASK_INTERRUPTIBLE);  // schedule 전에 sleep 상태를 먼저 설정
         if (*uaddr == val) {  // 재검증 (race 방지)
-            plist_add(&wait_q.list, &hb->chain);
+            plist_add(&wait_q.list, &hb->chain);  // 원자적 enqueue
             spin_unlock(&hb->lock);
             schedule();  // 슬립
+            spin_lock(&hb->lock);
+            // spurious wakeup이면 아직 큐에 남아 있으므로 직접 dequeue
+            if (!plist_node_empty(&wait_q.list))
+                plist_del(&wait_q.list, &hb->chain);
+            spin_unlock(&hb->lock);
         } else {
+            set_current_state(TASK_RUNNING);
             spin_unlock(&hb->lock);
         }
         break;
 
     case FUTEX_WAKE:
+        if (val == 0)  // 깨울 대상이 없으면 조기 반환
+            return 0;
+
         // 대기 스레드 깨우기
         spin_lock(&hb->lock);
         plist_for_each_entry_safe(q, hb->chain) {
             if (match_futex(&q->key, &key)) {
+                plist_del(&q->list, &hb->chain);  // 깨우는 쪽에서 dequeue
                 wake_up_process(q->task);
-                if (--val == 0)
+                if (++woken >= val)
                     break;
             }
         }
         spin_unlock(&hb->lock);
         break;
     }
+    return woken;  // 실제로 깨운 대기자 수 (FUTEX_WAIT는 0)
 }
 ```
 
@@ -559,15 +577,18 @@ struct foo *p = rcu_dereference(global_ptr);
 do_something_with(p->a);
 rcu_read_unlock();
 
-// 쓰기
+// 쓰기: 여러 updater가 같은 old_fp를 동시에 교체·해제하지 않도록 직렬화한다
+mutex_lock(&update_mutex);
+struct foo *old_fp = rcu_dereference_protected(global_ptr, lockdep_is_held(&update_mutex));
 struct foo *new_fp = kmalloc(sizeof(*new_fp), GFP_KERNEL);
 new_fp->a = new_value;
 new_fp->next = old_fp->next;
 
 rcu_assign_pointer(global_ptr, new_fp);  // 원자적 포인터 교체
+mutex_unlock(&update_mutex);
 
 synchronize_rcu();  // 모든 리더 종료 대기
-kfree(old_fp);      // 안전하게 해제
+kfree(old_fp);      // 직렬화된 update가 소유한 old만 해제
 ```
 
 ### Grace Period: 어떻게 모든 리더가 끝났는지 아는가?

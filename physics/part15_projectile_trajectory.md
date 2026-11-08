@@ -80,6 +80,8 @@ void StepProjectile(Projectile& p, vec3 gravity, float dt) {
 
 semi-implicit Euler. 두 줄. 다수의 게임 발사체는 이 정도 모델로도 충분하다.
 
+실행 모델과 예측·조준 모델은 분리해 고정해야 한다. semi-implicit step 으로 실행하면 누적 이산 오차가 생기므로, 닫힌 형식 예측으로 조준한 각도가 실제 적분 궤적과 어긋날 수 있다. 각 실행 모드 옆에 대응하는 predictor/aim 방식을 함께 적는다. 정확한 정지 표적 조준이 목표면 실행과 같은 해석적 모델을 쓰거나 실제 수치 step 과 같은 식으로 역산한다 (7.2, 8.3절).
+
 ### 1.4 닫힌 형식
 
 매 step 적분 안 하고 *시간 t* 에서 *직접 평가* 가능.
@@ -107,7 +109,7 @@ vec3 ProjectilePosAt(vec3 r0, vec3 v0, vec3 g, float t) {
 
 ### 1.6 게임 단순화
 
-게임은 보통 *진공 포물선만*. 화살 / 총알 / 폭탄. 사용자가 *기대* 하는 단순한 동작 + 예측 가능성. 공기 저항은 *시각 디테일* 일 뿐 게임플레이에 큰 영향 없음.
+게임은 보통 *진공 포물선만*. 화살 / 총알 / 폭탄. 사용자가 *기대* 하는 단순한 동작 + 예측 가능성. 공기 저항은 짧은 비행·낮은 속도에서는 시각 차이가 작지만, 거리·속도·도달 시간을 바꾸는 모델 파라미터이므로 항상 무시할 수 있는 것은 아니다. 그래서 필요한 정확도에 맞춰 진공 근사로 두는 경우가 많다.
 
 ## 2. 선형 항력 모델
 
@@ -195,6 +197,8 @@ $$
 
 $\rho$ = 공기 밀도, $C_d$ = 항력 계수 (drag coefficient, 도형 형태), $A$ = 단면적, $|\vec{v}| \vec{v}$ = 속도 크기 × 속도 벡터.
 
+여기서 $\vec{v}$ 는 물체에 대한 *주변 유체의 상대 속도* 다. 무풍일 때만 world velocity 와 같고, 바람이 있으면 `worldVelocity - windVelocity` 를 써야 한다. 가속도 식으로 옮기면 항력 계수는 $\rho C_d A / (2m)$ 이므로 `dragCoef` 에 질량과 기준 면적을 어떻게 접었는지 명시한다.
+
 크기는 *속도 제곱*, 방향은 *속도 반대*.
 
 ### 3.2 종단 속도
@@ -215,6 +219,8 @@ $$
 | 골프공 | 32 |
 | 빗방울 | 9 |
 
+이 표는 크기·자세·기준 면적·고도(공기 밀도) 조건이 다른 대표값을 모은 *비실측 튜닝 예시* 다. 실제 값은 $C_d$ 와 $A$ 정의에 따라 크게 달라지므로 게임에서는 측정·튜닝 대상으로 둔다.
+
 ### 3.3 닫힌 형식 없음
 
 이차 항력은 비선형 ODE다. 일정 중력과 한 축 운동처럼 제한된 경우에는 `tanh` 등을 이용한 닫힌 해가 있지만, 중력에 수직인 속도 성분까지 있는 일반 2D/3D 궤적은 단순 포물선 형태의 닫힌 해가 없어 수치 적분을 주로 사용한다.
@@ -229,7 +235,7 @@ void StepProjectileQuadDrag(Projectile& p, vec3 gravity,
 }
 ```
 
-이 한 줄 *비선형* 추가. semi-implicit Euler 로 충분.
+이 한 줄 *비선형* 추가. semi-implicit Euler 의 안정성은 큰 $c|\vec{v}|dt$ 에서 무너지므로, $h c |\vec{v}|$ 가 충분히 작은 동안만 이산화가 신뢰할 만하다. 그 범위를 넘으면 아래 split 이나 substep 을 쓴다.
 
 ### 3.4 작은 dt 권장
 
@@ -268,7 +274,7 @@ $C_d$ 값.
 | 유선형 | 0.04 |
 | Drag 만 (Disc) | 1.2 |
 
-게임은 *단순 곱셈 상수* 로 — $-c \cdot |\vec{v}| \vec{v}$. 디자이너 튜닝.
+게임은 *단순 곱셈 상수* 로 — $-c \cdot |\vec{v}| \vec{v}$. 디자이너 튜닝. 이 $C_d$ 표 역시 Reynolds/Mach 수와 자세에 따라 변하는 대표값이며 특정 조건의 상수가 아니다.
 
 ## 4. 움직이는 표적 예측
 
@@ -316,33 +322,56 @@ $$
 ```cpp
 bool PredictHitTime(vec3 ps, float s, vec3 pt, vec3 vt, float& tOut) {
     vec3 d = pt - ps;
-    float a = dot(vt, vt) - s * s;
-    float b = 2.0f * dot(d, vt);
-    float c = dot(d, d);
-
-    if (std::fabs(a) < 1e-8f) {
-        // 발사체 속력 = 표적 속력 — 선형
-        if (std::fabs(b) < 1e-8f) return false;
-        tOut = -c / b;
-        return tOut > 0;
+    if (!(s > 0.0f)) return false;                 // 발사체 속력은 양수
+    if (!(length_squared(d) > 0.0f)) {             // 동일 위치 — 이미 표적
+        tOut = 0.0f;
+        return true;
     }
 
-    float disc = b * b - 4 * a * c;
-    if (disc < 0) return false;            // 해 없음 — 발사체로 못 따라잡음
+    double a = (double)dot(vt, vt) - (double)s * s;
+    double b = 2.0 * (double)dot(d, vt);
+    double c = (double)dot(d, d);
 
-    float sqrtD = std::sqrt(disc);
-    float t1 = (-b + sqrtD) / (2 * a);
-    float t2 = (-b - sqrtD) / (2 * a);
+    if (std::fabs(a) < 1e-8 * std::max({1.0, std::fabs(b), std::fabs(c)})) {
+        // 발사체 속력 = 표적 속력 — 선형
+        if (std::fabs(b) < 1e-8 * std::max(1.0, std::fabs(c))) return false;
+        double t = -c / b;
+        if (!(t > 0.0)) return false;
+        tOut = (float)t;
+        return true;
+    }
 
-    // 양의 가장 작은 t (가장 빨리 만남)
-    if (t1 > 0 && t2 > 0) tOut = std::min(t1, t2);
-    else if (t1 > 0) tOut = t1;
-    else if (t2 > 0) tOut = t2;
-    else return false;
+    double disc = b * b - 4.0 * a * c;
+    double tol = 64.0 * std::numeric_limits<double>::epsilon()
+               * (b * b + std::fabs(4.0 * a * c));
+    if (disc < -tol) return false;                 // 해 없음 — 발사체로 못 따라잡음
+    disc = std::max(0.0, disc);
 
+    // -b ± sqrtD 가 가까울 때 작은 양근이 0 으로 소실되는 것을 막는 안정형
+    double sqrtD = std::sqrt(disc);
+    double q = -0.5 * (b + std::copysign(sqrtD, b));
+    if (std::fabs(q) < 1e-12) return false;
+    double t1 = q / a;
+    double t2 = c / q;
+
+    // 최종 근을 원래 거리식에 대입해 잔차를 확인한다.
+    auto valid = [&](double t) {
+        if (!(t > 0.0)) return false;
+        vec3 future = pt + vt * (float)t;
+        double dist = (double)length(future - ps);
+        return std::fabs(dist - (double)s * t) <= 1e-4 * std::max(1.0, (double)s * t);
+    };
+
+    double best = 1e30;
+    if (valid(t1)) best = std::min(best, t1);
+    if (valid(t2)) best = std::min(best, t2);
+    if (best >= 1e30) return false;
+    tOut = (float)best;
     return true;
 }
 ```
+
+`a` 와 `b` 는 단위가 다르므로 같은 절대값 대신 scale 을 고려한 tolerance 로 선형/상수를 판정한다. 이 풀이는 등속 무중력 가정이므로 `s > 0`, 유한 입력, 최대 예측 시간, 같은 위치(즉시 명중) 정책을 호출부 계약으로 둔다.
 
 ### 4.5 발사 방향
 
@@ -364,6 +393,8 @@ vec3 initialVel = fireDir * s;
 해결: *반복 풀이*. 진공 가정으로 t 추정 → 그 t 의 *중력 보정 후 미래 위치* → 새 t. 수렴까지.
 
 또는 *수치 풀이* (Newton's method).
+
+반복이 항상 수렴하는 것은 아니므로 최대 반복 횟수와 실패 시 근사 조준 정책을 함께 둔다.
 
 ### 4.7 해 없는 경우
 
@@ -400,47 +431,81 @@ $$
 \frac{g x^2}{2 v_0^2} u^2 - x u + \left( y + \frac{g x^2}{2 v_0^2} \right) = 0
 $$
 
+이 유도는 $x > 0$ 를 가정하고 $t$ 를 소거한 결과다. 목표가 음의 x 방향이거나 3D 이거나 수직 표적인 경우는 각도 대신 비행시간을 직접 푸는 아래 계약을 쓴다.
+
 ### 5.2 풀이
 
+정지 표적·일정 가속도 $\vec{a}$·고정 발사 속력 $s$ 에서 변위 $\vec{r}$ 는
+
+$$
+\vec{r} = \vec{v}_0 t + \tfrac{1}{2}\vec{a} t^2, \qquad |\vec{v}_0|^2 = s^2
+$$
+
+$T = t^2$ 로 두고 $t$ 를 소거하면 $T$ 에 대한 이차 방정식이 된다.
+
+$$
+\tfrac{1}{4}|\vec{a}|^2 T^2 - (\vec{r}\cdot\vec{a} + s^2) T + |\vec{r}|^2 = 0
+$$
+
+양의 실수 $T$ 만 채택하고 각 $t$ 에 대해
+
+$$
+\vec{v}_0 = \frac{\vec{r}}{t} - \frac{\vec{a} t}{2}
+$$
+
+로 발사 속도를 복원한다. 이 한 계약이 음의 x, 수직 표적, 무중력, 도달 불가를 모두 다룬다.
+
 ```cpp
-struct LaunchAngles {
-    float low;       // 직접 사격 (낮은 각)
-    float high;      // 곡사 (높은 각)
-    bool  exists;
+struct LaunchSolution {
+    vec3  velocity;   // 발사 속도 (|velocity| = speed)
+    float time;       // 비행 시간
 };
 
-LaunchAngles ComputeLaunchAngles2D(float x, float y, float v0, float g) {
-    LaunchAngles r{};
-    if (v0 <= 0 || g <= 0) return r;
+std::vector<LaunchSolution> ComputeLaunchVelocity(vec3 r, vec3 a, float speed) {
+    std::vector<LaunchSolution> out;
+    if (!(speed > 0.0f)) return out;                 // 고정 발사 속력은 양수
+    if (!(length_squared(r) > 0.0f)) return out;     // 동일 위치는 미래 발사해가 없다
 
-    float v2 = v0 * v0;
-    if (std::fabs(x) < 1e-6f) {
-        if (y >= 0 && v2 >= 2.0f * g * y) {
-            r.low = r.high = kPi * 0.5f;      // 거의 수직 위
-            r.exists = true;
-        } else if (y < 0) {
-            r.low = r.high = -kPi * 0.5f;     // 거의 수직 아래
-            r.exists = true;
-        }
-        return r;
+    double A = 0.25 * (double)dot(a, a);
+    double B = -((double)dot(r, a) + (double)speed * speed);
+    double C = (double)dot(r, r);
+
+    double T1, T2;
+    if (std::fabs(A) < 1e-12) {
+        T1 = T2 = C / ((double)speed * speed);       // 무중력 — 등속 직선
+    } else {
+        double disc = B * B - 4.0 * A * C;
+        double tol = 64.0 * std::numeric_limits<double>::epsilon()
+                   * (B * B + std::fabs(4.0 * A * C));
+        if (disc < -tol) return out;                 // 양의 실근 없음 — 도달 불가
+        disc = std::max(0.0, disc);
+        double q = -0.5 * (B + std::copysign(std::sqrt(disc), B));
+        if (std::fabs(q) < 1e-12) return out;
+        T1 = q / A;
+        T2 = C / q;
     }
 
-    float disc = v2 * v2 - g * (g * x * x + 2.0f * y * v2);
-    if (disc < 0) { r.exists = false; return r; }    // 사거리 부족
-
-    float sqrtD = std::sqrt(disc);
-    r.low  = std::atan((v2 - sqrtD) / (g * x));
-    r.high = std::atan((v2 + sqrtD) / (g * x));
-    r.exists = true;
-    return r;
+    double roots[2] = {T1, T2};
+    std::sort(roots, roots + 2);
+    for (double T : roots) {
+        if (!(T > 0.0)) continue;
+        double t = std::sqrt(T);
+        vec3 v = r / (float)t - a * (0.5f * (float)t);
+        // 최종 속도를 고정 속력 조건에 대입해 잔차를 확인한다.
+        if (std::fabs(length(v) - speed) >
+            1e-4f * std::max(1.0f, speed)) continue;
+        if (!out.empty() && std::fabs((float)t - out.back().time) <= 1e-6f) continue;
+        out.push_back({v, (float)t});
+    }
+    return out;
 }
 ```
 
-두 해 — *낮은 각 (직사)* 과 *높은 각 (곡사)*. 게임에 따라 선택.
+돌려준 두 해는 *비행시간 오름차순* 이다. 첫 해가 *낮은 각(직사)*, 둘째 해가 *높은 각(곡사)* 에 대응한다. 각도 자체가 필요하면 발사 속도를 어느 평면에서 정의하는지 밝히고 `atan2` 로 변환한다.
 
 ### 5.3 사거리 부족
 
-$\text{disc} < 0$ — 초기 속력이 목표 도달에 *부족함*. AI 처리:
+위 $T$ 이차 방정식의 판별식이 음수 — 초기 속력이 목표 도달에 *부족함*. AI 처리:
 
 - 더 가까이 이동 후 발사.
 - 더 큰 발사체 사용.
@@ -464,27 +529,12 @@ $$
 
 ### 5.5 3D 일반화
 
-3D 는 *수평 방향* 결정 (수평면 위 각도) + *수직 발사각*. 수평은 *목표 향한 방향*, 수직각은 위 2D 풀이.
+3D 도 같은 $T$ 계약을 쓴다. $\vec{r} = \vec{to} - \vec{from}$, $\vec{a} = \vec{g}$ 를 그대로 넘기면 수평면 방향과 수직 발사각이 한 번에 나온다. 별도의 수직 분기나 도달 판정을 두지 않아도 수직 표적과 도달 불가가 같은 경로에서 처리된다.
 
 ```cpp
-vec3 ComputeLaunchVelocity3D(vec3 from, vec3 to, float speed, float g) {
-    vec3 horizDir = to - from;
-    horizDir.y = 0;
-    float horizDist = length(horizDir);
-    if (horizDist < 1e-6f) {
-        // 바로 위/아래 — 수직 발사 케이스 별도 처리
-        float sign = (to.y >= from.y) ? 1.0f : -1.0f;
-        return vec3{0, sign * speed, 0};
-    }
-    horizDir /= horizDist;
-
-    float verticalDist = to.y - from.y;
-    auto angles = ComputeLaunchAngles2D(horizDist, verticalDist, speed, g);
-    if (!angles.exists) return vec3{0, 0, 0};
-
-    float theta = angles.low;
-    return horizDir * (speed * std::cos(theta))
-         + vec3{0, 1, 0} * (speed * std::sin(theta));
+std::vector<LaunchSolution> ComputeLaunchVelocity3D(vec3 from, vec3 to,
+                                                    vec3 gravity, float speed) {
+    return ComputeLaunchVelocity(to - from, gravity, speed);
 }
 ```
 
@@ -494,7 +544,7 @@ vec3 ComputeLaunchVelocity3D(vec3 from, vec3 to, float speed, float g) {
 - *NPC 던지기*: 캐릭터가 *목표 위치에 폭탄 던짐*.
 - *Aim assist*: 자동 조준의 *예상 궤적*.
 
-표적이 *움직이면* 4절의 *표적 예측* 으로 *미래 위치* 계산 후, 그 위치에 *발사각 역산*. 두 단계 결합.
+표적이 *움직이면* 4절의 *표적 예측* 으로 *미래 위치* 를 구한 뒤 그 위치에 *발사각 역산* 하는 근사 조합을 쓸 수 있다. 그러나 4절의 예측 시간은 *중력 없는 등속 직선* 가정이고, 5절 발사체의 실제 비행 시간은 중력 때문에 다르다. 그래서 이 한 번의 결합은 정확한 intercept 가 아니라 *근사 조준* 이다. 정확도를 높이려면 예측 시간과 발사각을 함께 수렴시키거나 시간·발사각을 동시에 푼다. 반복은 항상 수렴하지 않으므로 상한·복수근·실패 정책을 함께 둔다.
 
 ## 6. 충돌 ToI와 swept test
 
@@ -599,6 +649,8 @@ while (remainingTime > 0) {
 ```
 
 관통 발사체 (화살, 큰 총알) 의 자연 처리.
+
+`kSkin` 만큼 밀어내는 방식은 얇은 표면에서는 다음 sweep 이 같은 면을 다시 치지 않게 하지만, 두꺼운 collider 내부에서는 같은 표면을 다시 찾거나 다른 표적을 놓칠 수 있다. 시간 최소 차감과 공간 skin 이 서로 맞지 않아 위치와 시간도 어긋난다. 따라서 입사/출사 질의(entry/exit)나 hit shape 임시 제외, penetration event 중복 규약을 둔다. `maximumImpactCount` 와 `usedTime` 에 대응하는 이동을 명시하고, `OnHit` 이 velocity·liveness·world 를 바꾸면 다음 sweep 전에 재검증한다.
 
 ### 6.6 산업 패턴
 
@@ -777,6 +829,10 @@ void UpdateProjectiles(std::vector<Projectile>& projectiles,
 }
 ```
 
+위 update 는 *직선 step 운동 모형의 근사* 다. `newPos` 는 정확한 포물선 끝점이지만 그 사이 sweep 은 직선 chord 이므로 `hit.t` 는 곡선의 ToI 가 아니다. 곡률 오차는 대략 $|g| h^2 / 8$ 이며, 이 값이 허용치를 넘으면 step 을 subdivide 한다. 데미지·반응에 충돌 시점 속도를 쓰면 전체 `dt` 중력을 다 더한 `p.velocity` 가 아니라 TOI 시점 속도를 써야 한다. 움직이는 표적의 상대 운동과 shape 반경도 같은 query 계약으로 둔다.
+
+`OnProjectileHit` 안에서 `projectiles` 에 spawn/erase 하면 range-for 참조가 무효화될 수 있다. hit 을 값으로 기록해 순회가 끝난 뒤 소비하고, spawn/despawn 은 command queue 로 분리한다.
+
 ### 8.4 폭발 (area damage)
 
 발사체가 *폭발* 하면 *주변 적에게 데미지*. 폭발 중심 + 반경.
@@ -794,6 +850,8 @@ void Explode(vec3 center, float radius, float damage, const World& world) {
 
 거리 따른 *데미지 감쇠* 자연.
 
+`SphereCast` 가 값을 복사한 결과를 돌려주면 `v.health` 수정이 원본에 반영되지 않는다. stable entity handle 을 돌려주고, 한 entity 의 여러 collider 는 dedupe 한 뒤 권위 health 를 바꾼다.
+
 ### 8.5 발사체 풀
 
 발사체가 *지속 생성 / 제거* — `new` / `delete` 비용. *오브젝트 풀* 패턴.
@@ -803,24 +861,33 @@ struct ProjectilePool {
     std::vector<Projectile> data;
     std::vector<int>         freeList;
 
-    int Acquire() {
-        if (freeList.empty()) {
-            data.push_back({});
-            return data.size() - 1;
-        }
+    explicit ProjectilePool(int capacity) {
+        data.resize(capacity);            // 고정 용량을 생성 시 확보
+        freeList.reserve(capacity);
+        for (int i = capacity - 1; i >= 0; --i) freeList.push_back(i);
+    }
+
+    // 성공하면 사용 가능한 live 객체를 돌려준다. 실패 시 -1.
+    int AcquireInitialized(vec3 position, vec3 velocity) {
+        if (freeList.empty()) return -1;  // 정상 경로에서 컨테이너를 늘리지 않는다
         int idx = freeList.back();
         freeList.pop_back();
+        data[idx] = {};
+        data[idx].position = position;
+        data[idx].velocity = velocity;
+        data[idx].alive    = true;
         return idx;
     }
 
     void Release(int idx) {
+        if (idx < 0 || idx >= (int)data.size() || !data[idx].alive) return; // 중복 해제 거부
         data[idx].alive = false;
         freeList.push_back(idx);
     }
 };
 ```
 
-게임의 *수천 발사체* (탄막 슈터) 의 핫 패스. *할당 0*.
+`Acquire` 는 재사용 슬롯을 *초기화하지 않은 raw slot* 으로 돌려줄 수도 있고, 호출자가 모든 필드를 덮어쓰는 계약이면 그대로 유효하다. 위 예제는 `AcquireInitialized` 처럼 *사용 가능한 live 객체를 만든다* 는 계약을 택해 `alive`·`position`·`velocity` 를 초기화한다. 고정 용량을 생성 시 확보하고 free-list 도 reserve 하므로 정상 acquire/release 경로는 이후 컨테이너를 확장하지 않는다. 용량이 없으면 실패를 돌려주며, 이 실패 경로의 런타임 할당까지 *할당 0* 이라고 주장하지 않는다.
 
 ### 8.6 발사체 종류별 디자인
 

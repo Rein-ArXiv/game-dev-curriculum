@@ -39,6 +39,8 @@ MBCS는 가변 길이 인코딩의 초기 형태다. 한 문자가 1바이트 �
 | CP936 | 중국어 간체 | GBK |
 | CP950 | 중국어 번체 | Big5 |
 
+아래 바이트 예제는 소스/실행 문자 집합이 CP949, 시스템 ANSI 코드 페이지(ACP)가 949, 해당 CRT 로케일(LC_CTYPE)이 설정된 환경을 가정한다. UTF-8 소스로 빌드하거나 MSVC `/utf-8`을 쓰면 `"..."` literal의 바이트가 달라진다. `IsDBCSLeadByte`는 ACP를, `_mbs*` 계열은 별도의 CRT 코드 페이지 설정을 따른다.
+
 ### Lead Byte와 Trail Byte
 
 MBCS에서 2바이트 문자는 Lead Byte(선행 바이트)와 Trail Byte(후행 바이트)로 구성된다.
@@ -74,6 +76,8 @@ void analyze_mbcs_string(const char* str) {
 
     while (*p) {
         if (IsDBCSLeadByte(*p)) {
+            // lead 뒤에 trail이 없으면(0) 잘린 입력이므로 멈춘다.
+            if (p[1] == 0) break;
             // 2바이트 문자
             printf("Position %d: 2-byte char [%02X %02X]\n",
                    pos, p[0], p[1]);
@@ -157,15 +161,24 @@ buffer[9] = '\0';
 안전한 복사:
 
 ```cpp
-size_t mbcs_safe_copy(char* dest, const char* src, size_t max_bytes) {
+// dest_capacity는 종료 NUL을 포함한 바이트 수다. 입력은 유효한
+// NUL 종료 DBCS 문자열이어야 한다.
+size_t mbcs_safe_copy(char* dest, const char* src, size_t dest_capacity) {
     size_t written = 0;
     const unsigned char* p = (const unsigned char*)src;
 
-    while (*p && written < max_bytes) {
-        size_t char_len = IsDBCSLeadByte(*p) ? 2 : 1;
+    if (dest_capacity == 0) return 0;
 
-        // 전체 문자가 들어가는지 확인
-        if (written + char_len > max_bytes)
+    while (*p) {
+        size_t char_len = 1;
+        if (IsDBCSLeadByte(*p)) {
+            // trail이 실제로 존재하고 0이 아니어야 2바이트로 전진한다.
+            if (p[1] == 0) break;
+            char_len = 2;
+        }
+
+        // NUL 자리까지 확보되는지 확인한다.
+        if (written + char_len + 1 > dest_capacity)
             break;
 
         memcpy(dest + written, p, char_len);
@@ -211,8 +224,10 @@ size_t _mbslen(const unsigned char* str);
 const char* str = "ABC가나다";
 
 strlen(str);                   // 9 (바이트)
-_mbslen((unsigned char*)str);  // 6 (문자)
+_mbslen((unsigned char*)str);  // 6 (DBCS 문자 수)
 ```
+
+`_mbslen`·`_ismbblead`는 CRT 로케일(LC_CTYPE)과 multibyte code page 설정에 의존하므로 빌드/실행 환경을 맞춰야 한다.
 
 ## 2. LoadString의 함정
 
@@ -223,7 +238,7 @@ int LoadStringA(
     HINSTANCE hInstance,
     UINT      uID,
     LPSTR     lpBuffer,
-    int       cchBufferMax  // 버퍼 크기 (문자 단위)
+    int       cchBufferMax  // 버퍼 capacity (종료 NUL 포함, 문자 단위)
 );
 
 int LoadStringW(
@@ -236,7 +251,7 @@ int LoadStringW(
 
 ### MBCS에서의 버퍼 잘림 문제
 
-`LoadStringA`의 `cchBufferMax`는 바이트 수로 해석되지만, 반환값은 복사된 문자 수다. 이 불일치가 문제를 일으킨다.
+`LoadStringA`의 `cchBufferMax`는 종료 NUL을 포함한 char(바이트) 단위 capacity다. 반환값은 종료 NUL을 제외한 복사 문자 수다. DBCS에서는 char 단위와 사람이 보는 글자 수가 다르므로 이 불일치가 문제를 일으킨다.
 
 ```cpp
 // 리소스 문자열: "한글 테스트입니다" (17바이트 — 한글 8자×2 + 공백 1)
@@ -249,9 +264,9 @@ int result = LoadStringA(hInstance, IDS_MESSAGE, buffer, 10);
 // 3. 불완전한 MBCS 시퀀스 발생 가능
 ```
 
-실제 테스트 결과:
+특정 환경에서 관측된 예(OS build·ACP·CRT locale 의존):
 
-| 버퍼 크기 | 예상 동작 | 실제 동작 (일부 버전) |
+| 버퍼 크기 | 예상 동작 | 관측 동작 (특정 빌드·설정) |
 |-----------|-----------|----------------------|
 | 10 | 5문자 + null | 9바이트 = 5문자 (경계에 맞음) |
 | 11 | 5문자 + null | 10바이트 (경계 무시 — '트'가 반으로 잘림) |
@@ -264,7 +279,8 @@ int SafeLoadStringA(HINSTANCE hInstance, UINT uID,
                     LPSTR lpBuffer, int cchBufferMax) {
     if (cchBufferMax <= 0) return 0;
 
-    // 넉넉한 임시 버퍼 사용
+    // 넉넉한 임시 버퍼. 이미 1024바이트에서 잘린 리소스 문자열을
+    // 복구하는 장치는 아니다.
     char tempBuffer[1024];
     int len = LoadStringA(hInstance, uID, tempBuffer,
                           sizeof(tempBuffer));
@@ -274,9 +290,9 @@ int SafeLoadStringA(HINSTANCE hInstance, UINT uID,
         return 0;
     }
 
-    // MBCS 안전 복사
+    // MBCS 안전 복사 — cchBufferMax는 종료 NUL을 포함한 capacity다.
     size_t written = mbcs_safe_copy(lpBuffer, tempBuffer,
-                                     cchBufferMax - 1);
+                                     (size_t)cchBufferMax);
     return (int)written;
 }
 ```
@@ -332,8 +348,9 @@ printf("한글 UTF-8 출력 테스트\n");
 주의사항:
 
 ```cpp
-// stdout은 기본적으로 ANSI 모드
-// UTF-8 출력을 위해 모드 변경 필요
+// stdout의 CRT text 모드와 콘솔 출력 코드 페이지는 별개다.
+// wide + Unicode(text) CRT 출력을 위해 모드 변경이 필요하다.
+// 이미 UTF-8 바이트인 narrow 문자열은 SetConsoleOutputCP(CP_UTF8) 경로로도 출력된다.
 
 #include <io.h>
 #include <fcntl.h>
@@ -351,8 +368,9 @@ WriteConsoleW(hConsole, L"유니코드 출력\n", 8, NULL, NULL);
 ### printf vs WriteConsole 비교
 
 ```cpp
-// printf: CRT를 통함 (코드 페이지 변환 발생)
-printf("테스트");  // 현재 로캘에 따라 동작
+// printf: CRT를 통함. narrow 문자열은 컴파일된 바이트 그대로 전달되며
+//        CP949 바이트를 UTF-8로 자동 변환하지는 않는다.
+printf("테스트");  // 실행 문자 집합과 콘솔 OutputCP에 따라 동작
 
 // WriteConsoleA: 콘솔 출력 코드 페이지 사용
 WriteConsoleA(hConsole, "테스트", 6, &written, NULL);
@@ -373,18 +391,24 @@ WriteConsoleW(hConsole, L"테스트", 3, &written, NULL);
 ```cpp
 void OutputString(const wchar_t* str) {
     HANDLE hOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hOutput == INVALID_HANDLE_VALUE || hOutput == NULL) return;
     DWORD mode;
 
     if (GetConsoleMode(hOutput, &mode)) {
-        // 콘솔 출력
-        DWORD written;
-        WriteConsoleW(hOutput, str, wcslen(str), &written, NULL);
+        // 콘솔 출력 — WriteConsoleW는 부분 쓰기가 가능하므로 반환값을 확인한다.
+        DWORD written = 0;
+        if (!WriteConsoleW(hOutput, str, (DWORD)wcslen(str),
+                           &written, NULL)) {
+            // 실패 처리(진단 로그 등)
+        }
     } else {
         // 파이프/파일로 리다이렉션됨 → UTF-8로 변환
         std::string utf8 = WideToUtf8(str);
-        DWORD written;
-        WriteFile(hOutput, utf8.c_str(), utf8.length(),
-                  &written, NULL);
+        DWORD written = 0;
+        if (!WriteFile(hOutput, utf8.c_str(), (DWORD)utf8.length(),
+                       &written, NULL)) {
+            // 실패 처리
+        }
     }
 }
 ```
@@ -417,13 +441,15 @@ void InitConsoleUtf8() {
 
 ### Windows Terminal vs 레거시 콘솔
 
-| 기능 | 레거시 콘솔 | Windows Terminal |
-|------|-------------|------------------|
-| UTF-8 지원 | 제한적 | 완전 지원 |
-| 이모지 | 일부 | 완전 지원 |
-| 색상 | 16색 | TrueColor |
-| 가변폭 글꼴 | 불가 | 지원 |
-| GPU 렌더링 | 불가 | 지원 |
+비교는 console host(conhost)와 특정 Windows Terminal 버전을 기준으로 하며, shell(cmd/PowerShell)·호스트·인코딩 설정은 별개다.
+
+| 기능 | 레거시 콘솔(conhost) | Windows Terminal |
+|------|----------------------|------------------|
+| UTF-8 지원 | OutputCP 설정·폰트에 의존 | 범위가 넓지만 폰트·호스트에 의존 |
+| 이모지 | 폰트·glyph 지원에 의존 | 폰트·glyph 지원에 의존 |
+| 색상 | 16색 기본, 최근 conhost는 24-bit color 지원 | TrueColor |
+| 가변폭 글꼴 | 호스트·글꼴에 따라 다름 | 호스트·글꼴에 따라 다름 |
+| GPU 렌더링 | 불가 | 지원(버전·설정에 의존) |
 
 ## 4. Locale과 NLS (National Language Support)
 
@@ -475,7 +501,7 @@ int GetLocaleInfoW(
 wchar_t langName[256];
 GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_SLANGUAGE,
                langName, 256);
-// 결과: "한국어(대한민국)" — 순수 언어 이름은 LOCALE_SLOCALIZEDLANGUAGENAME
+// 결과: "한국어(대한민국)" (관측값, Windows build/NLS 의존) — 순수 언어 이름은 LOCALE_SLOCALIZEDLANGUAGENAME
 ```
 
 주요 LCTYPE 값:
@@ -527,7 +553,7 @@ int result = CompareStringW(
     L"Apple", -1,
     L"apple", -1
 );
-// result == CSTR_EQUAL (2)
+// result == CSTR_EQUAL (2) (영어 로케일 기준 관측값)
 
 // 언어별 정렬 (독일어 ß = ss)
 result = CompareStringW(
@@ -536,6 +562,7 @@ result = CompareStringW(
     L"straße", -1,
     L"strasse", -1
 );
+// result는 Windows NLS 버전에 따라 달라질 수 있다(관측값).
 ```
 
 ### LCMapString - 문자열 변환
@@ -635,13 +662,13 @@ Cch vs Cb 차이:
 ```cpp
 char buffer[100];
 
-// 문자 단위 - 100자까지
+// 문자 단위: 100은 종료 NUL을 포함한 char 단위 capacity다 (payload 최대 99).
 StringCchCopyA(buffer, 100, src);
-StringCchCopyW(wbuffer, 100, wsrc);  // 100 wchar_t
+StringCchCopyW(wbuffer, 100, wsrc);  // 100 UTF-16 code unit capacity
 
-// 바이트 단위 - 100바이트까지
+// 바이트 단위: 100은 종료 NUL을 포함한 byte capacity다.
 StringCbCopyA(buffer, 100, src);
-StringCbCopyW(wbuffer, 100, wsrc);   // 100바이트 = 50 wchar_t
+StringCbCopyW(wbuffer, 100, wsrc);   // 100바이트 = 50 UTF-16 code unit capacity
 ```
 
 주요 함수:
@@ -723,11 +750,11 @@ Strsafe vs CRT Secure 비교:
 
 | 측면 | Strsafe | CRT Secure |
 |------|---------|------------|
-| 반환 타입 | HRESULT | errno_t |
-| 실패 시 동작 | null 종료 보장 | 핸들러 호출 |
-| 이식성 | Windows 전용 | C11 표준 (일부) |
-| 버퍼 오버플로 | 잘림 허용 | 기본 에러 |
-| 매크로 오버로드 | 있음 | 없음 |
+| 반환 타입 | HRESULT | errno_t (sprintf_s 등은 int) |
+| 실패 시 동작 | 유효한 크기의 destination에 NUL 종료 보장 | invalid parameter handler 호출 후 오류 반환 |
+| 이식성 | Windows 전용 | C11 Annex K (선택적, MS 구현과 세부 동일성 없음) |
+| 버퍼 오버플로 | 기본은 잘림+STRSAFE_E_INSUFFICIENT_BUFFER, STRSAFE_NO_TRUNCATION은 에러 | 기본 에러 |
+| 매크로 오버로드 | 없음 | Microsoft CRT에는 C++ secure template overload 있음 |
 
 CRT Secure 실패 핸들러:
 
@@ -751,6 +778,8 @@ _set_invalid_parameter_handler(my_handler);
 _CrtSetReportMode(_CRT_ASSERT, 0);
 ```
 
+handler가 반환하도록 바꾸면 CRT 함수는 작업을 중단하고 오류(`errno_t` 등)를 반환한다. 이후 동작은 함수군과 `_CRT_SECURE_INVALID_PARAMETER` 정책에 따른다.
+
 ### 권장 사항
 
 | 상황 | 권장 |
@@ -763,15 +792,21 @@ _CrtSetReportMode(_CRT_ASSERT, 0);
 크로스 플랫폼 래퍼:
 
 ```cpp
-#ifdef _WIN32
-    #include <strsafe.h>
-    #define SAFE_STRCPY(d, sz, s) StringCchCopyA(d, sz, s)
-#else
-    #define SAFE_STRCPY(d, sz, s) do { \
-        strncpy(d, s, sz - 1); \
-        d[sz - 1] = '\0'; \
-    } while(0)
-#endif
+// 매크로 대신 함수로 계약을 고정한다. dst_capacity는 종료 NUL을 포함한
+// 바이트 수다. 0 용량과 부족 용량을 모두 처리한다.
+enum class CopyResult { Ok, Truncated, NoSpace };
+
+CopyResult SafeStrcpy(char* dst, size_t dst_capacity, const char* src) {
+    if (dst_capacity == 0) return CopyResult::NoSpace;
+
+    size_t i = 0;
+    while (src[i] != '\0' && i + 1 < dst_capacity) {
+        dst[i] = src[i];
+        ++i;
+    }
+    dst[i] = '\0';
+    return (src[i] == '\0') ? CopyResult::Ok : CopyResult::Truncated;
+}
 ```
 
 ## 6. TCHAR 마이그레이션
@@ -782,15 +817,21 @@ _CrtSetReportMode(_CRT_ASSERT, 0);
 
 ```cpp
 #include <tchar.h>
+#include <windows.h>
 
-// UNICODE 정의 여부에 따라
-#ifdef UNICODE
+// _T/_TCHAR/_tcs는 tchar.h가 _UNICODE(또는 _MBCS)로 결정한다.
+#ifdef _UNICODE
     typedef wchar_t TCHAR;
     #define _T(x) L##x
-    #define TEXT(x) L##x
 #else
     typedef char TCHAR;
     #define _T(x) x
+#endif
+
+// TEXT는 windows.h가 UNICODE 매크로를 보고 정의한다.
+#ifdef UNICODE
+    #define TEXT(x) L##x
+#else
     #define TEXT(x) x
 #endif
 ```
@@ -806,6 +847,8 @@ _CrtSetReportMode(_CRT_ASSERT, 0);
 | `_tcsncpy` | `strncpy` | `wcsncpy` |
 | `_stprintf` | `sprintf` | `swprintf` |
 | `_tfopen` | `fopen` | `_wfopen` |
+
+`_UNICODE`가 없고 `_MBCS`가 정의된 빌드에서는 `_tcs*` 함수가 `char` 함수로 매핑되지만 함수마다 단위가 다르다. `_tcslen`은 바이트 수를, `_tcsclen`은 문자 수를 세는 식이다.
 
 ### Windows API와 TCHAR
 
@@ -858,15 +901,15 @@ CreateFile([^AW])  → CreateFileW\1
 레거시 코드 호환 레이어:
 
 ```cpp
-// 기존 ANSI 라이브러리와 연동 시
+// UTF-8 입력 계약 레거시 라이브러리와 연동 시
 std::wstring input = L"한글 입력";
 
 // UTF-8로 변환 후 레거시 API 호출
 std::string utf8 = WideToUtf8(input);
-legacy_api(utf8.c_str());
+legacy_utf8_api(utf8.c_str());
 
-// 결과를 다시 Wide로
-std::string result_utf8 = legacy_api_result();
+// 결과를 다시 Wide로 (라이브러리 반환도 UTF-8)
+std::string result_utf8 = legacy_utf8_api_result();
 std::wstring result = Utf8ToWide(result_utf8);
 ```
 
@@ -990,19 +1033,30 @@ COM 객체는 모듈 경계를 넘어 통신한다. DLL A가 만든 문자열을
 | `CoTaskMemAlloc` / `CoTaskMemFree` | COM task allocator | COM 인터페이스 경계의 일반 버퍼 |
 | `SysAllocString` / `SysFreeString` | OLE Automation의 BSTR 전용 할당자 | BSTR만 |
 
-인터페이스 시그니처를 보면 어느 할당자를 써야 하는지가 결정되어 있다. out 파라미터의 타입이 계약을 지정한다.
+OLE Automation 시그니처와 IDL/API 문서가 할당자·해제자를 지정한다. 포인터 타입만으로 항상 결정되지는 않으므로 해당 인터페이스의 계약을 따른다.
 
 ```cpp
 // 문자열 반환: 호출자가 SysFreeString으로 해제한다
 HRESULT GetName(BSTR* pbstrName) {
-    *pbstrName = SysAllocString(L"MyObject");
+    if (!pbstrName) return E_POINTER;
+    *pbstrName = nullptr;
+    BSTR value = SysAllocString(L"MyObject");
+    if (!value) return E_OUTOFMEMORY;
+    *pbstrName = value;  // 성공 시에만 소유권을 이전한다
     return S_OK;
 }
 
 // 일반 버퍼 반환: 호출자가 CoTaskMemFree로 해제한다
 HRESULT GetData(BYTE** ppData, ULONG* pcb) {
-    *pcb = 100;
-    *ppData = (BYTE*)CoTaskMemAlloc(*pcb);
+    if (!ppData || !pcb) return E_POINTER;
+    *ppData = nullptr;
+    *pcb = 0;
+    const ULONG size = 100;
+    BYTE* data = (BYTE*)CoTaskMemAlloc(size);
+    if (!data) return E_OUTOFMEMORY;
+    // 여기서 data를 실제 내용으로 채운다(생략된 부분).
+    *ppData = data;
+    *pcb = size;  // 성공 시에만 길이와 소유권을 이전한다
     return S_OK;
 }
 ```
@@ -1022,8 +1076,8 @@ BSTR은 문자열 시작을 가리키는 포인터지만, 그 *앞* 에 길이 �
 ```cpp
 BSTR bstr = SysAllocString(L"Hello");
 
-UINT chars = SysStringLen(bstr);       // 5 (문자 수)
-UINT bytes = SysStringByteLen(bstr);   // 10 (바이트 수)
+UINT units = SysStringLen(bstr);       // 5 (UTF-16 code unit 수, 종료 NUL 제외)
+UINT bytes = SysStringByteLen(bstr);   // 10 (바이트 수, 종료 NUL 제외)
 
 SysFreeString(bstr);
 ```
@@ -1036,7 +1090,7 @@ SysFreeString(bstr);
 | 할당 | `SysAllocString` 계열 | `malloc`, `new`, 스택 등 |
 | 해제 | `SysFreeString` | 할당 방식에 따름 |
 | 중간 null | 허용 | 문자열 끝을 의미 |
-| COM 마샬링 | 자동 지원 | 수동 처리 |
+| COM 마샬링 | Automation 마샬러가 자동 처리 | IDL [string]·프록시 설정에 따라 자동 생성될 수 있음 |
 
 ```cpp
 // 잘못된 코드: 리터럴에는 길이 필드가 없다.
@@ -1070,7 +1124,7 @@ void ProcessString(BSTR bstr) {
 | `SysAllocStringByteLen(LPCSTR, UINT)` | 바이트 배열로부터 생성 | BSTR |
 | `SysReAllocString(BSTR*, LPCOLESTR)` | 재할당 | BOOL |
 | `SysFreeString(BSTR)` | 해제 | void |
-| `SysStringLen(BSTR)` | 문자 수 반환 | UINT |
+| `SysStringLen(BSTR)` | UTF-16 code unit 수 반환 | UINT |
 | `SysStringByteLen(BSTR)` | 바이트 수 반환 | UINT |
 
 `SysAllocStringLen`이 별도로 존재하는 이유가 BSTR의 존재 이유와 같다. 길이를 명시적으로 받아야 중간에 `U+0000`이 있는 데이터를 손실 없이 담을 수 있다. `SysAllocString`은 인자를 null 종료 문자열로 읽으므로 그 지점에서 잘린다.
@@ -1148,7 +1202,14 @@ ATL 기반 코드에서는 `CComBSTR`을 쓴다.
 CComBSTR bstr1(L"Hello");
 bstr1.Append(L" World");
 
-if (bstr1.CompareNoCase(L"HELLO WORLD") == 0) {
+// CComBSTR에는 CompareNoCase가 없다. SysStringLen으로 길이를 명시해
+// CompareStringOrdinal로 비교한다. ordinal 비교는 언어학적 동등성과 다르다.
+const int cmp = CompareStringOrdinal(
+    bstr1, static_cast<int>(SysStringLen(bstr1)),
+    L"HELLO WORLD", 11, TRUE);
+if (cmp == 0) {
+    // 비교 실패 — GetLastError() 확인
+} else if (cmp == CSTR_EQUAL) {
     // 같음
 }
 
@@ -1171,9 +1232,14 @@ using Microsoft::WRL::ComPtr;
 ComPtr<IUnknown> pUnk;
 HRESULT hr = CoCreateInstance(CLSID_Something, nullptr,
     CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pUnk));
+if (FAILED(hr)) {
+    // 활성화 실패 — pUnk는 null이다
+}
 
 ComPtr<IDispatch> pDisp;
-hr = pUnk.As(&pDisp);            // QueryInterface + 소유권 획득
+if (pUnk) {
+    hr = pUnk.As(&pDisp);        // QueryInterface + 소유권 획득 (실패 시 hr 확인)
+}
 // 범위를 벗어나면 Release가 호출된다
 ```
 
@@ -1237,17 +1303,26 @@ WideCharToMultiByte 플래그:
 | 플래그 | 의미 |
 |--------|------|
 | WC_COMPOSITECHECK | 합성 문자 확인 |
-| WC_DISCARDNS | 분해 시 비공백 무시 |
+| WC_DISCARDNS | WC_COMPOSITECHECK와 함께 쓰여 비간격 결합 문자(nonspacing character)를 버림 |
 | WC_SEPCHARS | 합성 문자 분리 |
 | WC_DEFAULTCHAR | 기본 대체 문자 사용 |
 | WC_ERR_INVALID_CHARS | 잘못된 문자 시 실패 |
 | WC_NO_BEST_FIT_CHARS | 유사 문자 매핑 금지 |
 
+`WC_COMPOSITECHECK` 계열 플래그는 합성/분해 변환에서만 의미가 있고, 코드 페이지에 따라 허용되는 플래그가 다르다. UTF-8 변환에는 임의의 flag가 허용되지 않는다.
+
 ### 2단계 변환 패턴
 
 ```cpp
+#include <limits>
+#include <stdexcept>
+
 std::wstring Utf8ToWide(const std::string& utf8) {
     if (utf8.empty()) return L"";
+
+    // Win32 길이 인자는 int다. INT_MAX 초과는 잘림/음수 길이를 만든다.
+    if (utf8.size() > static_cast<size_t>((std::numeric_limits<int>::max)()))
+        throw std::length_error("UTF-8 input exceeds Win32 int length");
 
     // 1단계: 필요한 버퍼 크기 계산
     int wideLen = MultiByteToWideChar(
@@ -1263,17 +1338,23 @@ std::wstring Utf8ToWide(const std::string& utf8) {
 
     // 2단계: 실제 변환
     std::wstring wide(wideLen, L'\0');
-    MultiByteToWideChar(
+    const int written = MultiByteToWideChar(
         CP_UTF8, MB_ERR_INVALID_CHARS,
         utf8.c_str(), (int)utf8.length(),
         &wide[0], wideLen
     );
+    if (written != wideLen)
+        throw std::runtime_error("conversion size changed unexpectedly");
 
     return wide;
 }
 
 std::string WideToUtf8(const std::wstring& wide) {
     if (wide.empty()) return "";
+
+    // Win32 길이 인자는 int다. INT_MAX 초과는 잘림/음수 길이를 만든다.
+    if (wide.size() > static_cast<size_t>((std::numeric_limits<int>::max)()))
+        throw std::length_error("UTF-16 input exceeds Win32 int length");
 
     // 1단계: 필요한 버퍼 크기 계산
     int utf8Len = WideCharToMultiByte(
@@ -1289,12 +1370,14 @@ std::string WideToUtf8(const std::wstring& wide) {
 
     // 2단계: 실제 변환
     std::string utf8(utf8Len, '\0');
-    WideCharToMultiByte(
+    const int written = WideCharToMultiByte(
         CP_UTF8, WC_ERR_INVALID_CHARS,
         wide.c_str(), (int)wide.length(),
         &utf8[0], utf8Len,
         nullptr, nullptr
     );
+    if (written != utf8Len)
+        throw std::runtime_error("conversion size changed unexpectedly");
 
     return utf8;
 }
@@ -1320,15 +1403,21 @@ int len = WideCharToMultiByte(
 if (usedDefault) {
     printf("일부 문자가 변환되지 않았다\n");
 }
-// 결과: "Hello ? World"
+// 결과: "Hello ? World" (flags·기본 문자·코드 페이지 의존 관측값)
 ```
 
 ### 변환 실패 처리
 
 ```cpp
+#include <limits>
+
 // 엄격한 변환 (실패 시 예외)
 std::wstring StrictUtf8ToWide(const std::string& utf8) {
     if (utf8.empty()) return {};
+
+    // Win32 길이 인자는 int다. INT_MAX 초과를 먼저 거부한다.
+    if (utf8.size() > static_cast<size_t>((std::numeric_limits<int>::max)()))
+        throw std::length_error("UTF-8 input exceeds Win32 int length");
 
     // 입력 길이를 명시하면 출력에 null 종결자가 포함되지 않는다.
     int srcLen = static_cast<int>(utf8.size());
@@ -1346,10 +1435,12 @@ std::wstring StrictUtf8ToWide(const std::string& utf8) {
     }
 
     std::wstring result(len, L'\0');
-    MultiByteToWideChar(
+    const int written = MultiByteToWideChar(
         CP_UTF8, MB_ERR_INVALID_CHARS,
         utf8.data(), srcLen, result.data(), len
     );
+    if (written != len)
+        throw std::runtime_error("conversion size changed unexpectedly");
 
     return result;
 }
@@ -1366,11 +1457,11 @@ NTFS는 파일명을 UTF-16으로 저장한다.
 | 파일명 최대 길이 | 255 UTF-16 코드 유닛 |
 | 경로 최대 길이 | 기본 260자 (MAX_PATH) |
 | 확장 경로 | 약 32,767자 |
-| 허용 문자 | NUL, \\, /, :, *, ?, ", <, >, \| 제외 전부 |
+| 허용 문자 | NUL, \\, /, :, *, ?, ", <, >, \| 와 제어 문자는 제외. Win32는 CON·PRN·AUX·NUL 등 예약 이름도 금지 |
 
 ### Short Name(8.3 형식)
 
-호환성을 위해 NTFS는 긴 파일명에 짧은 이름을 자동 생성한다.
+호환성을 위해 NTFS는 긴 파일명에 짧은 이름을 자동 생성하지만, 볼륨 설정(`NtfsDisable8dot3NameCreation`)에 따라 생성되지 않을 수 있다. 아래는 특정 볼륨/namespace에서 얻은 예시일 뿐이며, 동일한 표시 문자열만으로 같은 short name이 보장되지는 않는다. 필요하면 실제로 조회한다.
 
 ```text
 긴 이름:     "매우 긴 한글 파일명.txt"
@@ -1385,7 +1476,7 @@ NTFS는 파일명을 UTF-16으로 저장한다.
 ```cpp
 wchar_t shortPath[MAX_PATH];
 GetShortPathNameW(L"매우 긴 파일명.txt", shortPath, MAX_PATH);
-// shortPath: "B0EB5~1.TXT"
+// shortPath: 실제 조회 결과 (예: "B0EB5~1.TXT")
 
 wchar_t longPath[MAX_PATH];
 GetLongPathNameW(shortPath, longPath, MAX_PATH);
@@ -1394,9 +1485,9 @@ GetLongPathNameW(shortPath, longPath, MAX_PATH);
 
 ### 긴 경로 지원 (Windows 10+)
 
-기본 MAX_PATH(260자) 제한을 우회하는 방법은 세 가지다.
+기본 MAX_PATH(260자) 제한을 다루는 방법은 두 가지 범주다. `\\?\` 확장 경로 문법과, 지원되는 Win32 API에 대한 opt-in이다. opt-in은 매니페스트의 `longPathAware=true`와 시스템의 `LongPathsEnabled=1` 정책이 **함께** 충족되어야 하며, 둘 중 하나만으로 항상 해제되지 않는다. 상대 경로나 모든 API가 무제한이 되는 것도 아니다.
 
-방법 1: `\\?\` 접두사
+방법 1: `\\?\` 확장 경로 문법
 
 ```cpp
 // 확장 경로 문법
@@ -1409,7 +1500,7 @@ HANDLE hFile = CreateFileW(
 // . 과 .. 가 동작하지 않음
 ```
 
-방법 2: 매니페스트 설정 (Win10 1607+)
+방법 2: 지원 API에 대한 opt-in — `longPathAware` 매니페스트 AND `LongPathsEnabled` 정책
 
 ```xml
 <!-- app.manifest -->
@@ -1422,8 +1513,6 @@ HANDLE hFile = CreateFileW(
     </windowsSettings>
 </application>
 ```
-
-방법 3: 그룹 정책
 
 ```text
 컴퓨터 구성 → 관리 템플릿 → 시스템 → 파일 시스템
@@ -1524,7 +1613,7 @@ public:
         );
 
         // 레거시 API 호출
-        legacy_process(ansi.c_str());
+        legacy_ansi_process(ansi.c_str());
     }
 };
 ```
@@ -1600,17 +1689,25 @@ int wmain(int argc, wchar_t* argv[]) {
 // 또는 main에서 변환
 int main(int argc, char* argv[]) {
     // 명령줄을 Wide로 다시 가져오기
-    int wargc;
+    int wargc = 0;
     wchar_t** wargv = CommandLineToArgvW(
         GetCommandLineW(), &wargc
     );
+    if (!wargv) {
+        return 1;  // 변환 실패 — GetLastError() 확인
+    }
+
+    // 변환 중 예외가 나도 LocalFree가 실행되도록 소유권을 잡는다.
+    struct LocalFreeGuard {
+        wchar_t** p;
+        ~LocalFreeGuard() { LocalFree(p); }
+    } guard{wargv};
 
     for (int i = 1; i < wargc; i++) {
         std::string utf8Arg = WideToUtf8(wargv[i]);
         ProcessArgument(utf8Arg);
     }
 
-    LocalFree(wargv);
     return 0;
 }
 ```
@@ -1658,10 +1755,44 @@ enum class Encoding {
     Ansi
 };
 
+// 인코딩 추정이 아니라, 주어진 바이트 span이 UTF-8로 유효한지 검사한다.
+// overlong, UTF-16 surrogate, U+10FFFF 초과, F5-FF 선행 바이트를 거부한다.
+// ASCII와 내장 U+0000은 유효하다.
+bool ValidUtf8(const uint8_t* s, size_t len) {
+    size_t i = 0;
+    while (i < len) {
+        const uint8_t b = s[i++];
+        if (b <= 0x7F) continue;
+
+        size_t cont;
+        uint32_t cp, min_cp;
+        if (b >= 0xC2 && b <= 0xDF) { cont = 1; cp = b & 0x1F; min_cp = 0x80; }
+        else if (b >= 0xE0 && b <= 0xEF) { cont = 2; cp = b & 0x0F; min_cp = 0x800; }
+        else if (b >= 0xF0 && b <= 0xF4) { cont = 3; cp = b & 0x07; min_cp = 0x10000; }
+        else return false;  // 0xC0/0xC1(overlong), 0xF5-0xFF
+
+        if (len - i < cont) return false;
+        for (size_t k = 0; k < cont; ++k) {
+            const uint8_t c = s[i++];
+            if ((c & 0xC0) != 0x80) return false;
+            cp = (cp << 6) | (c & 0x3F);
+        }
+        // overlong, U+10FFFF 초과, surrogate 영역을 배제한다.
+        if (cp < min_cp || cp > 0x10FFFF ||
+            (cp >= 0xD800 && cp <= 0xDFFF))
+            return false;
+    }
+    return true;
+}
+
 Encoding DetectEncoding(const uint8_t* data, size_t len) {
     if (len >= 3 && data[0] == 0xEF &&
-        data[1] == 0xBB && data[2] == 0xBF)
-        return Encoding::Utf8Bom;
+        data[1] == 0xBB && data[2] == 0xBF) {
+        // BOM은 형식 힌트일 뿐이다. BOM 뒤 payload가 유효하지 않으면
+        // 완전한 UTF-8 텍스트로 승인하지 않는다.
+        return ValidUtf8(data + 3, len - 3)
+            ? Encoding::Utf8Bom : Encoding::Unknown;
+    }
 
     if (len >= 2 && data[0] == 0xFF && data[1] == 0xFE)
         return Encoding::Utf16LE;
@@ -1669,38 +1800,17 @@ Encoding DetectEncoding(const uint8_t* data, size_t len) {
     if (len >= 2 && data[0] == 0xFE && data[1] == 0xFF)
         return Encoding::Utf16BE;
 
-    // UTF-8 휴리스틱
-    bool validUtf8 = true;
+    // UTF-8 유효성 검사와 인코딩 추정을 분리한다. 고비트가 있으면서
+    // 유효한 UTF-8일 때만 Utf8로 판정한다.
     bool hasHighBit = false;
-
-    for (size_t i = 0; i < len && validUtf8; ) {
-        if (data[i] < 0x80) {
-            i++;
-        } else if ((data[i] & 0xE0) == 0xC0) {
-            if (i + 1 >= len || (data[i+1] & 0xC0) != 0x80)
-                validUtf8 = false;
-            else { i += 2; hasHighBit = true; }
-        } else if ((data[i] & 0xF0) == 0xE0) {
-            if (i + 2 >= len ||
-                (data[i+1] & 0xC0) != 0x80 ||
-                (data[i+2] & 0xC0) != 0x80)
-                validUtf8 = false;
-            else { i += 3; hasHighBit = true; }
-        } else if ((data[i] & 0xF8) == 0xF0) {
-            if (i + 3 >= len ||
-                (data[i+1] & 0xC0) != 0x80 ||
-                (data[i+2] & 0xC0) != 0x80 ||
-                (data[i+3] & 0xC0) != 0x80)
-                validUtf8 = false;
-            else { i += 4; hasHighBit = true; }
-        } else {
-            validUtf8 = false;
-        }
+    for (size_t i = 0; i < len; ++i) {
+        if (data[i] >= 0x80) { hasHighBit = true; break; }
     }
 
-    if (validUtf8 && hasHighBit)
+    if (hasHighBit && ValidUtf8(data, len))
         return Encoding::Utf8;
 
+    // BOM 없는 ASCII는 UTF-8과 legacy 인코딩이 구별되지 않는다.
     return Encoding::Ansi;  // 또는 Unknown
 }
 ```
@@ -1729,15 +1839,15 @@ Windows 문자열 처리는 단순해 보이지만 함정이 많다. 핵심 원�
 
 - [Windows Data Types](https://learn.microsoft.com/en-us/windows/win32/winprog/windows-data-types)
 - [Microsoft Learn: BSTR](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/automat/bstr)
-- [Wine의 oleaut32 구현](https://source.winehq.org/git/wine.git/tree/HEAD:/dlls/oleaut32) - BSTR/VARIANT 오픈소스 구현
-- Box, D. (1998). *Essential COM*
-- Rector, B. & Sells, C. (1999). *ATL Internals*
+- [Wine의 oleaut32 구현](https://source.winehq.org/git/wine.git/tree/HEAD:/dlls/oleaut32) - BSTR/VARIANT 오픈소스 구현 (URL 접근·리비전 미검증; 확인 시 정확한 file+commit permalink로 대체)
+- Box, D. (1998). *Essential COM* - 배경 자료(판본·장 미지정)
+- Rector, B. & Sells, C. (1999). *ATL Internals* - ATL 3.0 대상 역사적 배경. 현재 CComBSTR/ATL 계약은 Microsoft Learn(msvc-170) 기준
 - [Unicode in the Windows API](https://learn.microsoft.com/en-us/windows/win32/intl/unicode-in-the-windows-api)
 - [Strsafe Functions](https://learn.microsoft.com/en-us/windows/win32/menurc/strsafe-ovw)
 - [National Language Support](https://learn.microsoft.com/en-us/windows/win32/intl/national-language-support)
-- [UTF-8 Everywhere Manifesto](https://utf8everywhere.org/)
-- [The Old New Thing - Raymond Chen's Blog](https://devblogs.microsoft.com/oldnewthing/)
+- [UTF-8 Everywhere Manifesto](https://utf8everywhere.org/) - URL 내용 미검증
+- [The Old New Thing - Raymond Chen's Blog](https://devblogs.microsoft.com/oldnewthing/) - Windows 내부 동작 일반 참고용 아카이브(개별 글 인용 아님)
 - [Windows Console Documentation](https://learn.microsoft.com/en-us/windows/console/)
-- [ICU - International Components for Unicode](https://icu.unicode.org/)
-- [utfcpp - UTF-8 with C++ in a Portable Way](https://github.com/nemtrif/utfcpp)
-- [simdutf - Unicode validation and transcoding at billions of characters per second](https://github.com/simdutf/simdutf)
+- [ICU - International Components for Unicode](https://icu.unicode.org/) - 국제화 추가 읽을거리 (Win32 COM 계약 근거 아님)
+- [utfcpp - UTF-8 with C++ in a Portable Way](https://github.com/nemtrif/utfcpp) - UTF-8 유효성 검사·변환 구현 대안
+- [simdutf - Unicode validation and transcoding at billions of characters per second](https://github.com/simdutf/simdutf) - 고성능 UTF-8 유효성 검사·변환 구현 대안

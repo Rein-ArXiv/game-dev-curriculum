@@ -62,11 +62,11 @@ flowchart TB
 ```cpp
 class SceneDocument {
     SceneGraph graph_;
-    Signal<EntityId> onChanged_;          // 뷰들이 구독
+    Signal<PersistentEntityId> onChanged_;   // 뷰들이 구독
 public:
     const SceneGraph& Graph() const { return graph_; }  // 뷰는 const로만 접근
     void Apply(const Command& cmd);       // 변경은 오직 커맨드로
-    Signal<EntityId>& OnChanged() { return onChanged_; }
+    Signal<PersistentEntityId>& OnChanged() { return onChanged_; }
 };
 ```
 
@@ -92,24 +92,36 @@ struct Transform {
 엔티티를 가리키는 방법으로 *포인터·배열 인덱스* 를 쓰면 안 된다. undo로 엔티티가 삭제됐다 되살아나거나, 직렬화로 디스크를 왕복하거나, 멀티유저로 다른 사람이 같은 엔티티를 가리킬 때, 포인터·인덱스는 전부 깨진다. 대신 *안정 ID(stable id)* 를 부여한다 — 엔티티가 생성될 때 한 번 발급되고, 삭제 전까지 변하지 않으며, 직렬화·네트워크를 건너도 같은 값인 식별자다.
 
 ```cpp
-struct EntityId {
-    uint64_t value;          // GUID 또는 단조 증가 + 세션 prefix
-    bool operator==(EntityId o) const { return value == o.value; }
+struct PersistentEntityId {              // 직렬화·네트워크를 건너 보존되는 ID
+    uint64_t value;                      // GUID 또는 단조 증가 + 세션 prefix
+    bool operator==(PersistentEntityId o) const { return value == o.value; }
 };
-// 참조는 항상 ID로. 포인터는 한 프레임 안에서만 유효한 캐시.
-struct Reference { EntityId target; };
+struct LocalEntityHandle {               // 프로세스 안에서만 유효한 슬롯 핸들
+    uint32_t index;
+    uint32_t generation;
+};
+// 참조는 항상 PersistentEntityId로. 포인터는 한 프레임 안에서만 유효한 캐시.
+struct Reference { PersistentEntityId target; };
 ```
 
-ID는 *내부 표현(빠른 조회용 인덱스)* 과 분리해 둔다. ID→인덱스 매핑을 슬롯 기반 자료구조로 두면, 삭제된 슬롯을 재사용하되 *세대(generation)* 카운터로 "죽은 ID로 산 슬롯을 가리키는" 오류를 잡는다.
+저장 ID와 로컬 슬롯은 *다른 계층* 이다. 두 프로세스가 같은 객체를 다른 슬롯에 두거나 재로딩이 슬롯을 재배치해도 저장 ID는 변하지 않아야 하므로, persistent ID를 슬롯 인덱스로 직접 해석하지 않는다. SceneDocument가 `PersistentEntityId → LocalEntityHandle` 매핑을 소유하고, 로컬 조회는 핸들을 슬롯 기반 자료구조로 푼다. 슬롯을 재사용할 때는 *세대(generation)* 카운터로 "죽은 핸들로 산 슬롯을 가리키는" 오류를 잡는다.
 
 ```cpp
 struct Slot { uint32_t generation; Entity* entity; };
-// ID = (인덱스, 세대). 조회 시 세대 불일치면 "이미 삭제된 ID"로 판정
-Entity* Resolve(EntityId id) {
-    Slot& s = slots_[id.Index()];
-    return (s.generation == id.Generation()) ? s.entity : nullptr;
+// 로컬 조회: 인덱스 범위·generation wrap·null을 검사
+Entity* Resolve(LocalEntityHandle h) {
+    if (h.index >= slots_.size()) return nullptr;       // 범위 밖 핸들
+    Slot& s = slots_[h.index];
+    if (s.generation != h.generation || !s.entity) return nullptr;
+    return s.entity;
+}
+Entity* ResolvePersistent(PersistentEntityId id) {
+    auto it = persistentToLocal_.find(id);              // ID→핸들 매핑
+    return (it != persistentToLocal_.end()) ? Resolve(it->second) : nullptr;
 }
 ```
+
+슬롯의 `generation`은 32비트라 오래 살아남은 세션에서는 *wrap* 할 수 있다 — wrap 시 해당 슬롯의 기존 핸들을 무효화하거나 슬롯을 재사용하지 않는 정책을 둔다. 아직 해소되지 않은 참조는 persistent ID를 *그대로 보존* 해 다시 저장할 때 유실되지 않게 한다(4절의 끊긴 참조와 연결).
 
 ### 컴포넌트 모델
 
@@ -139,7 +151,7 @@ struct Command {
 };
 
 struct MoveCommand : Command {
-    EntityId target;
+    PersistentEntityId target;
     Vec3 oldPos, newPos;      // undo에 필요한 이전 값을 캡처
     void Execute(SceneDocument& d) override { d.SetPos(target, newPos); }
     void Undo(SceneDocument& d)    override { d.SetPos(target, oldPos); }
@@ -170,6 +182,8 @@ public:
     void Redo(SceneDocument& d) { /* 대칭 */ }
 };
 ```
+
+`Do`가 `Execute` 후 `push_back`하는 순서는 *예외 원자성* 을 자동으로 만들지 않는다 — 실행 중 예외가 나면 문서는 이미 바뀌었는데 undo 기록은 없다. 강한 보장이 필요하면 둘 중 하나를 계약으로 택한다. **prepare/commit** 은 모든 검증과 필요한 할당(undo 기록 공간 포함)을 먼저 끝내고, commit/기록 단계는 그 계약 아래 실패하지 않게 한다. **rollback** 은 각 자식 `Execute`가 성공하거나 자기 변경을 원복함을 보장하고, 이미 성공한 자식만 역순으로 `Undo`한다. 단순히 `catch`에서 `Undo`를 부르는 것만으로는 부족하다 — 실패한 자식 자신이 부분 변경을 남기거나 그 `Undo`가 실패하면 strong guarantee가 성립하지 않는다.
 
 ### 커맨드 합치기 — 드래그의 함정
 
@@ -205,6 +219,8 @@ struct Transaction : Command {
 
 undo는 반드시 *역순* 이다 — A를 만들고 B가 A를 참조하게 했다면, undo는 B의 참조를 먼저 끊고 A를 지워야 한다. 순서를 지키지 않으면 "삭제된 A를 가리키는 B"라는 깨진 중간 상태가 생긴다.
 
+복합 커맨드의 *원자성* 도 앞의 정책을 따른다 — 자식이 중간에 실패하면 앞서 성공한 자식들을 역순으로 되돌릴 수 있어야 하고, 실패한 자식 자신이 남긴 부분 변경까지 복구 범위에 포함해야 한다. 이것이 보장되지 않으면 트랜잭션은 "전부 아니면 전무"가 아니라 부분 적용 상태를 남긴다.
+
 ### 함정 — 캡처 범위와 부작용
 
 커맨드 undo의 가장 흔한 버그는 *불완전한 캡처* 다. 엔티티를 삭제하는 커맨드가 "엔티티만" 기억하고 "그 엔티티를 가리키던 다른 참조들"을 기억하지 않으면, undo로 엔티티는 되살아나지만 참조는 끊긴 채다. 삭제 커맨드는 *삭제되는 엔티티 전체 + 들어오던 참조 + 나가던 참조* 를 모두 캡처해야 한다. 직렬화(4절)를 재사용해 "삭제 직전 상태를 통째로 직렬화 → undo 시 역직렬화"하는 방식이 가장 견고하다 — 캡처 누락을 구조적으로 막는다.
@@ -228,38 +244,50 @@ undo는 반드시 *역순* 이다 — A를 만들고 B가 A를 참조하게 했�
 기즈모를 끌기 전에 *무엇을 클릭했는지* 알아야 한다. 마우스 클릭 한 점을 화면 공간에서 *월드 공간 광선(ray)* 으로 변환하고, 그 광선과 씬의 충돌을 검사한다.
 
 ```cpp
+// 계약: mouse는 좌상단 원점·Y 아래 방향의 픽셀 좌표. ScreenToNDC가 원점/Y를 처리한다.
 Ray ScreenToRay(Vec2 mouse, const Camera& cam) {
     Vec3 ndc = ScreenToNDC(mouse);                    // [-1,1] 정규화
+    // depth는 NDC z가 아니라 window depth 규약이다. reverse-Z/무한 far면 0/1의 의미를 확인한다.
     Vec3 worldNear = Unproject(ndc, 0.0f, cam);       // 근평면
     Vec3 worldFar  = Unproject(ndc, 1.0f, cam);       // 원평면
     return Ray{worldNear, Normalize(worldFar - worldNear)};
 }
 ```
 
-피킹 방식은 둘이다. *광선-기하 교차* 는 광선을 쏴 가장 가까운 충돌 엔티티를 찾는다 — 정확하지만 메시가 많으면 가속 구조(BVH)가 필요하다. *ID 버퍼(픽킹 버퍼)* 는 각 엔티티를 *고유 색(=ID)* 으로 오프스크린 렌더링하고, 클릭 픽셀의 색을 읽어 ID를 얻는다 — GPU가 한 번에 처리해 픽셀 단위로 정확하고, 알파·인스턴싱·복잡 메시에 강하다.
+피킹 방식은 둘이다. *광선-기하 교차* 는 광선을 쏴 가장 가까운 충돌 엔티티를 찾는다 — 정확하지만 메시가 많으면 가속 구조(BVH)가 필요하다. *ID 버퍼(픽킹 버퍼)* 는 각 엔티티를 *패스별 토큰* 을 인코딩한 고유 색으로 오프스크린 렌더링하고, 클릭 픽셀의 색을 읽어 토큰을 얻은 뒤 *토큰→ID 표* 로 해석한다 — GPU가 한 번에 처리해 픽셀 단위로 정확하고, 알파·인스턴싱·복잡 메시에 강하다.
 
 ```cpp
-// ID 버퍼: 각 엔티티를 ID를 인코딩한 색으로 그린다
-uint32_t encoded = entity.id.value & 0xFFFFFF;        // 24비트 색에 ID
-DrawWithColor(entity, RGB(encoded));
-// 클릭 시: 해당 픽셀 1개를 읽어 ID 디코딩
-uint32_t picked = ReadPixel(idBuffer, mouse);
+// 패스마다 PickingToken(작은 정수) -> PersistentEntityId 표를 만든다
+std::vector<PersistentEntityId> tokenToId;            // token 0은 background로 예약
+uint32_t token = RegisterPickingToken(tokenToId, entity.id);   // 1..0xFFFFFF
+DrawWithColor(entity, RGB(token));                    // 색에는 토큰만 인코딩
+// 클릭 시: 그 픽셀을 그릴 때 사용한 표로 해석
+uint32_t pickedToken = ReadPixel(idBuffer, mouse);
+PersistentEntityId picked = (pickedToken < tokenToId.size())
+    ? tokenToId[pickedToken] : PersistentEntityId{};  // background/범위 밖
 ```
+
+`entity.id.value & 0xFFFFFF`처럼 64비트 ID를 잘라 쓰면 고유성을 보장하지 못한다 — ID 1과 `0x01000001`이 같은 `1`로 충돌한다. 그래서 발급 단위를 *패스별 토큰* 으로 좁히고 토큰 0을 background로 비워 둔다. 토큰이 24비트 범위를 넘으면 조용히 잘리는 대신 *소진 오류* 로 처리한다. GPU readback이 비동기라면 다음 프레임 표로 이전 픽셀을 해석하지 않도록 *그 픽셀을 그릴 때 사용한 표* 를 readback 완료까지 보관한다. 색 버퍼를 쓰는 경우 sRGB 변환·blending·MSAA resolve·alpha discard 정책이 실제 렌더와 일치해야 한다(정수 ID attachment를 써도 ID 세대·표 수명은 별도다).
 
 ### 드래그 루프 — 평면 투영
 
 축 화살표를 끌 때, 마우스의 2D 이동을 *그 축 위의 1D 이동* 으로 바꿔야 한다. 마우스 광선을 *축을 포함하면서 카메라를 향하는 평면* 에 투영하고, 그 교점을 축 위로 사영해 이동량을 얻는다.
 
 ```cpp
-float DragAlongAxis(Vec3 axis, Vec3 origin, Ray mouseRay, const Camera& cam) {
+std::optional<float> DragAlongAxis(Vec3 axis, Vec3 origin, Ray mouseRay, const Camera& cam) {
+    axis = Normalize(axis);                             // 단위 축 조건을 명시적으로 만든다
     // 축을 포함하고 시선에 최대한 수직인(카메라를 향하는) 평면을 만들어 마우스 광선을 교차
     Vec3 planeNormal = Cross(axis, Cross(axis, cam.forward));
-    Vec3 hit = IntersectRayPlane(mouseRay, origin, planeNormal);
+    if (LengthSquared(planeNormal) < kEps) return std::nullopt;   // 축 ∥ view → 평면 퇴화
+    Vec3 hit;
+    if (!IntersectRayPlane(mouseRay, origin, planeNormal, hit)) return std::nullopt;
     return Dot(hit - origin, axis);   // 축 위로 사영한 거리
 }
 ```
 
 드래그 시작에서 *그랩 오프셋* 을 기억해 "핸들의 어디를 잡았는지"를 보존한다. 이게 없으면 드래그 시작 순간 오브젝트가 마우스 위치로 *튄다* — 디자이너가 가장 싫어하는 버그다.
+
+축과 view가 평행(near-parallel)해 평면 법선이 0이 되거나 광선이 평면과 교차하지 않는 입력은 `optional`/오류로 반환하고 *기존 드래그 상태를 유지* 한다 — 퇴화 법선으로 계산한 값으로 오브젝트를 순간이동시키지 않는다. 축이 단위 벡터가 아니면 `Dot` 결과가 실제 거리와 달라지므로 시작 시 정규화한다.
 
 ### 스냅과 그리드
 
@@ -289,38 +317,40 @@ Vec3 SnapToGrid(Vec3 pos, float grid) {
 | 축 | 텍스트(JSON/YAML) | 바이너리 |
 |---|---|---|
 | 가독성·디프 | 좋음 (버전 관리 친화) | 불가 (도구 필요) |
-| 병합 충돌 해결 | 사람이 가능 | 어려움 |
+| 병합 충돌 해결 | 기본 line-based merge에 유리 | 전용 merge 도구 없이는 어려움 |
 | 크기·로드 속도 | 큼·느림 | 작음·빠름 |
-| 스키마 유연성 | 높음 | 낮음 (오프셋 고정) |
+| 스키마 유연성 | 높음 | 일반적으로 낮음 (오프셋 고정) |
 
-레벨 에디터의 *작업 파일* 은 보통 *텍스트* 를 택한다 — 디자이너 둘이 같은 씬을 만지면 버전 관리에서 디프·병합이 일어나는데, 바이너리는 충돌 시 사람이 손볼 수 없다(6절). 대신 *출하 빌드* 는 텍스트를 *바이너리로 쿠킹(cooking)* 해 크기·로드 속도를 얻는다 — 편집용과 런타임용 포맷을 분리하는 것이 표준이다.
+레벨 에디터의 *작업 파일* 은 보통 *텍스트* 를 택한다 — 디자이너 둘이 같은 씬을 만지면 버전 관리에서 디프·병합이 일어나는데, 바이너리는 *기본 line-based merge* 로는 충돌을 풀기 어려워 전용 merge 도구가 필요하다(6절). 태그·길이 기반 스키마나 custom merge driver를 쓰면 바이너리도 의미론적 병합이 가능하므로, 이 우열은 형식 일반의 속성이 아니라 *기본 도구 기준* 의 비교다. 대신 *출하 빌드* 는 텍스트를 *바이너리로 쿠킹(cooking)* 해 크기·로드 속도를 얻는다 — 편집용과 런타임용 포맷을 분리하는 것이 표준이다.
 
 ### 참조 직렬화
 
-씬 안에서 엔티티 A가 엔티티 B를 가리킬 때, 포인터를 저장할 수 없다 — 다음 로드 때 주소가 다르다. *안정 ID* (1절)를 저장한다. 로드 시 *2패스* 로 처리한다. 1패스에서 모든 엔티티를 만들며 ID→엔티티 맵을 채우고, 2패스에서 저장된 ID를 실제 참조로 *해소(resolve)* 한다.
+씬 안에서 엔티티 A가 엔티티 B를 가리킬 때, 포인터를 저장할 수 없다 — 다음 로드 때 주소가 다르다. *안정 ID* (1절)를 저장한다. 로드 시 *2패스* 로 처리한다. 1패스에서 모든 엔티티를 만들며 ID→엔티티 맵을 채우고, 2패스에서 저장된 ID를 보존한 채 실제 해소는 조회 시점의 `ResolvePersistent`로 미룬다.
 
 ```cpp
 // 1패스: 엔티티 생성, idMap 채우기
 for (auto& node : json["entities"]) {
-    Entity* e = scene.Create(EntityId{node["id"]});
+    Entity* e = scene.Create(PersistentEntityId{node["id"]});
     idMap[e->id] = e;
 }
 // 2패스: 참조 필드를 ID로 찾아 연결
 for (auto& node : json["entities"]) {
-    Entity* e = idMap[EntityId{node["id"]}];
-    EntityId refId{node["ref"]};                              // 저장된 참조 ID
-    e->target = idMap.count(refId) ? idMap[refId] : nullptr;  // 끊긴 참조 허용
+    Entity* e = idMap[PersistentEntityId{node["id"]}];
+    PersistentEntityId refId{node["ref"]};                    // 저장된 참조 ID
+    e->target = refId;                                        // ID만 저장; 해소는 ResolvePersistent
 }
 ```
 
-끊긴 참조(가리키던 대상이 삭제됨)를 *치명적 오류로 막지 말고* null로 두되, 검증(8절)에서 잡는다. 로드 자체가 실패하면 디자이너가 파일을 통째로 잃는다.
+끊긴 참조(가리키던 대상이 삭제됨)를 *치명적 오류로 막지 말고* ID 그대로 보존하고, 실제 해소는 조회 시점의 `ResolvePersistent`로 처리한다. ID를 버리지 않으므로 다시 저장할 때 참조가 유실되지 않고, 검증(8절)에서 미해결 참조를 잡는다. 로드 자체가 실패하면 디자이너가 파일을 통째로 잃는다.
 
 ### 버전과 마이그레이션
 
 컴포넌트 스키마는 시간이 지나며 변한다 — 필드가 추가되고, 이름이 바뀌고, 타입이 분리된다. 1년 전 저장한 씬을 오늘 빌드로 열 수 있어야 한다. 각 직렬화 단위에 *버전 번호* 를 박고, *마이그레이션 함수* 를 버전별로 둔다.
 
 ```cpp
-void MigrateLight(json& data, int fromVersion) {
+// 전제: 1 <= fromVersion <= 3. 미래 버전(>3)은 이 함수로 부르지 않는다.
+bool MigrateLight(json& data, int fromVersion) {
+    if (fromVersion < 1 || fromVersion > 3) return false;   // 미래/알 수 없는 버전 거부
     if (fromVersion < 2) {
         // v1: intensity가 0~1 → v2: 0~100 (단위 변경)
         data["intensity"] = data["intensity"].get<float>() * 100.0f;
@@ -330,10 +360,13 @@ void MigrateLight(json& data, int fromVersion) {
         data["temperature"] = 6500.0f;          // 기본값 주입
     }
     data["version"] = 3;
+    return true;
 }
 ```
 
 마이그레이션은 *체인* 으로 적용한다 — v1 파일이면 v1→v2, v2→v3를 차례로 거쳐 현재로 올라온다. 이 체인을 깨뜨리지 않으려면 *오래된 마이그레이션 코드를 절대 지우지 않는다*. 누군가 5년 된 씬을 열 수 있고, 그 경로가 막히면 데이터가 영영 죽는다. 마이그레이션마다 "이 버전 파일 → 현재 버전" 왕복 테스트를 자동화한다.
+
+호출 dispatcher는 `1 ≤ fromVersion ≤ 3`만 이 함수로 보낸다. 미래 버전은 *읽기 전용/실패* 로 처리하고 원본 데이터를 v3으로 덮어쓰지 않는다 — 미래 필드를 보존하는 것과 그 스키마를 v3이라고 재표기하는 것은 다르다.
 
 ### 증분 저장과 더티 추적
 
@@ -370,13 +403,13 @@ Value ResolveProperty(const PrefabInstance& inst, PropertyId prop) {
 
 ### 중첩 프리팹
 
-프리팹 안에 다른 프리팹이 들어간다 — "방" 프리팹이 "책상" 프리팹을 포함하고, "책상"이 "서랍" 프리팹을 포함한다. 이 *중첩(nesting)* 은 오버라이드 해소를 계층화한다. 인스턴스의 속성은 *가장 바깥 오버라이드(씬 인스턴스) → 중간 프리팹 → 가장 안쪽 프리팹의 기본값* 순으로 해소된다.
+프리팹 안에 다른 프리팹이 들어간다 — "방" 프리팹이 "책상" 프리팹을 포함하고, "책상"이 "서랍" 프리팹을 포함한다. 이 *중첩(nesting)* 은 오버라이드 해소를 계층화한다. 인스턴스의 속성은 *가장 바깥 오버라이드(씬 인스턴스) → 중간 프리팹 → 가장 안쪽 프리팹의 기본값* 순으로 해소된다. 아래 그림은 같은 속성 경로(`책상/서랍 색`)가 어느 단계에서 덮어써지는지를 따른다.
 
 ```mermaid
 flowchart TB
-    Scene[씬: 방 인스턴스<br/>창문 색 오버라이드] --> Room[방 프리팹<br/>책상 인스턴스]
+    Scene[씬: 방 인스턴스<br/>책상/서랍 색 = 빨강 override] --> Room[방 프리팹<br/>책상 인스턴스]
     Room --> Desk[책상 프리팹<br/>서랍 인스턴스]
-    Desk --> Drawer[서랍 프리팹<br/>기본값]
+    Desk --> Drawer[서랍 프리팹<br/>Drawer.Color = 흰색 기본값]
 ```
 
 중첩의 위험은 *순환 참조* 다 — A 프리팹이 B를, B가 다시 A를 포함하면 무한 전개된다. 프리팹 편집 시 *순환을 감지해 거부* 한다(검증, 8절). 또한 중첩이 깊으면 속성 해소가 *프리팹 체인을 매번 거슬러 올라가* 느려진다 — 해소 결과를 *평탄화(flatten)* 해 캐시하고, 어느 단계든 변경되면 캐시를 무효화한다.
@@ -408,7 +441,7 @@ flowchart TB
 
 ```cpp
 struct Operation {
-    EntityId target;
+    PersistentEntityId target;
     PropertyId prop;
     Value newValue;
     uint64_t lamport;     // 인과 순서용 논리 시계
@@ -416,11 +449,11 @@ struct Operation {
 };
 ```
 
-*최종 쓰기 우선(last-write-wins)* 은 가장 단순하다 — Lamport 시계(논리적 타임스탬프)가 큰 쪽이 이긴다. 같은 속성에 대한 동시 변경은 한쪽이 무시된다. 단순하지만 변경 손실이 있다. *속성 단위 병합* 은 충돌 입자를 잘게 한다 — 한 사람이 위치를, 다른 사람이 색을 바꾸면 *둘 다 적용* 한다(서로 다른 속성이라 충돌 아님). 같은 속성일 때만 LWW로 떨어진다. 구조적 변경(엔티티 삭제 대 그 엔티티 자식 추가)은 별도 규칙이 필요하다 — "삭제가 이긴다 + 고아 자식 처리" 또는 "삭제를 취소하고 자식을 살린다" 중 일관된 정책을 정한다.
+*최종 쓰기 우선(last-write-wins)* 은 가장 단순하다 — Lamport 시계(논리적 타임스탬프)가 큰 쪽이 이기고, 값이 같으면 `(lamport, stable author ID)` 같은 *결정적 비교 키* 로 총순서를 준다. 도착 순서에 따라 결과가 달라지면 복제본이 수렴하지 않으므로 동률 처리를 명시해야 한다. 삭제는 묘비(tombstone)로 남겨 중복·재전달을 멱등하게 처리한다. 단순하지만 변경 손실이 있다. *속성 단위 병합* 은 충돌 입자를 잘게 한다 — 한 사람이 위치를, 다른 사람이 색을 바꾸면 *둘 다 적용* 한다(서로 다른 속성이라 충돌 아님). 같은 속성일 때만 LWW로 떨어진다. 구조적 변경(엔티티 삭제 대 그 엔티티 자식 추가)은 별도 규칙이 필요하다 — "삭제가 이긴다 + 고아 자식 처리" 또는 "삭제를 취소하고 자식을 살린다" 중 일관된 정책을 정한다.
 
 ### CRDT의 위치
 
-*CRDT(Conflict-free Replicated Data Type)* 는 동시 연산이 *어떤 순서로 도착해도 같은 결과* 로 수렴하도록 설계된 자료구조다. 속성 맵을 last-write-wins 레지스터로, 자식 목록을 순서 보존 시퀀스 CRDT로 두면, 중앙 서버의 직렬화 없이도 각 클라이언트가 같은 상태로 수렴한다. 트레이드오프는 *메타데이터 비용* 이다 — 모든 값에 논리 시계·삭제 묘비(tombstone)를 달아야 해 메모리·전송량이 는다. 텍스트 협업과 달리 씬은 구조가 깊어 CRDT 설계가 까다롭다 — 많은 게임 에디터가 *락 + 속성 단위 LWW* 의 실용적 절충에 머무는 이유다.
+*CRDT(Conflict-free Replicated Data Type)* 는 동시 연산이 *해당 CRDT가 보장하는 순서 제약 안에서* 같은 결과로 수렴하도록 설계된 자료구조다. 속성 맵을 last-write-wins 레지스터로, 자식 목록을 순서 보존 시퀀스 CRDT로 두면, 중앙 서버의 직렬화 없이도 각 클라이언트가 같은 상태로 수렴한다. 임의 연산을 로그에 등록하는 것만으로 CRDT가 되지는 않는다 — 선택한 CRDT 종류에 맞는 인과 전달·중복 제거 또는 state merge 조건이 충족되어야 한다. 트레이드오프는 *메타데이터 비용* 이다 — 모든 값에 논리 시계·삭제 묘비(tombstone)를 달아야 해 메모리·전송량이 는다. 텍스트 협업과 달리 씬은 구조가 깊어 CRDT 설계가 까다롭다 — 많은 게임 에디터가 *락 + 속성 단위 LWW* 의 실용적 절충에 머무는 이유다.
 
 ### 프레즌스와 운영
 
@@ -440,13 +473,17 @@ struct Operation {
 void OnFileChanged(const Path& path) {
     AssetId id = assetDb.Find(path);
     if (!id) return;
-    Asset* reloaded = LoadAsset(path);          // 새 버전 로드
-    assetDb.Replace(id, reloaded);              // 핸들 뒤의 실체 교체
+    Asset* reloaded = LoadAsset(path);          // 완성된 파일만 읽는다(임시 파일+rename)
+    if (!reloaded || !ValidateAsset(*reloaded)) return;   // 실패 시 기존 버전 유지
+    assetDb.Publish(id, reloaded);              // 소유 스레드에서 원자적 게시
+    assetDb.RetireOld(id);                      // 기존 CPU 참조·GPU fence 완료 후 회수
     // 이 에셋을 쓰는 머티리얼·메시·인스턴스가 자동으로 새 데이터를 봄
 }
 ```
 
 핵심은 *핸들 간접화(handle indirection)* 다. 객체가 에셋을 *직접 포인터* 로 들면 교체할 수 없다. *에셋 핸들(ID)* 로 들고, 핸들→실체 매핑을 한 곳에서 관리하면, 그 매핑의 실체만 바꿔치기해도 모든 사용처가 새 데이터를 본다. 이는 1절의 안정 ID·핸들 모델의 직접적 재사용이다.
+
+다만 핸들 간접화는 *논리 정체성* 을 보존할 뿐, 이미 잡고 있는 CPU 참조나 GPU 제출 작업의 완료를 보장하지 않는다. 그래서 교체는 load → validate → 소유 스레드/동기화 경계에서 publish → 이전 버전 retire의 단계로 나누고, 검증에 실패하면 기존 버전을 유지한다. DLL 함수 포인터·callback·vtable을 가진 객체도 이전 모듈의 *실행 중 참조* 에 포함되므로, 재로드 전에 그 코드의 실행이 끝났음을 기다린다. 파일 저장은 임시 파일+rename이나 안정성 검사/재시도 정책으로 완성본만 읽는다 — watcher의 debounce만으로는 저장 중간 상태를 배제하지 못한다.
 
 ### 코드 핫리로드와 상태 보존
 
@@ -458,19 +495,26 @@ sequenceDiagram
     participant Ed as 에디터
     participant Old as 기존 모듈
     participant New as 새 모듈
-    FS->>Ed: 소스 변경 감지
+    FS->>Ed: 완성된 소스 변경 감지
+    Ed->>Old: 진행 중 호출 정지 요청
+    Ed->>Old: 기존 코드·CPU/GPU 작업 완료 대기
     Ed->>Old: 상태 직렬화(필드 보존)
     Ed->>Ed: 재컴파일
-    Ed->>New: 새 모듈 로드
-    Ed->>New: 상태 역직렬화(복원)
-    Note over New: 로직은 새 것, 상태는 보존
+    alt 컴파일·로드·검증 성공
+        Ed->>New: 새 모듈 로드
+        Ed->>New: 상태 역직렬화(복원)
+        Note over New: 로직은 새 것, 상태는 보존
+        Ed->>Old: 이전 버전 회수(CPU/GPU 완료 후)
+    else 실패
+        Ed->>Old: 기존 버전 유지(중단)
+    end
 ```
 
 상태 보존의 함정은 *스키마 변경* 이다 — 코드 핫리로드 중 필드가 추가/삭제되면 직렬화 4절의 마이그레이션과 같은 문제가 생긴다. 단순 핫리로드는 "필드 시그니처가 같을 때만" 상태를 복원하고, 시그니처가 바뀌면 *기본값으로 재초기화* 하거나 핫리로드를 건너뛰고 전체 재시작을 요구한다.
 
 ### 안전망 — 핫리로드가 깨질 때
 
-핫리로드는 본질적으로 *위험하다* — 부분 교체된 상태는 정상 시작 경로를 거치지 않아 미묘한 버그를 낳는다. 그래서 안전망을 둔다. *리로드 전 스냅샷* 을 떠 리로드가 크래시하면 직전 상태로 되돌린다. 리로드 후 *검증(8절)* 을 자동 실행해 깨진 참조·잘못된 상태를 즉시 잡는다. 그리고 핫리로드로 들어간 변경은 *출하 빌드에서 항상 전체 재로드로 재현* 되는지 확인한다 — 핫리로드에서만 동작하고 깨끗한 시작에선 깨지는 상태를 출하 게이트에서 거른다. 핫리로드는 *편집 편의 기능* 이지 *진실의 경로* 가 아니다.
+핫리로드는 본질적으로 *위험하다* — 부분 교체된 상태는 정상 시작 경로를 거치지 않아 미묘한 버그를 낳는다. 그래서 안전망을 둔다. *리로드 전 스냅샷* 을 떠 리로드가 크래시하면 직전 상태로 되돌린다. 이 복구는 프로세스가 살아 있을 때의 *처리 가능한 reload 실패*(컴파일·로드·검증 오류)를 전제한다 — 힙·스택이 손상된 *치명적 크래시* 는 같은 프로세스에서 일반 로깅·할당·네트워크 코드를 안전하게 호출할 수 없으므로, out-of-process 수집기(Breakpad/Crashpad 등)가 덤프·심볼을 회수하고 별도 정상 프로세스가 지속된 스냅샷을 읽어 재시작 복구한다. 덤프·심볼·스냅샷의 보관 시점과 platform-specific crash-safe 경계를 명시한다. 리로드 후 *검증(8절)* 을 자동 실행해 깨진 참조·잘못된 상태를 즉시 잡는다. 그리고 핫리로드로 들어간 변경은 *출하 빌드에서 항상 전체 재로드로 재현* 되는지 확인한다 — 핫리로드에서만 동작하고 깨끗한 시작에선 깨지는 상태를 출하 게이트에서 거른다. 핫리로드는 *편집 편의 기능* 이지 *진실의 경로* 가 아니다.
 
 ## 8. 검증과 진단
 
@@ -497,7 +541,7 @@ ValidationResult ValidateReferences(const SceneDocument& doc) {
     ValidationResult r;
     for (auto& e : doc.Graph().Entities()) {
         for (auto& ref : e.References()) {
-            if (!doc.Graph().Resolve(ref.target))
+            if (!doc.Graph().ResolvePersistent(ref.target))
                 r.Error(e.id, "끊긴 참조: " + ref.target.ToString());
         }
     }
@@ -538,9 +582,9 @@ flowchart LR
 
 ## 더 읽을거리
 
-- Unity / Unreal Engine 에디터 문서 — 프리팹·중첩·오버라이드·배리언트 워크플로의 산업 표준.
-- "Game Engine Architecture" (Jason Gregory) — 씬 그래프·툴 파이프라인·에셋 시스템의 기반.
-- ImGui / 에디터 GUI 프레임워크 문서 — 즉시 모드 인스펙터·기즈모 구현.
-- Operational Transformation 및 CRDT 관련 자료 — 동시 편집 병합의 이론과 실무.
-- Git 내부 구조 문서 — 텍스트 직렬화·디프·3-way 병합이 멀티유저 작업 파일에 주는 함의.
-- 각 엔진의 핫리로드 / live coding 발표(GDC 등) — 상태 보존 코드 리로드의 실제 사례.
+- Unity 6.0 매뉴얼, "Prefab Variants"·"Nested Prefabs" (docs.unity3d.com/6000.0/Documentation/Manual/PrefabVariants.html) — 프리팹·중첩·오버라이드·배리언트 워크플로.
+- "Game Engine Architecture" (Jason Gregory, CRC Press) — 씬 그래프·툴 파이프라인·에셋 시스템의 배경. (인용 판본은 읽은 시점 기준으로 명시)
+- Dear ImGui 저장소 (github.com/ocornut/imgui) — 즉시 모드 인스펙터·디버그 패널 UI. (3D 기즈모 좌표 변환·피킹 수학은 엔진/별도 확장)
+- Ellis·Gibbs, "Concurrency Control in Groupware Systems" (SIGMOD 1989); Shapiro 등, "Conflict-free Replicated Data Types" (INRIA RR-7687, 2011) — 동시 편집 병합의 이론.
+- Git 공식 문서 "gitattributes" (git-scm.com/docs/gitattributes) — 텍스트/binary 취급과 custom merge driver.
+- Unreal Engine, "Live Coding" 매뉴얼 (dev.epicgames.com) — object reinstancing과 상태 보존 코드 리로드의 실제 사례.

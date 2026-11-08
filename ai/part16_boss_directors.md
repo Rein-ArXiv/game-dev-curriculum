@@ -211,8 +211,10 @@ public:
             if (!p.IsValid(ctx))                   continue;  // 거리·상황 조건
             candidates.push_back(id);
         }
-        if (candidates.empty())                              // 모두 막히면
+        if (candidates.empty()) {                            // 모두 막히면
+            Commit(fallbackPattern_);                        // 공통 이력 경로를 건너뛰지 않는다
             return fallbackPattern_;                         // 안전한 기본기
+        }
 
         int chosen = WeightedPick(candidates, ctx, fallbackPattern_); // 가중 샘플링
         Commit(chosen);
@@ -236,7 +238,7 @@ private:
 };
 ```
 
-`candidates.empty` 분기가 중요하다. 모든 패턴이 쿨다운·반복 금지·조건으로 막혀 *선택지가 없는* 순간이 실전에서 생긴다 — 이때 fallback 없이 빈 선택을 반환하면 보스가 멍하니 서 있는 버그가 난다. fallback은 쿨다운도 조건도 없는 가벼운 기본 공격(약한 베기 등)으로, "항상 둘 곳이 있다"를 보장한다.
+`candidates.empty` 분기가 중요하다. 모든 패턴이 쿨다운·반복 금지·조건으로 막혀 *선택지가 없는* 순간이 실전에서 생긴다 — 이때 fallback 없이 빈 선택을 반환하면 보스가 멍하니 서 있는 버그가 난다. fallback은 쿨다운도 조건도 없는 가벼운 기본 공격(약한 베기 등)으로, "항상 둘 곳이 있다"를 보장한다. fallback도 실제 공격이므로 다른 선택과 같은 `Commit` 경로를 지나 cooldown·lastPattern·recentWindow에 기록한다. 의도적으로 무제약 대기 패턴을 fallback으로 쓴다면 집계에서 제외한다는 정책을 명시해야 한다.
 
 ### 네 가지 제약의 역할
 

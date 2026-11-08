@@ -165,6 +165,7 @@ Microsoft는 1990년대 Windows용으로 CP949(확장 완성형)를 개발했다
 예시: "가" = `0xB0 0xA1`
 
 ```c
+// 실행 문자 집합(execution charset)이 CP949(MSVC 한글 코드 페이지)라고 가정한다.
 const char* str = "ABC가나다";
 
 // 바이트 배열:
@@ -209,7 +210,7 @@ str[3] = '\0';
 
 ```text
 U+0000 - U+007F:  ASCII
-U+0080 - U+00FF:  라틴 확장
+U+0080 - U+00FF:  라틴-1 보충 (Latin-1 Supplement)
 U+0100 - U+017F:  라틴 확장-A
 U+0370 - U+03FF:  그리스어
 U+0400 - U+04FF:  키릴 문자
@@ -221,14 +222,16 @@ U+4E00 - U+9FFF:  CJK 한자 (20,992 코드 포인트, 최초 할당 20,902자)
 U+AC00 - U+D7A3:  한글 음절 (11,172개)
 ```
 
+이 그림은 Unicode 2.0 이후의 현대 배치이며, 한글 음절(U+AC00~U+D7A3)은 1991년 초기 할당이 아니라 Unicode 2.0에서 현재 위치로 옮겨진 것이다.
+
 65,536개면 충분할 것 같았다.
 
 ### 16비트의 한계
 
 하지만 현실은 달랐다.
 
-- **역사적 한자**: 70,000개 이상 (고전 중국어, 일본어, 한국어)
-- **이모지**: 3,600개 이상 (계속 증가 중)
+- **역사적 한자**: 수만 개 이상 (CJK 통합/확장 영역)
+- **이모지**: 수천 개의 코드 포인트 (계속 증가 중이며, 이모지 시퀀스 수와는 다르다)
 - **고대 문자**: 이집트 상형문자, 설형문자, 룬 문자
 - **수학 기호**: $\mathbb{R}$, $\mathfrak{H}$, $\mathcal{L}$ 등
 - **음악 기호**: 악보 표기
@@ -426,20 +429,21 @@ UTF-8의 핵심은 바이트 첫 비트 패턴으로 역할을 명확히 구분�
 최대 3바이트만 뒤로 가면 문자 경계 찾기가 보장된다.
 
 ```c
-// 현재 위치에서 문자 시작점 찾기
-const uint8_t* find_char_start(const uint8_t* pos) {
+// begin은 버퍼 시작, pos는 그 안의 위치. begin 이전으로는 탐색하지 않는다.
+const uint8_t* find_char_start(const uint8_t* begin, const uint8_t* pos) {
     for (int i = 0; i < 4; i++) {
         if ((pos[0] & 0xC0) != 0x80) {
             // 10xxxxxx가 아니면 문자 시작
             return pos;
         }
+        if (pos == begin) return NULL;  // 시작 전으로 이동 불가
         pos--;
     }
-    return NULL;  // 에러 (불가능)
+    return NULL;  // continuation이 4개 이상 → 잘못된 UTF-8
 }
 ```
 
-왜 최대 3바이트일까? 4바이트 문자가 최대이므로, 최악의 경우 3개의 continuation byte를 건너뛰고 4번째에서 lead byte를 발견하기 때문이다.
+왜 최대 3바이트일까? 4바이트 문자가 최대이므로, 최악의 경우 3개의 continuation byte를 건너뛰고 4번째에서 lead byte를 발견하기 때문이다. 이 탐색은 유효한 UTF-8 시퀀스 내부 위치를 전제로 하며, 임의 바이트열에는 먼저 검증이 필요하다.
 
 ### ASCII 완벽 호환
 
@@ -455,14 +459,14 @@ U+0000 ~ U+007F: 0xxxxxxx (그대로 ASCII)
 
 효과:
 1. 기존 ASCII 파일을 그대로 UTF-8로 취급 가능
-2. NULL(`0x00`)은 절대 중간에 나타나지 않음 → C 문자열 호환
+2. NUL(`0x00`)은 오직 U+0000의 1바이트 표현으로만 나오며 다른 코드 포인트의 멀티바이트 표현에는 들어가지 않음 → 종료 NUL 기반 C 문자열 호환 (길이 기반 문자열은 중간 NUL을 포함할 수 있다)
 3. `strchr(str, 'A')`는 멀티바이트 내부와 절대 혼동 안 됨
 
 왜냐하면 다음과 같이 범위가 완전히 분리되어 있기 때문이다.
 
 ```text
 ASCII 영역:     0x00 - 0x7F (최상위 비트 = 0)
-Lead byte:      0xC0 - 0xF7 (최상위 비트 = 1)
+Lead byte:      0xC2 - 0xF4 (최상위 비트 = 1; 2바이트 C2..DF, 3바이트 E0..EF, 4바이트 F0..F4)
 Continuation:   0x80 - 0xBF (최상위 비트 = 1)
 ```
 
@@ -741,13 +745,14 @@ Windows API가 `CreateFileA`/`CreateFileW` 두 버전으로 존재하는 이유,
 
 ```c
 // ANSI 버전 (코드 페이지 의존)
-BOOL CreateFileA(LPCSTR lpFileName, ...);
+HANDLE CreateFileA(LPCSTR lpFileName, ...);
 
 // Wide 버전 (UTF-16)
-BOOL CreateFileW(LPCWSTR lpFileName, ...);
+HANDLE CreateFileW(LPCWSTR lpFileName, ...);
+// 실패 시 NULL이 아니라 INVALID_HANDLE_VALUE를 반환한다.
 ```
 
-A 함수는 단순히 래퍼다. 실제 구현은 W 함수에만 있고, A 함수는 내부적으로 `MultiByteToWideChar`를 호출한 후 W 함수로 위임한다.
+A 함수는 일반적으로 대응하는 W 함수로 변환해 위임하는 방식으로 구현되지만, 이는 문서화된 API 계약이 아니라 구현 관례다. A 함수는 내부적으로 `MultiByteToWideChar`를 거쳐 코드 페이지에 따라 파일명을 변환한다.
 
 권장 패턴은 다음과 같다.
 
@@ -759,19 +764,26 @@ std::string filename_utf8 = "한글파일.txt";
 std::wstring filename_utf16 = utf8_to_utf16(filename_utf8);
 HANDLE h = CreateFileW(filename_utf16.c_str(), ...);
 
-// 변환 함수
+// 변환 함수. flags 0은 잘못된 UTF-8을 대체 문자로 처리하므로,
+// 앞의 엄격 검증 정책과 맞추려면 MB_ERR_INVALID_CHARS로 실패를 드러낸다.
 std::wstring utf8_to_utf16(const std::string& utf8) {
     if (utf8.empty()) return std::wstring();
+    if (utf8.size() > INT_MAX) throw std::length_error("input too large");
 
     // 입력 길이를 명시하면 반환 길이에 null 종결자가 포함되지 않는다.
     const int src_len = static_cast<int>(utf8.size());
-    int len = MultiByteToWideChar(CP_UTF8, 0,
-                                  utf8.data(), src_len,
-                                  nullptr, 0);
+    const int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                        utf8.data(), src_len,
+                                        nullptr, 0);
+    if (len == 0)
+        throw std::system_error(GetLastError(), std::system_category());
+
     std::wstring result(len, 0);
-    MultiByteToWideChar(CP_UTF8, 0,
-                       utf8.data(), src_len,
-                       &result[0], len);
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                            utf8.data(), src_len,
+                            &result[0], len) == 0) {
+        throw std::system_error(GetLastError(), std::system_category());
+    }
     return result;
 }
 ```
@@ -1039,7 +1051,7 @@ UTF-8은 바이트 순서가 없으므로 BOM이 기술적으로 불필요하다
 찬성 입장:
 - 텍스트 에디터가 인코딩 자동 감지
 - UTF-8 vs 레거시 ANSI 구분
-- Windows 메모장 등 일부 도구에서 요구
+- Windows 메모장 등 일부 도구가 BOM을 인코딩 감지 신호로 사용
 
 반대 입장 (Unix/Linux 진영):
 
@@ -1065,7 +1077,7 @@ BOM 포함 시:
 <html>
 ```
 
-BOM 포함 시 일부 브라우저에서 "?" 표시.
+BOM이 본문 문자로 취급되면 일부 파서에서 `?`나 U+FEFF로 노출될 수 있다.
 
 3. **파일 비교**
 
@@ -1148,6 +1160,8 @@ Encoding detect_encoding(const uint8_t* data, size_t len) {
 - Windows API: UTF-8 ↔ UTF-16
 - 외부 라이브러리 요구사항
 
+단, 사용자 텍스트와 OS 경로·식별자는 별개다. Unix 경로는 임의의 비 NUL·비 slash 바이트열일 수 있고, Windows wide 경로는 엄격한 Unicode scalar로 변환되지 않는 code unit을 담을 수 있다. 파일시스템 경계에서는 native 표현을 손실 없이 보존하는 별도 정책이 필요하다.
+
 변환 레이어 예시:
 
 ```cpp
@@ -1205,7 +1219,7 @@ size_t count_codepoints(const char* s) {
 
 // 3. 그래핌 클러스터 (사용자가 보는 "글자")
 // "👨‍👩‍👧‍👦" (가족) = 1 그래핌, 7 코드 포인트, 25바이트
-// ICU 라이브러리 필요
+// 조합 문자·ZWJ 시퀀스·shaping을 정확히 다루려면 UAX #29나 ICU 같은 라이브러리가 필요하다.
 ```
 
 ### 데이터베이스 VARCHAR 처리
@@ -1220,7 +1234,7 @@ CREATE TABLE users (
 name VARCHAR(100)  -- 100 문자
 
 -- SQL Server
-name VARCHAR(100)    -- 100 바이트 (ANSI)
+name VARCHAR(100)    -- 100 바이트 (코드 페이지 기반; UTF-8 collation에서는 UTF-8 바이트)
 name NVARCHAR(100)   -- 100 UTF-16 코드 유닛
 ```
 
@@ -1232,14 +1246,13 @@ std::string truncate_to_chars(const std::string& utf8, size_t max_chars) {
     size_t pos = 0;
 
     while (pos < utf8.length() && count < max_chars) {
-        uint8_t b = utf8[pos];
-
-        if ((b & 0x80) == 0)         pos += 1;
-        else if ((b & 0xE0) == 0xC0) pos += 2;
-        else if ((b & 0xF0) == 0xE0) pos += 3;
-        else if ((b & 0xF8) == 0xF0) pos += 4;
-        else break;
-
+        size_t len = 0;
+        // 시작 바이트만 보지 않고 decode_utf8로 검증된 시퀀스만 소비한다.
+        if (decode_utf8(reinterpret_cast<const uint8_t*>(utf8.data() + pos),
+                        utf8.length() - pos, &len) == INVALID) {
+            break;
+        }
+        pos += len;
         count++;
     }
 
@@ -1249,7 +1262,8 @@ std::string truncate_to_chars(const std::string& utf8, size_t max_chars) {
 // 사용
 std::string name = "매우 긴 이름...";
 std::string safe_name = truncate_to_chars(name, 100);
-// SQL에 안전하게 삽입 가능
+// 코드 포인트 수 기준으로 자른다. DB의 byte/code-unit 한도는 별도로 확인하고,
+// SQL injection 방지는 bound parameter로 보장한다.
 ```
 
 ### 게임 엔진에서의 고려사항
@@ -1257,7 +1271,8 @@ std::string safe_name = truncate_to_chars(name, 100);
 폰트 렌더링:
 
 ```cpp
-// 코드 포인트 단위로 순회
+// 단순화된 1 코드 포인트 = 1 글리프 모델이다.
+// 조합 문자, ZWJ 이모지, complex shaping은 별도 처리가 필요하다.
 void render_text(const char* utf8, float x, float y) {
     const char* p = utf8;
     const char* end = utf8 + strlen(utf8);
@@ -1282,12 +1297,16 @@ void render_text(const char* utf8, float x, float y) {
 class TextInput {
 private:
     std::string utf8_buffer;
-    size_t cursor_pos;  // 바이트 위치
+    size_t cursor_pos = 0;  // 바이트 위치
 
 public:
     void insert_char(uint32_t codepoint) {
+        // 서로게이트와 U+10FFFF 초과는 유효한 Unicode scalar value가 아니다.
+        if (codepoint > 0x10FFFF || (codepoint >= 0xD800 && codepoint <= 0xDFFF)) return;
+
         char utf8[5];
         size_t len = encode_utf8(codepoint, (uint8_t*)utf8);
+        if (len == 0) return;  // 인코딩 실패 계약
         utf8[len] = '\0';
 
         utf8_buffer.insert(cursor_pos, utf8, len);
@@ -1297,7 +1316,7 @@ public:
     void move_cursor_left() {
         if (cursor_pos == 0) return;
 
-        // UTF-8 문자 시작점 찾기
+        // 코드 포인트 단위 이동(결합 문자/그래핌 클러스터 경계는 아님)
         do {
             cursor_pos--;
         } while (cursor_pos > 0 &&
@@ -1340,6 +1359,7 @@ bool is_ascii(const char* str, size_t len) {
 ### 코드 포인트 개수 계산 최적화
 
 ```c
+// 검증된 UTF-8에 대해서만 코드 포인트 수와 일치한다.
 size_t count_codepoints_fast(const char* str, size_t len) {
     size_t count = 0;
 
@@ -1356,7 +1376,7 @@ size_t count_codepoints_fast(const char* str, size_t len) {
 ```
 
 이 한 줄의 비트 연산이 전체 문자 개수를 센다. 왜냐하면:
-- ASCII (0xxxxxxx): `& 0xC0` = 0x00 ≠ 0x80 → count++
+- ASCII (0xxxxxxx): `& 0xC0` = 0x00 또는 0x40 ≠ 0x80 → count++
 - Lead (110xxxxx, 1110xxxx, 11110xxx): ≠ 0x80 → count++
 - Continuation (10xxxxxx): `& 0xC0` = 0x80 → count 유지
 
@@ -1377,7 +1397,7 @@ int utf8_strcmp(const char* s1, const char* s2) {
 // 바이트 비교 = 코드 포인트 비교
 ```
 
-이것이 UTF-8의 또 다른 천재성이다. 정렬 순서가 바이트 순서와 일치한다.
+이것이 UTF-8의 또 다른 천재성이다. 정렬 순서가 바이트 순서와 일치한다. 다만 이 순서는 코드 포인트 기준 사전식 순서일 뿐, 언어별 collation이나 정규화(NFC/NFD)된 의미 동등성을 보장하지 않는다. 비교·해시 전에 정규화 정책을 정한다.
 
 ### 빠른 참조
 
@@ -1431,7 +1451,7 @@ U+FFFE, U+FFFF: 유효한 scalar value인 noncharacter; 문자 교환용으로 �
 - **1992년 UTF-8**: 플레이스매트 스케치가 인터넷 표준으로
 
 현재의 상황은 다음과 같다.
-- **웹**: UTF-8이 98% 이상 점유
+- **웹**: UTF-8이 사실상 표준 인코딩으로 자리 잡음
 - **Windows**: UTF-16 레거시에 묶임
 - **데이터베이스**: UTF-8 기본화
 - **프로그래밍 언어**: 외부 UTF-8 지원은 널리 퍼졌지만 내부 표현은 다르다. Rust `str`과 Go 문자열은 바이트 기반이고 보통 UTF-8을 담지만, Python 3 `str`은 PEP 393의 문자열별 유연한 1·2·4바이트 코드 유닛 표현을 사용한다.

@@ -130,21 +130,23 @@ struct DecisionTrace {
 
 ```cpp
 float Utility::Score(const Action& a, const Context& ctx, DecisionTrace::Candidate* out) {
-    float score = a.baseWeight;
+    float product = 1.0f;                    // 고려요소만의 raw 곱
     if (out) out->factorCount = 0;
     for (const Consideration& c : a.considerations) {
         float v = c.curve(c.input(ctx));     // 입력을 0~1 곡선에 통과
-        score *= v;                          // 곱셈 결합
+        product *= v;                        // 곱셈 결합
         if (out && out->factorCount < out->factors.size()) {
             out->factors[out->factorCount++] = {c.name, v};
         }
     }
-    // 보상 보정(compensation): 곱셈이 항을 늘릴수록 점수가 깎이는 편향 보정
+    // 보상 보정(compensation): [0,1] 범위의 곱에만 적용한다
     int n = (int)a.considerations.size();
+    float compensated = product;
     if (n > 0) {
         float mod = 1.0f - 1.0f / n;
-        score = score + (1.0f - score) * mod * score;
+        compensated = product + (1.0f - product) * mod * product;
     }
+    float score = a.baseWeight * compensated; // raw 곱 → 보정 → baseWeight 순서를 통일한다
     if (out) { out->name = a.name; out->score = score; }
     return score;
 }
@@ -442,12 +444,12 @@ protected:
 
 ### 노드 breakpoint
 
-일반 디버거의 브레이크포인트를 *트리 노드 단위* 로 옮긴 것이다. "이 사격 노드가 실행되는 순간 멈춰라"를 걸면, 그 노드가 평가되는 프레임에 — 노드의 OnTick이 실행되기 직전에 — 게임 시뮬레이션이 멈추고 그 순간의 blackboard 전체를 검사한다.
+일반 디버거의 브레이크포인트를 *트리 노드 단위* 로 옮긴 것이다. "이 사격 노드가 실행되는 순간 멈춰라"를 걸면, 그 노드가 평가되는 프레임에 플래그를 세우고 노드의 OnTick이 끝난 뒤 다음 safe point에서 게임 시뮬레이션이 멈춰 그때의 blackboard 전체를 검사한다. 즉 이 구현은 *after-tick breakpoint* 다 — 노드 진입 전에 멈추려면 노드를 실행하지 않고 반환하는 별도의 suspend/resume 프로토콜이 필요하며, 단순히 Running을 반환하면 BT 결과가 달라진다.
 
 ```cpp
 Status Node::Tick(Context& ctx) {
     if (dbg_.breakpoint && ctx.debugBreakAllowed) {
-        ctx.pauseRequested = true;            // 시뮬레이션 일시정지 요청
+        ctx.pauseRequested = true;            // 이 노드 실행 후 다음 safe point에서 일시정지 요청
         ctx.breakNode = id_;                  // 어느 노드에서 멈췄는지
     }
     Status s = OnTick(ctx);
@@ -651,14 +653,23 @@ $$
 가장 흔한 통계 오용은 실험을 돌리며 *유의해지는 순간 멈추는* 엿보기(optional stopping)다. 매 시점의 검정이 $\alpha=0.05$여도 여러 시점을 보고 한 번이라도 기각하면 전체 1종 오류가 5%를 넘는다. 독립 검정 $K$개라는 단순 모델이면 적어도 한 번 위양성이 날 확률은 $1-(1-\alpha)^K$지만, 누적 A/B 데이터의 중간 검정은 서로 강하게 상관돼 이 식도 정확하지 않다. 실제 팽창률은 점검 시점과 중단 규칙에 달린다. 표본 수를 사전에 고정해 마지막에 한 번 검정하거나, 중간 점검이 필요하면 group-sequential alpha-spending, always-valid p-value, 순차 확률비 검정처럼 전체 오류율을 제어하는 절차를 미리 선택한다.
 
 ```cpp
+#include <cmath>
+#include <limits>
+#include <optional>
+
 // 두 비율 A/B: 필요 표본 수(사전 계산)와 고정-표본 검정(엿보기 금지)
-int ApproxRequiredSamplePerGroup(double pBar, double delta,
-                                 double zAlpha = 1.95996,   // 양측 alpha=0.05
-                                 double zBeta  = 0.84162) {  // 검정력 0.80
-    if (!(pBar > 0.0 && pBar < 1.0) || !(delta > 0.0))
-        throw std::invalid_argument("pBar and delta are outside the approximation domain");
+std::optional<long long> ApproxRequiredSamplePerGroup(
+        double pBar, double delta,
+        double zAlpha = 1.95996,   // 양측 alpha=0.05
+        double zBeta  = 0.84162) { // 검정력 0.80
+    if (!std::isfinite(pBar) || !std::isfinite(delta) ||
+        !(pBar > 0.0 && pBar < 1.0) || !(delta > 0.0))
+        return std::nullopt;       // 비유한 입력 또는 정의역 밖
     double s = zAlpha + zBeta;
-    return (int)std::ceil(s * s * 2.0 * pBar * (1.0 - pBar) / (delta * delta));
+    double n = std::ceil(s * s * 2.0 * pBar * (1.0 - pBar) / (delta * delta));
+    if (!std::isfinite(n) || n > (double)std::numeric_limits<long long>::max())
+        return std::nullopt;       // 변환 전 유한성·상한 검사
+    return (long long)n;           // int가 아닌 넓은 정수로 반환
 }
 
 // 사전 고정한 n에 도달한 뒤 단 한 번만 호출한다 — 매 틱 호출+조기 중단은 위양성 폭증
@@ -666,7 +677,10 @@ bool AbSignificant(int xA, int nA, int xB, int nB) {
     if (nA <= 0 || nB <= 0 || xA < 0 || xA > nA || xB < 0 || xB > nB)
         throw std::invalid_argument("invalid binomial counts");
     double pA = (double)xA / nA, pB = (double)xB / nB;
-    double p  = (double)(xA + xB) / (nA + nB);
+    // 합산은 int가 아니라 넓은 부동소수점에서 수행한다 (int 합 overflow 방지)
+    double xSum = (double)xA + (double)xB;
+    double nSum = (double)nA + (double)nB;
+    double p  = xSum / nSum;
     double se = std::sqrt(p * (1.0 - p) * (1.0 / nA + 1.0 / nB));
     if (se == 0.0) return false;                 // 두 군 모두 0 또는 모두 1
     double Z  = (pB - pA) / se;
@@ -674,7 +688,7 @@ bool AbSignificant(int xA, int nA, int xB, int nB) {
 }
 ```
 
-거시·미시 두 차원의 검증은 서로 다른 실패를 찾는다. 트레이스·오버레이는 개별 결정의 인과와 계약 위반을 찾고, 메트릭·통제 실험은 전체 경험의 분포 변화를 추정한다. 어느 한쪽도 AI 품질을 단독으로 보장하지 않는다.
+`ApproxRequiredSamplePerGroup`이 `nullopt`를 반환하면 입력이 비유한이거나 표본 수가 상한을 넘은 경우이므로, 호출자는 계획값 실패로 처리하고 좁은 정수로 잘라 계속 계산하지 않는다. 거시·미시 두 차원의 검증은 서로 다른 실패를 찾는다. 트레이스·오버레이는 개별 결정의 인과와 계약 위반을 찾고, 메트릭·통제 실험은 전체 경험의 분포 변화를 추정한다. 어느 한쪽도 AI 품질을 단독으로 보장하지 않는다.
 
 ## 8. 자체 디버깅 도구 제작
 

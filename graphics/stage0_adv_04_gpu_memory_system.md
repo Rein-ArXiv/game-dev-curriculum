@@ -110,16 +110,43 @@ Coherent는 가시성 계약이고 cached는 CPU 접근 성능 속성이다. coh
 비-coherent 메모리에서는 CPU가 쓴 범위를 flush하고, GPU가 쓴 결과를 CPU가 읽기 전에 invalidate해야 한다. 이때 범위는 API가 요구하는 원자 크기 단위에 맞춰 확장한다.
 
 ```cpp
-Range AlignNonCoherentRange(
+// offset, size: allocation 안의 flush/invalidate 대상 범위(바이트).
+// allocationSize, mappedSize: 실제 할당 크기와 CPU에 매핑된 크기.
+std::optional<Range> AlignNonCoherentRange(
     uint64_t offset,
     uint64_t size,
+    uint64_t allocationSize,
+    uint64_t mappedSize,
     uint64_t atomSize)
 {
+    if (atomSize == 0 || size == 0 || offset > allocationSize ||
+        size > allocationSize - offset)          // offset+size overflow 방지 겸용
+        return std::nullopt;
+
     const uint64_t begin = offset - offset % atomSize;
-    const uint64_t end = AlignUp(offset + size, atomSize);
-    return {begin, end - begin};
+    uint64_t end = offset + size;                // <= allocationSize
+    const uint64_t remainder = end % atomSize;
+    if (remainder != 0) {
+        const uint64_t delta = atomSize - remainder;
+        if (end > std::numeric_limits<uint64_t>::max() - delta)
+            return std::nullopt;
+        end += delta;
+    }
+    // Vulkan 예외: 정렬된 끝이 allocation 끝에 닿으면 그 지점까지로 자른다.
+    if (end > allocationSize)
+        end = allocationSize;
+    if (end <= begin)
+        return std::nullopt;
+
+    // 정렬된 범위가 매핑 밖이면 그대로 flush하지 않고 호출을 거절한다.
+    if (begin >= mappedSize || end > mappedSize)
+        return std::nullopt;
+
+    return Range{begin, end - begin};
 }
 ```
+
+예를 들어 offset=900, size=100, allocationSize=1000, atomSize=256이면 정렬된 끝이 1024가 되지만, 할당 끝에 닿는 범위의 끝 정렬은 Vulkan이 면제하므로 1000으로 자른다. 정렬 결과가 매핑 범위를 벗어나면 그대로 flush하지 말고 매핑을 넓히거나 호출을 거절한다.
 
 Flush는 GPU 작업 완료를 기다리는 동기화가 아니다. CPU 캐시의 변경을 장치가 볼 수 있는 메모리 영역으로 내보내는 작업일 뿐이다. GPU가 그 범위를 읽기 시작하는 시점은 별도의 실행 의존성으로 보장해야 한다.
 
@@ -259,6 +286,16 @@ Aliasing에는 추가 조건이 있다.
 링 버퍼 구현에서 `head < tail` 같은 원형 오프셋 비교만 사용하면 wrap 이후의 사용 구간을 잘못 판정하기 쉽다. 논리적 커서를 계속 증가하는 64비트 절대 위치로 두고, 실제 버퍼 오프셋만 나머지 연산으로 구한다.
 
 ```cpp
+// 요청 정렬을 checked 덧셈으로 계산한다. overflow면 nullopt.
+static std::optional<uint64_t> AlignUpChecked(uint64_t x, uint64_t alignment) {
+    if (alignment == 0) return std::nullopt;
+    const uint64_t remainder = x % alignment;
+    const uint64_t delta = remainder == 0 ? 0 : alignment - remainder;
+    if (x > std::numeric_limits<uint64_t>::max() - delta)
+        return std::nullopt;
+    return x + delta;
+}
+
 class UploadRing {
 public:
     struct Slice {
@@ -269,19 +306,36 @@ public:
     };
 
     std::optional<Slice> Allocate(uint64_t size, uint64_t alignment) {
-        uint64_t begin = AlignUp(write_, alignment);
+        // size<=capacity와 checked alignment를 먼저 거절한다.
+        if (mapped_ == nullptr || capacity_ == 0 || size == 0 ||
+            size > capacity_ || alignment == 0 || capacity_ % alignment != 0)
+            return std::nullopt;
+
+        // GPU 사용도, 아직 제출하지 않은 예약도 전부 없는 경우에만 기준을 재설정한다.
+        const bool completelyEmpty = inFlight_.empty() && write_ == retired_;
+        const uint64_t cursor = completelyEmpty ? 0 : write_;
+        const uint64_t retired = completelyEmpty ? 0 : retired_;
+
+        auto aligned = AlignUpChecked(cursor, alignment);
+        if (!aligned) return std::nullopt;
+        uint64_t begin = *aligned;
         uint64_t offset = begin % capacity_;
 
-        // 한 할당이 물리 버퍼 끝을 가로지르지 않게 다음 lap으로 이동한다.
-        if (offset + size > capacity_) {
-            begin = AlignUp(begin, capacity_);
+        // offset + size 대신 overflow 없는 뺄셈으로 물리 버퍼 끝을 검사한다.
+        if (size > capacity_ - offset) {
+            aligned = AlignUpChecked(begin, capacity_);
+            if (!aligned) return std::nullopt;
+            begin = *aligned;
             offset = 0;
         }
 
-        if (begin + size - retired_ > capacity_) {
-            return std::nullopt; // 공간 부족: 퇴역 전 바이트와 겹치거나 size가 capacity_를 넘는다.
-        }
+        if (begin < retired) return std::nullopt;
+        const uint64_t usedWithPadding = begin - retired;
+        if (usedWithPadding > capacity_ || size > capacity_ - usedWithPadding)
+            return std::nullopt;
 
+        // 성공 직전에만 상태를 갱신한다. 실패 경로는 head를 변경하지 않는다.
+        retired_ = retired;
         write_ = begin + size;
         return Slice{begin, size, offset, mapped_ + offset};
     }
@@ -312,7 +366,7 @@ private:
 };
 ```
 
-`capacity_`를 2의 거듭제곱으로 제한하면 modulo를 mask로 바꿀 수 있지만 정확성에는 필요하지 않다. 다만 `offset = begin % capacity_`가 요청한 정렬을 유지하려면 `capacity_`는 사용하는 모든 `alignment`의 배수여야 한다. `AlignUp(begin, capacity_)`는 capacity가 일반 정수여도 동작하는 정수 나눗셈 기반 구현이어야 한다.
+`capacity_`를 2의 거듭제곱으로 제한하면 modulo를 mask로 바꿀 수 있지만 정확성에는 필요하지 않다. 다만 `offset = begin % capacity_`가 요청한 정렬을 유지하려면 `capacity_`는 사용하는 모든 `alignment`의 배수여야 한다. `AlignUpChecked(begin, capacity_)`는 capacity가 일반 정수여도 동작하는 정수 나눗셈 기반 구현이어야 한다.
 
 ### 프레임 수가 아니라 완료 값이 수명을 결정한다
 

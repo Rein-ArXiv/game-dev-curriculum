@@ -1,6 +1,6 @@
 ## 들어가며
 
-DirectX의 자원 모델은 두 단계로 분리돼 있다. 자원(Resource)은 GPU가 접근할 수 있는 메모리에 적재된 실제 바이트 묶음이고, 뷰(View)는 그 바이트를 *어떤 의미로 읽거나 쓸지* 결정하는 메타데이터다. 자원 자체는 "여기 1MB짜리 바이트 덩어리가 있다"는 사실만 알고, 그 덩어리가 1024×1024 RGBA8 텍스처인지, 16바이트 정렬된 상수 버퍼인지, 정점 배열인지는 뷰가 결정한다. 같은 텍스처를 셰이더 입력(SRV)으로도, 렌더 타겟(RTV)으로도, 컴퓨트 출력(UAV)으로도 쓸 수 있는 유연성이 여기서 나온다.
+DirectX의 자원 모델은 두 단계로 분리돼 있다. 자원(Resource)은 GPU가 접근할 수 있는 메모리에 적재된 실제 바이트 묶음이고, 뷰(View)는 그 바이트를 *어떤 의미로 읽거나 쓸지* 결정하는 메타데이터다. 자원의 크기·차원·형태와 텍스처/버퍼 종류는 자원 서술자(resource descriptor)가 정하고, 뷰는 그 자원 위에서 픽셀 포맷·mip 범위·배열 슬라이스 같은 해석을 얹는다. 예를 들어 1024×1024 RGBA8 텍스처는 기본 픽셀 페이로드만 4MiB가 필요하며, 그 크기와 2차원 형태는 자원 서술자가 결정한다. 같은 텍스처를 셰이더 입력(SRV)으로도, 렌더 타겟(RTV)으로도, 컴퓨트 출력(UAV)으로도 쓸 수 있는 유연성은 호환 포맷·서브리소스 범위 안에서 하나의 자원에 여러 뷰를 붙일 수 있다는 데서 나온다.
 
 DX12로 가면 힙(Heap) 개념이 한 층 더 추가된다. 자원이 어디에 살지(VRAM인지 시스템 RAM인지)와 어떻게 접근될지(GPU 전용인지, CPU가 쓰기만 하는지, CPU가 읽기만 하는지)를 프로그래머가 명시적으로 고른다. DX11의 `D3D11_USAGE_*`가 드라이버에게 건네는 힌트라면, DX12의 힙은 프로그래머가 직접 메모리 풀을 선택하는 한 단계 더 명시적인 모델이다. 이 차이는 단순한 API 표면의 변화가 아니라, 메모리 배치와 동기화의 책임이 드라이버에서 애플리케이션으로 넘어왔다는 패러다임 전환이다.
 
@@ -273,7 +273,7 @@ device->CreateCommittedResource(
 
 ### UMA와 Resizable BAR
 
-위 표는 디스크리트 GPU 기준이다. *UMA(Unified Memory Architecture)* 환경, 즉 통합 GPU(노트북 Intel/AMD 내장, Apple Silicon, 콘솔)에서는 VRAM 자체가 시스템 RAM의 일부다. 이 환경에서 `DEFAULT`와 `UPLOAD`는 같은 물리 메모리 풀을 가리키므로, Upload에서 Default로의 복사가 사실상 무의미하다. CPU가 쓴 데이터를 GPU가 그대로 읽을 수 있다.
+위 표는 디스크리트 GPU 기준이다. *UMA(Unified Memory Architecture)* 환경, 즉 통합 GPU(노트북 Intel/AMD 내장, Apple Silicon, 콘솔)에서는 VRAM 자체가 시스템 RAM의 일부다. 이 환경에서 `DEFAULT`와 `UPLOAD`가 같은 물리 메모리 풀을 가리키는 경우가 많다. 다만 물리 메모리 공유가 곧바로 CPU 매핑·캐시 일관성·타일링·힙 사용 계약을 없애 주는 것은 아니다. 무복사 경로를 쓰려면 지원되는 host-visible coherent/local heap인지, `GPU_UPLOAD`/`CUSTOM` 같은 경로와 format·usage 제약을 만족하는지, 매핑과 동기화를 어떻게 할지를 먼저 확인해야 한다.
 
 ```cpp
 D3D12_FEATURE_DATA_ARCHITECTURE arch{};
@@ -281,13 +281,14 @@ arch.NodeIndex = 0;
 device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE, &arch, sizeof(arch));
 
 if (arch.UMA) {
-    // Upload와 Default가 같은 메모리 — 복사 단계를 건너뛸 수 있다
+    // 후보 경로 — 실제로 복사를 생략하려면 heap/memory type,
+    // host-visible·coherent 지원, 매핑·동기화 계약을 추가로 확인한다
 }
 ```
 
-`UMA`가 참이면 업로드 경로를 단순화해 복사 명령과 추가 메모리를 절약할 수 있다. 엔진은 보통 시작 시 이 플래그를 조회해 디스크리트 경로와 UMA 경로를 분기한다.
+`UMA`가 참이어도, 지원되는 heap/memory type과 기능 지원·매핑·동기화 계약을 확인한 뒤에 한해 업로드 경로를 단순화해 복사 명령과 추가 메모리를 절약할 수 있다. 실측 없이 복사가 항상 무의미하다고 단정하지 않는다. 엔진은 보통 시작 시 이 플래그를 조회해 디스크리트 경로와 UMA 경로를 분기한다.
 
-*Resizable BAR(ReBAR)* 는 디스크리트 GPU에서도 비슷한 효과를 낸다. 원래 CPU는 PCIe의 BAR(Base Address Register) 윈도우를 통해 VRAM의 256MB 정도만 직접 접근할 수 있었다. ReBAR는 이 윈도우를 VRAM 전체로 확장해, CPU가 VRAM에 직접 쓸 수 있게 한다. 그러면 Upload 힙을 거치지 않고 `DEFAULT` 자원에 가까운 메모리에 바로 쓰는 최적화가 가능해진다. NVIDIA의 Resizable BAR, AMD의 Smart Access Memory, Intel의 ReBAR가 모두 같은 PCIe 표준 기능의 다른 이름이다.
+*Resizable BAR(ReBAR)* 는 디스크리트 GPU에서도 비슷한 효과를 낸다. 원래 CPU는 PCIe의 BAR(Base Address Register) 윈도우를 통해 VRAM의 256MB 정도만 직접 접근할 수 있었다. ReBAR는 이 윈도우를 VRAM 전체로 확장해, CPU가 VRAM에 직접 쓸 수 있게 한다. 다만 ReBAR만으로 모든 `DEFAULT` 자원에 대한 CPU 쓰기가 허용되는 것은 아니며, 지원되는 host-visible/coherent 힙과 자원 상태·동기화 계약을 만족할 때에 한해 Upload 힙을 거치지 않고 쓰는 최적화가 가능해진다. NVIDIA의 Resizable BAR, AMD의 Smart Access Memory, Intel의 ReBAR가 모두 같은 PCIe 표준 기능의 다른 이름이다.
 
 ### Custom Heap
 
@@ -295,7 +296,7 @@ if (arch.UMA) {
 
 ## 5. Resource와 View의 관계
 
-자원과 뷰는 다대다(N:M) 관계다. 하나의 자원에 여러 뷰가 붙고, 그 뷰들이 파이프라인의 서로 다른 단계에 묶인다. 이 다대다 구조가 메모리를 절약하면서 한 자원을 여러 패스에서 재활용하게 만드는 핵심이다.
+자원과 뷰는 일대다(1:N) 관계다. 하나의 자원에 여러 뷰가 붙고, 일반적으로 각 뷰는 하나의 자원을 참조한다. 그 뷰들이 파이프라인의 서로 다른 단계에 묶인다. 이 구조가 메모리를 절약하면서 한 자원을 여러 패스에서 재활용하게 만드는 핵심이다.
 
 HDR 렌더링과 그림자 패스에서 한 자원이 어떻게 여러 뷰를 갖는지 보면 다음과 같다.
 
@@ -304,8 +305,8 @@ flowchart LR
     R1[Texture2D HDR<br/>RGBA16F] --> SRV1[SRV - 톤매핑 입력]
     R1 --> RTV1[RTV - 씬 렌더 타겟]
     R1 --> UAV1[UAV - 컴퓨트 블러]
-    R2[Texture2D Shadow<br/>D32_FLOAT] --> SRV2[SRV - 그림자 비교 샘플]
-    R2 --> DSV1[DSV - 그림자 깊이 출력]
+    R2[Texture2D Shadow<br/>R32_TYPELESS] --> SRV2[SRV - R32_FLOAT<br/>그림자 비교 샘플]
+    R2 --> DSV1[DSV - D32_FLOAT<br/>그림자 깊이 출력]
 ```
 
 핵심은 같은 메모리 블록이 패스마다 다른 의미로 해석된다는 점이다. HDR 텍스처는 씬을 그릴 때 RTV로 쓰이고, 톤매핑 단계에서 SRV로 읽히며, 블룸 블러에서 UAV로 갱신된다. 메모리는 하나지만 뷰가 셋이다.
@@ -320,7 +321,7 @@ DX11은 드라이버가 충돌을 감지해 자동으로 한쪽을 unbind하고 
 
 같은 자원이라도 뷰가 자원을 다르게 해석할 수 있다. 뷰는 자원 위에 세 가지 추가 정보를 얹는다.
 
-- `Format` — 같은 32비트 픽셀을 `R8G8B8A8_UNORM`(선형)으로 볼지 `R8G8B8A8_UNORM_SRGB`(감마)로 볼지. RTV는 sRGB로 인코딩해 출력하고, 같은 자원의 UAV는 선형 raw 비트로 읽는 조합도 가능하다.
+- `Format` — 같은 32비트 픽셀을 `R8G8B8A8_UNORM`(선형)으로 볼지 `R8G8B8A8_UNORM_SRGB`(감마)로 볼지. sRGB RTV는 셰이더가 출력한 선형 값을 저장 시 인코딩하고, 같은 자원을 `_UNORM` UAV로 읽으면 그 인코딩된 값이 raw code value로 그대로 나온다. UNORM UAV는 sRGB 디코딩을 자동으로 수행하지 않으므로, 선형 계산에 쓰려면 UAV 단계에서 명시적으로 decode/encode하거나 애초에 선형 중간 자원을 따로 유지해야 한다. 뷰 재해석(view reinterpretation)과 데이터 변환은 서로 다른 문제다.
 - `MipLevels` — SRV는 전체 mip 범위를 묶지만, RTV는 특정 mip 한 장만 가리킨다.
 - `ArraySlice` — 큐브맵의 한 면, 또는 텍스처 배열의 한 슬라이스만 뷰로 잘라낸다. 그림자 큐브맵의 여섯 면을 각각 별도 RTV로 만들어 한 면씩 그리는 식이다.
 
@@ -333,7 +334,7 @@ desc.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
 // RTV / SRV 는 _UNORM_SRGB 로, UAV 는 _UNORM(선형) 으로 뷰를 만든다
 ```
 
-대표 사례는 sRGB와 선형을 함께 다루는 경우다. 색상 텍스처를 화면 출력 시에는 sRGB로 감마 보정하고 싶지만, 컴퓨트 셰이더에서 후처리할 때는 선형 또는 raw 비트로 읽고 싶다. Typeless로 만들고 RTV에는 `_UNORM_SRGB`, UAV에는 `_UNORM`을 주면 한 메모리를 두 해석으로 쓴다. 깊이 버퍼도 마찬가지로 `R24G8_TYPELESS`로 만들어 DSV는 `D24_UNORM_S8_UINT`, SRV는 `R24_UNORM_X8_TYPELESS`로 묶어 깊이 값을 셰이더에서 읽는다. 포맷 폭이 맞지 않으면(예: `R8G8B8A8_TYPELESS`에 16비트 포맷 뷰) 뷰 생성이 실패한다.
+대표 사례는 sRGB와 선형을 함께 다루는 경우다. 색상 텍스처를 화면 출력 시에는 sRGB로 감마 보정하고 싶지만, 컴퓨트 셰이더에서 후처리할 때는 선형 또는 raw 비트로 읽고 싶다. Typeless로 만들고 RTV에는 `_UNORM_SRGB`, UAV에는 `_UNORM`을 주면 한 메모리를 두 해석으로 쓴다. 다만 이때 `_UNORM` UAV가 보는 값은 sRGB 인코딩된 raw code value이므로, 선형 공간 계산이 필요하면 셰이더에서 디코딩을 명시하거나 선형 자원을 따로 두는 편이 안전하다. 깊이 버퍼도 마찬가지로 `R24G8_TYPELESS`로 만들어 DSV는 `D24_UNORM_S8_UINT`, SRV는 `R24_UNORM_X8_TYPELESS`로 묶어 깊이 값을 셰이더에서 읽는다. 이렇게 하나의 자원을 DSV와 SRV로 공유하려면 호환 typeless 포맷으로 만들어야 한다. 포맷 폭이 맞지 않으면(예: `R8G8B8A8_TYPELESS`에 16비트 포맷 뷰) 뷰 생성이 실패한다.
 
 ## 6. Residency와 Eviction
 

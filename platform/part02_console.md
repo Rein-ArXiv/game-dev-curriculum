@@ -1,12 +1,12 @@
 ## 들어가며
 
-콘솔은 *고정된 하드웨어* 라는 한 가지 사실에서 출발한다. PC가 무한히 많은 GPU·CPU·메모리 조합을 상대해야 하는 반면, 콘솔은 *플랫폼 홀더가 정의한 소수의 고정 하드웨어 프로파일* 만 상대한다. 이 사실은 양날의 검이다 — 한쪽 날은 *단일 사양에 모든 것을 갈아 넣는 최적화의 자유* 이고, 다른 쪽 날은 *예산을 1바이트도 넘길 수 없는 엄격함* 과 *플랫폼 홀더의 인증을 통과해야만 출시할 수 있다는 관문* 이다.
+콘솔은 *플랫폼 홀더가 정의한 소수의 고정 하드웨어 프로파일* 이라는 사실에서 출발한다. PC가 무한히 많은 GPU·CPU·메모리 조합을 상대해야 하는 반면, 콘솔은 *열거 가능하고 인증할 수 있는 target profile 집합* 을 상대한다. 이 사실은 양날의 검이다 — 한쪽 날은 *타깃 profile에 모든 것을 갈아 넣는 최적화의 자유* 이고, 다른 쪽 날은 *예산을 1바이트도 넘길 수 없는 엄격함* 과 *플랫폼 홀더의 인증을 통과해야만 출시할 수 있다는 관문* 이다.
 
-이 글은 그 고정 하드웨어 위에서 게임을 짜는 일을 한 흐름으로 정리한다. 고정 사양이 왜 최적화의 출발점이자 종착점인지, 메모리 예산을 어떻게 바이트 단위로 관리하는지, 플랫폼 SDK와 하드웨어 디코더·스토리지·컨트롤러 기능을 어떻게 끌어 쓰는지, TRC(Technical Requirements Checklist)라 불리는 인증 체크리스트가 무엇을 강제하는지, 패치와 배포·세이브·트로피를 어떻게 다루는지, 그리고 인증에서 반복적으로 미끄러지는 함정이 무엇인지를 다룬다. 특정 콘솔의 마케팅 명칭보다 *세대를 관통하는 구조* 에 무게를 둔다 — 사양 숫자는 세대마다 바뀌지만, 고정 하드웨어가 강제하는 사고방식은 그대로다.
+이 글은 그 열거된 target profile 위에서 게임을 짜는 일을 한 흐름으로 정리한다. 제한된 profile 집합이 왜 최적화의 출발점이자 종착점인지, 메모리 예산을 어떻게 바이트 단위로 관리하는지, 플랫폼 SDK와 하드웨어 디코더·스토리지·컨트롤러 기능을 어떻게 끌어 쓰는지, TRC(Technical Requirements Checklist)라 불리는 인증 체크리스트가 무엇을 강제하는지, 패치와 배포·세이브·트로피를 어떻게 다루는지, 그리고 인증에서 반복적으로 미끄러지는 함정이 무엇인지를 다룬다. 특정 콘솔의 마케팅 명칭보다 *세대를 관통하는 구조* 에 무게를 둔다 — 사양 숫자는 세대마다 바뀌지만, 열거된 profile이 강제하는 사고방식은 그대로다.
 
 ```mermaid
 flowchart LR
-    HW[고정 HW<br/>단일 사양] --> Budget[엄격한 예산<br/>메모리·프레임]
+    HW[고정 HW<br/>열거 가능한 target profile] --> Budget[엄격한 예산<br/>메모리·프레임]
     Budget --> SDK[플랫폼 SDK<br/>HW 기능 활용]
     SDK --> Cert[인증/TRC<br/>체크리스트 통과]
     Cert --> Ship[배포·패치<br/>세이브·트로피]
@@ -70,11 +70,15 @@ struct HardwareProfile {
     bool   rayTracing;           // RT 효과 on/off
 };
 
-// 부팅 시 기기 식별 → 프로파일 선택 (런타임 분기 아님, 시작 시 1회)
-const HardwareProfile& SelectProfile(SkuId sku, DockMode mode);
+// 부팅 시 SKU(정적 capability)로 기본 프로파일을 고른다.
+const HardwareProfile& SelectProfile(SkuId sku);
+
+// dock/portable·출력 조건 같은 mode/budget은 실행 중 바뀔 수 있다.
+// 변경 notification을 받으면 render target·스트리밍 풀을 안전하게 재설정한다.
+void OnDisplayModeChanged(DockMode mode);
 ```
 
-핵심은 이 분기가 *부팅 시 1회* 라는 점이다. PC처럼 프레임마다 "지금 사양이 뭐지"를 묻지 않는다. 기기를 식별해 프로파일을 한 번 고르고, 그 뒤로는 *그 프로파일 안에서 고정 최적화* 한다. 저사양기 프로파일은 내부 해상도와 그림자 품질을 낮춰 같은 프레임 예산을 맞춘다. 각 프로파일은 그 자체로 하나의 단일 사양 타깃이 된다.
+핵심은 SKU 분기가 *부팅 시 1회* 라는 점이다. PC처럼 프레임마다 "지금 사양이 뭐지"를 묻지 않는다. SKU 같은 *정적 capability* 로 프로파일을 한 번 고르고, 그 뒤로는 *그 프로파일 안에서 고정 최적화* 한다. 저사양기 프로파일은 내부 해상도와 그림자 품질을 낮춰 같은 프레임 예산을 맞춘다. 다만 dock/portable·출력 조건처럼 *실행 중 바뀌는 mode/budget* 은 별도 동적 상태로 두고, 변경 notification에서 render target을 안전하게 재설정한다. 모든 콘솔에 이런 전환이 있다고 일반화하지는 않는다. 각 프로파일은 그 자체로 하나의 고정 타깃이 된다.
 
 ### 이전 세대 동시 지원
 
@@ -94,7 +98,7 @@ const HardwareProfile& SelectProfile(SkuId sku, DockMode mode);
 
 ```mermaid
 flowchart TB
-    Total[전체 물리 메모리] --> OS[OS 예약<br/>UI·녹화·음성·다운로드]
+    Total[전체 물리 메모리<br/>SDK·타깃별 예시] --> OS[OS 예약<br/>UI·녹화·음성·다운로드]
     Total --> Game[게임 가용 예산<br/>고정 상한]
     Game --> Tex[텍스처 풀]
     Game --> Mesh[메시·지오메트리]
@@ -167,14 +171,14 @@ Submit(cmd, fence);                    // 펜스로 GPU 완료를 직접 추적
 
 ### 하드웨어 디코더와 고정 기능 블록
 
-콘솔에는 범용 CPU·GPU 외에 *고정 기능 하드웨어 블록* 이 박혀 있다. 오디오 디코더, 비디오 디코더, 데이터 압축 해제 엔진, 공간 오디오 처리 유닛 등이다. 이들은 *CPU를 전혀 안 쓰고* 특정 작업을 처리한다.
+콘솔에는 범용 CPU·GPU 외에 *고정 기능 하드웨어 블록* 이 박혀 있다. 오디오 디코더, 비디오 디코더, 데이터 압축 해제 엔진, 공간 오디오 처리 유닛 등이다. 이들은 특정 연산을 CPU에서 *offload* 해 처리하지만, 파일 I/O 제출·완료 동기화·주변 처리는 CPU에 남는다.
 
-| 고정 기능 블록 | 하는 일 | CPU 절감 효과 |
+| 고정 기능 블록 | 하는 일 | CPU에서 덜어내는 일 |
 |---|---|---|
-| 오디오 디코더 | 플랫폼 네이티브 압축 오디오 해제 | 다수 효과음 디코딩을 CPU에서 분리 |
-| 압축 해제 엔진 | 디스크 데이터 실시간 압축 해제 | 로딩 시 CPU 점유 거의 0 |
+| 오디오 디코더 | 플랫폼 네이티브 압축 오디오 해제 | 다수 효과음 디코딩 연산을 CPU에서 분리 |
+| 압축 해제 엔진 | 디스크 데이터 실시간 압축 해제 | 로딩 시 decode CPU 점유를 크게 줄임(제출·동기화는 남음) |
 | 공간 오디오 유닛 | HRTF 기반 3D 오디오 처리 | 오브젝트 기반 공간화를 HW로 |
-| 비디오 디코더 | 컷신·배경 영상 디코딩 | 영상 재생 CPU 비용 제거 |
+| 비디오 디코더 | 컷신·배경 영상 디코딩 | 영상 디코딩 연산을 CPU에서 분리 |
 
 이걸 쓰려면 *에셋을 플랫폼 네이티브 포맷으로 구워야* 한다. 같은 원본 오디오를 플랫폼 디코더가 이해하는 인코딩으로 변환하면, 수백 개 효과음을 하드웨어가 디코딩해 CPU를 비운다. 그래서 출시 빌드는 보통 *플랫폼마다 다른 인코딩* 을 굽는다. 이 블록들을 안 쓰면 그만큼 CPU·GPU 시간을 직접 태워야 하고, 고정 예산 안에서 그 손해는 곧 품질 하락이다.
 
@@ -201,6 +205,7 @@ flowchart LR
     SSD[SSD<br/>압축 저장] -->|고대역폭 읽기| Decomp[HW 압축 해제 엔진]
     Decomp -->|원본 데이터| Mem[통합 메모리]
     Mem --> GPU[GPU/CPU 사용]
+    CPU[CPU: I/O 제출·완료 동기화·주변 처리] -.-> Decomp
 ```
 
 플랫폼에 따라 storage 요청 결과를 GPU가 사용할 수 있는 자원으로 옮기는 과정에서 중간 복사와 CPU 관여를 줄이는 경로도 있다. “직접”은 API가 숨긴 staging과 ownership transition이 물리적으로 모두 사라진다는 뜻이 아니다. 이런 경로는 로딩 시간과 CPU 사용량을 줄이는 수단이며, 로딩 화면 없는 설계는 콘텐츠 working set, 예측 실패, worst-case 이동과 fallback까지 budget 안에 들어올 때 성립한다.
@@ -299,7 +304,7 @@ TRC 항목은 대략 다음 영역에 걸친다.
 
 ```mermaid
 flowchart TB
-    TRC[TRC 체크리스트] --> Sys[시스템 동작<br/>일시정지·전환·종료]
+    TRC[TRC 체크리스트<br/>범주 예시·항목/판본은 NDA 확인 필요] --> Sys[시스템 동작<br/>일시정지·전환·종료]
     TRC --> Store[스토리지·세이브<br/>저장 중 표시·손상 방지]
     TRC --> Net[네트워크·온라인<br/>연결 끊김 처리]
     TRC --> UI[UI·표기<br/>버튼·용어·지역화]
@@ -357,20 +362,25 @@ TRC 항목은 *필수(required)* 와 *권장(recommended)* 으로 나뉜다. 필
 세이브는 인증이 가장 깐깐하게 보는 영역 중 하나다. *데이터 손상* 은 사용자에게 가장 치명적인 사고이기 때문이다.
 
 ```cpp
-// 안전한 세이브: 임시 파일에 쓰고 검증 후 원자적 교체
+// 안전한 세이브: 임시 쓰기 → 검증 → durable replace/commit.
+// RAII guard가 정상·실패·예외 모든 경로에서 indicator를 정리한다.
+struct SaveIndicatorGuard {
+    SaveIndicatorGuard()  { BeginSaveIndicator(); }   // "저장 중" 표시 (인증 필수)
+    ~SaveIndicatorGuard() { EndSaveIndicator(); }
+};
+
 bool SaveGame(const SaveData& data) {
-    BeginSaveIndicator();                 // "저장 중" 표시 (인증 필수)
-    if (!WriteToTemp(data, "save.tmp")) { EndSaveIndicator(); return false; }
-    if (!Verify("save.tmp")) { EndSaveIndicator(); return false; }   // 체크섬 검증
-    AtomicRename("save.tmp", "save.dat");  // 원자적 교체: 중간에 죽어도 기존 세이브 보존
-    EndSaveIndicator();
-    return true;
+    SaveIndicatorGuard indicator;
+    if (!WriteToTemp(data, "save.tmp"))          return false; // 실패 → guard가 정리
+    if (!Verify("save.tmp"))                     return false; // 체크섬 검증
+    if (!DurableReplace("save.tmp", "save.dat")) return false; // 원자적 교체 + durable commit
+    return true;   // 성공. 정리는 guard 소멸자가 담당
 }
 ```
 
-핵심 원칙은 다음과 같다.
+핵심 원칙은 다음과 같다. 헬퍼의 실패 반환은 SaveGame의 실패로, 예외는 정리 후 전파로 반영한다. 원자적 교체는 지원 파일시스템·같은 volume/target 조건에서만 성립한다.
 
-- *원자적 쓰기*: 임시 파일에 다 쓰고 검증한 뒤 *원자적으로 교체* 한다. 쓰는 도중 전원이 나가도 기존 세이브가 살아남는다.
+- *원자적 쓰기와 durability*: 임시 파일에 다 쓰고 검증한 뒤 *원자적으로 교체* 한다. 교체의 원자성(독자가 항상 완전한 파일을 봄)과 전원 차단 후 *durability*(commit/flush 완료)는 별개이므로, 파일·디렉터리 또는 플랫폼 SDK가 요구하는 commit 완료를 확인한다.
 - *손상 감지와 복구*: 세이브에 *체크섬·버전* 을 넣어 손상·구버전을 감지하고, 백업 슬롯으로 복구한다.
 - *저장 중 표시*: 디스크 쓰기 중에는 *명확한 표시* 를 띄우고, 전원·매체 제거를 *경고* 한다. 인증 필수.
 - *버전 마이그레이션*: 패치로 세이브 포맷이 바뀌면 *구버전 세이브를 신버전으로 변환* 한다. 패치 후 기존 세이브가 안 열리면 대형 사고다.
@@ -382,17 +392,26 @@ bool SaveGame(const SaveData& data) {
 플랫폼마다 *실적(achievement)·트로피(trophy)* 시스템이 있다. 게임이 특정 조건 달성 시 *플랫폼 서비스에 잠금 해제를 통보* 하면, 시스템이 알림을 띄우고 사용자 프로필에 기록한다. 구현은 단순해 보이지만 함정이 있다.
 
 - *멱등성*: 같은 실적을 두 번 잠금 해제해도 문제없어야 한다. 네트워크 재시도로 중복 호출이 흔하다.
-- *오프라인 큐*: 오프라인에서 달성한 실적은 *로컬에 큐* 했다가 온라인 복귀 시 동기화한다. 인증은 *오프라인 달성이 유실되지 않는지* 본다.
+- *오프라인 큐와 재시도 소유자*: 오프라인에서 달성한 실적은 *로컬에 큐* 했다가 온라인 복귀 시 동기화한다. SDK가 durable 재시도를 보장하면 그 큐를 쓰고, 보장하지 않는 플랫폼에서만 앱이 pending 저장소를 책임진다. 인증은 *오프라인 달성이 유실되지 않는지* 본다.
 - *서버 권위 검증*: 온라인 게임은 클라이언트가 보고한 실적을 그대로 믿지 않고 *서버가 검증* 해 치트를 막는다.
 - *완전성*: 일부 플랫폼은 *모든 실적이 정상 작동* 하고 *최고 등급 실적이 실제로 달성 가능* 한지 검사한다. 버그로 못 따는 실적이 있으면 거부될 수 있다.
 
 ```cpp
-// 실적 잠금 해제: 멱등 + 오프라인 큐
+// 실적 잠금 해제: 멱등 + durable pending.
+// IsUnlocked(로컬 달성)와 IsUploaded/Confirmed(서버 완료)는 별개 상태로 둔다.
+// 재시도 소유자: SDK가 durable 재시도를 보장하면 그 큐를 쓰고, 보장하지 않는
+// 플랫폼에서만 앱의 pending 저장소가 책임진다(둘을 중복 구현하지 않는다).
 void UnlockAchievement(AchievementId id) {
-    if (localState_.IsUnlocked(id)) return;     // 멱등: 이미 해제됨
-    localState_.MarkUnlocked(id);               // 로컬 먼저 기록
-    if (IsOnline()) PlatformUnlock(id);         // 온라인이면 즉시 동기화
-    else            pendingQueue_.push(id);     // 아니면 큐 → 복귀 시 전송
+    if (localState_.IsUnlocked(id)) return;     // 멱등: 이미 달성
+    localState_.MarkUnlocked(id);               // IsUnlocked=true (로컬 먼저)
+    localState_.MarkPending(id);                // 서버 완료 전까지 durable dirty/pending
+    TryUpload(id);
+}
+
+void TryUpload(AchievementId id) {
+    if (!IsOnline()) return;                    // 온라인 복귀 시 재시도
+    if (!PlatformUnlock(id)) return;            // 실패 → pending 유지, 다음 기회에 재시도
+    localState_.MarkUploaded(id);               // IsUploaded/Confirmed=true, pending 해제
 }
 ```
 
@@ -459,7 +478,7 @@ float UpdateDynamicResolution(float lastFrameMs, float targetMs) {
 
 ## 결론
 
-콘솔 개발의 모든 결정은 *고정 하드웨어* 라는 한 사실에서 갈라져 나온다. 단일 사양은 *하나의 목표를 향해 끝까지 깎는 최적화의 자유* 를 주는 동시에, *1바이트도 넘길 수 없는 예산* 과 *인증을 통과해야만 출시할 수 있는 관문* 을 강제한다. 저수준 API로 드라이버를 걷어내고, 하드웨어 디코더·압축 해제·공간 오디오 블록에 일을 떠넘기고, 셰이더를 미리 굽고, 비동기 컴퓨트로 GPU 유닛을 채우는 것 — 모두 *하드웨어를 정확히 알기에* 가능한 거래다.
+콘솔 개발의 모든 결정은 *플랫폼 홀더가 정의한 소수의 고정 하드웨어 프로파일* 에서 갈라져 나온다. 제한된 profile 집합은 *각 타깃을 향해 끝까지 깎는 최적화의 자유* 를 주는 동시에, *1바이트도 넘길 수 없는 예산* 과 *인증을 통과해야만 출시할 수 있는 관문* 을 강제한다. 저수준 API로 드라이버를 걷어내고, 하드웨어 디코더·압축 해제·공간 오디오 블록에 일을 떠넘기고, 셰이더를 미리 굽고, 비동기 컴퓨트로 GPU 유닛을 채우는 것 — 모두 *하드웨어를 정확히 알기에* 가능한 거래다.
 
 그 자유의 반대편에 엄격함이 있다. 메모리 예산은 카테고리별로 쪼개 상시 추적해야 하고, 단편화와 누수는 장시간 가동 테스트에서 잡힌다. TRC는 기능이 아니라 *동작 정합성* — 세이브 손상 방지, 컨트롤러 분리 처리, 버튼 표기, 네트워크 끊김의 우아한 실패 — 를 수백 항목으로 검사하고, 하나의 필수 위반이 출시 전체를 막는다. 세이브는 원자적 쓰기와 마이그레이션으로 손상을 막고, 실적은 멱등성과 오프라인 큐로 유실을 막는다.
 
@@ -467,8 +486,8 @@ float UpdateDynamicResolution(float lastFrameMs, float targetMs) {
 
 ## 더 읽을거리
 
-- 각 플랫폼 홀더의 개발자 문서 — TRC/인증 체크리스트, SDK API, 메모리·스토리지 가이드(NDA 하 제공).
-- "Game Engine Architecture" (Jason Gregory) — 콘솔 메모리 관리·할당자·잡 시스템·렌더링 아키텍처의 실무.
-- GDC 발표 아카이브 — 콘솔 메모리 예산, 동적 해상도, 비동기 컴퓨트, 스트리밍 사례 발표 다수.
-- "Real-Time Rendering" — GPU 파이프라인·동적 해상도·업스케일링의 이론적 배경.
-- 플랫폼별 그래픽스 API 레퍼런스 — 저수준 명령 버퍼·PSO·동기화 모델(NDA 하 제공).
+- 각 플랫폼 홀더의 개발자 문서 — TRC/인증 체크리스트, SDK API, 메모리·스토리지 가이드(NDA 하 제공; 개발자 등록·문서 확인 필요, 공개 자료로 검증 완료로 보지 않음).
+- "Game Engine Architecture" (Jason Gregory, 4판) — 콘솔 메모리 관리·할당자·잡 시스템·렌더링 아키텍처의 배경 읽을거리(현재 API/예산 계약의 직접 근거는 아니며 인용 장은 미확인).
+- GDC 발표 아카이브 — 콘솔 메모리 예산·동적 해상도·비동기 컴퓨트·스트리밍 사례를 찾는 탐색 시작점(개별 발표를 직접 인용으로 특정하지 않음).
+- "Real-Time Rendering" (4판) — GPU 파이프라인·동적 해상도·업스케일링의 이론적 배경(콘솔별 정책의 직접 근거는 아니며 인용 장은 미확인).
+- 플랫폼별 그래픽스 API 레퍼런스 — 저수준 명령 버퍼·PSO·동기화 모델(NDA 하 제공; 개발자 문서 확인 필요).

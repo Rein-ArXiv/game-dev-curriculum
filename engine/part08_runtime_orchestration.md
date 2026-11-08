@@ -96,13 +96,16 @@ $$
 \quad S_{k+1}=F(S_k, I_k),\quad A\leftarrow A-h
 $$
 
-$A_{\max}$는 긴 정지 뒤 수백 틱을 한 프레임에 몰아서 실행하는 spiral of death를 막는다. 이 clamp는 시간을 보존하지 않는다. 따라서 발생 횟수와 버린 시간을 계측해야 한다.
+$A_{\max}$는 긴 정지 뒤 수백 틱을 한 프레임에 몰아서 실행하는 spiral of death를 막는다. 이 clamp는 시간을 보존하지 않는다. 따라서 `realDelta`가 clamp에서 잘린 시간(`droppedRealClamp`)과 catch-up 상한에 걸린 잔여 시간(`droppedCatchUpTime`)을 구분해 계측하고, 프레임 계측에는 clamp하지 않은 monotonic delta를 따로 보존한다.
 
 ```cpp
 constexpr double kTick = 1.0 / 60.0;
+constexpr double kMaxFrameDelta = 0.25;
 constexpr int kMaxCatchUpSteps = 4;
 
-accumulator += std::min(realDelta, 0.25);
+const double clampedDelta = std::min(realDelta, kMaxFrameDelta);
+droppedRealClamp += realDelta - clampedDelta;   // 첫 clamp에서 버린 시간도 기록
+accumulator += clampedDelta;
 int steps = 0;
 while (accumulator >= kTick && steps < kMaxCatchUpSteps) {
     FixedUpdate(kTick);
@@ -110,7 +113,7 @@ while (accumulator >= kTick && steps < kMaxCatchUpSteps) {
     ++steps;
 }
 if (accumulator >= kTick) {
-    droppedSimulationTime += accumulator - std::fmod(accumulator, kTick);
+    droppedCatchUpTime += accumulator - std::fmod(accumulator, kTick);
     accumulator = std::fmod(accumulator, kTick);
 }
 const double alpha = accumulator / kTick;
@@ -121,6 +124,8 @@ const double alpha = accumulator / kTick;
 $$
 S_{\text{render}}=(1-\alpha)S_{k-1}+\alpha S_k
 $$
+
+이 보간은 현재 real time까지 예측한 위치가 아니라 $(k-1+\alpha)h$ 시각의 표시 상태다. 따라서 $\text{presentationTime}=\text{simulationTime}-h+\text{accumulator}$이며, 이 1틱 지연은 입력 지연 분석과 snapshot age 계측에 포함한다. 렌더만 local prediction을 쓰는 경우에는 권위 보간과 별도로 표시한다.
 
 회전은 정규화된 quaternion 보간을 사용하고, 순간 이동·리스폰·월드 원점 이동에는 보간을 끊는 discontinuity flag가 필요하다. 그렇지 않으면 존재하지 않은 중간 경로가 화면에 나타난다.
 
@@ -305,7 +310,7 @@ private:
 };
 ```
 
-이 예시는 reader가 이전 buffer를 다 읽기 전에 writer가 다시 덮어쓰지 않는다는 추가 보장이 필요하다. render가 simulation보다 두 프레임 늦을 수 있다면 triple buffer, frame fence, reference-counted snapshot 중 하나를 사용한다.
+이 예시는 reader가 이전 buffer를 다 읽기 전에 writer가 다시 덮어쓰지 않는다는 추가 보장이 필요하다. release/acquire는 가시성만 보장할 뿐 재사용 허가가 아니므로, reader completion/fence/lease로 반환된 슬롯만 `BeginWrite`가 가져갈 수 있도록 API로 표현한다. render가 simulation보다 두 프레임 늦을 수 있다면 triple buffer, frame fence, reference-counted snapshot 중 하나를 사용하되, reader 지연에 시간 상한을 두고 필요한 버퍼 수와 backpressure를 함께 정한다.
 
 ### Command와 event
 
@@ -350,14 +355,16 @@ bool Runtime::Initialize() {
 이 코드만으로는 실패한 지점 이전의 자원을 되돌리지 않는다. RAII를 사용하거나 성공한 단계 stack을 기록해 역순 rollback을 수행한다.
 
 ```cpp
-ScopeRollback rollback;
-platform.Initialize();
+ScopeRollback rollback;   // 가드 자체는 할당하지 않는다
+if (!platform.Initialize()) return false;   // 실패한 단계는 자기 부분 자원을 스스로 정리한다
 rollback.Push([&] { platform.Shutdown(); });
-jobs.Initialize();
+if (!jobs.Initialize()) return false;
 rollback.Push([&] { jobs.Shutdown(); });
 // ...
-rollback.Commit();
+rollback.Commit();   // 모든 단계가 성공한 뒤에만 commit
 ```
+
+각 단계의 `bool` 반환을 확인한 뒤 성공한 단계만 rollback에 등록하고, 실패하면 즉시 탈출해 `Commit`하지 않는다. 선행 성공 단계의 역순 해제는 rollback이 맡고, 부분 초기화에 실패한 컴포넌트 자신의 자원은 그 컴포넌트가 정리한다. `Shutdown`은 `noexcept`이며 callback/job을 drain한 뒤 호출한다.
 
 종료 순서도 역순만 외우면 충분하지 않다.
 
@@ -394,6 +401,8 @@ struct TickRecord {
 ```
 
 재생에서는 real clock, OS 입력, 네트워크 도착 시각을 직접 읽지 않고 record를 공급한다. 렌더·오디오 같은 비권위 출력은 hash에서 제외하되, 이들이 시뮬레이션을 수정하지 않는지 별도로 검사한다.
+
+입력과 seed만으로는 비동기 활성화 순서가 고정되지 않는다. asset/cell 활성화가 gameplay 결과에 영향을 주면 권위적 외부 완료를 tick event로 기록하거나 활성화 시점을 결정론적으로 고정한다. 병렬 RNG는 stream ownership을 정해 호출 순서에 의존하지 않게 하고, canonical state hash가 어떤 상태를 포함하는지 범위를 선언한다.
 
 ### 검증할 불변식
 
@@ -461,8 +470,8 @@ void Runtime::RunFrame() {
     platform.PumpEvents();
     RawInput raw = input.CaptureSnapshot();
     network.DrainIncoming(networkCommands_);
-    frameCommands_.Append(input.Quantize(raw, simulationTick_));
-    frameCommands_.Append(networkCommands_);
+    commandQueue_.Enqueue(input.Quantize(raw, simulationTick_));   // held 상태 + 이번 tick edge
+    commandQueue_.Enqueue(networkCommands_);                        // 미래 tick 명령은 보존
 
     fixedAccumulator_ += realDelta;
     int steps = 0;
@@ -470,7 +479,7 @@ void Runtime::RunFrame() {
         TickContext tick{
             .index = simulationTick_,
             .dt = fixedStep_,
-            .commands = frameCommands_,
+            .commands = commandQueue_.Take(simulationTick_),   // tick당 1회, 단조 증가
         };
         world.BeginTick(tick);
         jobs.Run(simulationGraph);
@@ -507,6 +516,12 @@ void Runtime::RunFrame() {
 - 렌더·오디오 게시 이후 지연 파괴
 - 프레임 끝 계측 commit
 
+`RunFrame`은 `Running` 상태 전용이다. `Paused`/`Loading`에서는 `platform.PumpEvents()`와 UI·플랫폼 이벤트만 처리하고 시뮬레이션·렌더 제출 구간은 상태 predicate로 감싸 건너뛴다. pause 진입/해제 시 accumulator를 유지할지 초기화할지, pause 중 도착한 edge 입력을 보존할지 폐기할지도 함께 정한다.
+
+`commands`에는 매 tick 지속되는 held 상태와 한 tick에만 소비되는 pressed/released edge를 구분해 담는다. edge 명령은 지정된 tick에서 정확히 한 번 `Take`되고 다시 나타나지 않는다. 고정 틱이 하나도 실행되지 않은 프레임의 입력은 다음 tick으로 보존한다. 지정 tick보다 늦게 도착한 네트워크 명령은 일반 `Take` 경로에 넣지 않고 별도의 rollback/지연 명령 경로로 보낸다.
+
+`jobs.Run`은 완료 barrier인 `RunAndWait`로 두거나 완료 continuation에서 `CommitTick`을 수행하게 한다. `renderer.Submit`이 snapshot lease를 이전하는지 복사하는지, `world.CommitDeferredDestruction`이 어느 reader 완료와 GPU fence를 기다리는지 명시하고 Part05의 에셋 수명 계약과 통일한다. 안정 ID만 저장해도 GPU buffer 수명이 자동 보장되지는 않는다.
+
 실제 엔진에서는 render와 simulation이 다른 프레임을 처리할 수 있으므로 snapshot slot과 fence를 추가해야 한다. 네트워크 rollback을 사용하면 command history와 state history도 tick 단위로 보존해야 한다. 중요한 것은 기능을 한 루프에 나열하는 것이 아니라 각 데이터의 시점과 owner를 설명할 수 있는 구조다.
 
 ---
@@ -524,4 +539,4 @@ void Runtime::RunFrame() {
 - Robert Nystrom, *Game Programming Patterns* — game loop, update method, event queue
 - Anthony Williams, *C++ Concurrency in Action*, 2nd ed. — 메모리 모델, 작업 큐, 동기화
 - ISO/IEC 14882, C++ 표준 — 객체 수명과 원자 연산의 happens-before 계약
-- Bruce Dawson, “Game Timing and Multicore Processors” — monotonic timing과 프레임 계측
+- Microsoft, “Game Timing and Multicore Processors” — 역사적 배경. 확인한 문서에서 저자(Bruce Dawson) 귀속은 확인되지 않았고, single-core affinity 같은 과거 multicore 권고는 현재의 보편 규칙이 아니다(현재 QPC 지침은 별도). monotonic timing과 프레임 계측의 배경으로만 인용한다.

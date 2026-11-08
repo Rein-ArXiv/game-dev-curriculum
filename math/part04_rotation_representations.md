@@ -144,26 +144,26 @@ flowchart TD
     Lock --> Stuck
 ```
 
-수치적으로는 *yaw 와 roll 값이 무한히 많은 조합으로 같은 회전* 을 표현 — *유일성이 깨진다*. 보간이나 미분에서 *작은 입력 변화가 큰 출력 변화* 를 만들거나 *불연속* 이 생긴다.
+수치적으로는 짐벌락 자세에서 *yaw 와 roll 값이 무한히 많은 조합으로 같은 회전* 을 표현해 *역변환의 유일성이 깨진다*. 주의할 점은 *오일러 각 → 회전* 방향은 극점 근처에서도 *연속* 이라는 것이다. 문제는 그 반대 방향, 즉 *회전 → 오일러 각 재추출* 과 *각속도 → 각 변화율 매핑* 에서 특이해지고, 재추출된 각이 canonical branch (예: $[-\pi, \pi]$) 를 넘을 때 *점프* 가 생긴다는 데 있다. 보간·미분에서 문제가 되는 것은 이 *역방향 특이성* 이다.
 
 ### 2.4 게임에서의 짐벌락 시나리오
 
-FPS의 카메라가 *수직 위* 를 보면 (pitch = 90°) 직관적 자유도가 무너진다. 일반적인 yaw/pitch 카메라는 roll을 저장하지 않으므로 화면이 roll로 기우는 게 아니라, *yaw 축의 의미가 불안정해지거나 yaw 입력이 화면 회전처럼 느껴지는* 문제가 핵심이다.
+FPS 카메라처럼 *yaw/pitch 두 자유도만* 쓰는 경우는 짐벌락이 *로직상 발생할 수 없다* — roll을 저장하지 않으므로 pitch가 90° 에서도 두 축이 같은 축으로 겹치지 않는다. 다만 pitch가 수직에 가까워지면 *시선 방향과 yaw 축이 평행에 가까워져* 마우스 좌우 입력이 화면 회전처럼 느껴지는 *불안정* 이 생긴다.
 
 ```cpp
-// 잘못된 패턴: 매 프레임 yaw, pitch에 변화 누적
+// yaw/pitch 2자유도 카메라: 수직 직전에서 pitch를 제한
 camera.yaw   += mouseDeltaX;
 camera.pitch += mouseDeltaY;
-camera.pitch = clamp(camera.pitch, -89, 89);  // 짐벌락 회피
+camera.pitch = clamp(camera.pitch, -89, 89);  // 극점 근처 불안정 완화
 ```
 
-`clamp` 가 *수직 위 보기 자체를 막는* 임시 방편. 회전 자유도를 *제한* 한 셈이지만 *대부분 게임에서 충분*. 짐벌락이 *숨겨진* 형태.
+`clamp` 는 *수직 위 보기 자체를 막는* 대신 yaw 축의 불안정을 피한다. 자유도를 *제한* 한 셈이지만 *대부분의 FPS에서 충분* 하다.
 
-진짜 *완전 자유 회전* (우주선, VR 컨트롤러) 이 필요하면 오일러로는 어렵다 — 쿼터니언이 답.
+반면 yaw/pitch/roll *세 자유도를 모두* 오일러로 다루거나 *회전 → 오일러 재추출* 을 하는 코드는 극점에서 특이해진다. 진짜 *완전 자유 회전* (우주선, VR 컨트롤러) 이 필요하면 오일러로는 어렵다 — 쿼터니언이 답.
 
 ### 2.5 보간의 어색함
 
-두 오일러 각 (1°, 89°, 0°) 와 (1°, 91°, 0°) 의 *물리적 자세* 자체는 가깝다. 다만 *값이 연속적으로 변하는데도 yaw / roll 분해가 불안정* 해 *보간 경로* 가 튈 수 있다. 짐벌락 부근에서는 *같은 회전을 다른 (yaw, roll) 조합* 으로 표현 가능해 *선형 보간이 의도와 다른 경로* 를 그린다.
+두 오일러 각 (1°, 89°, 0°) 와 (1°, 91°, 0°) 의 *물리적 자세* 자체는 가깝다. 그러나 각각을 *회전으로 만든 뒤 다시 오일러로 재추출* 하면 canonical branch 때문에 yaw/roll이 180° 가까이 튄 다른 값으로 나올 수 있다. 이 재추출된 값을 그대로 선형 보간하면 *의도와 다른 큰 회전 경로* 를 그린다. 문제는 *회전 → 오일러 역변환의 branch 점프* 이며, Euler→회전 방향이 극점 근처에서 불연속인 것이 아니다.
 
 ```cpp
 EulerAngles Lerp(EulerAngles a, EulerAngles b, float t) {
@@ -662,11 +662,12 @@ EulerAngles QuatToEuler(quat q) {
 
     float pitch = std::asin(sinPitch);
     float yaw, roll;
-    if (std::fabs(sinPitch) > 0.9999f) {
-        // 짐벌락 부근 — yaw로 모음, roll = 0
+    if (std::fabs(sinPitch) >= 1.0f) {
+        // 정확한 극점 — yaw가 비유일하므로 roll = 0으로 고정
         yaw  = std::atan2(-2.0f * (q.x*q.y - q.w*q.z), 1.0f - 2.0f*(q.x*q.x + q.z*q.z));
         roll = 0.0f;
     } else {
+        // 극점 근접 영역 포함: 일반 분기가 자세를 손실 없이 복원한다.
         yaw  = std::atan2(2.0f * (q.w*q.z + q.x*q.y),
                           1.0f - 2.0f*(q.y*q.y + q.z*q.z));
         roll = std::atan2(2.0f * (q.w*q.x + q.y*q.z),
@@ -676,7 +677,9 @@ EulerAngles QuatToEuler(quat q) {
 }
 ```
 
-`asin` 의 입력 clamp + 짐벌락 부근 분기. *완전한 회복* 은 어렵다 — 짐벌락 부근 입력은 *정보 손실* 이라 원래 오일러 각을 *정확히 복원* 하지 못할 수 있다.
+`asin` 의 입력 clamp + *정확한 극점* 에서만의 분기. `fabs(sinPitch) > 0.9999` 처럼 폭을 넓게 잡으면 정확한 극점뿐 아니라 pitch 약 89.19° 이상의 약 0.81° 영역까지 분기에 들어간다. 그 영역에서 pitch는 그대로 두고 roll만 0으로 만들면 *재구성한 회전이 원래 quaternion과 달라진다* — 원래 각의 비유일성과 *원래 자세의 손실* 을 혼동한 것이다. 근접 영역을 일반 분기로 처리하면 자세는 유지되고 조건수만 나빠진다.
+
+*완전한 회복* 은 여전히 어렵다 — 정확한 극점에서는 원래 yaw/roll 조합이 비유일해 *정확히 복원* 하지 못한다.
 
 게임 엔진은 *오일러 → 쿼터니언 → 보관 → 변환 → 행렬* 의 *단방향 흐름* 이 표준. *오일러 ↔ 쿼터니언 왕복* 을 피해 정밀도 손실을 최소화한다.
 
@@ -731,19 +734,23 @@ quat InterpolateBone(BoneKey a, BoneKey b, float t) {
 
 ### 8.4 GPU 셰이더의 본 변환
 
-본 변환을 *셰이더* 에 보낼 때 *행렬* 로 변환. GPU의 정점 변환이 *행렬 × 벡터* 가 표준.
+본 변환을 *셰이더* 에 보낼 때 *행렬* 로 변환한다. GPU의 정점 변환이 *행렬 × 벡터* 가 표준이다.
+
+여기서 `bones[i]` 의 의미를 먼저 선언해야 한다. 이 배열이 *로컬 bone pose* (부모 기준 TRS) 라면, 각 본의 TRS를 정점에 그대로 곱하는 것은 *스키닝이 아니다*. 스키닝에는 *계층을 따라 누적한 global pose*, *inverse bind 행렬*, 그리고 *메시 기준 좌표* 가 필요하다. 예를 들어 mesh 기준 좌표를 쓰는 규약이면 다음과 같다.
 
 ```cpp
-// CPU: 본 회전을 행렬로 변환
+// CPU: bones[i]가 로컬 bone pose일 때 스키닝 행렬을 구성
 for (int i = 0; i < boneCount; ++i) {
-    boneMatrices[i] = TRSMatrix(bones[i].position,
-                                  bones[i].rotation,
-                                  bones[i].scale);
+    // globalPose[i]: 부모 계층을 누적한 본의 월드 pose
+    // inverseBind[i]: bind pose의 역
+    boneMatrices[i] = meshInverse * globalPose[i] * inverseBind[i];
 }
 // GPU에 boneMatrices 전송
 ```
 
-각 본 16 floats (4×4 행렬). 수만 본이면 *megabyte 단위 GPU 전송*. 일부 엔진은 *3×4 affine 행렬* (12 floats) 또는 *듀얼 쿼터니언* 으로 압축.
+반대로 `bones[i]` 에 이미 *최종 skin transform* (global pose × inverse bind, 필요하면 mesh 기준 포함) 이 들어 있다면 그 행렬을 그대로 쓴다. 어느 규약인지 문서화하지 않으면 *본 하나가 잘못 적용되거나 mesh 기준이 이중 적용* 되는 버그가 생긴다.
+
+각 본 16 floats (4×4 행렬). 수만 본이면 *megabyte 단위 GPU 전송*. 일부 엔진은 *3×4 affine 행렬* (12 floats) 또는 *듀얼 쿼터니언* 으로 압축한다.
 
 ### 8.5 디버그 시각화
 

@@ -127,11 +127,12 @@ float MatchUtility(const Candidate& c, const Policy& p) {
         p.partyCost(c.partyFeatures) +
         p.roleCost(c.roleAssignment);
 
-    return -(qualityCost + p.waitCost(c.queueAge));
+    // waitReward는 queueAge에 대해 단조 증가한다(오래 기다릴수록 utility↑).
+    return -qualityCost + p.waitReward(c.queueAge);
 }
 ```
 
-`waitCost`는 선형일 필요가 없다. 생존 분석에서 특정 구간의 이탈 위험이 빠르게 증가한다면 볼록 비용으로 모델링할 수 있다. 또한 “더 기다리면 얼마나 좋은 후보가 오는가”는 확정값이 아니라 도착 과정에 대한 조건부 기대값이다. 따라서 정적 가중치 하나로 유지율을 직접 제어한다고 해석하지 않고, 오프라인 재생과 간섭을 고려한 온라인 실험으로 전체 정책을 평가한다.
+`waitReward`는 선형일 필요가 없다. 대기 보상은 큐 나이에 대해 단조 증가해야 오래 기다린 후보가 불리해지지 않는다. 생존 분석에서 특정 구간의 이탈 위험이 빠르게 변하면 비선형으로 모델링할 수 있다. 또한 “더 기다리면 얼마나 좋은 후보가 오는가”는 확정값이 아니라 도착 과정에 대한 조건부 기대값이다. 따라서 정적 가중치 하나로 유지율을 직접 제어한다고 해석하지 않고, 오프라인 재생과 간섭을 고려한 온라인 실험으로 전체 정책을 평가한다.
 
 ## 2. MMR 모델 비교
 
@@ -146,8 +147,8 @@ E_A = \frac{1}{1 + 10^{(R_B - R_A)/400}}, \qquad R_A' = R_A + K\,(S_A - E_A)
 $$
 
 - $S_A$ — 실제 결과 (승 = 1, 무 = 0.5, 패 = 0).
-- $E_A$ — 기대 승률. 이 식의 400은 스케일 매개변수이며, 이 관례에서는 400 차이가 10배 승산(약 91% 승률)을 뜻한다.
-- $K$ — 한 결과가 레이팅에 미치는 크기. 상수가 아니라 경기 수·불확실성·시즌 정책에 따라 달리 둘 수도 있다.
+- $E_A$ — 기대 점수(expected score)로, $E_A = P(\text{win}) + 0.5\,P(\text{draw})$다. 무승부가 없는 경기에서만 기대 승률과 같아진다. 이 식의 400은 스케일 매개변수이며, 이 관례에서는 400 차이가 10배 승산(약 91% 승률)을 뜻한다.
+- $K$ — 한 결과가 레이팅에 미치는 크기. 아래 수치 트레이스는 고정 $K$ 정책(기본값 32)을 가정하며, 경기 수·불확실성·시즌 정책에 따라 $K$를 달리 두는 가변 정책은 별도 선택이다.
 
 ```cpp
 float Elo_Expected(float Ra, float Rb) {
@@ -156,11 +157,11 @@ float Elo_Expected(float Ra, float Rb) {
 
 float Elo_Update(float Ra, float S, float Rb, float K = 32.0f) {
     float E = Elo_Expected(Ra, Rb);
-    return Ra + K * (S - E);     // S: 실제 결과, E: 기대 승률
+    return Ra + K * (S - E);     // S: 실제 결과 점수, E: 기대 점수
 }
 ```
 
-수치 트레이스 — $R_A = 1500$, $R_B = 1500$ (동급), $K = 32$. 기대 승률 $E_A = 0.5$. A가 이기면 ($S = 1$) → $R_A' = 1500 + 32(1 - 0.5) = 1516$. A가 지면 → $1484$. 동급끼리는 *±16점* 으로 대칭. 이번엔 $R_A = 1700$, $R_B = 1300$. $E_A = 1/(1 + 10^{-1}) \approx 0.909$. A가 이기면 $R_A' = 1700 + 32(1 - 0.909) \approx 1703$ — *고작 +3점* (이길 게 이김). A가 지면 $1700 + 32(0 - 0.909) \approx 1671$ — *-29점* (대형 이변). 약자가 강자를 잡으면 크게 오르는 구조다.
+수치 트레이스 — $R_A = 1500$, $R_B = 1500$ (동급), $K = 32$. 기대 점수 $E_A = 0.5$. A가 이기면 ($S = 1$) → $R_A' = 1500 + 32(1 - 0.5) = 1516$. A가 지면 → $1484$. 동급끼리는 *±16점* 으로 대칭. 이번엔 $R_A = 1700$, $R_B = 1300$. $E_A = 1/(1 + 10^{-1}) \approx 0.909$. A가 이기면 $R_A' = 1700 + 32(1 - 0.909) \approx 1703$ — *고작 +3점* (이길 게 이김). A가 지면 $1700 + 32(0 - 0.909) \approx 1671$ — *-29점* (대형 이변). 약자가 강자를 잡으면 크게 오르는 구조다.
 
 장점 — *간단*. 단점 — *불확실성 모델링 없음*. 신규 플레이어와 1000판 한 베테랑이 *같은 K* 를 쓴다 — 신규는 실제 실력이 어디인지 모르는데도 한 판에 16점밖에 안 움직여 *수렴이 느리다*.
 
@@ -211,16 +212,18 @@ $$
 보수적 점수 $\mu-k\sigma$는 불확실성이 큰 플레이어를 순위표에 과대 노출하지 않는 표시·랭킹 규칙으로 사용할 수 있다. 정규분포 가정에서 $k=3$의 단측 하한은 약 99.865% 수준이지 정확히 99%가 아니다. 이 값을 매치메이킹 실력값으로 그대로 사용하면 신규를 체계적으로 낮은 방에 배치할 수 있으므로, 매칭에서는 $\mu$와 $\sigma$를 별도 특성으로 사용해 승률 분포를 계산하는 편이 낫다.
 
 ```cpp
-// 1명 대 1명, 동일한 성능 분산 beta를 가정한 축약식
+// 1명 대 1명, 동일한 성능 표준편차 beta를 가정한 축약식
 float MatchQualityTrueSkill1v1(float muA, float sigA, float muB, float sigB,
                                float beta) {
     float c2 = 2.0f * beta * beta + sigA * sigA + sigB * sigB;
     float dmu = muA - muB;
-    // 0~1, 두 팀 스킬이 가까울수록 1에 가까움
+    // 0~1 품질값. 승률도 평균 유사도도 아니고 두 팀 스킬 분포의 겹침을 나타냄
     return std::sqrt(2.0f * beta * beta / c2)
          * std::exp(-(dmu * dmu) / (2.0f * c2));
 }
 ```
+
+β는 성능의 표준편차이고 수식에서는 $c^2$에 $2\beta^2$로 제곱되어 들어간다 — β 자체는 분산이 아니다. 이 quality 값은 두 팀 스킬 분포가 얼마나 겹치는지를 0~1로 나타낸 것으로, 어느 팀의 승률도 아니고 플레이어 간 평균 유사도도 아니다.
 
 요인 그래프는 팀전, 다인 순위, 무승부를 같은 확률 모델 안에 표현할 수 있다. 인원 수가 다른 팀도 계산 자체는 가능하지만 그것만으로 게임 규칙상 공정해지는 것은 아니다. 구현에서는 근사 메시지 전달의 수렴, 파티 상관관계, 역할별 기여도처럼 독립 정규 실력 가정에서 벗어나는 요소를 따로 검증해야 한다.
 
@@ -308,7 +311,8 @@ float MatchCost(const CandidateMatch& c, const Policy& p) {
          + p.latencyWeight * p.LatencyCost(c.rttByPlayer)
          + p.partyWeight  * p.PartyCost(c.partyConfiguration)
          + p.roleWeight   * p.RoleCost(c.roleAssignment)
-         + p.ageWeight    * p.AgeCost(c.oldestQueueAge);
+         // AgeReward는 queueAge에 대해 단조 증가한다(오래 기다릴수록 비용↓).
+         - p.ageWeight    * p.AgeReward(c.oldestQueueAge);
 }
 ```
 
@@ -408,23 +412,42 @@ std::vector<DataCenter> AvailableDataCenters(
 매치 인원 *N명* → *N명의 평균 핑이 가장 낮은 데이터센터* 선택. 단순 평균 외에 *최대 핑 최소화* (minimax) 도 흔하다 — 평균이 좋아도 한 명만 200ms면 그 한 명이 게임을 망친다.
 
 ```cpp
-ServerLocation ChooseServer(const std::vector<PlayerId>& players) {
-    ServerLocation best;
+enum class ServerSelectionStatus { Ok, NoCapacity, NoAcceptableRegion };
+
+struct ServerSelection {
+    ServerSelectionStatus status;   // NoCapacity: 적격 서버 파티션이 비어 있음
+                                    // NoAcceptableRegion: 후보는 있으나 RTT/지역 하드 상한을 못 넘김
+    ServerLocation        location; // status == Ok일 때만 유효
+};
+
+ServerSelection ChooseServer(const std::vector<PlayerId>& players) {
+    if (players.empty() || availableServers.empty())
+        return { ServerSelectionStatus::NoCapacity, {} };
+
+    ServerSelection best{ ServerSelectionStatus::NoAcceptableRegion, {} };
     float bestCost = INFINITY;
     for (auto& loc : availableServers) {
         float sum = 0, worst = 0;
+        bool acceptable = true;
         for (auto& p : players) {
             float ping = EstimatePing(p, loc);
+            if (!std::isfinite(ping)) { acceptable = false; break; } // NaN RTT 후보 제외
             sum += ping;
             worst = std::max(worst, ping);          // 최악 핑 추적
         }
+        if (!acceptable) continue;
         float avg = sum / players.size();
         float cost = policy.ServerCost(avg, worst);
-        if (cost < bestCost) { bestCost = cost; best = loc; }
+        if (cost < bestCost) {
+            bestCost = cost;
+            best = { ServerSelectionStatus::Ok, loc };
+        }
     }
     return best;
 }
 ```
+
+적격 후보가 없으면 빈 위치나 기본 서버로 대체하지 않고 `NoCapacity`/`NoAcceptableRegion`을 호출자에게 돌려준다. 서버 목록 스냅샷은 선택 중에 교체될 수 있으므로 참조 수명을 고정하거나 세대 번호로 검증하며, 서버 목록이 비었을 때 역참조하지 않는다. 선택 실패 시 자동 재시도를 무제한으로 돌리지 않고 상한·백오프·마감을 둔다.
 
 클라이언트는 큐 진입 전에 각 데이터센터의 여러 프로브를 측정할 수 있다. 그러나 자기 보고 값은 조작 가능하고 단일 표본은 지터를 놓친다. 서버가 발급한 프로브 토큰, 서버 관측 왕복 시간, 표본 시각과 분산을 함께 보관하고 오래된 측정은 폐기한다.
 
@@ -495,7 +518,7 @@ std::optional<RoleAssignment> AssignRoles(
 
 ### Role Queue (역할 큐)
 
-플레이어가 *큐 진입 시 역할 선택* → *역할별 큐 분리* → 매치 시 역할 자동 배정. 장점 — *역할 균형 보장*. 단점 — *부족한 역할의 대기 시간 폭증*.
+플레이어가 *큐 진입 시 역할 선택* → *역할별 큐 분리* → 매치 시 역할 자동 배정. 장점 — *역할 균형 보장*. 단점 — *부족한 역할이 매치 생성률을 제한해 초과 공급 역할의 대기가 길어진다*.
 
 역할 $r$의 도착률을 $\lambda_r$, 매치 하나에 필요한 인원을 $n_r$라 하면 해당 역할이 허용하는 매치 생성률의 상한은 $\lambda_r/n_r$다. 따라서 전체 처리량은 이상적으로도 다음을 넘지 못한다.
 
@@ -519,9 +542,9 @@ flowchart TB
     R1 --> Q1[(Redis Queue NA)]
     R2 --> Q2[(Redis Queue EU)]
     R3 --> Q3[(Redis Queue KR)]
-    Q1 --> GS1[Game Servers NA]
-    Q2 --> GS2[Game Servers EU]
-    Q3 --> GS3[Game Servers KR]
+    Q1 -->|제어 경로 요약<br/>matcher/allocator가 예약·할당| GS1[Game Servers NA]
+    Q2 -->|제어 경로 요약<br/>matcher/allocator가 예약·할당| GS2[Game Servers EU]
+    Q3 -->|제어 경로 요약<br/>matcher/allocator가 예약·할당| GS3[Game Servers KR]
 ```
 
 ### 큐 저장소 — Redis Sorted Set
@@ -543,6 +566,9 @@ stateDiagram-v2
     Reserved --> Allocating: candidate group fixed
     Allocating --> Matched: server allocation committed
     Allocating --> Queued: allocation failure / rollback
+    Allocating --> Reconciling: commit result unknown (timeout)
+    Reconciling --> Matched: commit confirmed by reconcile
+    Reconciling --> Queued: reservation aborted by reconcile
     Reserved --> Queued: lease expired
     Queued --> Cancelled: player cancellation
     Matched --> [*]
@@ -550,6 +576,8 @@ stateDiagram-v2
 ```
 
 예약 연산은 모든 구성원의 `Queued` 상태와 예상 버전을 검사하고, *전부 성공할 때만* 같은 `reservation_id`와 만료 시각을 기록해야 한다. Lua나 서버 측 트랜잭션은 이 compare-and-set을 원자적으로 구현하는 수단이다. `ZRANGEBYSCORE`로 얻은 후보를 곧바로 `ZREM`으로 일괄 삭제하는 스크립트는 필요한 수보다 많이 제거하고 할당 실패 복구도 못 하므로 올바른 프로토콜이 아니다.
+
+Redis Cluster에서는 multi-key 스크립트가 같은 hash slot에서만 동작하므로 queue/reservation 키를 hash tag(같은 `{...}` 접두)로 묶어 같은 슬롯에 두어야 한다. 단일 인스턴스가 아니면 서로 다른 슬롯의 키를 한 트랜잭션/스크립트에 넣을 수 없다. 스크립트는 실행 전에 모든 키의 버전·상태를 검증하고, 실행 중 오류가 나면 Redis가 SQL rollback 같은 전체 되돌림을 보장하지 않으므로 일부만 기록된 partial effect가 남을 수 있다. 이때도 lease 펜싱 토큰으로 만료된 소유자의 쓰기를 거부하고 이미 기록된 예약은 명시적 보상/조정 경로로 정리한다. 할당 실패의 rollback(멱등 연산)과 응답 유실로 결과를 모르는 CommitUnknown은 구분해 다룬다 — 후자는 예약·할당 ID를 대조하는 조정자가 회수하거나 커밋을 완료할 때까지 서버를 해제하지 않는다.
 
 ### 매치 워커 — 비동기 + 배치
 
@@ -615,7 +643,9 @@ spec:
 워커와 게임 서버 풀은 서로 다른 신호로 확장한다. 워커는 후보 계산 시간, 예약 충돌, 이벤트 지연, CPU를 보고, 게임 서버 풀은 할당 도착률, Ready 여유분, 시작 시간 분위수를 본다. 큐 크기는 적격 플레이어 부족으로도 커질 수 있어 단독 확장 신호로 쓰기 어렵다.
 
 ```yaml
-# 예시: CPU 외에 외부 메트릭을 함께 사용하는 워커 HPA
+# 예시: CPU 외에 외부 메트릭을 함께 사용하는 워커 HPA.
+# matchmaking_event_lag_seconds가 전역 대기 latency 한 값이면 target.type을 Value(예: 0.2초 = "200m")로 두는 편이 의도와 맞다.
+# 이 예시는 adapter가 Pod별/처리단위별 값을 내는 경우로, AverageValue를 쓰는 대신 labels/aggregation/단위를 문서화한다.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 spec:
@@ -634,6 +664,8 @@ spec:
           type: AverageValue
           averageValue: "0.2"
 ```
+
+queue lag를 전역 latency로 볼지, 모든 worker의 합산 backlog work로 볼지에 따라 target Value/AverageValue 선택이 달라진다 — 하나의 설정이 보편적으로 옳지 않다. 10 Pod, 전역 lag 1초, 목표 0.2초의 같은 수치도 AverageValue=5, Value=50으로 해석이 갈린다. metric unit·집계(평균/최댓값/합)·누락 시 동작·다중 metric 결합 방식(HPA가 가장 큰 권장 replica를 택하는 규칙 포함)을 기록한다.
 
 적격 플레이어가 없는 수집 단계에서는 워커를 늘려도 대기가 줄지 않는다. 반대로 계산·저장소·할당 단계가 도착률을 따라가지 못한다면 워커나 파티션을 늘려야 한다. Little의 법칙은 어느 단계가 병목인지 알려 주지 않으므로 구간별 대기와 처리율을 직접 측정한다.
 
@@ -758,7 +790,7 @@ MatchResult HandleLongWait(const Player& player, const QueuePolicy& policy) {
 ## 더 읽을거리
 
 - Arpad Elo, *The Rating of Chessplayers, Past and Present* (1978) — Elo 레이팅의 원전.
-- Mark Glickman, [The Glicko-2 System](https://www.glicko.net/glicko/glicko2.pdf) — 신뢰도(RD)·변동성과 평가 기간 갱신의 원문.
+- Mark Glickman, [Example of the Glicko-2 system](https://www.glicko.net/glicko/glicko2.pdf) (rev. 2022-03-22) — 신뢰도(RD)·변동성과 평가 기간 갱신의 원문.
 - Ralf Herbrich, Tom Minka, Thore Graepel, ["TrueSkill: A Bayesian Skill Rating System"](https://www.microsoft.com/en-us/research/publication/trueskilltm-a-bayesian-skill-rating-system/) (NIPS 2006) — 팀전·다인전 베이지안 레이팅.
 - Tom Minka, Ryan Cleven, Yordan Zaykov, ["TrueSkill 2: An Improved Bayesian Skill Rating System"](https://www.microsoft.com/en-us/research/publication/trueskill-2-improved-bayesian-skill-rating-system/) (2018) — 보조 관측을 포함한 확장.
 - [Open Match 2 Overview](https://open-match.dev/site/v2/overview/) — 티켓 저장과 매칭 함수 호출의 책임 경계, 중복 티켓 해소 책임.

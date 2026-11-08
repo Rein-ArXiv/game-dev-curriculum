@@ -2,7 +2,7 @@
 
 게임의 물리는 결국 *단순한 도형 사이의 거리* 를 묻는 일이다. 화살이 적과 부딪혔는가, 캐릭터가 벽에 닿았는가, 폭발 범위 안에 누가 있는가, 카메라가 지면에 박혀 있는가 — 모두 *두 도형 사이 교차 또는 거리* 의 계산.
 
-게임에서 압도적으로 자주 등장하는 *기본 도형 (primitive)* 은 네 가지: *구 (Sphere)*, *축 정렬 박스 (AABB)*, *회전 박스 (OBB)*, *캡슐 (Capsule)*. 이 넷의 *교차 판정* 과 *거리 함수* 가 게임 충돌의 *80%* 를 처리한다. 임의 볼록 도형의 일반 충돌(SAT, GJK)은 *이 기본 도형이 부족할 때* 등장하는 *고급 토픽*.
+게임에서 압도적으로 자주 등장하는 *기본 도형 (primitive)* 은 네 가지: *구 (Sphere)*, *축 정렬 박스 (AABB)*, *회전 박스 (OBB)*, *캡슐 (Capsule)*. 이 넷의 *교차 판정* 과 *거리 함수* 가 *대부분의 일상적 충돌 질의* 를 처리한다. 임의 볼록 도형의 일반 충돌(SAT, GJK)은 *이 기본 도형이 부족할 때* 등장하는 *고급 토픽*.
 
 이 글의 목표는 다음 다섯 가지다.
 
@@ -45,7 +45,7 @@ struct Sphere {
 };
 ```
 
-메모리 16 byte (vec3 + float). 모든 회전·변환에 *대칭* — 회전을 적용해도 *모양이 안 바뀐다*.
+메모리 16 byte (vec3 + float). *강체 회전과 균등 스케일* 에 대해 *대칭* — 회전을 적용해도 *모양이 안 바뀐다*. *비균등 스케일* 을 적용하면 구가 아니라 *타원체* 가 된다.
 
 게임 응용: 폭발 범위, 트리거, 단순 캐릭터 (아바타).
 
@@ -235,7 +235,7 @@ bool AABBIntersect(AABB a, AABB b) {
 
 각 축에서 *분리되지 않으면* 교차. 한 축에서라도 *분리* 되면 즉시 false (early-out).
 
-*접촉 (touching)* 처리 정책. 위 코드는 *겹침 없는 접촉 (max == min)* 도 *교차로 판정* — 트리거 overlap 에 적합. *물리 침투 응답* 에는 *진짜 겹침 (overlap > 0)* 만 필요해 *< 와 > 대신 <= 와 >=* 를 써 접촉을 *분리* 로 본다. 이 글의 코드는 *전자 (트리거 정책)* 에 통일. *침투 깊이 코드 (3.3절)* 는 *후자 (overlap > 0)* 정책.
+*접촉 (touching)* 처리 정책. 위 코드는 *겹침 없는 접촉 (max == min)* 도 *교차로 판정* — 트리거 overlap 에 적합. 세 층을 구분한다: (1) *집합 교차 판정* 은 접촉도 포함할 수 있고, (2) *contact 생성* 은 접촉 상태에서도 접촉점·법선을 만들어 *접근 속도를 막는 resting contact* 를 지원해야 하며, (3) *양의 침투 위치 보정* 만 `overlap > 0` 을 요구한다. 즉 위치 보정이 양의 침투만 다룬다고 해서 물리 응답 전체가 접촉을 배제하는 것은 아니다. 이 글의 *교차 판정* 코드는 트리거 정책 (`<=`) 에 통일하고, *침투 깊이 코드 (3.3절)* 는 위치 보정용으로 `overlap > 0` 정책을 쓴다.
 
 이 코드 패턴이 *분리축 이론 (Separating Axis Theorem)* 의 가장 단순한 사례. AABB는 *축 후보가 3개* (x, y, z) 만 있어 단순.
 
@@ -348,7 +348,7 @@ AABB TransformAABB(AABB a, mat4 M) {
 }
 ```
 
-8개 코너 변환. 더 빠른 *행렬 절대값 트릭* 도 있지만 *회전된 AABB는 원본보다 작아지지 않는다* (박스를 다시 축 정렬로 보내는 회전만 같고, 그 외에는 더 크다) — *정확하지 않은 컬링* 의 시작점.
+8개 코너 변환. 더 빠른 *행렬 절대값 트릭* 도 있다. 비교 기준을 명확히 하면 — 변환 후 AABB 는 *부피(면적)* 가 줄지 않고 회전한 물체를 감싸지만, *축별 extent* 는 회전에 따라 줄어들 수 있으며 *원래 AABB 를 그대로 포함* 하지도 않는다. 회전이 *축 정렬을 유지* 하는 경우에만 같아진다. 어느 기준으로 비교하든 *정확하지 않은 컬링* 의 시작점.
 
 ## 4. Sphere-AABB
 
@@ -409,11 +409,24 @@ Contact SphereAABBContact(Sphere s, AABB box) {
     c.isColliding = distSq <= s.radius * s.radius;
     if (!c.isColliding) return c;
 
-    if (distSq > 1e-6f) {
-        // AABB 밖 — closest 가 AABB 표면 위
-        float dist = std::sqrt(distSq);
-        c.normal = delta / dist;
-        c.depth  = s.radius - dist;
+    // 내부/외부는 거리 임계값이 아니라 *좌표별 포함* 으로 판정한다.
+    // 중심이 밖이면, 모서리 근처에서 closest 거리가 아주 작아도 (distSq <= 1e-6 등)
+    // 반드시 외부 분기로 가야 한다. 그렇지 않으면 한 축만 골라 밀어내
+    // 최소 분리 벡터가 아닌 결과가 나온다.
+    const bool inside =
+        s.center.x >= box.min.x && s.center.x <= box.max.x &&
+        s.center.y >= box.min.y && s.center.y <= box.max.y &&
+        s.center.z >= box.min.z && s.center.z <= box.max.z;
+
+    if (!inside) {
+        // AABB 밖 — closest 가 AABB 표면 위.
+        // 작은 거리에서도 안전하도록 최대 성분으로 스케일한 뒤 정규화한다.
+        float m = std::max(std::fabs(delta.x),
+                  std::max(std::fabs(delta.y), std::fabs(delta.z)));
+        vec3 scaled = (m > 0.0f) ? delta / m : vec3(1, 0, 0);
+        float len = length(scaled);
+        c.normal = scaled / len;
+        c.depth  = s.radius - m * len;
         c.point  = closest;
     } else {
         // AABB 안 — 구 중심이 박스 내부.
@@ -443,7 +456,7 @@ Contact SphereAABBContact(Sphere s, AABB box) {
 }
 ```
 
-*AABB 안에 구 중심* 이 들어간 케이스. AABB 의 *6면까지 거리* 중 *가장 가까운 면* 을 찾아 *그 면의 외향 법선* 으로 push. 침투 깊이는 *반지름 + (구 중심에서 그 면까지 거리)*.
+*AABB 안에 구 중심* 이 들어간 케이스. AABB 의 *6면까지 거리* 중 *가장 가까운 면* 을 찾아 *그 면의 외향 법선* 으로 push. 침투 깊이는 *반지름 + (구 중심에서 그 면까지 거리)*. 앞의 내부/외부 분기는 중심의 *좌표별 포함* 으로 하므로, 밖에서 모서리에 가까운 경우도 정확한 최근접점 기반 법선을 얻는다.
 
 ### 4.5 게임 응용
 
@@ -833,6 +846,9 @@ void ApplyExplosionDamage(vec3 center, float radius, float maxDamage) {
 bool CanSee(vec3 eye, vec3 target, const std::vector<AABB>& occluders) {
     vec3 dir = target - eye;
     float dist = length(dir);
+    // 계약: eye == target (dist == 0) 이면 방향이 정의되지 않는다.
+    // 자기 자신과의 시야는 가림이 없으므로 visible 로 본다.
+    if (dist < 1e-6f) return true;
     Ray ray = { eye, dir / dist };
 
     for (auto& occluder : occluders) {
@@ -881,7 +897,7 @@ float Heuristic(vec3 from, vec3 to) {
 }
 ```
 
-격자 게임에는 Manhattan, 자유 이동에는 Euclidean. 휴리스틱이 *실제 비용 이하* 여야 A* 의 최적성 보장.
+격자 게임에는 Manhattan, 자유 이동에는 Euclidean. 휴리스틱이 *admissible* (실제 비용 이하)이고 *consistent* (일관) 해야 A* 최적성이 보장된다. 이 조건은 *이동 모델* 에 달려 있다 — 대각 이동을 허용하면 8방향 Manhattan 은 admissible 이 아니고, *최소 단위 비용* 이 1이 아니거나 *가중치* 가 있으면 휴리스틱도 그에 맞게 스케일해야 한다. 또 consistent 하지 않은 휴리스틱을 쓰려면 *닫힌 노드 재개방 (reopen)* 정책이 필요하다.
 
 ### 8.5 LOD (Level of Detail) 결정
 
@@ -910,7 +926,7 @@ float SoundVolume(vec3 listener, vec3 source, float maxDist) {
 }
 ```
 
-물리 정확하려면 *역제곱 감쇠* (`1 / dist^2`), 게임 감각에는 *선형 감쇠* 가 흔하다.
+여기서 `SoundVolume` 은 *선형 감쇠 게인* 예시다. 물리 모델을 구분하면 — 자유 음장 점음원의 *음향 강도 (intensity)* 는 $1/r^2$, *음압 (pressure)* 은 $1/r$, 그리고 믹서의 *진폭 게인 (amplitude gain)* 이나 지각적 음량은 또 다른 스케일이다. 어느 것을 'volume' 으로 부르는지 명시하고, 게임 감쇠 곡선 (선형·역제곱·로그) 은 물리 모델이 아니라 *선택한 근사* 임을 전제한다.
 
 ### 8.7 트리거 영역 진입
 
@@ -950,7 +966,7 @@ void UpdateTriggers(std::vector<TriggerVolume>& triggers,
 
 ## 결론
 
-기본 도형 (Sphere, AABB, OBB, Capsule) 의 *교차 판정과 거리 함수* 가 게임 충돌의 *80%* 를 차지한다. 단순한 식들이지만 *수만 검사가 매 프레임* 일어나, *효율적인 구현* 과 *빠른 컬링* 이 게임 성능의 핵심.
+기본 도형 (Sphere, AABB, OBB, Capsule) 의 *교차 판정과 거리 함수* 가 *대부분의 일상적 충돌 질의* 를 차지한다. 단순한 식들이지만 *수만 검사가 매 프레임* 일어나, *효율적인 구현* 과 *빠른 컬링* 이 게임 성능의 핵심.
 
 이 글에서 정리한 핵심.
 
@@ -960,7 +976,7 @@ void UpdateTriggers(std::vector<TriggerVolume>& triggers,
 4. **거리 제곱 비교** — sqrt 회피. 게임 코드의 무수한 거리 검사에서 누적 절감.
 5. **broad phase + narrow phase** — AABB로 빠르게 거르고 OBB/Capsule로 정밀 검사. 게임 엔진의 표준 패턴.
 
-기본 도형으로 *80%* 가 처리되지만 *나머지 20%* — 임의 볼록 도형, 오목 도형, 메쉬 — 에 *일반화된 충돌 알고리즘* 이 필요하다. SAT 일반 형태와 GJK가 그 토픽이다.
+기본 도형으로 *대부분의 충돌 질의* 가 처리되지만, *임의 볼록 도형·오목 도형·메쉬* 에는 *일반화된 충돌 알고리즘* 이 필요하다. SAT 일반 형태와 GJK가 그 토픽이다.
 
 ## 더 읽을거리
 

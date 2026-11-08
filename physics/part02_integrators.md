@@ -131,15 +131,17 @@ $$
 E_{n+1} = E_n + \frac{1}{2} k \Delta t^2 (\vec{v}_n^2 - k \vec{x}_n^2) + O(\Delta t^3)
 $$
 
-*에너지가 거의 보존* — 평균적으로 일정, 작은 진동 (oscillation) 만. 진폭 발산 없다. 1.4절의 explicit Euler 와 선행항의 차수는 같고 *부호* 만 다르다: $(v_n^2 - k x_n^2)$ 는 진동 주기마다 부호가 바뀌므로 누적되지 않고, 장기 에너지 편차는 $O(\Delta t)$ 범위 ($\Delta t = 0.1$ 에서 상대 약 $\pm 5\%$) 에 갇힌다.
+*안정 영역 안에서* 에너지가 거의 보존 — 평균적으로 일정, 작은 진동 (oscillation) 만. 아래 수치는 m=k=1, $\Delta t=0.1$ ($h\omega = 0.1$) 실험의 것이다. 1.4절의 explicit Euler 와 선행항의 차수는 같고 *부호* 만 다르다: $(v_n^2 - k x_n^2)$ 는 진동 주기마다 부호가 바뀌므로 누적되지 않고, 장기 에너지 편차는 $O(\Delta t)$ 범위 ($\Delta t = 0.1$ 에서 상대 약 $\pm 5\%$) 에 갇힌다. step 이 안정 영역을 벗어나면 ($h\omega \ge 2$) 이 방법도 발산한다.
 
 ### 2.3 정확도 vs 안정성
+
+아래 표와 §6.2 표는 모두 $m=k=1$ 조화진동자, $\Delta t=0.1$ ($h\omega = 0.1$) 실험을 전제로 한다.
 
 | | Explicit | Semi-implicit |
 |---|---|---|
 | Local error | $O(\Delta t^2)$ | $O(\Delta t^2)$ |
 | Global error | $O(\Delta t)$ | $O(\Delta t)$ |
-| 진동 안정 | 발산 | 안정 |
+| 진동 안정 | 발산 | $h\omega < 2$ 에서 안정 |
 | 게임 활용 | 거의 안 씀 | 표준 |
 
 *정확도는 같은 1차*. 하지만 *안정성* 이 완전히 다르다.
@@ -157,9 +159,9 @@ $$
 
 ### 2.5 충돌과의 호환성
 
-충돌이 *순간 속도 변화 (impulse)* 를 만든다. semi-implicit Euler 의 *속도 → 위치* 순서가 *충돌 후 새 속도로 위치 갱신* 의 자연스러운 흐름과 일치.
+충돌이 *순간 속도 변화 (impulse)* 를 만든다. *속도 제약을 먼저 풀고 새 속도로 위치를 전진* 하는 파이프라인에는 semi-implicit Euler 의 *속도 → 위치* 순서가 자연스럽게 맞는다.
 
-Explicit Euler 였으면 *이전 속도로 위치 갱신 후 충돌* → *비일관 상태*.
+Explicit Euler 는 위치를 이전 속도로 먼저 전진시킨다. 사건 시각 분할과 충돌 검사 순서를 적절히 설계하면 explicit 적분기도 충돌 파이프라인에 결합할 수 있다. 즉 이것은 *적분기의 안정성·차수와 별개의 event ordering 문제* 이며, explicit 이라는 이유만으로 잘못된 코드가 되지는 않는다.
 
 ## 3. Velocity Verlet — 위치 기반의 토대
 
@@ -419,7 +421,7 @@ void RunExperiment(StepFn step, int steps, double h) {
 
 dt가 작아지면 같은 물리 시간에서 각 방법의 global error는 해당 차수에 따라 줄어든다. Explicit Euler의 조화진동자 에너지는 어떤 양의 고정 dt에서도 결국 증가하지만, 성장률이 작아져 눈에 띄는 시점이 늦어진다.
 
-하지만 *충분히 긴 시뮬레이션* 에서는 *symplectic 만 안정*. 게임이 *60 fps × 10 분 = 36,000 step* 이라면 dt = 1/60 ≈ 0.017 에서 *Explicit 은 명확한 발산*, *Semi-impl 은 안정*.
+하지만 *충분히 긴 시뮬레이션* 에서는 *symplectic 계열이 장기 에너지 거동에서 유리* 하다. 게임이 *60 fps × 10 분 = 36,000 step* 이라면 dt = 1/60 ≈ 0.017 에서 *Explicit 은 명확한 발산*, *Semi-impl 은 안정 영역 안이므로 bounded* 다. RK4 도 안정 영역 안에서는 bounded 이며, 모든 방법은 안정 영역을 벗어나면 발산할 수 있다.
 
 ### 6.4 dt 임계점 (stability boundary)
 
@@ -551,7 +553,7 @@ void StepRK4(State& s, AccelerationFn a, float t, float dt) {
 
 | 신호 | 의미 |
 |---|---|
-| 시간 vs 진폭 | 진동 시스템의 진폭 변화 — Explicit 만 발산 |
+| 시간 vs 진폭 | 진동 시스템의 진폭 변화 — Explicit 은 조건 없이 발산하고, semi-implicit·Verlet·RK4 도 안정 영역 밖에서는 발산 |
 | 에너지·위상 오차 | 장기 구조 보존을 관찰하는 신호; 이것만으로 symplectic임을 증명하지는 않음 |
 | dt 임계점 | 어느 dt 부터 적분기가 망가지는가 |
 | step 비용 | 가속도 평가 1회, 2회, 4회와 목표 오차까지의 총 비용 |

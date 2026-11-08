@@ -39,28 +39,32 @@
 
 ### 1.1 식
 
-침투 깊이 $d$, 법선 $\hat{n}$, 법선 방향 상대 속도 $\vec{v}_n$:
+침투 깊이 $d\ge0$, 법선 $\hat{n}$ (A→B), 법선 방향 상대 속도 $v_n=(\vec{v}_B-\vec{v}_A)\cdot\hat{n}$:
 
 $$
-\vec{F} = -k_s d \hat{n} - k_d \vec{v}_n
+\vec{F}_B = \max\!\big(0,\; k_s d - k_d v_n\big)\,\hat{n},
+\qquad \vec{F}_A = -\vec{F}_B
 $$
 
-$k_s$ = 스프링 강도, $k_d$ = 감쇠 계수. 침투할수록 *밀어내는 힘* + 빠른 침투엔 *감쇠*.
+$k_s$ = 스프링 강도, $k_d$ = 감쇠 계수. 침투할수록 *밀어내는 힘* + 빠른 침투엔 *감쇠*. 힘은 B에 작용하고 A에는 반작용이 간다.
 
 ```cpp
 void PenaltyResponse(Body& a, Body& b, vec2 n, float depth) {
     vec2 vRel = b.linearVelocity - a.linearVelocity;
     float vn  = dot(vRel, n);
-    vec2  F   =  kSpring * depth * n - kDamper * vn * n;   // B 에 작용하는 힘 (A 에는 -F)
+    float fn  = std::max(0.0f, kSpring * depth - kDamper * vn);
+    vec2  F   = fn * n;                                    // B 에 작용하는 힘 (A 에는 -F)
     a.forceAccum -= F;
     b.forceAccum += F;
 }
 ```
 
+`max(0, ...)` clamp는 빠르게 분리하는 중($v_n>0$)에 $k_s d-k_d v_n$이 음수가 되어 두 물체를 잡아당기는 접착을 막는다. 이는 비관통 접촉 경계 모델의 제한이며, 양방향 힘을 갖는 Kelvin–Voigt 재료 내부 스프링과는 구분한다. 접착을 허용하려면 별도 재질 모델로 선언한다.
+
 ### 1.2 매력
 
 - *단순*: 일반 force 한 줄.
-- *연속*: 침투 깊이의 함수라 미분 가능 — 어떤 적분기든 사용 가능.
+- *연속*: 접촉이 활성인 구간에서는 침투 깊이의 연속 함수 — 다른 힘과 같은 적분기 경로로 넣을 수 있다. 다만 *어떤 적분기든 안정*을 뜻하지는 않고, 접촉 활성화($d=0$) 경계에서 힘의 미분 가능성은 보장되지 않는다.
 - *통합 자연*: 다른 외력 (중력, 사용자 입력) 과 *같은 accumulator* 에 더하기.
 
 ### 1.3 함정 — 강성 계수의 dilemma
@@ -71,7 +75,7 @@ $$
 \Delta t < \frac{2}{\sqrt{k_s / m}}
 $$
 
-이상 (안정 조건). $k_s = 10^5$, $m = 1$ 이면 dt < 6 ms. 60 fps (16 ms) 안에 *여러 substep 필요* — 비용.
+이상 (안정 조건). 이 부등식은 *무감쇠 선형 진동자* 를 semi-implicit Euler/velocity Verlet 로 적분할 때의 안정 경계다. explicit Euler 는 이 무감쇠 계에서 임의의 양의 $\Delta t$ 에서도 에너지가 증가하므로 같은 식이 적용되지 않는다. 감쇠나 접촉 방향 유효질량을 넣으면 경계가 달라진다. 여기서 $m$ 은 접촉 법선 방향의 *effective mass* 로 해석하고, 접촉 활성화 경계의 비매끄러움은 별도로 다룬다. $k_s = 10^5$, $m = 1$ 이면 dt < 6 ms. 60 fps (16 ms) 안에 *여러 substep 필요* — 비용.
 
 게임이 *부드러운 박스 (soft body 느낌)* 를 원하면 OK, *딱딱한 충돌* 은 timestep 부담.
 
@@ -259,6 +263,8 @@ float ComputeNormalImpulse2D(
                  + rACrossN * rACrossN * a.invInertia
                  + rBCrossN * rBCrossN * b.invInertia;
 
+    if (!(denom > 0.0f)) return 0.0f;   // 양의 inverse effective mass 가 없으면 제약행 비활성화
+
     return -(1.0f + restitution) * vRelN / denom;
 }
 
@@ -270,6 +276,8 @@ a.angularVelocity -= Cross2D(rA, impulse) * a.invInertia;
 b.linearVelocity  += impulse * b.invMass;
 b.angularVelocity += Cross2D(rB, impulse) * b.invInertia;
 ```
+
+이 함수를 solve하기 전에 적어도 한 자유도가 반응하여 `denom > 0`인 pair만 통과시킨다는 전제가 필요하다. 회전까지 잠긴 두 static/kinematic body는 `denom = 0`이고 정지 접촉에서는 `0/0`로 NaN이 된다. 위처럼 `denom <= 0`이면 제약행을 비활성화하거나 upstream filter가 그런 pair를 걸러낸다. $\hat n$은 단위 벡터, 회복 계수 $e$는 정책 범위 안, $\vec r_A,\vec r_B$는 COM 기준이어야 한다.
 
 ### 3.6 이미 분리 중인 경우
 
@@ -299,9 +307,11 @@ $$
 - $e = 0$: 충돌 후 *법선 속도 0*. 두 물체가 *그 방향으로 같이* 움직임. 완전 비탄성 (점토 흙 흡수).
 - $0 < e < 1$: 일반적. *일부 에너지 손실*.
 
-### 4.3 게임에서의 값
+### 4.3 게임 튜닝 예시 값
 
-| 재질 | 일반 e |
+아래 수치는 조건이 명시된 실측 물성표가 아니라, 속도·형상·표면·실험 조건 없이 관행적으로 인용되는 *가상의 게임 튜닝 예시*다. 실제 $e$ 는 재질 하나의 상수가 아니라 접촉 쌍 모델의 파라미터이며, 충돌 속도·형상·표면 상태에 따라 달라진다.
+
+| 재질 | 예시 e |
 |---|---|
 | 강철 / 강철 | 0.7 ~ 0.8 |
 | 고무 공 | 0.7 ~ 0.9 |
@@ -310,7 +320,7 @@ $$
 | 점토 | 0.0 |
 | Super ball | 0.95+ |
 
-게임은 보통 *0.0 ~ 0.4*. 너무 큰 e 는 *비현실적으로 튀어 오름*. 캐릭터가 *5 번 튕긴 후 멈추는* 모습이 부자연.
+게임에서는 보통 *0.0 ~ 0.4* 범위에서 시작해 장면별로 조정한다. $e > 0.7$ 을 비현실로 단정하지는 않으며, $e$ 가 크면 튀어 오름이 과장되어 캐릭터가 *5 번 튕긴 후 멈추는* 모습이 부자연스러워질 수 있다.
 
 ### 4.4 두 표면의 결합
 
@@ -335,7 +345,7 @@ const float kRestThreshold = 1.0f;        // m/s
 float effectiveE = (std::fabs(vRelN) < kRestThreshold) ? 0.0f : e;
 ```
 
-작은 속도엔 *e = 0 강제*. 시뮬 안정.
+작은 속도엔 *e = 0 강제*. 시뮬 안정. `kRestThreshold` 는 장면·단위·재질에 맞춰 조정하는 예시값이지 자연 상수가 아니다.
 
 ### 4.6 회복 계수 vs 마찰
 
@@ -413,11 +423,11 @@ Box2D 의 *NGS (Non-linear Gauss-Seidel) split position solver* 의 단순화 �
 
 ### 5.6 위치 보정과 운동량
 
-위치 보정이 *속도를 안 바꿈*. 운동량 보존 시각에서는 *외부 개입* — *연속 시간 시뮬* 의 충실한 모델이 아님. 하지만 *시각적 안정 + 시뮬 진동 회피* 가 우선.
+직접 위치 보정은 속도를 바꾸지 않으므로 선운동량과 운동 에너지는 그대로다. 하지만 위치를 바꾸면서 공통 원점에 대한 각운동량과 위치 에너지는 달라질 수 있으므로 *연속 시간 시뮬* 의 충실한 모델은 아니다. 그래도 *시각적 안정 + 시뮬 진동 회피* 가 우선인 경우가 많다.
 
 ### 5.7 대안: pseudo-velocity
 
-Bullet 의 접근. 위치 보정 대신 *위치 보정을 또 다른 속도 (pseudo-velocity)* 로 표현. 정규 속도와 *분리된 별도 채널* — 운동량 모델 보존하면서 위치 보정 효과.
+Bullet 의 접근. 위치 보정 대신 *위치 보정을 또 다른 속도 (pseudo-velocity)* 로 표현. 정규 속도와 *분리된 별도 채널* 로 두어 시뮬 속도 적분과 충돌하지 않게 한다. 다만 pseudo-velocity도 결국 위치를 바꾸는 채널이므로 각운동량·위치 에너지를 자동으로 보존하지는 않는다.
 
 ```cpp
 struct Body {
@@ -427,7 +437,7 @@ struct Body {
 };
 ```
 
-Step 마지막에 `position += pseudoVelocity * dt; pseudoVelocity = 0;`. 운동량 시뮬에 영향 안 줌.
+Step 마지막에 `position += pseudoVelocity * dt; pseudoVelocity = 0;`. 이 위치 변화는 정규 속도 적분과 분리되어 정규 솔버의 운동량 계산을 교란하지 않지만, 위치 채널이므로 각운동량·위치 에너지 보존을 자동 보장하지는 않는다.
 
 ## 6. Baumgarte 안정화
 
@@ -457,7 +467,7 @@ normal impulse 계산에 *bias 한 항* 을 추가해 후속 속도가 침투를
 
 ### 6.3 장점
 
-- *위치 변경 없음* — 운동량 모델 충실.
+- *별도 위치 pass 없음* — bias 항으로 속도 제약에 통합한다.
 - *통일된 솔버* — 모든 응답이 *임펄스* 한 종류.
 - *Sequential impulse 와 호환*.
 
@@ -475,11 +485,13 @@ float bias = std::min((kBaumgarte * std::max(depth - kSlop, 0.0f)) / dt,
 
 ### 6.5 NGS vs Baumgarte
 
-| 방법 | 장점 | 단점 |
+세 기법을 운동량 충실성 순위로 나누지 않는다. 모두 위치 오차를 줄이는 안정화 채널이 다를 뿐이다.
+
+| 방법 | 안정화 채널 | 특징 |
 |---|---|---|
-| Position correction (NGS) | 큰 침투에서 안정 | 운동량 모델 깨짐 |
-| Baumgarte bias | 운동량 모델 충실 | 튜닝 어려움 |
-| Pseudo-velocity (Bullet) | 둘의 절충 | 코드 복잡 |
+| Position correction (NGS) | 위치를 직접 이동 | 선운동량은 보존하지만 각운동량·위치 에너지가 변할 수 있음 |
+| Baumgarte bias | 속도 제약의 bias | 별도 위치 pass 없음, 속도에 인공 에너지를 주입할 수 있음 |
+| Pseudo-velocity (Bullet) | 별도 위치 채널 | 시뮬 속도와 분리, 역시 자동 보존은 아님 |
 
 Box2D 는 *NGS + Baumgarte* 혼합. PhysX 는 *bias 기반 PGS + substep 기반 TGS*. 엔진별 다른 선택.
 
@@ -546,7 +558,7 @@ $$
 flowchart LR
     CenterHit[중심 타격] --> PureTrans[순수 병진]
     EdgeHit[모서리 타격] --> Both[병진 + 회전]
-    Both --> SameImpulse[같은 임펄스면 COM 속도 변화는 동일]
+    Both --> SameImpulse["같은 J를 준 경우<br/>COM 속도 변화 동일 (해석)"]
     Both --> Rotation[추가 각속도 변화]
 ```
 

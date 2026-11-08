@@ -396,15 +396,18 @@ VkSubpassDependency dep{};
 dep.srcSubpass = VK_SUBPASS_EXTERNAL;
 dep.dstSubpass = 0;
 dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                 | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+                 | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                 | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
 dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                 | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-dep.srcAccessMask = 0;
+                 | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                 | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+dep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                  | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
                   | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 ```
 
-깊이 쓰기는 `EARLY_FRAGMENT_TESTS` 단계에서 일어나므로, 컬러 출력 단계뿐 아니라 이 단계까지 동기화 범위에 포함한다. 이 의존성이 없으면 검증 레이어가 레이아웃 전이와 첨부 쓰기 사이의 위험을 경고하고, 일부 드라이버에서는 깊이 클리어가 직전 프레임의 읽기와 겹쳐 깜빡임이 나타난다.
+깊이 쓰기는 `EARLY_FRAGMENT_TESTS` 또는 `LATE_FRAGMENT_TESTS` 단계에서 일어날 수 있으므로, 컬러 출력 단계뿐 아니라 두 fragment test 단계를 모두 동기화 범위에 포함한다. 이전 프레임의 첨부 쓰기 결과와 다시 쓰는 사이의 WAW 의존도 있으므로 srcAccess에도 컬러·깊이 첨부 write를 둔다. 이 의존성이 없으면 검증 레이어가 레이아웃 전이와 첨부 쓰기 사이의 위험을 경고하고, 일부 드라이버에서는 깊이 클리어가 직전 프레임의 읽기와 겹쳐 깜빡임이 나타난다. 별도의 완료 fence나 layout transition·queue ownership이 이전 사용을 이미 완전히 끝냈다면 일부 mask만으로 충분할 수 있지만, 그 계약이 없으면 위처럼 보수적으로 잡는다.
 
 ### Render Pass와 Framebuffer 생성
 
@@ -681,9 +684,9 @@ subpass.pResolveAttachments = &colorResolveRef;   // 핵심
 
 ### 타일 기반 GPU의 최적화
 
-모바일 GPU인 ARM Mali, Qualcomm Adreno, Apple GPU는 프레임버퍼를 16×16에서 64×64 정도의 작은 타일 단위로 처리한다. 멀티 샘플 컬러와 깊이가 온칩 타일 메모리에 머물고, 서브패스가 끝날 때 타일 안에서 resolve를 수행해 단일 샘플 결과만 DRAM에 기록한다. 멀티 샘플 데이터가 외부 메모리를 왕복하지 않으므로, 4× MSAA의 실효 비용이 4배가 아니라 1.5배 안팎에 그친다. 데스크톱의 즉시 모드(immediate mode) GPU에서는 멀티 샘플 첨부가 VRAM을 그대로 차지하므로 비용이 더 든다. 타일 기반 GPU에서 MSAA가 현실적인 선택지인 이유가 이 메모리 모델의 차이다.
+모바일 GPU인 ARM Mali, Qualcomm Adreno, Apple GPU는 프레임버퍼를 16×16에서 64×64 정도의 작은 타일 단위로 처리한다. 멀티 샘플 컬러와 깊이가 온칩 타일 메모리에 머물고, 서브패스가 끝날 때 타일 안에서 resolve를 수행해 단일 샘플 결과만 DRAM에 기록한다. 멀티 샘플 데이터가 외부 메모리를 왕복하지 않으므로 4× MSAA의 실효 비용이 4배보다 훨씬 낮을 수 있고, 특정 workload에서 1.5배 안팎이라는 보고도 있다. 다만 이는 측정 모델·측정 조건에 따라 달라지는 값이며, 4×의 대역폭·wall time이 항상 1.5배라는 일반 규칙은 아니다. 데스크톱의 즉시 모드(immediate mode) GPU에서는 멀티 샘플 첨부가 VRAM을 그대로 차지하므로 비용이 더 든다. 타일 기반 GPU에서 MSAA가 현실적인 선택지인 이유가 이 메모리 모델의 차이다.
 
-이 차이는 Vulkan의 렌더 패스·서브패스·resolve 추상이 왜 명시적인지를 설명한다. 첨부의 로드/스토어 연산, transient 힌트, 서브패스 경계가 모두 타일 메모리의 적재·기록 시점을 드라이버에 알리는 신호다. DX12가 자동으로 처리하는 부분을 Vulkan이 코드 표면에 노출한 결과다.
+이 차이는 Vulkan의 렌더 패스·서브패스·resolve 추상이 왜 명시적인지를 설명한다. 첨부의 로드/스토어 연산과 transient 힌트, 서브패스 경계는 타일 메모리의 적재·기록 시점을 드라이버에 알리는 신호일 뿐, resolve 의무 자체를 대신하지 않는다. 멀티샘플을 단일 샘플로 합치는 논리적 resolve는 이 예제처럼 render pass의 resolve attachment(`pResolveAttachments`)로, 또는 color aspect에 한해 명시적 `vkCmdResolveImage`로 수행해야 한다. 자동 resolve는 플랫폼 renderpass나 multisampled-render-to-texture 확장 경로가 정의된 경우에만 기대할 수 있고, DX12도 모든 경로에서 자동으로 resolve해 주는 것이 아니다.
 
 ## 8. 샘플 셰이딩
 
@@ -708,7 +711,7 @@ ms.sampleShadingEnable = VK_TRUE;
 ms.minSampleShading = 0.5f;    // 표본의 최소 50% 에서 셰이더 실행
 ```
 
-`minSampleShading`은 한 픽셀에서 최소 몇 비율의 표본을 독립 실행할지의 하한이다. 4× MSAA에서 `1.0`이면 4개 표본 모두 셰이더를 실행해 픽셀당 셰이더 비용이 네 배가 된다. `0.5`이면 표본 4개 중 2개꼴로 실행해 비용을 두 배로 억제하면서도, 표본별로 보간 위치가 달라져 알파 경계의 표현이 개선된다. `0.25`는 4×에서 max(⌈0.25×4⌉, 1) = 1회라 기본 MSAA와 같아져 이득이 없다.
+`minSampleShading`은 한 픽셀에서 *최소* 몇 비율의 표본을 독립 실행할지의 하한이다. 4× MSAA에서 `1.0`이면 최소 4개 표본에서, `0.5`이면 최소 2개 표본에서 셰이더 실행을 요구한다. 표본별로 보간 위치가 달라져 알파 경계 표현이 개선되지만, 이는 비용 상한이 아니다. 구현이 하한보다 더 많은 표본에서 실행할 수 있고, 셰이더 비용이 정확히 두 배(또는 네 배)로 제한된다는 보장은 없다. `0.25`는 4×에서 max(⌈0.25×4⌉, 1) = 1회가 최소라 기본 MSAA와 같은 하한이 되어 이득이 없다. 실제 invocation 수는 sample-qualified 입력과 구현 최적화에 따라 달라지므로 프로파일링으로 확인한다.
 
 ### 셰이더 측
 
@@ -742,7 +745,7 @@ ms.alphaToCoverageEnable = VK_TRUE;
 
 여기까지의 코드는 외부 메시가 깊이 정렬된 상태로 부드러운 가장자리를 가지고 그려지는 장면을 만든다. tinyobjloader와 tinygltf로 OBJ와 glTF를 읽고, 해시 맵으로 정점 중복을 제거해 정점 수와 정점 캐시 부하를 함께 낮추고, 깊이 첨부를 렌더 패스에 통합해 가려진 면을 잘라냈다. MSAA 멀티 샘플 첨부와 자동 resolve로 기하 가장자리를 다듬고, 샘플 셰이딩과 alpha to coverage로 셰이더 출력의 가장자리까지 손댈 수 있게 됐다. Vulkan의 명시적 명령 모델 위에 현실적인 메시 렌더링의 토대가 모인 셈이다.
 
-이 글의 트레이드오프는 세 축이다. 첫째, 포맷 선택이다. OBJ는 단순해 원리를 보이기 좋지만 PBR과 애니메이션을 담지 못하고, glTF는 표준이지만 접근자·버퍼 뷰의 간접 참조를 다뤄야 한다. 둘째, 깊이 정밀도다. 24비트 정규화 깊이는 흔하고 호환성이 높지만, 넓은 야외 장면에서는 32비트 부동소수 Reverse-Z가 Z-fighting을 막는다. 셋째, MSAA 비용이다. 타일 기반 GPU에서는 4×가 1.5배 비용에 그치지만 즉시 모드 데스크톱 GPU에서는 첨부 메모리와 대역폭이 그대로 늘어, 같은 4×라도 플랫폼에 따라 비용이 다르다.
+이 글의 트레이드오프는 세 축이다. 첫째, 포맷 선택이다. OBJ는 단순해 원리를 보이기 좋지만 PBR과 애니메이션을 담지 못하고, glTF는 표준이지만 접근자·버퍼 뷰의 간접 참조를 다뤄야 한다. 둘째, 깊이 정밀도다. 24비트 정규화 깊이는 흔하고 호환성이 높지만, 넓은 야외 장면에서는 32비트 부동소수 Reverse-Z가 Z-fighting을 막는다. 셋째, MSAA 비용이다. 타일 기반 GPU에서는 4×의 실효 비용이 즉시 모드보다 낮은 경우가 많지만(구현·workload 의존), 즉시 모드 데스크톱 GPU에서는 첨부 메모리와 대역폭이 그대로 늘어 같은 4×라도 플랫폼에 따라 비용이 다르다.
 
 셰이딩은 텍스처를 그대로 복사하는 수준이라 빛의 방향이나 표면 거칠기를 반영하지 못한다. 물리 기반 재질은 베이스 컬러·금속성·거칠기를 Cook-Torrance BRDF에 연결하고, IBL을 사용한다면 irradiance map, 정반사 prefilter와 BRDF LUT의 생성·수명·descriptor binding을 함께 관리해야 한다. 전처리를 compute queue에 보낼 때도 queue-family ownership, semaphore와 결과 이미지의 layout 전이가 소비 graphics queue의 읽기보다 먼저 완료되어야 한다.
 
@@ -750,5 +753,5 @@ ms.alphaToCoverageEnable = VK_TRUE;
 
 - [glTF 2.0 Specification](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html) — 접근자·버퍼 뷰·PBR 머티리얼의 표준.
 - [tinygltf](https://github.com/syoyo/tinygltf) / [tinyobjloader](https://github.com/tinyobjloader/tinyobjloader) — 본문 로더의 저장소. tinygltf는 v3부터 C11 API(`tiny_gltf_v3.h`)가 mainline이고, 본문이 쓰는 C++ `tiny_gltf.h`는 `attic/`에 보존되어 있다.
-- [Vulkan Tutorial: Depth buffering / Loading models / Multisampling](https://vulkan-tutorial.com/Depth_buffering) — 같은 경로의 입문 구현 자료.
+- [Vulkan Tutorial: Depth buffering](https://vulkan-tutorial.com/Depth_buffering), [Loading models](https://vulkan-tutorial.com/Loading_models), [Multisampling](https://vulkan-tutorial.com/Multisampling) — 같은 경로의 입문 구현 자료.
 - ARM, [Arm GPU Best Practices Developer Guide](https://developer.arm.com/documentation/101897/latest/) — 타일 기반 GPU 에서의 MSAA 비용 근거.

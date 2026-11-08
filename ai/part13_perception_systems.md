@@ -167,23 +167,24 @@ float ConeMultiplier(const Agent& a, Vec3 dirToTarget, float dist) {
 시야 콘 안에 있어도 *장애물에 가려지면* 보이지 않는다. 이를 검사하는 것이 raycast — NPC의 눈에서 목표로 광선을 쏘아, 중간에 막히는지 보는 것이다.
 
 ```cpp
-bool HasLineOfSight(Vec3 eye, Vec3 targetPos, const World& world) {
+bool HasLineOfSight(Vec3 eye, EntityId target, Vec3 targetPos, const World& world) {
     Vec3  delta = targetPos - eye;
     float dist  = Length(delta);
     if (dist < 1e-3f) return true;
     Vec3  dir   = delta / dist;
     RayHit hit;
-    // 목표보다 살짝 짧게 쏜다 — 목표 자신의 콜라이더에 맞는 것을 방지
+    // 목표보다 살짝 짧게 쏘고, 목표 자신의 콜라이더는 ignore 목록으로 제외한다
     float rayLength = std::max(0.0f, dist - kSkin);
     if (rayLength > 0.0f &&
-        world.Raycast(eye, dir, rayLength, &hit, kSightMask)) {
-        return false;                                  // 중간에 무언가 막음
+        world.Raycast(eye, dir, rayLength, &hit, kSightMask, /*ignore=*/target)) {
+        // 최초 hit가 목표면 스킨이 목표 앞면을 못 가린 것 — 가림막으로 보지 않는다
+        return hit.entity == target;
     }
     return true;                                       // 막힘 없음
 }
 ```
 
-두 가지 함정에 주의한다. 첫째, *목표 자신* 의 콜라이더에 광선이 맞아 "가려졌다"고 오판하는 경우 — 광선 길이를 `dist - kSkin` 으로 살짝 줄이거나 목표 콜라이더를 마스크에서 제외한다. 둘째, *충돌 마스크(kSightMask)* — 시야를 막는 것은 벽·문이지 풀잎·투명 트리거가 아니다. "시야 차폐" 전용 레이어를 두고 그 레이어만 검사한다. 이 마스크를 빠뜨리면 NPC가 풀숲 뒤 플레이어를 못 보거나 유리창 너머를 못 보는 비현실이 생긴다.
+두 가지 함정에 주의한다. 첫째, *목표 자신* 의 콜라이더에 광선이 맞아 "가려졌다"고 오판하는 경우 — 광선 길이를 `dist - kSkin` 으로 줄이는 것만으로는 부족하다. 목표 반경이 `kSkin`보다 크면 광선이 목표 앞면(`dist - 반경`)에 먼저 닿기 때문이다. Raycast 결과 `hit.entity`를 목표와 비교하거나, ignore 목록/전용 마스크로 목표·자신을 제외해야 한다. endpoint skin은 충돌체 필터의 대체물이 아니다. 둘째, *충돌 마스크(kSightMask)* — 시야를 막는 것은 벽·문이지 풀잎·투명 트리거가 아니다. "시야 차폐" 전용 레이어를 두고 그 레이어만 검사한다. 이 마스크를 빠뜨리면 NPC가 풀숲 뒤 플레이어를 못 보거나 유리창 너머를 못 보는 비현실이 생긴다.
 
 ### raycast 예산과 단계적 필터
 
@@ -237,7 +238,7 @@ float ComputeExposure(const Agent& a, EntityId t, float dist, const World& world
     // 1) 엄폐 — 목표의 여러 부위로 raycast, 보이는 비율
     int visible = 0;
     for (Vec3 part : tgt.SamplePoints()) {              // 머리, 가슴, 골반, 무릎...
-        if (HasLineOfSight(a.eyePos, part, world)) ++visible;
+        if (HasLineOfSight(a.eyePos, t, part, world)) ++visible;
     }
     float coverFactor = float(visible) / tgt.SamplePoints().size();
     if (coverFactor == 0.0f) return 0.0f;               // 완전 차폐 — 조기 종료
@@ -312,6 +313,7 @@ struct NoiseEvent {
     float     loudness;       // 발생 강도 (속삭임 0.1 ~ 총성 1.0)
     EntityId  instigator;     // 누가 냈는가 (아군 소음 무시용)
     NoiseType type;           // 발소리·총성·물건충돌 — 반응 분기용
+    EventId   causeEvent;     // 이 소음을 낸 물리 사건 ID (생성 시 채움)
 };
 ```
 
@@ -334,9 +336,9 @@ void HearNoise(Agent& a, const NoiseEvent& n, const World& world) {
     float atten = n.loudness / (1.0f + dist / a.hearingFalloff);  // 역거리
     atten *= world.SoundOcclusion(a.earPos, n.position);          // 벽 차폐 0.3~1.0
     if (atten <= a.hearingThreshold) return;           // 들리지 않음
-    // 청각 stimulus — 위치는 부정확(소리 위치 + 노이즈)
+    // 청각 stimulus — 위치는 부정확(소리 위치 + 노이즈), 원사건 ID는 그대로 전달
     Vec3 perceived = n.position + RandomInDisk(a.hearingPosError * (1 - atten));
-    a.AddStimulus({ perceived, atten, SenseType::Hearing, Now(), n.instigator });
+    a.AddStimulus({ perceived, atten, SenseType::Hearing, Now(), n.instigator, n.causeEvent });
 }
 ```
 
@@ -426,7 +428,7 @@ $$
 
 베이즈와의 관계도 분명히 해 둔다. 조건부 독립 관측의 정통 사후확률은 *우도비의 곱* (로그-오즈 가법)으로 갱신되고, noisy-OR은 각 감각을 "탐지" 믿음의 *독립적 충분 원인* 으로 보는 인과 모델이다. 둘 다 독립성을 전제하지만 함수 형태가 다르다. 게임 인지가 noisy-OR을 택하는 이유는 결과가 $[0, 1]$ 에 갇혀 게이지·UI에 바로 쓰이고, 새 증거를 *의심에 곱하기만* 하면 되는 점증 갱신이 싸기 때문이다.
 
-핵심 *실패 경계는 독립성 가정* 이다. 두 감각이 *같은 물리 사건* 에서 비롯하면 오차가 상관되어 noisy-OR이 증거를 *이중 계산* 한다. 플래시뱅 하나가 밝은 섬광(시각 $c = 0.7$)과 큰 폭음(청각 $c = 0.7$)을 *동시에* 낸다고 하자. 독립으로 융합하면 $1 - 0.3 \times 0.3 = 0.91$ 이지만, 둘은 사실 *하나의 증거* 라 참 신뢰도는 약 0.7에 머물러야 한다. 이 과신은 단 하나의 미끼로 NPC를 "확신"시켜 잠입의 공정성을 깬다. 완화책은 융합을 *독립 출처에만* 적용하는 것 — 자극에 원인 사건 ID를 달아 같은 사건에서 온 감각은 최댓값으로만 합치고, 서로 다른 사건일 때만 noisy-OR로 보강한다.
+핵심 *실패 경계는 독립성 가정* 이다. 두 감각이 *같은 물리 사건* 에서 비롯하면 오차가 상관되어 noisy-OR이 증거를 *이중 계산* 한다. 플래시뱅 하나가 밝은 섬광(시각 $c = 0.7$)과 큰 폭음(청각 $c = 0.7$)을 *동시에* 낸다고 하자. 독립으로 융합하면 $1 - 0.3 \times 0.3 = 0.91$ 이지만, 둘은 사실 *하나의 증거* 라 참 신뢰도는 약 0.7에 머물러야 한다. 이 과신은 단 하나의 미끼로 NPC를 "확신"시켜 잠입의 공정성을 깬다. 완화책은 융합을 *독립 출처에만* 적용하는 것 — 자극에 원인 사건 ID를 달아 같은 사건에서 온 감각은 최댓값으로만 합치고, 서로 다른 사건일 때만 noisy-OR로 보강한다. 원사건 ID(`causeEvent`)는 소음·감각 자극이 *생성될 때* 채우고 알 수 없으면 0이 아니라 새 ID를 발급한다(0은 미상을 뜻하는 별도 그룹으로만 쓴다). 사건을 같은 것으로 묶는 *사건 동일성* 과 각 감각 오차가 확률적으로 독립인지는 서로 다른 가정이므로 한 개념으로 취급하지 않는다 — 같은 사건에서 나온 두 감각은 상관되어 있어도, 서로 다른 사건의 감각은 독립으로 다룰 수 있다.
 
 경계 조건 두 가지가 더 있다. $c_i = 1$ 은 *흡수원* 이다 — 확실한 한 감각($q_i = 0$)이 있으면 다른 어떤 증거와 무관하게 $c_{\text{fused}} = 1$ 이다(확정된 목격은 보강이 필요 없다는 올바른 행동). $c_i = 0$ 은 의심에 1을 곱해 *아무 기여도 없다*. 수치적으로는 고신뢰 감각이 여럿 쌓여 $c_{\text{fused}} \to 1$ 로 갈 때 $c$ 를 직접 저장하면 1 근처에서 정밀도를 잃으므로, *의심 공간* $q \mathrel{*}{=} (1 - c)$ 로 누적하고 마지막에 $1 - q$ 로 돌리는 편이 안전하다.
 

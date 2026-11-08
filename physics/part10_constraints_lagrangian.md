@@ -4,7 +4,7 @@
 
 게임의 *다른 응답* — 관절 (joint), 모터, 거리 제약 (rope), 각도 제한 (hinge) — 도 비슷한 패턴 : *상태에 대한 제약 + 그 제약을 만족시키는 임펄스*. 매번 별도 코드를 작성하는 대신 *공통 추상화* 가 필요.
 
-그 추상화가 *제약 (Constraint) 시스템*. 위치 제약 $C(\vec{q}) = 0$ 으로 모든 응답을 표현하고, 그 도함수의 *Lagrangian 미정승수법* 으로 *제약력 (constraint force) 의 크기* 를 결정. 충돌·관절·모터가 *같은 솔버에서 풀린다*.
+그 추상화가 *제약 (Constraint) 시스템*. 제약을 위치 제약 $C(\vec{q}, t) = 0$ 또는 그 시간 미분인 속도 제약으로 표현하고, 그 도함수의 *Lagrangian 미정승수법* 으로 *제약력 (constraint force) 의 크기* 를 결정. 충돌은 부등식 제약, 모터·마찰은 속도 수준 제약으로 *같은 솔버에서 풀린다*.
 
 이 글의 목표.
 
@@ -41,7 +41,7 @@
 
 ### 1.1 Holonomic vs Non-holonomic
 
-*Holonomic*: 위치만의 함수로 표현 가능. $C(\vec{q}) = 0$.
+*Holonomic*: 위치만의 함수(시간 명시 가능)로 표현 가능. $C(\vec{q}, t) = 0$.
 
 예: distance joint — 두 객체의 거리가 일정.
 
@@ -49,7 +49,7 @@ $$
 C(\vec{q}) = |\vec{x}_B - \vec{x}_A| - L = 0
 $$
 
-*Non-holonomic*: 속도까지 포함된 제약. 위치만으론 표현 불가.
+*Non-holonomic*: 적분 불가능한 속도 수준 제약. 위치만의 함수로 표현하거나 적분해 위치 제약으로 되돌릴 수 없다.
 
 예: rolling without slipping (구가 미끄러지지 않고 구름). *접촉점에서 속도 0* — 위치만으로는 표현 안 됨.
 
@@ -86,7 +86,7 @@ $$
 
 ### 1.5 자유도 (DOF) 와 제약
 
-3D 강체는 6 DOF (위치 3 + 회전 3). 제약 한 개가 *DOF 한 개를 제거*.
+3D 강체는 6 DOF (위치 3 + 회전 3). 독립적인 활성 제약 하나가 *DOF 한 개를 제거* 한다. 실제 감소량은 활성 제약 Jacobian의 *rank* 이며, 중복·특이·비활성 행은 그대로 세면 안 된다.
 
 | 관절 | 제거된 DOF | 남은 DOF |
 |---|---|---|
@@ -96,7 +96,7 @@ $$
 | Slider | 5 (위치 2 + 회전 3) | 1 (한 축 이동) |
 | 자유 | 0 | 6 |
 
-각 관절을 *제약 식의 개수* 로 표현 — 제약이 많을수록 자유도 적음.
+각 관절을 *제약 식의 개수* 로 표현 — 독립 활성 제약이 많을수록 자유도가 적다. 위 표의 수치는 겹치지 않는 정규 직교 행을 가정한 어림이며, 일반 자유도 수와 저장 성분 수(q의 성분 개수)는 구분한다.
 
 ## 2. 속도 제약과 Jacobian
 
@@ -112,7 +112,9 @@ $$
 
 여기서 $J = \partial C / \partial \vec{q}$ 가 *Jacobian* — 제약이 *어느 자유도에 작용* 하는지의 행렬.
 
-속도 제약: $J \vec{v} = 0$ (또는 inequality 면 $J \vec{v} \ge 0$).
+속도 제약: $J \vec{v} = 0$. 부등식 제약은 *활성 경계에서만* 부등호가 붙는다. 분리 상태 $C>0$ 에서는 어떤 접근 속도도 허용되고, $C=0$ 인 접촉에서만 비접근 조건을 적용한다. 이산 시간에서는 위치를 예측한 speculative 형태 $C + \Delta t\, J \vec{v} \ge 0$ (즉 $J \vec{v} \ge -C/\Delta t$) 을 쓴다. 모든 상태에 $J \vec{v} \ge 0$ 를 요구하면 분리 중인 물체까지 잘못 막는다.
+
+일반화 좌표의 시간 미분 $\dot{\vec{q}}$ 와 강체의 twist $\vec{v}$ 는 다를 수 있다 (예: 3D 회전 쿼터니언). $J = \partial C/\partial \vec{q}$ 는 저장 좌표에 대한 행렬이므로 twist 좌표에 대한 제약 행은 $J_v = C_q G(q)$, 그리고 $\dot{\vec{q}} = G(q)\vec{v}$ 로 쓴다. 아래 cross-product 형태의 Jacobian은 twist $(\vec{v}, \vec{\omega})$ 좌표에 대한 것이다.
 
 ### 2.2 Jacobian 의 의미
 
@@ -194,35 +196,35 @@ $$
 
 ### 3.3 풀이
 
-식을 정리:
+연속계의 정확한 속도 제약은 미분에 $\dot{J}$ 항까지 포함한다:
 
 $$
-\dot{\vec{v}} = M^{-1} \vec{F}_{ext} + M^{-1} J^T \lambda
+J \dot{\vec{v}} + \dot{J} \vec{v} = 0
 $$
 
-속도 제약 $J \vec{v}_{new} = 0$ 을 *임펄스 형태* 로 (한 step Δt 후):
+게임 솔버가 실제로 푸는 것은 *한 step 동안의 Jacobian을 고정한* 이산 속도 투영이다. 이 근사에서 $\dot{J}\vec{v}$ 항(회전·자이로스코픽 등)은 step 안에서 무시된다. 외력이 반영된 속도를 $\vec{v}^* = \vec{v} + \Delta t\, M^{-1}\vec{F}_{ext}$ 로 두고 제약력 미정승수를 $\lambda_{force}$ 라 하면:
 
 $$
-J (\vec{v} + \Delta t \cdot \dot{\vec{v}}) = 0
+J \vec{v}^* + \Delta t\, J M^{-1} J^T \lambda_{force} = 0
 $$
 
-대입하고 정리:
+정리하면:
 
 $$
-J M^{-1} J^T \lambda = -J \vec{v} / \Delta t - J M^{-1} \vec{F}_{ext}
+J M^{-1} J^T \lambda_{force} = -J \vec{v}^* / \Delta t
 $$
 
-$\lambda$ 에 대한 선형 시스템. *제약 1 개* 라면 *스칼라 분수* — 직접 풀이.
+$\lambda_{force}$ 에 대한 선형 시스템. *제약 1 개* 라면 *스칼라 분수* — 직접 풀이. 이는 힘 단위이며 아래 임펄스 형태와 구분한다.
 
 ### 3.4 임펄스 형태
 
-게임 솔버는 *힘이 아닌 임펄스* 로 표현. 임펄스 벡터를 $\vec{P} = J^T \lambda$ 로 두면,
+게임 솔버는 *힘이 아닌 임펄스* 로 표현한다. 임펄스 미정승수를 $\Lambda_{impulse} = \Delta t\, \lambda_{force}$ 로 두면,
 
 $$
-\vec{P} = J^T \lambda, \quad \lambda = -(J M^{-1} J^T)^{-1} (J \vec{v} + b)
+\vec{P} = J^T \Lambda_{impulse}, \quad \Lambda_{impulse} = -(J M^{-1} J^T)^{-1} (J \vec{v}^* + b)
 $$
 
-이때 $\lambda$ 는 힘 형태의 미정승수가 아니라 *한 step 동안 적분된 impulse multiplier* 다. 같은 기호를 쓰지만 단위가 다르다.
+이때 $\Lambda_{impulse}$ 는 힘 형태의 미정승수 $\lambda_{force}$ 가 아니라 *한 step 동안 적분된 impulse multiplier* 다. 같은 $\lambda$ 기호를 쓰면 단위 혼동이 생기므로 $\lambda_{force}$ 와 $\Lambda_{impulse}$ 로 구분한다.
 
 여기서 $b$ = bias 항 (Baumgarte 또는 restitution).
 
@@ -284,10 +286,10 @@ normal impulse 식의 *완전한 일반화*. distance joint, hinge, motor 모두
 
 ### 4.4 K matrix
 
-다중 제약 ($m \ge 2$): $K = J M^{-1} J^T$ 가 *m × m 행렬*. 풀이가 *연립 선형* — 작은 행렬 (대부분 게임 제약은 m ≤ 6) 의 inverse.
+전체 시스템에서 $K = J M^{-1} J^T$ 는 *모든 제약 행* 수 m × m 행렬이다. 반면 개별 관절을 그 관절의 행만 모아 풀 때의 $K_{block}$ 은 1~6행짜리 작은 행렬이다. 관절 하나를 닫힌 형태로 풀면 local $K_{block}$ 의 inverse를 쓴다.
 
 ```cpp
-// 3 자유도 제약 (예: 3D ball joint)
+// 관절 하나의 local block (예: 3D ball joint, 3행)
 mat3 K = J * Minv * transpose(J);
 vec3 lambda = inverse(K) * (-J * v - b);
 ```
@@ -298,7 +300,7 @@ vec3 lambda = inverse(K) * (-J * v - b);
 
 ### 4.6 Effective mass 의 캐싱
 
-매 step 안에서 *반복 (sequential impulse)* — effective mass 가 *step 안에서 불변*. step 시작에 *미리 계산 + 캐싱*.
+*pose와 Jacobian을 고정한 velocity pass 안에서* effective mass 는 불변이다. 이 구간의 시작에 *미리 계산 + 캐싱* 한다.
 
 ```cpp
 struct ConstraintData {
@@ -308,7 +310,7 @@ struct ConstraintData {
 };
 ```
 
-`PrepareVelocityConstraint` 에서 미리 계산, `SolveVelocityConstraint` 에서 매 iter 재사용.
+`PrepareVelocityConstraint` 에서 미리 계산, `SolveVelocityConstraint` 에서 매 iter 재사용. 단 TGS/NGS처럼 sub-step 사이에 pose나 contact arm이 갱신되는 solver는 그 시점마다 effective mass를 다시 계산해야 한다 — step 전체에 걸친 불변량이 아니다.
 
 ## 5. LCP와 MLCP
 
@@ -347,7 +349,7 @@ $A = J M^{-1} J^T$ (inverse effective mass matrix), $\vec{q} = J \vec{v} + b$.
 
 ### 5.4 풀이 방법
 
-- *Pivoting (Lemke's algorithm)*: 정확한 해. 비쌈 (m³). 정확성 우선.
+- *Pivoting (Lemke's algorithm)*: 정확한 해. 비용은 pivot 횟수·문제 구조·퇴화·종료 조건에 의존하며 O(m³) 하나로 단정할 수 없다. 정확성 우선.
 - *Iterative (PGS — Projected Gauss-Seidel)*: 부등식 bound를 투영하며 반복 근사. 한 sweep 비용은 constraint 수 $m$에 비례하고 총비용은 반복 수와 sparsity에 의존한다.
 - *Splitting methods*: 위치 / 속도 분리 솔버 (NGS).
 
@@ -412,7 +414,9 @@ public:
         rB = Rotate(localB, b->angle);
         vec2 d = (b->position + rB) - (a->position + rA);
         float currentLen = Length(d);
-        u = (currentLen > 1e-6f) ? d / currentLen : vec2{0, 0};
+        // restLength>0 인데 anchor가 겹치면 u=0 이 되어 P=u*λ=0 이 된다.
+        // 결정적 대체축으로 초기 분리를 만들거나, 생성 시 겹친 anchor를 금지한다.
+        u = (currentLen > 1e-6f) ? d / currentLen : vec2{1, 0};
 
         float rAcrossU = Cross2D(rA, u);
         float rBcrossU = Cross2D(rB, u);
@@ -452,6 +456,8 @@ public:
 };
 ```
 
+양의 `restLength` 인데 두 anchor가 정확히 겹치면 단위 방향 `u` 가 정의되지 않는다. 위 코드는 결정적 대체축(`{1,0}`)으로 초기 분리를 만들고, 그 외에는 생성 시 겹친 anchor를 금지하는 편이 안전하다. `restLength = 0` 은 방향 제약이 아니라 두 점을 일치시키는 point constraint로 다루는 것이 자연스럽다. 회전·position helper의 구현 생략 자체는 이 문제와 별개다.
+
 ### 6.3 다른 제약들도 같은 인터페이스
 
 - `HingeJoint` (회전축 1)
@@ -465,6 +471,8 @@ public:
 ### 6.4 솔버 (메인 루프)
 
 ```cpp
+// 전제: 호출자가 외력/가속도를 속도에 이미 적분했거나, 이 Step 앞에 별도로 적분한다.
+// 이 함수의 IntegratePositions 는 pose만 갱신한다.
 void Solver::Step(World& world, float dt) {
     // 1. 모든 제약 준비
     for (auto& c : world.constraints) c->PrepareVelocityConstraint(dt);
@@ -475,8 +483,8 @@ void Solver::Step(World& world, float dt) {
         for (auto& c : world.constraints) c->SolveVelocityConstraint();
     }
 
-    // 3. 적분
-    Integrate(world, dt);
+    // 3. 위치 적분 — 속도는 velocity iteration에서 이미 보정됨
+    IntegratePositions(world, dt);
 
     // 4. position iteration
     for (int i = 0; i < kPositionIters; ++i) {
@@ -515,11 +523,7 @@ $$
 C_n = d \ge 0
 $$
 
-위치 제약 + inequality. 시간 미분:
-
-$$
-\dot{C}_n = J_n \vec{v} \ge 0
-$$
+위치 제약 + inequality. 이 제약을 속도 수준으로 옮길 때는 활성 여부를 구분한다. 분리 상태 $C_n > 0$ 에서는 접근 속도도 허용되므로 $J_n \vec{v}$ 에 부호 조건이 없다. 접촉 경계 $C_n = 0$ 에서만 비접근 조건을 적용하거나, 이산 시간에서는 $C_n + \Delta t\, J_n \vec{v} \ge 0$ (speculative 형태)을 쓴다. 시간 미분으로 모든 상태에 $\dot{C}_n = J_n \vec{v} \ge 0$ 를 부과하면 분리 중인 물체까지 잘못 막는다.
 
 여기서 $J_n = (-\hat{n}, -\vec{r}_A \times \hat{n}, \hat{n}, \vec{r}_B \times \hat{n})$ — normal impulse 식의 그 Jacobian.
 

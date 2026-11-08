@@ -2,14 +2,17 @@
 // 화면 출력(Draw)은 archetype_draw.cpp에 있고, 테스트 타깃은 그 TU를 컴파일하지 않는다.
 #include "sim/archetype.h"
 
+#include "sim/kernel_dispatch.h"
+
 #include <algorithm>
 #include <random>
 
 namespace ppl {
 
 void ArchetypeSimulation::Init(std::size_t entityCount, int viewportW, int viewportH) {
-    viewportW_  = viewportW;
-    viewportH_  = viewportH;
+    // 좌표 계약: 0 <= x <= W-1, 0 <= y <= H-1. Init과 Update가 같은 상한을 쓴다.
+    viewportW_  = SanitizeViewport(viewportW);
+    viewportH_  = SanitizeViewport(viewportH);
     totalCount_ = entityCount;
 
     // 엔티티를 256개 단위 chunk로 나눈다. 마지막 chunk는 부분 채움.
@@ -19,8 +22,8 @@ void ArchetypeSimulation::Init(std::size_t entityCount, int viewportW, int viewp
     chunks_.reserve(chunkCount);
 
     std::mt19937 rng(0xC0FFEEu);
-    std::uniform_real_distribution<float> distX(0.0f, static_cast<float>(viewportW_));
-    std::uniform_real_distribution<float> distY(0.0f, static_cast<float>(viewportH_));
+    std::uniform_real_distribution<float> distX(0.0f, static_cast<float>(viewportW_ - 1));
+    std::uniform_real_distribution<float> distY(0.0f, static_cast<float>(viewportH_ - 1));
     std::uniform_real_distribution<float> distV(-120.0f, 120.0f);
 
     std::size_t remaining = entityCount;
@@ -40,24 +43,27 @@ void ArchetypeSimulation::Init(std::size_t entityCount, int viewportW, int viewp
 }
 
 void ArchetypeSimulation::Update(float dt, SimdWidth simd, bool branchless) {
-    switch (simd) {
+    // 요청과 실제 실행 커널을 한 곳(ResolveKernel)에서 판정한다.
+    const ResolvedKernel k = ResolveKernel(Layout::Archetype, simd, branchless);
+    const float safeDt = SanitizeDt(dt);
+    switch (k.effective) {
         case SimdWidth::Scalar:
-            UpdateScalar(dt, branchless);
+            UpdateScalar(safeDt, k.branchlessApplied);
             break;
         case SimdWidth::SSE:
 #if defined(PERF_LAB_X86_SIMD)
-            UpdateSSE(dt);
+            UpdateSSE(safeDt);
 #else
-            UpdateScalar(dt, branchless);
+            UpdateScalar(safeDt, k.branchlessApplied);
 #endif
             break;
         case SimdWidth::AVX2:
 #if defined(PERF_LAB_X86_SIMD) && defined(PERF_LAB_AVX2)
-            UpdateAVX2(dt);
+            UpdateAVX2(safeDt);
 #elif defined(PERF_LAB_X86_SIMD)
-            UpdateSSE(dt);
+            UpdateSSE(safeDt);
 #else
-            UpdateScalar(dt, branchless);
+            UpdateScalar(safeDt, k.branchlessApplied);
 #endif
             break;
     }
@@ -199,8 +205,14 @@ void ArchetypeSimulation::UpdateAVX2(float dt) {
             __m256 vx = _mm256_loadu_ps(&c.velX[i]);
             __m256 vy = _mm256_loadu_ps(&c.velY[i]);
 
+#if defined(PERF_LAB_FMA)
             px = _mm256_fmadd_ps(vx, dtv, px);
             py = _mm256_fmadd_ps(vy, dtv, py);
+#else
+            // FMA 없이 분리 곱셈·덧셈. FMA 경로와 반올림 지점이 다르다.
+            px = _mm256_add_ps(px, _mm256_mul_ps(vx, dtv));
+            py = _mm256_add_ps(py, _mm256_mul_ps(vy, dtv));
+#endif
 
             const __m256 mX = _mm256_or_ps(
                 _mm256_cmp_ps(px, zero, _CMP_LT_OQ),

@@ -53,7 +53,7 @@ void process_data() {
 }
 ```
 
-Microsoft 보안 대응 센터(MSRC)의 2019년 발표에 따르면, 자사 제품 보안 취약점(CVE)의 약 **70%가 메모리 안전성 문제**다([MSRC, "A proactive approach to more secure code"](https://msrc.microsoft.com/blog/2019/07/a-proactive-approach-to-more-secure-code/)). 대표적인 유형은 다음과 같다:
+Microsoft 보안 대응 센터(MSRC)의 2019년 발표에 따르면, 자사 제품 보안 취약점(CVE)의 약 **70%가 메모리 안전성 문제**다([MSRC, "A proactive approach to more secure code"](https://msrc.microsoft.com/blog/2019/07/a-proactive-approach-to-more-secure-code/); 링크는 현재 포털로 리다이렉트되므로 2019년 수치는 아카이브 원문으로 확인해야 한다). 대표적인 유형은 다음과 같다:
 
 - Use-after-free
 - Double-free
@@ -144,34 +144,17 @@ Dijkstra et al. (1978) "On-the-Fly Garbage Collection"에서 제안:
 
 ```text
 White: 미방문 (GC 후보)
-Gray:  방문했지만 자식 미탐색 (작업 큐)
+Gray:  방문했지만 자식 미탐색 (gray 작업; 재귀 구현은 활성 프레임, 큐 구현은 큐)
 Black: 자식까지 모두 탐색 완료 (확정 생존)
 ```
 
 시각화:
 
 ```text
-초기:
-    Root → [A] → [B] → [C]
-           ↓
-          [D] → [E]
-
-    모두 WHITE
-
-Mark 시작:
-    Root → [A:GRAY]
-
-A 처리:
-    Root → [A:BLACK] → [B:GRAY]
-                       ↓
-                      [D:GRAY]
-
-B 처리:
-    [A:BLACK] → [B:BLACK] → [C:GRAY]
-                ↓
-               [D:GRAY]
-
-...반복...
+초기 graph: Root→A; A→B; B→C; A→D; D→E
+A 처리 후: A=BLACK, B=GRAY, D=GRAY; C/E=WHITE
+B 처리 후: A/B=BLACK, C/D=GRAY; E=WHITE
+간선 집합은 그대로 유지
 
 Sweep:
     BLACK → 생존 (WHITE로 리셋)
@@ -200,7 +183,7 @@ typedef struct {
 void mark(Object* obj) {
     if (!obj || obj->marked) return;
 
-    obj->marked = true;  // BLACK
+    obj->marked = true;  // 발견/생존 표시 (자식 스캔 전이므로 tri-color black 확정은 아님)
 
     for (size_t i = 0; i < obj->ref_count; i++) {
         mark(obj->refs[i]);  // 재귀적으로 표시
@@ -235,6 +218,8 @@ void gc_collect(GC* gc) {
     sweep(gc);
 }
 ```
+
+재귀 mark에서 `marked=true`는 BLACK 확정이 아니라 발견/생존 표시다. 아직 자식 스캔을 마치지 않은 활성 재귀 프레임이 gray 작업을 담당하며, 자식까지 모두 스캔한 뒤에야 tri-color 의미의 black이 된다. 이 STW 구현은 그래프가 변하지 않으므로 gray를 별도 큐로 두지 않아도 된다.
 
 ### 장점: 순환 참조 해결
 
@@ -373,12 +358,12 @@ Age  2 (Survivor):  [obj1]        (obj2 죽음)
                      ↓
 Minor GC
                      ↓
-Age 15 (threshold)
+Age 15 (threshold 예시)
                      ↓
 Old Generation:     [obj1]  (Promoted!)
 ```
 
-JVM의 기본 threshold: **15번** 생존 시 promotion
+HotSpot `MaxTenuringThreshold`의 기본값은 15지만 실제 승격 시점은 survivor 목표량과 age table 분포에 따라 collector가 동적으로 조정하며, G1의 humongous allocation처럼 Eden→Survivor→Old 흐름을 따르지 않는 예외도 있다. 모든 JVM·collector에 공통된 고정 15회 규칙이 아니다.
 
 ### 문제: Old → Young 참조
 
@@ -416,7 +401,8 @@ obj->field = young_obj;  // Young 객체 할당
 
 // Write barrier (컴파일러가 자동 삽입)
 if (is_old(obj) && is_young(young_obj)) {
-    mark_card_dirty(&card_table, obj);
+    // slot-card 방식: 대입한 필드 slot이 놓인 card를 dirty로 표시한다.
+    mark_card_dirty(&card_table, &obj->field);
 }
 ```
 
@@ -429,10 +415,12 @@ Minor GC 시:
 
 for (int i = 0; i < card_table.size; i++) {
     if (card_table[i] == DIRTY) {
-        scan_card(i);  // 이 카드의 객체들 스캔
+        scan_card(i);  // 이 card 안의 참조 slot들을 스캔 (slot-card 방식)
     }
 }
 ```
+
+card를 표시하는 주소와 `scan_card`가 스캔하는 범위는 같은 계약이어야 한다. 위 예시는 필드 slot이 놓인 card를 표시하고 그 slot-card를 스캔하는 방식이다. owner 객체 시작 card를 표시하는 구현이라면 `scan_card`가 그 객체 전체를 스캔해야 하며, 이 경우 owner 주소 자체는 오류가 아니다.
 
 ### Remembered Set: 대안 구현
 
@@ -524,18 +512,10 @@ void write_barrier(Object* obj, Object* new_ref) {
 예시:
 
 ```text
-초기:
-    [A:BLACK] → [B:WHITE]
-
-앱이 A->field = C (WHITE) 실행:
-
-Write barrier 작동:
-    [A:GRAY] → [B:WHITE]
-              ↓
-             [C:WHITE]
-
-다음 GC iteration에서 A 재스캔:
-    [A:BLACK] → [C:BLACK]
+대입 전: A.field = B
+대입 후: A.field = C
+barrier: A를 재스캔 대상으로 GRAY 처리
+도식: A:GRAY ──→ C:WHITE
 ```
 
 **사용:** HotSpot의 역사적 CMS가 incremental-update 계열 barrier를 사용한 대표 사례다. 현대 .NET background GC도 generation 2 작업의 상당 부분을 전용 스레드에서 수행하지만, 세대 0·1 foreground collection은 managed thread를 정지시킬 수 있다. 런타임 이름이 비슷하다고 동일한 barrier와 phase 구조라고 가정하면 안 된다.
@@ -567,6 +547,8 @@ Write barrier:
 GC 완료 후:
     B는 이번 GC에서 생존 (다음 GC에서 회수 가능)
 ```
+
+이 그림의 `A:BLACK → B:WHITE`는 강한 불변식의 안정 상태가 아니라, SATB의 약한 불변식(추가 gray 경로/큐 불변식) 전제 아래에서 일시적으로 허용되는 장면이다.
 
 **사용:** G1 GC (Java), Shenandoah GC
 
@@ -600,15 +582,21 @@ ZGC와 Shenandoah는 mark뿐 아니라 relocation/compaction의 많은 부분을
 2. **Load Barriers:** 포인터를 읽을 때 GC 상태 확인
 
 ```c
-Object* load(Object** ptr) {
-    Object* obj = *ptr;
-    if (needs_relocation(obj)) {
-        obj = relocate(obj);  // 새 주소로 이동
-        *ptr = obj;           // 포인터 업데이트
+// 축소 모형: 처음 읽은 참조가 아직 slot의 현재 값일 때만 self-heal한다.
+Object* load(Object** slot) {
+    Object* observed = atomic_load_explicit(slot, memory_order_acquire);
+    Object* moved = ResolveForwarding(observed);
+    if (moved != observed) {
+        Object* expected = observed;
+        atomic_compare_exchange_strong_explicit(
+            slot, &expected, moved,
+            memory_order_acq_rel, memory_order_acquire);
     }
-    return obj;
+    return moved;
 }
 ```
+
+이 예시는 동시 collector의 완전 구현이 아니라 self-heal 계약을 보이기 위한 축소 모형이다. 처음 읽은 참조가 아직 slot의 현재 값일 때만 갱신하며, 새 주소 forwarding의 publication, 옛 객체의 수명/reclamation, 반환된 참조가 언제까지 유효한지, 같은 관측값이 재등장하는 ABA는 원 collector의 phase/read semantics와 함께 별도로 증명해야 한다. CAS 한 줄로 ZGC/Shenandoah 같은 실제 collector가 안전해진다고 주장하지 않는다.
 
 3. **Concurrent Relocation:** 객체 이동을 병렬로 수행
 
@@ -778,7 +766,7 @@ Mike Acton(당시 Insomniac Games)이 CppCon 2014의 "Data-Oriented Design and C
 #include <stdlib.h>
 #include <stdbool.h>
 
-#define MAX_OBJECTS 1000
+#define MAX_OBJECTS 1000  // 힙 객체 수 상한; 값 스택 용량 256과 별개
 
 typedef enum {
     OBJ_INT,
@@ -801,12 +789,13 @@ typedef struct sObject {
 } Object;
 
 typedef struct {
+    // 값 스택 계약(depth=stack_size, capacity=256): 0 <= depth <= capacity, push: depth<capacity, pop: depth>=1, pair: depth>=2 (호출자/verifier 보장)
     Object* stack[256];
     int stack_size;
 
     Object* first_object;  // Linked list of all objects
     int num_objects;
-    int max_objects;
+    int max_objects;  // 힙 객체 수 임계값 (값 스택 용량과 별개)
 } VM;
 
 VM* new_vm() {
@@ -814,10 +803,11 @@ VM* new_vm() {
     vm->stack_size = 0;
     vm->first_object = NULL;
     vm->num_objects = 0;
-    vm->max_objects = 8;  // 초기 threshold
+    vm->max_objects = 8;  // 초기 threshold (힙 객체 수 기준; 값 스택 계약과 별개)
     return vm;
 }
 
+// push: stack_size < 256, pop: stack_size >= 1일 때만 유효하다.
 void push(VM* vm, Object* obj) {
     vm->stack[vm->stack_size++] = obj;
 }
@@ -902,6 +892,7 @@ void push_int(VM* vm, int value) {
 }
 
 Object* push_pair(VM* vm) {
+    // 값 스택 계약: 이 함수는 stack_size >= 2일 때만 유효하다.
     Object* obj = new_object(vm, OBJ_PAIR);
     obj->pair.tail = pop(vm);
     obj->pair.head = pop(vm);
@@ -1175,7 +1166,7 @@ CPU 사용률:
   0% └─────────────────────
 ```
 
-JVM은 GC가 CPU의 98%를 쓰고도 2% 미만 회수하면 **OOM**을 던진다.
+HotSpot의 GC overhead limit 정책(예: Parallel GC의 `-XX:+UseGCOverheadLimit`)은 GC가 CPU의 98%를 쓰고도 2% 미만 회수하면 `OutOfMemoryError: GC overhead limit exceeded`를 던진다. 이 98%/2%는 해당 collector/옵션의 진단 정책이며 모든 JVM·collector에 공통된 일반 pause 보장 규칙이 아니다.
 
 **해결:**
 
@@ -1220,14 +1211,14 @@ for (int i = 0; i < 1000000; i++) {
 
 ### 기술 논문 및 서적 (필독)
 
-- Richard Jones, Antony Hosking, Eliot Moss, ["The Garbage Collection Handbook: The Art of Automatic Memory Management"](https://gchandbook.org/), Chapman & Hall/CRC, 2011
- - **바이블**: 모든 GC 알고리즘의 상세 분석
+- Richard Jones, Antony Hosking, Eliot Moss, ["The Garbage Collection Handbook: The Art of Automatic Memory Management"](https://gchandbook.org/), Chapman & Hall/CRC, 2011 (1판)
+ - **바이블**: 모든 GC 알고리즘의 상세 분석 (사이트는 현행 2판2023 기준; 1판의 장 위치는 판본으로 확인)
 - David F. Bacon, Perry Cheng, V.T. Rajan, ["A Unified Theory of Garbage Collection"](https://dl.acm.org/doi/10.1145/1028976.1028982), OOPSLA 2004
  - Tracing과 Reference Counting의 이론적 통합
 - Paul R. Wilson, ["Uniprocessor Garbage Collection Techniques"](https://dl.acm.org/doi/10.1007/BFb0017182), IWMM 1992
  - GC 기법의 종합 서베이
-- David Ungar, ["Generation Scavenging: A Non-disruptive High Performance Storage Reclamation Algorithm"](https://dl.acm.org/doi/10.1145/800017.800989), SIGSOFT/SIGPLAN 1984
- - Generational GC의 원조 논문
+- David Ungar, ["Generation Scavenging: A Non-disruptive High Performance Storage Reclamation Algorithm"](https://dl.acm.org/doi/10.1145/800020.808261), SIGSOFT/SIGPLAN 1984
+  - 세대별 GC의 초기 실용 구현(세대 개념의 원전은 Lieberman & Hewitt, CACM 26(6), 1983)
 
 ### 역사 및 기초
 
@@ -1242,13 +1233,13 @@ for (int i = 0; i < 1000000; i++) {
  - Concurrent compaction과 load-reference barrier
 - Per Liden, ["ZGC: What's new in JDK 15"](https://malloc.se/blog/zgc-jdk15), 2020
  - Colored pointers와 load barriers
-- [G1 GC Documentation](https://www.oracle.com/technical-resources/articles/java/g1gc.html), Oracle
+- [G1 GC Documentation](https://docs.oracle.com/en/java/javase/25/gctuning/garbage-first-g1-garbage-collector1.html), Oracle (JDK 25 G1 절)
  - Region-based generational GC
 
 ### 게임 엔진 및 실전
 
-- Unity, ["Understanding Automatic Memory Management"](https://docs.unity3d.com/Manual/UnderstandingAutomaticMemoryManagement.html)
- - Unity GC 최적화 가이드
+- Unity, ["Memory overview"](https://docs.unity3d.com/Manual/performance-memory-overview.html)
+  - Unity GC 최적화 가이드
 - Unity, ["Incremental Garbage Collection"](https://docs.unity3d.com/Manual/performance-incremental-garbage-collection.html)
  - 프레임 분산, write barrier와 fallback 조건
 - Mike Acton, ["Data-Oriented Design and C++"](https://www.youtube.com/watch?v=rX0ItVEVjHc), CppCon 2014
@@ -1281,8 +1272,8 @@ for (int i = 0; i < 1000000; i++) {
 
 ### 구현 코드
 
-- [OpenJDK HotSpot GC Source](https://github.com/openjdk/jdk/tree/master/src/hotspot/share/gc)
- - Serial, Parallel, G1, ZGC, Shenandoah 구현
+- [OpenJDK HotSpot GC Source](https://github.com/openjdk/jdk/blob/master/src/hotspot/share/gc/shared/ageTable.cpp)
+  - tenuring/promotion 등 GC 구현을 읽는 출발점; 저장소 전체 GC를 검증한 것으로 표시하지 않음
 - [Boehm-Demers-Weiser GC](https://github.com/ivmai/bdwgc)
  - Conservative GC (Unity에서 사용)
 - [Bob Nystrom, "Crafting Interpreters"](https://craftinginterpreters.com/garbage-collection.html)
@@ -1293,15 +1284,15 @@ for (int i = 0; i < 1000000; i++) {
 - Gil Tene, ["How NOT to Measure Latency"](https://www.youtube.com/watch?v=lJ8ydIuPFeU), Strange Loop 2015
  - GC 지연 시간 측정의 함정
 - Aleksey Shipilev, ["The Black Magic of Java Method Dispatch"](https://shipilev.net/blog/2015/black-magic-method-dispatch/)
- - 메서드 디스패치와 JIT 인라이닝의 실측 분석
+  - 메서드 디스패치와 JIT 인라이닝의 실측 분석 (GC 절의 직접 근거가 아니라 배경 읽을거리)
 - [Renaissance Benchmark Suite](https://renaissance.dev/)
- - 현대 JVM GC 벤치마크
+  - GC도 관측할 수 있는 현대 JVM benchmark suite (GC 전용 benchmark는 아님)
 
 ### 대안 및 최신 연구
 
 - ["Rust Ownership System"](https://doc.rust-lang.org/book/ch04-00-understanding-ownership.html)
  - GC 없는 메모리 안전성
-- ["Reference Counting with Frame Limited Reuse"](https://www.microsoft.com/en-us/research/publication/reference-counting-with-frame-limited-reuse/), Microsoft Research
- - Reference Counting 최적화
+- Anton Lorenzen, Daan Leijen, ["Reference Counting with Frame Limited Reuse"](https://www.microsoft.com/en-us/research/publication/reference-counting-with-frame-limited-reuse/), ICFP 2022
+  - Reference Counting 최적화
 - ["Immix: A Mark-Region Garbage Collector"](https://dl.acm.org/doi/10.1145/1375581.1375586), PLDI 2008
  - Mark-Sweep와 Copying의 하이브리드

@@ -42,9 +42,9 @@ char str[] = "Hello";
 이 두 접근법의 차이는 단순한 구현 디테일이 아니다. 각각은 근본적으로 다른 트레이드오프를 내포한다.
 
 **Null-terminated의 장점:**
-- 메모리 오버헤드가 없다 (길이 필드가 불필요)
+- 길이 필드 대신 종료자 1코드 단위만 쓴다 (별도 길이 필드 불필요)
 - 문자열 리터럴과 자연스럽게 매칭된다
-- 서브스트링이 원본과 동일한 형식이다 (어디서든 시작 가능)
+- 서픽스(끝까지의 부분 문자열)를 포인터 이동만으로 만들 수 있다 (임의 구간은 끝 종료자가 별도로 필요)
 - C 언어의 단순함과 부합한다 (구조체가 필요 없음)
 
 **Null-terminated의 단점:**
@@ -57,7 +57,7 @@ char str[] = "Hello";
 
 이 선택을 이해하려면 1970년대 초반의 상황을 봐야 한다. Dennis Ritchie가 C를 설계할 때 그가 다룬 하드웨어는 PDP-11이었다. 이 기계는 상상하는 것보다 훨씬 제한적이었다.
 
-- 16비트 주소 공간 (최대 64KB 메모리)
+- 16비트 주소 공간 (한 주소 공간에서 최대 64KB)
 - 매우 느린 메모리 접근
 - 복잡한 자료구조를 위한 여유가 없었음
 
@@ -149,7 +149,7 @@ int main() {
 }
 ```
 
-이 루프가 수행하는 누적 스캔은 $N(N-1)/2$바이트다. 절대 시간은 컴파일러 최적화, C 라이브러리 구현, CPU와 `N`에 따라 크게 달라지므로 실행 환경과 최적화 옵션을 함께 기록해야 한다. 작은 `N`에서 나온 한 번의 시간을 보편적인 수치로 제시하는 대신 여러 크기에서 $N^2$에 가까운 증가 추세를 확인한다.
+이 루프가 수행하는 누적 스캔은 $N(N-1)/2$바이트다. 절대 시간은 컴파일러 최적화, C 라이브러리 구현, CPU와 `N`에 따라 크게 달라지므로 실행 환경과 최적화 옵션을 함께 기록해야 한다. 최종 `buffer`를 출력하거나 checksum에 넣어 측정 대상이 최적화로 제거되지 않게 한다. 작은 `N`에서 나온 한 번의 시간을 보편적인 수치로 제시하는 대신 여러 크기에서 $N^2$에 가까운 증가 추세를 확인한다.
 
 ### 해결책 1: 길이를 저장하라
 
@@ -162,14 +162,25 @@ typedef struct {
     size_t capacity;
 } String;
 
+// src는 s->data 바깥의 문자열이어야 한다(자기 자신에 대한 별칭 금지).
 void string_append(String* s, const char* src) {
     size_t src_len = strlen(src);
 
+    if (src_len > SIZE_MAX - s->length - 1) return;  // 길이 overflow 방지
+    const size_t required = s->length + src_len + 1;
+
     // 길이를 이미 알고 있으므로 끝 위치를 즉시 계산 - O(1)
-    if (s->length + src_len >= s->capacity) {
-        // 재할당 필요
-        size_t new_capacity = (s->capacity + src_len) * 2;
+    if (required > s->capacity) {
+        // 재할당 필요. overflow 없이 요구량 이상으로 키운다.
+        size_t new_capacity = s->capacity + src_len;
+        if (new_capacity < s->capacity || new_capacity > SIZE_MAX / 2)
+            new_capacity = required;
+        else
+            new_capacity *= 2;
+        if (new_capacity < required) new_capacity = required;
+
         char* new_data = (char*)malloc(new_capacity);
+        if (!new_data) return;  // 할당 실패 시 s를 변경하지 않는다
         memcpy(new_data, s->data, s->length);
         free(s->data);
         s->data = new_data;
@@ -240,7 +251,8 @@ public:
         : data_(new char[other.length_ + 1]),
           length_(other.length_),
           capacity_(other.length_ + 1) {
-        std::memcpy(data_, other.data_, length_ + 1);
+        if (other.data_) std::memcpy(data_, other.data_, length_ + 1);
+        else data_[0] = '\0';  // moved-from 상태도 빈 문자열로 복사한다
     }
 
     String(String&& other) noexcept
@@ -249,6 +261,10 @@ public:
         other.length_ = 0;
         other.capacity_ = 0;
     }
+
+    // 소유 포인터를 가진 클래스이므로 대입은 명시적으로 막아 둔다(얕은 복사 방지).
+    String& operator=(const String&) = delete;
+    String& operator=(String&&) = delete;
 
     ~String() {
         delete[] data_;
@@ -274,7 +290,8 @@ void reserve(size_t new_capacity) {
     if (new_capacity <= capacity_) return;
 
     char* new_data = new char[new_capacity];
-    std::memcpy(new_data, data_, length_ + 1);
+    if (data_) std::memcpy(new_data, data_, length_ + 1);
+    else new_data[0] = '\0';  // 빈(moved-from) 상태도 지원
     delete[] data_;
     data_ = new_data;
     capacity_ = new_capacity;
@@ -286,7 +303,8 @@ void append(const String& other) {
         // 재할당 필요
         reserve(new_length + 1);
     }
-    std::memcpy(data_ + length_, other.data_, other.length_ + 1);
+    // self-append(other == *this) 시 구간이 겹치므로 memmove를 쓴다.
+    std::memmove(data_ + length_, other.data_, other.length_ + 1);
     length_ = new_length;
 }
 ```
@@ -303,8 +321,9 @@ void append(const String& other) {
 void reserve(size_t new_capacity) {
     if (new_capacity <= capacity_) return;
 
-    size_t new_cap = capacity_;
+    size_t new_cap = capacity_ < 1 ? 1 : capacity_;  // capacity_ == 0에서도 진행
     while (new_cap < new_capacity) {
+        if (new_cap > SIZE_MAX / 2) { new_cap = new_capacity; break; }  // overflow 방지
         new_cap *= 2;  // 2배씩 증가
     }
 
@@ -327,7 +346,7 @@ void reserve(size_t new_capacity) {
 #### 전략 2: 1.5배 증가
 
 ```cpp
-new_cap = capacity_ + capacity_ / 2;  // 1.5배
+new_cap = capacity_ + std::max(capacity_ / 2, 1);  // 1.5배, capacity 1에서도 증가
 ```
 
 장점:
@@ -337,7 +356,7 @@ new_cap = capacity_ + capacity_ / 2;  // 1.5배
 단점:
 - 재할당 횟수 소폭 증가
 
-성장률이 황금비 이하이면 과거에 해제한 모든 buffer 크기의 합이 언젠가 새 buffer 크기에 도달할 수 있다는 이상화된 산술이 성립한다. 그러나 allocator가 그 block들을 하나의 연속 영역으로 합칠 수 있다는 보장은 없고 size class와 다른 allocation이 개입하므로, 1.5배가 실제 주소 재사용을 보장하는 것은 아니다.
+성장률이 황금비 미만이면 과거에 해제한 모든 buffer 크기의 합이 언젠가 새 buffer 크기에 도달할 수 있다는 이상화된 산술이 성립한다(황금비와 같으면 유한 단계에서는 미달하고 극한에서만 경계에 접근한다). 그러나 allocator가 그 block들을 하나의 연속 영역으로 합칠 수 있다는 보장은 없고 size class와 다른 allocation이 개입하므로, 1.5배가 실제 주소 재사용을 보장하는 것은 아니다.
 
 특정 64비트 release ABI의 source에서 관찰되는 대표적인 경향은 다음과 같다. `basic_string`의 growth policy는 표준 보장이 아니며 library version, 요청 크기와 ABI에 따라 달라질 수 있다.
 
@@ -414,15 +433,15 @@ String operator+(String&& lhs, const String& rhs) {
 
 힙 할당은 생각보다 훨씬 비싸다.
 
-- `malloc` 호출: 수백 CPU 사이클 (메모리 관리자 오버헤드)
+- `malloc` 호출: allocator와 size class에 따라 수십~수백 CPU 사이클 (메모리 관리자 오버헤드)
 - 캐시 미스: 메인 메모리 접근 (수십 나노초)
 - 메모리 단편화 증가
 - 멀티스레드 환경에서 락 경합
 
-그런데 통계를 보면 다음과 같은 패턴이 드러난다.
+일반적인 게임/툴 워크로드에서 관찰되는 가정은 다음과 같다(데이터셋에 따라 달라진다).
 
-- 대부분의 문자열은 매우 짧다 (< 20자)
-- 파일명, 태그, 토큰 등은 평균 10자 미만
+- 대부분의 문자열은 매우 짧다 (< 20 char 코드 단위)
+- 파일명, 태그, 토큰 등은 평균 10 char 코드 단위 미만
 - 작은 문자열에 힙 할당은 과도한 오버헤드
 
 이것이 SSO (Small String Optimization)가 탄생한 배경이다.
@@ -606,13 +625,17 @@ C++03 시대의 장점은 다음과 같다.
 ```cpp
 // C++03 COW string (GCC 구버전)
 std::string s1 = "Hello";
-char& ref = s1[0];    // s1의 첫 문자 참조 (아직 유일 소유자라 복사 없음)
+char& ref = s1[0];    // 비const 참조 노출
 
-std::string s2 = s1;  // COW: 데이터 공유
-s1[0] = 'J';          // s1 수정 → COW 발동, s1이 새 버퍼 할당
+// libstdc++ 구 COW는 이 시점에 s1을 unshareable로 표시하므로,
+// 아래 복사는 단순 공유가 아니라 깊은 복사가 될 수 있다.
+std::string s2 = s1;
 
-// 문제: ref는 여전히 유효할까?
-// COW 구현에서는 미정의 동작이 발생할 수 있다
+s1[0] = 'J';          // 분리 여부는 구현에 따라 다르다
+
+// N2668이 문제 삼은 것은 이런 참조·이터레이터가 다른 객체의 수정이나
+// 병렬 element 접근으로 무효화·경합될 수 있다는 점, 그리고 const 연산에
+// 숨은 ref_count 갱신이 끼어들어 데이터 경합을 만든다는 점이다.
 ```
 
 C++11 표준 ([N2668 제안서](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2008/n2668.htm))은 명확히 요구한다.
@@ -648,22 +671,18 @@ std::atomic<int> ref_count;  // 원자적 연산
 - CAS 재시도형 구현은 경합에서 실패와 backoff 비용이 생긴다.
 - 실제 배수는 명령어, memory order, cache 상태와 thread 배치에 따라 달라진다.
 
-#### 이유 3: Move Semantics와의 충돌
+#### 이유 3: Move Semantics와의 관계
 
-C++11의 가장 중요한 기능 중 하나는 move semantics다.
+C++11에서 가장 중요한 기능 중 하나인 move semantics는 공유 버퍼를 가리키는 핸들도 그대로 옮길 수 있다. move는 원본을 무효 객체로 만드는 것이 아니라 유효하지만 미지정 상태로 남긴다.
 
 ```cpp
 String(String&& other) noexcept {
     ptr_ = other.ptr_;
-    other.ptr_ = nullptr;  // 소유권 이전
+    other.ptr_ = nullptr;  // 소유권 이전, other는 유효하지만 미지정 상태
 }
 ```
 
-Move semantics의 핵심은 "소유권 이전"이다. 원본은 무효화되고, 대상이 리소스를 가져간다.
-
-하지만 COW는 "공유"를 가정한다. 원본과 복사본이 모두 유효하게 유지된다.
-
-이 두 개념은 근본적으로 양립할 수 없다.
+따라서 move semantics 자체가 COW를 금지하지는 않는다. Qt의 암묵적 공유 타입도 이동과 함께 쓰인다. `std::string`에서 COW가 금지된 직접적인 이유는 이유 1·2의 참조·이터레이터 무효화와 데이터 경합 계약이며, 이 절은 move와의 양립 불가라는 오해를 정리한 것이다.
 
 #### 이유 4: 실제 성능 저하
 
@@ -678,9 +697,9 @@ Move semantics의 핵심은 "소유권 이전"이다. 원본은 무효화되고,
 
 2008년, WG21 표준위원회는 N2668 "Concurrency Modifications to Basic String" 제안서를 채택했다.
 
-핵심은 참조·이터레이터 무효화 규칙과 데이터 경합 금지 조항을 강화해, COW 구현이 표준을 만족할 수 없게 만든 것이다. 구현체는 즉시 복사(eager copy)로 전환해야 했고, GCC libstdc++도 GCC 5에서 새 ABI와 함께 COW 문자열을 버렸다.
+핵심은 참조·이터레이터 무효화 규칙과 데이터 경합 금지 조항을 강화해, COW 구현이 표준을 만족할 수 없게 만든 것이다. 구현체는 즉시 복사(eager copy)로 전환해야 했고, GCC libstdc++도 GCC 5에서 새 ABI(`_GLIBCXX_USE_CXX11_ABI=1`)를 기본으로 하며 COW 문자열을 기본 경로에서 제외했다. 구 ABI 문자열 구현은 호환을 위해 남아 있다.
 
-이것은 표준의 진화가 때로는 "실수를 인정하고 수정하는 과정"임을 보여준다. COW는 20년간 유효했던 최적화였지만, 새로운 요구사항(멀티스레딩, move semantics)과 충돌했다.
+이것은 표준의 진화가 때로는 "실수를 인정하고 수정하는 과정"임을 보여준다. COW는 20년간 유효했던 최적화였지만, 새로운 요구사항(멀티스레딩과 참조·이터레이터 무효화 규칙)과 충돌했다.
 
 ### Qt QString은 왜 여전히 COW를 사용하는가
 
@@ -813,8 +832,8 @@ std::cout << sv;  // 미정의 동작
 std::string s = "Hello";
 std::string_view sv = s;  // s의 버퍼 참조
 
-s += " World";  // 재할당 발생 (capacity 초과 시)
-// sv는 이제 해제된 메모리 가리킴
+s += " World";  // capacity를 넘길 때만 재할당. SSO 범위면 버퍼가 그대로라 sv도 유효하다
+// 재할당이 일어나면 sv는 해제된 메모리를 가리킴
 ```
 
 #### 위험 3: C 문자열 생명주기
@@ -835,9 +854,9 @@ std::string_view sv;
 // 패턴 1: 문자열 리터럴 (정적 저장소)
 std::string_view sv1 = "literal";  // OK: 프로그램 전체 생명주기
 
-// 패턴 2: 함수 매개변수 (호출자의 생명주기 보장)
+// 패턴 2: 함수 매개변수 (호출자가 호출 동안 유효한 범위를 보장해야 함)
 void log(std::string_view message) {
-    std::cout << message << '\n';  // OK: message는 호출 동안 유효
+    std::cout << message << '\n';  // OK: 호출자가 message의 수명을 보장
 }
 
 // 패턴 3: 짧은 스코프
@@ -863,8 +882,10 @@ public:
 | 함수 매개변수 (읽기 전용) | `string_view` | 복사 없음, C 문자열도 지원 |
 | 멤버 변수 | `std::string` | 생명주기 명확 |
 | 반환 타입 | `std::string` | 소유권 이전 보장 |
-| 임시 객체 허용 안 됨 | `const string&` | 수명 연장 규칙 활용 |
+| 임시 객체 차단 | 삭제된 `const string&&` 오버로드 | `const string&`는 임시를 허용하므로 `= delete`로 막는다 |
 | Null 종료 필요 | `const char*` | `string_view`는 Null 보장 안 함 |
+
+null 종료를 요구하는 `%s`, `strlen` 같은 API에는 `view.data()`를 그대로 넘기지 않는다. view는 null 종료를 보장하지 않으므로, 소유 `std::string`을 거치거나 길이 기반 API를 쓴다.
 
 `string_view`는 강력하지만 위험한 도구다. Rust의 차용 검사기 같은 컴파일 타임 보증이 없는 C++에서는, 프로그래머가 생명주기를 수동으로 관리해야 한다.
 
@@ -885,12 +906,14 @@ BSTR은 `wchar_t*`이고, 포인터는 데이터의 첫 문자를 가리킨다. 
 이 배치는 세 가지를 동시에 만족시킨다.
 
 ```cpp
-UINT bytes = *((UINT*)bstr - 1);   // 길이 조회는 포인터 산술 한 번
+UINT bytes = SysStringByteLen(bstr);   // null BSTR이면 0을 반환하는 COM API
 ```
 
 - **길이 조회가 $O(1)$이다.** 종료 null을 찾아 훑을 필요가 없다.
 - **중간에 `U+0000`이 들어가도 된다.** 길이가 별도로 저장되므로 바이너리 데이터를 그대로 담을 수 있다.
 - **종료 null도 함께 둔다.** 그래서 길이를 모르는 기존 `wchar_t*` 코드에 그대로 넘길 수 있다.
+
+단, 중간 null을 포함한 이진 데이터는 종료 null 기반 C wide 문자열 API에 넘기면 그 지점에서 잘린다. `*((UINT*)bstr - 1)` 같은 직접 헤더 역참조는 이 ABI에 한정된 관찰이며 nullptr BSTR에서는 성립하지 않으므로, 길이는 `SysStringByteLen`/`SysStringLen`으로 조회한다.
 
 세 번째가 이 설계의 실용적 핵심이다. 길이 접두만 두고 종료 null을 버렸다면 기존 C 문자열 API와 섞어 쓸 수 없었다. 두 표현의 비용을 모두 내고 두 표현의 호환성을 모두 사는 선택이다.
 
@@ -900,6 +923,8 @@ UINT bytes = *((UINT*)bstr - 1);   // 길이 조회는 포인터 산술 한 번
 | 중간 null | 불가능 | 가능 |
 | 종료 null | 있음 | 있음 |
 | 고정 오버헤드 | 2바이트 | 6바이트 |
+
+여기서 6바이트는 논리 표현의 고정 오버헤드이며, allocator의 정렬·라운딩과 할당 metadata는 포함하지 않는다.
 
 ### 오버헤드는 짧은 문자열에서 지배적이다
 
@@ -913,7 +938,7 @@ $$\text{overhead} = \frac{6}{2n + 6}$$
 | 20 | 40바이트 | 46바이트 | 13.0% |
 | 100 | 200바이트 | 206바이트 | 2.9% |
 
-짧은 문자열이 많은 워크로드에서 이 비율은 무시할 수 없다. 그런데 이 표현에는 그 비용을 줄일 방법이 없다. 길이 필드가 데이터와 같은 할당 블록 안에 있어야 하므로 **짧은 문자열이라고 해서 할당을 생략할 수 없다.** 짧은 값을 객체 안에 인라인으로 담는 최적화가 원리적으로 불가능한 표현이다.
+짧은 문자열이 많은 워크로드에서 이 비율은 무시할 수 없다. BSTR에서는 이 비용을 줄일 방법이 없다. COM의 할당/해제 계약(`SysAllocString`/`SysFreeString`)과 포인터 하나를 넘기는 ABI 때문에 길이 필드가 데이터와 같은 할당 블록 안에 있어야 하므로 **짧은 문자열이라고 해서 할당을 생략할 수 없다.** 길이 접두 표현 자체가 인라인 저장을 금지하는 것은 아니며, `{pointer, length}` 쌍이나 opaque handle 같은 대안도 있다.
 
 ### 왜 `std::string`은 이 배치를 쓰지 않는가
 
@@ -926,9 +951,9 @@ $$\text{overhead} = \frac{6}{2n + 6}$$
 | 짧은 값 최적화 | 가능 | 불가능 |
 | 경계를 넘을 수 있는가 | 같은 ABI·같은 구현 안에서만 | 언어 중립 |
 
-갈림길은 **무엇이 경계를 넘어가는가**다. `std::string`은 값이 C++ 코드 안에 머물기 때문에 객체 표현을 마음대로 정할 수 있다. 반면 언어 중립 이진 인터페이스는 문자열을 **포인터 하나**로 주고받는다. 길이를 함께 실어 보낼 자리가 없으니, 길이를 데이터와 같은 블록에 붙이는 것 말고는 방법이 없다.
+갈림길은 **무엇이 경계를 넘어가는가**다. `std::string`은 값이 C++ 코드 안에 머물기 때문에 객체 표현을 마음대로 정할 수 있다. 반면 BSTR이 속한 COM 자동화 ABI는 문자열을 **포인터 하나**로 주고받고 할당/해제를 전용 함수로 고정한다. 길이를 함께 실어 보낼 자리가 없어 길이를 데이터와 같은 블록에 붙였다. 언어 중립 인터페이스가 반드시 이 형태여야 하는 것은 아니며, `{pointer, length}` 쌍이나 opaque handle을 쓰는 ABI도 있다.
 
-여기서 일반적인 결론이 나온다. **length-prefix는 "포인터 하나로 길이까지 전달해야 할 때" 나타나는 형태다.** 그 대가로 짧은 값 최적화를 잃고, 고정 오버헤드를 내며, 길이 필드가 사용자 코드에 타입으로 드러나지 않아 규약으로만 지켜진다. 같은 `wchar_t*`라도 길이 필드가 앞에 있는 포인터와 없는 포인터를 컴파일러는 구분하지 못한다. 그래서 이 표현을 채택한 환경은 전용 생성·해제 함수를 강제하고, 그 짝을 어기면 진단되지 않는 힙 손상이 된다. 표현의 이득을 규약의 부담으로 지불하는 셈이다.
+여기서 BSTR에 한정된 결론이 나온다. **BSTR의 length-prefix는 "포인터 하나로 길이까지 전달해야 하는 ABI"에서 나타나는 형태다.** 그 대가로 짧은 값 최적화를 잃고, 고정 오버헤드를 내며, 길이 필드가 사용자 코드에 타입으로 드러나지 않아 규약으로만 지켜진다. 같은 `wchar_t*`라도 길이 필드가 앞에 있는 포인터와 없는 포인터를 컴파일러는 구분하지 못한다. 그래서 이 표현을 채택한 환경은 전용 생성·해제 함수를 강제하고, 그 짝을 어기면 진단되지 않는 힙 손상이 된다. 표현의 이득을 규약의 부담으로 지불하는 셈이다.
 
 ---
 

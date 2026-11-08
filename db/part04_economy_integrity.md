@@ -123,13 +123,16 @@ INSERT INTO processed_requests (idem_key, account_id, created_at)
 VALUES ('c1f3-...', 42, now());
 
 -- 2. 효과 적용 (1이 성공한 경우에만 도달)
+--    조건부 차감이 0행이어도 SQL 오류가 아니다 — 반드시 행 수를 확인한다
 UPDATE wallets   SET gems = gems - 100 WHERE account_id = 42 AND gems >= 100;
+--    affected_rows != 1 → ROLLBACK, 잔액 부족/지갑 없음 반환 (지급하지 않음)
+--    지급(INSERT)도 성공(1행)을 확인하고, 아니면 ROLLBACK 후 지급 실패 반환
 INSERT INTO inventory_item (character_id, template_id, count) VALUES (7, 301, 1);
 
-COMMIT;
+COMMIT;   -- 두 효과가 모두 성공했을 때만 도달
 ```
 
-원자성이 핵심이다 — 키 기록과 효과가 한 트랜잭션이므로, "키만 적히고 효과는 없는" 또는 그 반대의 중간 상태가 없다. 유니크 위반을 받은 중복 요청에는 *첫 처리의 응답을 그대로* 돌려준다(처리 결과를 키 행에 함께 저장) — 클라이언트 입장에서 재시도는 늦게 도착한 성공일 뿐이다.
+원자성과 함께 *업무 성공 조건* 을 확인해야 한다 — 조건부 차감이 0행이면 SQL 오류가 아니라 업무 실패이므로, 지급 전에 롤백하고 잔액 부족을 반환한다. 원자성이 핵심인 이유는 키 기록과 효과가 한 트랜잭션이므로, "키만 적히고 효과는 없는" 또는 그 반대의 중간 상태가 없기 때문이다. 유니크 위반을 받은 중복 요청에는 *첫 처리의 응답을 그대로* 돌려준다(처리 결과를 키 행에 함께 저장) — 클라이언트 입장에서 재시도는 늦게 도착한 성공일 뿐이다.
 
 운영 디테일 셋. 첫째, *키의 범위와 수명* — 키 테이블은 자라기만 하므로 보존 기간(예: 30일)을 정해 정리하되, 그 기간은 "클라이언트가 재시도할 수 있는 최대 시간"보다 길어야 한다. 둘째, *키 생성 주체* — 클라이언트 생성이 기본이되, 신뢰할 수 없는 입력이므로 계정 ID와 결합해 저장한다(남의 키 충돌 공격 방지). 셋째, *처리 중 상태* — 같은 키의 요청이 첫 처리가 끝나기 전에 또 오면, 거절하고 잠시 후 재시도시킨다(키 행을 "처리 중"으로 먼저 삽입하는 2단계) — 동시 도착 중복까지 닫는 마감 처리다.
 
@@ -151,13 +154,19 @@ INSERT INTO processed_requests (idem_key, account_id, created_at) VALUES ('K', 4
 R1: SELECT … WHERE idem_key=K   -> 없음
 R2: SELECT … WHERE idem_key=K   -> 없음   (R1이 아직 커밋 전이라 그 INSERT가 안 보인다)
 R1: UPDATE gems -= 100; INSERT K; COMMIT
-R2: UPDATE gems -= 100; INSERT K; COMMIT
-결과: 100이 두 번 차감 — 멱등성 키를 두고도 이중 처리
+
+경우 A — R2도 같은 트랜잭션에서 UPDATE와 INSERT를 묶으면
+  R2: UPDATE gems -= 100; INSERT K -> 유니크 위반, 트랜잭션 전체 rollback
+  결과: 100이 한 번만 차감 — R2의 선검사 통과는 정확성 근거가 아니었을 뿐이다
+
+경우 B — R2의 UPDATE가 autocommit이거나 외부 효과가 INSERT보다 먼저 확정되면
+  R2: UPDATE gems -= 100 (커밋); INSERT K -> 유니크 위반
+  결과: 100이 두 번 차감 — 멱등성 키를 두고도 이중 처리
 ```
 
-핵심은 *격리 수준만으로는 이 창이 닫히지 않는다* 는 것이다. Read Committed에서는 각 문장이 새 스냅숏을 받지만 $R_2$의 `SELECT` 시점에 $R_1$의 `INSERT`는 아직 커밋되지 않아 보이지 않고, 스냅숏 격리(PostgreSQL의 Repeatable Read)에서는 각 트랜잭션이 자기 시작 시점의 스냅숏을 보므로 역시 보이지 않는다. 두 경우 모두 선검사는 "없음"을 반환하고 두 트랜잭션이 함께 효과를 적용한다. 직렬화 가능(Serializable)까지 올리면 실행 결과가 어떤 직렬 순서와 같도록 강제되어 이 인터리빙도 막히지만, 그 보장은 엔진과 구현(예: PostgreSQL의 SSI)에 따라 중단(serialization failure)과 재시도 비용을 수반하고, 더 낮은 격리 수준에서 도는 대다수 운영 경로에는 적용되지 않는다.
+핵심은 *격리 수준만으로는 이 창이 닫히지 않는다* 는 것이다. Read Committed에서는 각 문장이 새 스냅숏을 받지만 $R_2$의 `SELECT` 시점에 $R_1$의 `INSERT`는 아직 커밋되지 않아 보이지 않고, 스냅숏 격리(PostgreSQL의 Repeatable Read)에서는 각 트랜잭션이 자기 시작 시점의 스냅숏을 보므로 역시 보이지 않는다. 두 경우 모두 선검사는 "없음"을 반환하므로 선검사만으로는 중복을 막지 못한다. 두 번째 트랜잭션의 효과가 실제로 중복 커밋되는지는 이후 유니크 선점이 효과와 같은 트랜잭션에서 커밋되는지에 달려 있다. 직렬화 가능(Serializable)까지 올리면 실행 결과가 어떤 직렬 순서와 같도록 강제되어 이 인터리빙도 막히지만, 그 보장은 엔진과 구현(예: PostgreSQL의 SSI)에 따라 중단(serialization failure)과 재시도 비용을 수반하고, 더 낮은 격리 수준에서 도는 대다수 운영 경로에는 적용되지 않는다.
 
-그래서 격리 수준에 무관하고 이식 가능한 정확성의 근거는 *유니크 제약* 이다. `INSERT`를 먼저 실행해 두 번째 시도가 유니크 위반(또는 `INSERT ... ON CONFLICT DO NOTHING`의 0행 영향)으로 걸러지게 하고, 그 결과로 효과 적용 여부를 가른다. 중복을 닫는 사건은 두 번째 `INSERT`가 유니크 인덱스에서 부딪히는 순간이지 `SELECT`가 아니다. 선검사 `SELECT`는 흔한 경로 — 이미 처리된 키를 빠르게 가려 저장된 응답을 재생 — 의 최적화로만 두고, 중복 차단의 근거로는 삼지 않는다. 같은 논리가 4절의 원장 유니크 제약과 6절의 플랫폼 거래 ID에도 그대로 적용된다.
+그래서 격리 수준에 무관하고 이식 가능한 정확성의 근거는 *유니크 제약* 이다. 다만 이 근거는 키 선점과 효과가 같은 트랜잭션에 있고 유니크 위반 시 효과까지 rollback될 때 성립한다. `INSERT`를 먼저 실행해 두 번째 시도가 유니크 위반(또는 `INSERT ... ON CONFLICT DO NOTHING`의 0행 영향)으로 걸러지게 하고, 그 결과로 효과 적용 여부를 가른다. 키를 효과 뒤에 `INSERT`하더라도 같은 트랜잭션에서 유니크 위반이 전체를 rollback하면 정확성 오류가 아니다 — 선점의 이점은 조기 중복 판정과 불필요한 작업 감소에 있다. 효과를 먼저 autocommit하거나 외부 부작용을 `INSERT` 전에 확정하면 유니크 제약은 사후 중복 판정에 그치므로, 선검사뿐 아니라 효과의 커밋 경계를 함께 봐야 한다. 중복을 닫는 사건은 두 번째 `INSERT`가 유니크 인덱스에서 부딪히는 순간이지 `SELECT`가 아니다. 선검사 `SELECT`는 흔한 경로 — 이미 처리된 키를 빠르게 가려 저장된 응답을 재생 — 의 최적화로만 두고, 중복 차단의 근거로는 삼지 않는다. 같은 논리가 8절의 원장 `ref_key` UNIQUE와 6절의 플랫폼 거래 ID에도 그대로 적용된다.
 
 ### 처리 기록의 상태 머신
 
@@ -171,7 +180,7 @@ ABSENT -> IN_PROGRESS -> SUCCEEDED
 
 상태 전이는 조건부 갱신으로 원자화한다. `IN_PROGRESS`가 영원히 남지 않도록 소유자와 lease, 재개 정책이 필요하며, 오래된 작업자가 나중에 결과를 덮지 않도록 세대 번호를 사용할 수 있다.
 
-같은 키로 다른 요청 본문이 오면 기존 결과를 돌려주어서는 안 된다. 키와 함께 정규화한 요청 매개변수의 해시를 저장하고 불일치를 오류로 처리해야 한다. 그렇지 않으면 클라이언트 버그나 공격자가 기존 키를 재사용해 엉뚱한 결과를 정상 성공처럼 받을 수 있다.
+같은 키로 다른 요청 본문이 오면 기존 결과를 돌려주어서는 안 된다. 키에 scope(주체·작업 종류)를 결합하거나, 저장 행에 scope·principal·operation과 정규화한 요청 매개변수의 fingerprint(또는 원문)를 함께 남기고 기존 응답 반환 전에 모두 비교해 불일치를 오류로 처리해야 한다. 그렇지 않으면 클라이언트 버그나 공격자가 기존 키를 재사용해 엉뚱한 결과를 정상 성공처럼 받을 수 있다.
 
 ### 보존 기간은 데이터 계약이다
 
@@ -218,8 +227,9 @@ CREATE TABLE gold_ledger (
 ```mermaid
 flowchart LR
     T[트랜잭션: 지급 + outbox 행 삽입] --> DB[(DB)]
-    R[릴레이 — 폴링/CDC] --> DB
-    R -->|발행 후 완료 표시| Q[메시지 큐]
+    R[릴레이 — 폴링/CDC] -->|outbox 조회| DB
+    R -->|outbox 행 완료 표시| DB
+    R -->|발행| Q[메시지 큐]
     Q --> W[알림·후속 처리]
 ```
 
@@ -322,9 +332,13 @@ flowchart LR
 
 ```sql
 CREATE TABLE idempotency_key (
-    key         TEXT PRIMARY KEY,
-    result     JSONB,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    key                 TEXT PRIMARY KEY,
+    scope               TEXT NOT NULL,
+    principal           BIGINT NOT NULL,
+    operation           TEXT NOT NULL,
+    request_fingerprint BYTEA NOT NULL,
+    result              JSONB,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE wallet_ledger (
@@ -349,18 +363,26 @@ CREATE TABLE wallet_balance (
 
 ```cpp
 GrantResult GrantCurrency(Db& db, GrantCommand cmd) {
+    auto fingerprint = Fingerprint(Canonicalize(cmd));
+
     return db.RunTransaction([&](Tx& tx) {
         auto existing = tx.QueryOne(
-            "SELECT result FROM idempotency_key WHERE key=? FOR UPDATE",
+            "SELECT result, scope, principal, operation, request_fingerprint "
+            "FROM idempotency_key WHERE key=? FOR UPDATE",
             cmd.idempotencyKey);
 
         if (existing) {
+            if (existing["scope"] != cmd.scope ||
+                existing["principal"] != cmd.principal ||
+                existing["operation"] != cmd.operation ||
+                existing["request_fingerprint"] != fingerprint) {
+                return GrantResult::Conflict();
+            }
             return DecodeGrantResult(existing["result"]);
         }
 
-        tx.Execute(
-            "INSERT INTO idempotency_key(key) VALUES (?)",
-            cmd.idempotencyKey);
+        tx.ClaimKey(cmd.idempotencyKey, cmd.scope, cmd.principal,
+                    cmd.operation, fingerprint);
 
         tx.Execute(
             "INSERT INTO wallet_ledger(player_id,currency,delta,reason,ref_key) "
@@ -382,6 +404,25 @@ GrantResult GrantCurrency(Db& db, GrantCommand cmd) {
 }
 ```
 
+`RunTransaction` wrapper는 다음 계약을 지녀야 병렬 동일 요청까지 같은 응답으로 접힌다.
+
+```text
+인증된 principal, 작업 종류, 통화·금액과 정규화 요청을 검증한다
+시도 시작
+    유니크 제약 아래에서 키를 선점한다 (scope·principal·operation·fingerprint 포함)
+    중복이면:
+        이 시도의 트랜잭션을 rollback한다
+        새 트랜잭션·스냅숏에서 저장된 결과를 읽는다
+        같은 principal과 같은 정규화 요청인지 확인한다
+        저장된 결과를 반환한다
+    같은 트랜잭션에서 원장·잔액·(선택) 아웃박스를 적용한다
+    응답을 멱등성 행에 저장한다
+커밋
+커밋 성공 뒤에만 응답을 반환한다
+```
+
+이 계약에서 유니크 충돌은 실패가 아니라 재조회·재생의 신호다. 없는 키에 대한 `SELECT ... FOR UPDATE`는 그 키의 gap을 잠그지 않으므로 중복 판정의 근거가 되지 않는다. 선점 함수가 어떤 유니크 오류가 이 키 충돌인지 식별하고, 다른 불변식 위반은 재시도로 숨기지 않고 실패로 전파한다. 첫 시도가 아직 진행 중이면 `IN_PROGRESS` 정책에 따라 기다림·재시도 응답을 돌려주고, 최종 실패 상태도 응답으로 정의한다.
+
 이 코드는 외부 알림을 직접 보내지 않는다. 트랜잭션 안에서 메시지 브로커를 호출하면 DB는 롤백됐는데 메시지는 나가거나, 메시지는 실패했는데 DB는 커밋되는 상태가 생긴다. 필요한 외부 효과는 아웃박스 행으로 기록하고 별도 워커가 보낸다.
 
 ```sql
@@ -396,13 +437,21 @@ case duplicate request:
   same idempotency key로 GrantCurrency를 100번 병렬 호출
   assert wallet_ledger rows for ref_key == 1
   assert wallet_balance.amount increased once
-  assert all responses are identical
+  assert 모든 응답이 정책상 동일한 저장 결과 또는 정의된 재시도 응답
 
 case crash after ledger before response:
   transaction commit 후 응답 전 서버 kill
   retry same idempotency key
   assert second call returns stored result
   assert no second ledger row
+
+case same key, different principal or amount:
+  첫 요청 뒤 같은 키로 다른 principal/amount 호출
+  assert 충돌 오류, 저장 결과 재생 안 함
+
+case in-progress and final failure:
+  첫 시도가 IN_PROGRESS/FAILED_FINAL인 동안 같은 키 호출
+  assert 정책에 정의된 기다림·재시도·최종 실패 응답
 ```
 
 이 테스트가 통과하면 "정확히 한 번"을 네트워크가 보장해서가 아니라, 수신자가 중복을 같은 결과로 접었기 때문에 경제 상태가 보존된다. 프로그래머가 붙잡아야 할 단위는 결제 API 설명서가 아니라 이 지급 함수와 그 불변식이다.
@@ -424,4 +473,4 @@ case crash after ledger before response:
 - [microservices.io: Transactional Outbox](https://microservices.io/patterns/data/transactional-outbox.html) — 아웃박스 패턴 정리(Chris Richardson).
 - Pat Helland, "Life beyond Distributed Transactions: an Apostate's Opinion" (CIDR 2007) — 분산 트랜잭션을 피하는 설계 철학의 고전.
 - Hal Berenson, Phil Bernstein, Jim Gray, Jim Melton, Elizabeth O'Neil, Patrick O'Neil, "A Critique of ANSI SQL Isolation Levels" (SIGMOD 1995) — 격리 수준과 스냅숏 격리에서 무엇이 막히고 무엇이 안 막히는지의 1차 분석. 멱등성 키가 격리 수준이 아니라 유니크 제약으로 정확성을 얻는 이유의 배경.
-- [Apple: App Store Server Notifications](https://developer.apple.com/documentation/appstoreservernotifications) / [Google Play: Real-time developer notifications](https://developer.android.com/google/play/billing/rtdn-reference) — 결제 통지의 최소 한 번 의미론 1차 출처.
+- [Apple: App Store Server Notifications](https://developer.apple.com/documentation/appstoreservernotifications) / [Google Play: Real-time developer notifications](https://developer.android.com/google/play/billing/rtdn-reference) — 결제 통지 개요. Google은 RTDN 이후 Developer API 조회와 중복 ID 처리 범위를 설명하며, 전달 보장은 각 문서의 재시도·ack(Google은 Pub/Sub) 절에서 확인해야 한다. Apple의 세부 retry 정책은 이번에 본문을 확인하지 못했으므로, 무한 또는 모든 상황의 최소 한 번 보장으로 인용하지 않는다.

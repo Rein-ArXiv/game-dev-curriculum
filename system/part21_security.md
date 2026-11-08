@@ -98,7 +98,8 @@ $ /usr/bin/passwd
 # → /etc/shadow 수정 가능
 
 # 하지만 실제 uid는 여전히 1000
-# → 다른 사용자 파일 접근 불가
+# → 이 프로세스의 euid/fsuid는 0이고 effective capability(CAP_DAC_OVERRIDE 등)가 적용되므로
+#    파일 DAC 검사는 통과한다. real UID를 보는 특정 검사(access(2) 등)만 사용자 기준으로 남는다.
 ```
 
 **setgid + sticky bit:**
@@ -164,11 +165,11 @@ UID != 0  →  제한된 권한
 ```c
 // include/uapi/linux/capability.h
 #define CAP_CHOWN            0   // 파일 소유자 변경
-#define CAP_DAC_OVERRIDE     1   // DAC 권한 우회
-#define CAP_FOWNER           3   // 파일 권한 무시
+#define CAP_DAC_OVERRIDE     1   // 파일 read/write/execute DAC 검사 우회
+#define CAP_FOWNER           3   // 파일 소유자 기반 검사(chmod/chown 등) 우회
 #define CAP_KILL             5   // 시그널 전송
 #define CAP_SETUID           7   // UID 변경
-#define CAP_NET_BIND_SERVICE 10  // 1024 이하 포트 바인딩
+#define CAP_NET_BIND_SERVICE 10  // 특권 포트(<1024) 바인딩; net.ipv4.ip_unprivileged_port_start로 경계 조정
 #define CAP_NET_RAW          13  // RAW 소켓 생성
 #define CAP_SYS_TIME         25  // 시스템 시간 설정
 #define CAP_SYS_ADMIN        21  // 거의 모든 관리 작업
@@ -252,7 +253,7 @@ cap_flag_value_t value;
 cap_get_flag(caps, CAP_NET_BIND_SERVICE, CAP_EFFECTIVE, &value);
 
 if (value == CAP_SET) {
-    // 1024 이하 포트 바인딩 가능
+    // 특권 포트(<1024) 바인딩 가능 (net.ipv4.ip_unprivileged_port_start 기준)
     bind(sock, (struct sockaddr *)&addr, sizeof(addr));
 }
 ```
@@ -264,10 +265,10 @@ if (value == CAP_SET) {
 #include <sys/prctl.h>
 
 // CAP_SYS_ADMIN을 bounding set에서 제거
-// → 이후 execve로 실행되는 모든 프로그램에서 사용 불가
+// → 현재 effective/permitted는 즉시 지워지지 않지만, 이후 execve에서 새로 획득되지 않는다
 prctl(PR_CAPBSET_DROP, CAP_SYS_ADMIN);
 
-// 이제 root로 실행해도 CAP_SYS_ADMIN 없음
+// 이제 root로 실행해도 execve 후 CAP_SYS_ADMIN 없음
 execve("/bin/bash", ...);
 ```
 
@@ -458,7 +459,7 @@ unconfined_u:unconfined_r:passwd_t:s0 12345 pts/0 passwd
 ### 커널 구현
 
 ```c
-// security/selinux/hooks.c
+// security/selinux/hooks.c (교육용 축약; 실제 v5.15는 state 인자를 포함한다)
 static int selinux_inode_permission(struct inode *inode, int mask) {
     struct inode_security_struct *isec = inode->i_security;
     u32 sid = current_sid();  // 현재 프로세스의 Security ID
@@ -469,22 +470,31 @@ static int selinux_inode_permission(struct inode *inode, int mask) {
                         mask_to_av(mask), NULL);
 }
 
-// security/selinux/avc.c
-int avc_has_perm(u32 ssid, u32 tsid, u16 tclass, u32 requested) {
+// security/selinux/avc.c (요청 권한 집합 판정 교육용 helper)
+int avc_has_perm(u32 ssid, u32 tsid, u16 tclass, u32 requested,
+                 struct common_audit_data *auditdata) {
     // 1. 캐시 확인 (빠른 경로)
     node = avc_lookup(ssid, tsid, tclass);
-    if (node && node->ae.avd.allowed & requested)
-        return 0;  // 캐시 히트
+    if (node) {
+        u32 cached_denied = requested & ~node->ae.avd.allowed;
+        if (cached_denied == 0)
+            return 0;  // 캐시 히트: 요청한 모든 권한이 허용됨
+    }
 
     // 2. 정책 서버 질의 (느린 경로)
     rc = security_compute_av(ssid, tsid, tclass, requested, &avd);
+    if (rc != 0)
+        return rc;  // 정책 질의 실패를 캐시 정상 결과처럼 쓰지 않는다
 
     // 3. 캐시에 저장
     avc_insert(ssid, tsid, tclass, &avd);
 
-    return (avd.allowed & requested) ? 0 : -EACCES;
+    u32 denied = requested & ~avd.allowed;
+    return denied == 0 ? 0 : -EACCES;
 }
 ```
+
+`avc_has_perm`는 요청한 권한 중 하나가 아니라 **모든 비트가 allowed에 포함되는지**를 검사하는 교육용 helper다. 실제 SELinux의 permissive/audit 정책 처리와 캐시 무효화 규약은 이 모형에 포함하지 않는다.
 
 ### 실전 사용
 
@@ -640,7 +650,8 @@ $ ln -s /etc/shadow /tmp/mylink
 
 # 하지만
 $ myapp /tmp/mylink  # 성공? 실패?
-# → 커널 버전에 따라 다름 (link_path_walk 처리)
+# → 경로 해석, profile attachment, 소유자 UID와 policy 모드에 따라 달라질 수 있다.
+#    이 예제는 특정 kernel/AppArmor 버전의 audit 결과로 확인하지 않았으므로 직접 근거로 쓰지 않는다.
 ```
 
 **Rename 공격:**
@@ -654,7 +665,7 @@ $ mv /sensitive/data.txt /var/www/html/safe.txt
 ```
 
 **해결책:**
-- AppArmor 2.x부터 `owner` 조건 추가
+- `owner` 조건으로 소유자 기준 규칙을 둘 수 있다(정확한 도입 버전은 미확인)
 - `audit` 플래그로 의심스러운 접근 로깅
 
 ## 6. Seccomp: 시스템 콜 필터링
@@ -729,8 +740,14 @@ struct sock_fprog prog = {
 
 // 적용
 // NNP가 켜지지 않으면 비특권 사용자는 PR_SET_SECCOMP가 EACCES로 실패한다.
-if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) perror("nnp");
-if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) < 0) perror("seccomp");
+if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) {
+    perror("nnp");
+    exit(1);  // 전제 조건 실패 → 실행 중단
+}
+if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) < 0) {
+    perror("seccomp");
+    exit(1);  // 보안 경계 설치 실패 → 보호되지 않은 채로 workload를 실행하지 않는다
+}
 
 // 이제 open() 호출 시 프로세스 즉시 종료
 int fd = open("/etc/passwd", O_RDONLY);  // killed
@@ -758,7 +775,7 @@ seccomp_load(ctx);
 ### 커널 구현
 
 ```c
-// kernel/seccomp.c
+// kernel/seccomp.c (단일 filter 모형)
 static long __seccomp_filter(int this_syscall, const struct seccomp_data *sd) {
     struct seccomp_filter *f = current->seccomp.filter;
     u32 action;
@@ -768,21 +785,27 @@ static long __seccomp_filter(int this_syscall, const struct seccomp_data *sd) {
 
     switch (action & SECCOMP_RET_ACTION_FULL) {
     case SECCOMP_RET_ALLOW:
-        return 0;  // 통과
+        return 0;  // syscall을 그대로 실행
 
     case SECCOMP_RET_ERRNO:
+        // syscall을 건너뛰고 반환 register에 -errno를 넣는다(일반 함수 return과 다름)
         return -min_t(int, action & SECCOMP_RET_DATA, MAX_ERRNO);
 
     case SECCOMP_RET_TRAP:
-        // SIGSYS 시그널 전송
+        // syscall을 실행하지 않고 SIGSYS 시그널 전송
         force_sig_seccomp(this_syscall, action & SECCOMP_RET_DATA);
         return -1;
 
+    case SECCOMP_RET_KILL_THREAD:
+        do_exit(SIGSYS);  // 현재 thread만 종료
+
     case SECCOMP_RET_KILL_PROCESS:
-        do_exit(SIGSYS);  // 프로세스 종료
+        do_group_exit(SIGSYS);  // thread group 전체 종료
     }
 }
 ```
+
+이 모형은 단일 filter만 다루며 실제 커널은 누적된 filter를 모두 실행해 가장 제한적인 action을 선택한다. `SECCOMP_RET_LOG`, `SECCOMP_RET_TRACE`, `SECCOMP_RET_USER_NOTIF` 등은 syscall 실행 여부와 통지 방식이 각각 다르다.
 
 ### 실전: Docker 보안
 
@@ -822,7 +845,8 @@ $ docker run --rm -it alpine sh
 reboot: Operation not permitted  # seccomp이 차단
 
 $ docker run --security-opt seccomp=unconfined alpine reboot
-# 동작함 (위험!)
+# seccomp 필터는 없지만 기본 capability set에 CAP_SYS_BOOT이 없으면
+# reboot는 여전히 EPERM으로 실패한다. unconfined seccomp만으로 재부팅 권한이 생기지는 않는다.
 ```
 
 ## 7. Namespaces와 권한 격리
@@ -916,22 +940,33 @@ write_file("/proc/self/setgroups", "deny");  // 보안상 필수
 write_file("/proc/self/gid_map", "0 1000 1");
 
 // 3. 다른 namespace 생성 (이제 권한 있음)
-unshare(CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWNET);
+//    CLONE_NEWNS·CLONE_NEWNET는 호출자에게, CLONE_NEWPID는 이후 생성되는 자식에게 적용된다.
+if (unshare(CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWNET) == -1)
+    return -1;
 
 // 4. 루트 변경 (CAP_SYS_CHROOT 가 아직 있을 때)
-chroot("/var/lib/container/rootfs");
-chdir("/");
+if (chroot("/var/lib/container/rootfs") == -1)
+    return -1;
+if (chdir("/") == -1)
+    return -1;
 
 // 5. Capability 제한
 cap_t caps = cap_init();
 cap_set_proc(caps);
 
 // 6. Seccomp 적용 (NNP 를 먼저 켜야 CAP_SYS_ADMIN 없이도 필터를 설치할 수 있다)
-prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog);
+if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == -1)
+    return -1;
+if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) == -1)
+    return -1;  // 필터 설치 실패 시 workload를 실행하지 않는다
 
-// 7. 컨테이너 프로세스 실행
-execve("/bin/sh", ...);
+// 7. 새 PID namespace의 자식 생성 후, 그 child에서 컨테이너 프로세스 실행
+//    unshare(CLONE_NEWPID)만으로는 호출자가 새 PID namespace로 이동하지 않는다.
+pid_t pid = fork();
+if (pid == 0) {
+    // 이 child가 새 PID namespace의 PID 1이 된다. /proc는 이 namespace에 맞게 다시 마운트한다.
+    execve("/bin/sh", ...);
+}
 ```
 
 ## 8. 하드웨어 보안 기능
@@ -1095,7 +1130,8 @@ $ cat /proc/cpuinfo | grep shstk
 flags: ... shstk ...  # Shadow Stack 지원
 
 # Linux 6.6+ 커널에서 지원
-CONFIG_X86_SHADOW_STACK=y
+CONFIG_X86_USER_SHADOW_STACK=y
+# CPU의 shstk flag, 커널 설정, userspace 활성화(glibc/툴체인)가 모두 갖춰져야 동작한다
 ```
 
 ## 9. 실전 보안 강화
@@ -1239,13 +1275,13 @@ $ sysctl -p /etc/sysctl.d/99-security.conf
 - Cowan, C., et al. (2000). *SubDomain: Parsimonious Server Security*. USENIX LISA.
 - Edge, J. (2015). *A seccomp overview*. LWN.net. https://lwn.net/Articles/656307/
 - Kerrisk, M. (2013). *Namespaces in operation, part 5: User namespaces*. LWN.net. https://lwn.net/Articles/532593/
-- Intel Corporation. (2016). *Control-flow Enforcement Technology Specification*.
-- ARM Ltd. (2021). *Armv8-A Architecture Reference Manual*.
-- Linux kernel source tree: `security/` directory
- - `security/selinux/` - SELinux implementation
- - `security/apparmor/` - AppArmor implementation
- - `security/commoncap.c`, `kernel/capability.c` - Capability 검사와 syscall
- - `kernel/seccomp.c` - Seccomp implementation
- - `kernel/user_namespace.c` - User namespace
-- Documentation: `Documentation/security/` in kernel source
+- Intel Corporation. (2016). *Control-flow Enforcement Technology Specification*. — 판본·문서 번호·절 미확인(직접 근거로 쓰려면 리비전과 절을 명시할 것)
+- ARM Ltd. (2021). *Armv8-A Architecture Reference Manual*. — 판본(DDI 번호·리비전)·절 미확인
+- Linux v5.15 커널 소스 트리: `security/` 디렉터리
+ - `security/selinux/avc.c` — `avc_has_perm`의 요청 권한 판정
+ - `security/apparmor/` — 경로 기반 정책 판정(버전별 구현 차이 확인 필요)
+ - `security/commoncap.c`, `kernel/capability.c` — capability 검사와 syscall
+ - `kernel/seccomp.c` — `__seccomp_filter` action 처리
+ - `kernel/user_namespace.c` — `make_kuid` UID 변환
+- Documentation: `Documentation/security/` in kernel source (v5.15)
 - Red Hat, *SELinux User's and Administrator's Guide* — RHEL 공식 문서.

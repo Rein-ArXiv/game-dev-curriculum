@@ -181,6 +181,9 @@ public:
     ~function() { reset(); }
 
     R operator()(Args... args) {
+        if (!vtable_) {
+            throw std::bad_function_call();  // std::function과 같은 빈 상태 계약
+        }
         return vtable_->invoke(obj(), std::forward<Args>(args)...);
     }
 
@@ -189,7 +192,12 @@ private:
     static const VTable& get_vtable_for() {
         static const VTable vtable = {
             [](void* obj, Args... args) -> R {
-                return (*static_cast<Functor*>(obj))(std::forward<Args>(args)...);
+                auto* functor = static_cast<Functor*>(obj);
+                if constexpr (std::is_void_v<R>) {
+                    (*functor)(std::forward<Args>(args)...);
+                } else {
+                    return (*functor)(std::forward<Args>(args)...);
+                }
             },
             [](void* obj) {
                 auto* functor = static_cast<Functor*>(obj);
@@ -271,8 +279,8 @@ std::any a = 42;                    // int
 a = std::string("hello");           // string
 a = std::vector<double>{1.0, 2.0};  // vector<double>
 
-int* pi = std::any_cast<int>(&a);                 // nullptr (현재 string)
-std::string* ps = std::any_cast<std::string>(&a); // 성공
+int* pi = std::any_cast<int>(&a);                       // nullptr (현재 vector<double>)
+auto* pv = std::any_cast<std::vector<double>>(&a);      // 성공
 ```
 
 ### std::any의 구조
@@ -316,6 +324,7 @@ public:
         using ValueType = std::decay_t<T>;
 
         if constexpr (sizeof(ValueType) <= BufferSize &&
+                      alignof(ValueType) <= alignof(std::max_align_t) &&
                       std::is_nothrow_move_constructible_v<ValueType>) {
             new(buffer_) ValueType(std::move(value));
         } else {
@@ -379,7 +388,7 @@ public:
 
     template<typename T>
     T* cast() {
-        if (type_ == &typeid(T)) {
+        if (type_ && *type_ == typeid(T)) {
             return static_cast<T*>(heap_ptr_ ? heap_ptr_ : buffer_);
         }
         return nullptr;
@@ -389,6 +398,7 @@ private:
     template<typename T>
     static const VTable& get_vtable() {
         constexpr bool in_buffer = sizeof(T) <= BufferSize &&
+                                   alignof(T) <= alignof(std::max_align_t) &&
                                    std::is_nothrow_move_constructible_v<T>;
         static const VTable vt = {
             [](void* obj) {
@@ -504,6 +514,12 @@ public:
         index_ = index;
     }
 
+    // 이 골격은 타입별 복사/이동 테이블을 생략했으므로 암시적 바이트 복사를 막는다
+    variant(const variant&) = delete;
+    variant& operator=(const variant&) = delete;
+    variant(variant&&) = delete;
+    variant& operator=(variant&&) = delete;
+
     ~variant() {
         destroy_table_[index_](buffer_);
     }
@@ -533,9 +549,10 @@ private:
 
 ### std::visit의 마법
 
-`std::visit`은 컴파일 타임에 모든 타입 조합에 대한 점프 테이블을 생성한다.
+`std::visit`은 표준이 구현 전략을 규정하지는 않지만, 보통 컴파일 타임에 모든 타입 조합을 분기하는 테이블을 만들어 dispatch한다.
 
 ```cpp
+// 실제 구현처럼 보이지만 방문자 타입·반환형·valueless 처리를 생략한 구조 설명용 의사코드다.
 template<typename Visitor, typename... Types>
 auto visit(Visitor&& vis, variant<Types...>& v) {
     using ReturnType = /* 모든 호출의 공통 반환 타입 */;
@@ -772,10 +789,12 @@ public:
     // 실전에서는 별도 버퍼나 unique_function을 사용해야 한다.
     template<typename F>
     delegate(F&& f) requires (!std::is_same_v<std::decay_t<F>, delegate>) {
-        static F stored = std::forward<F>(f);
+        // F가 참조 타입이면 static_cast<F*>가 참조의 포인터가 되어 컴파일되지 않으므로 decay한다
+        using Functor = std::decay_t<F>;
+        static Functor stored = std::forward<F>(f);
         object_ = &stored;
         stub_ = [](void* obj, Args... args) -> R {
-            return (*static_cast<F*>(obj))(std::forward<Args>(args)...);
+            return (*static_cast<Functor*>(obj))(std::forward<Args>(args)...);
         };
     }
 
@@ -907,6 +926,8 @@ for (const auto& shape : shapes) {
     shape.draw();
 }
 ```
+
+이 골격에서 `object`의 이동 생성자는 기본 구현이므로 이동한 뒤 `self_`는 비어 있다. `draw`와 복사 생성자는 `self_`를 역참조하므로, 비어 있는 `object`를 복사하거나 `draw`를 호출하지 않도록 비어 있지 않음이 보장된 상태에서만 사용한다.
 
 ### 장점
 
@@ -1093,11 +1114,13 @@ for (auto& r : rectangles) total += r.area();
 
 ## 7. 실전 적용: 게임 엔진의 선택
 
+아래 코드는 실제 엔진 소스를 인용한 것이 아니라 각 엔진의 설계 경향을 요약한 유사 설계 의사코드다. Unreal의 `Tick`/`BeginPlay`는 `UObject`가 아니라 `AActor`·`UActorComponent`에 있고, `FProperty`는 값 저장과 리플렉션 메타데이터를 함께 다룬다.
+
 ### Unreal Engine: 가상 함수 + Type Erasure 혼용
 
 ```cpp
-// UObject: 가상 함수 사용
-class UObject {
+// UObject 계층(예: AActor): 가상 함수 사용
+class AActor {
 public:
     virtual void Tick(float DeltaTime) {}
     virtual void BeginPlay() {}
@@ -1120,7 +1143,7 @@ class FProperty {
 - UObject 계층: 가상 함수(개발자 편의성).
 - 델리게이트, 프로퍼티: Type Erasure(유연성).
 
-### Unity (C++ 코어): ECS + Type Erasure
+### Unity (Entities): ECS + Type Erasure
 
 ```cpp
 // 컴포넌트는 타입별 배열 (DoD)
@@ -1212,7 +1235,14 @@ public:
         } else {
             heap_ptr_ = ::operator new(
                 sizeof(Functor), std::align_val_t{alignof(Functor)});
-            new(heap_ptr_) Functor(std::forward<F>(f));
+            try {
+                new(heap_ptr_) Functor(std::forward<F>(f));
+            } catch (...) {
+                // 생성자가 던지면 이 객체의 소멸자는 실행되지 않으므로 여기서 해제한다
+                ::operator delete(heap_ptr_, std::align_val_t{alignof(Functor)});
+                heap_ptr_ = nullptr;
+                throw;
+            }
         }
     }
 };
@@ -1255,6 +1285,9 @@ public:
         }
     }
 
+    // 암시적 대입은 참조 카운트를 갱신하지 않고 포인터만 덮어쓰므로 이중 해제를 막기 위해 삭제한다
+    sbo_shared& operator=(const sbo_shared&) = delete;
+
     ~sbo_shared() {
         if (control_ && control_->refcount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
             get()->~T();
@@ -1268,7 +1301,7 @@ public:
 };
 ```
 
-이 코드에는 본질적인 한계가 있다. inline 저장(use_sbo) 시 복사본들이 원본 객체의 `inline_storage_`를 가리키므로, 원본이 사본보다 먼저 소멸하면 댕글링이 된다. **공유 소유권과 SBO는 양립할 수 없으며**, 이것이 `std::shared_ptr`에 SBO가 없는 이유다. 위 패턴은 원본의 수명이 모든 사본보다 길다고 보장되는 제한된 상황에서만 성립한다.
+이 코드에는 본질적인 한계가 있다. inline 저장(use_sbo) 시 복사본들이 원본 객체의 `inline_storage_`를 가리키므로, 원본이 사본보다 먼저 소멸하면 댕글링이 된다. 일반 `shared_ptr`이 요구하는 안정된 대상 주소와 독립적인 소유자 수명은 **대상 주소가 고정된 단순 owner-inline SBO와 양립하기 어려우며**, 이것이 `std::shared_ptr`이 제어 블록과 객체를 별도로 두는 이유다. 위 패턴은 원본의 수명이 모든 사본보다 길다고 보장되는 제한된 상황에서만 성립한다.
 
 ### 과도한 Cache Line Alignment를 피하라
 

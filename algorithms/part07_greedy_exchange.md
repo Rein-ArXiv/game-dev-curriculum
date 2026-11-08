@@ -57,6 +57,8 @@ Greedy 규칙은 현재 부분해에서 후보 하나를 고르는 local criteri
 
 종료 시간이 가장 빠른 활동을 먼저 선택하고, 이후 시작 시간이 마지막 종료 이상인 활동 중 다시 가장 빨리 끝나는 것을 고른다.
 
+양립 가능성을 반열린 집합의 비겹침으로 정의하면 영길이 구간 $[x,x)$는 어느 구간과도 겹치지 않으므로 영길이 활동을 유효하게 취급하는 계약에서는 이를 먼저 전부 선택하고, 양의 길이($s_i<f_i$)를 가진 활동에만 종료 시간 greedy를 적용한다. 아래 코드처럼 양의 길이 활동만 다루려면 일반 활동을 $s_i<f_i$로 제한한다. 빈 활동이 제품에서 의미 없다면 그 제한을 명시하는 편이 더 간단하며, Part03의 영길이 구간 생성 계약과 맞춘다.
+
 ```cpp
 std::vector<Activity> SelectActivities(std::vector<Activity> a) {
     std::sort(a.begin(), a.end(), [](const Activity& x, const Activity& y) {
@@ -91,13 +93,13 @@ std::vector<Activity> SelectActivities(std::vector<Activity> a) {
 
 ## 3. Scheduling과 지연 최소화
 
-단일 machine에서 작업 $i$의 처리 시간 $p_i$, deadline $d_i$가 있고 완료 시간 $C_i$라 하자. 최대 지연
+단일 machine에서 모든 작업이 시간 0에 이용 가능하고($r_i=0$), 처리 시간 $p_i\ge0$이며, 비선점이고 선행·셋업 제약이 없는 문제($1\,||\,L_{max}$)를 생각하자. 작업 $i$의 완료 시간을 $C_i$라 하자. 최대 지연
 
 $$
 L_{max}=\max_i(C_i-d_i)
 $$
 
-을 최소화하려면 deadline이 빠른 순서(EDD)로 처리한다.
+을 최소화하려면 deadline이 빠른 순서(EDD)로 처리한다. 여기서 다루는 것은 $L_i=C_i-d_i$인 lateness이며, $T_i=\max(0,L_i)$로 정의하는 tardiness와는 목적 함수가 다르다. release time이나 선행 제약이 있는 job system에는 이 규칙이 그대로 확장되지 않는다.
 
 ### Inversion 교환
 
@@ -179,7 +181,7 @@ Canonical coin system인지 증명되지 않은 임의 게임 화폐에 greedy�
 - 같은 지역 asset을 묶으면 I/O locality 증가
 - 한 tower upgrade가 다른 tower 효과를 증폭
 
-Marginal gain을 매번 재계산하는 greedy가 필요할 수 있고, 그조차 최적성은 submodularity 같은 조건에 달려 있다.
+Marginal gain을 매번 재계산하는 greedy가 필요할 수 있다. 그러나 단조 submodular 최대화에서 greedy가 cardinality 제약 아래 보장하는 것은 정확한 최적이 아니라 $1-1/e$ 근사다. 예를 들어 coverage에서 $A=\{1,2,3,4\}$, $B=\{1,2,5\}$, $C=\{3,4,6\}$이고 두 집합을 고르면 greedy는 $A$ 다음 $B$를 골라 5를 얻지만, 최적은 $B\cup C$로 6이다. Greedy가 정확한 최적해를 주는 것은 matroid 위의 선형 가중치 같은 별도의 교환 구조가 있을 때다.
 
 ### Tie-break의 영향
 

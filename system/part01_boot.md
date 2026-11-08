@@ -217,12 +217,16 @@ grub_cmd_linux(grub_command_t cmd, int argc, char *argv[])
 bzImage의 구조는 다음과 같다.
 
 ```mermaid
-flowchart TB
+flowchart LR
     A["Real-mode 커널 헤더 (setup.bin)<br/>boot_params 구조체<br/>BIOS 호출 코드"]
-    B["32비트 진입점 (compressed/head_64.S)<br/>startup_32"]
-    C["압축된 커널 (vmlinux.bin.gz)<br/>실제 커널 코드<br/>.text, .data 섹션"]
-    D["압축 해제 코드 (decompress_kernel)"]
-    A --> B --> C --> D
+    B["32비트 진입점 (compressed/head_64.S)<br/>startup_32 → startup_64"]
+    C["압축된 커널 데이터 (vmlinux.bin.gz)<br/>.text, .data 섹션"]
+    D["압축 해제 및 적재 코드 (extract_kernel)"]
+    E["ELF 적재 / relocation 완료"]
+    F["적재된 커널 entry 실행"]
+    A --> B --> D
+    C -. 데이터 입력 .-> D
+    D --> E --> F
 ```
 
 ### 압축 해제 과정
@@ -280,7 +284,7 @@ asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
     /* 디버그 콘솔 초기화 */
     debug_putstr("early console in extract_kernel\n");
 
-    /* 커널 압축 해제 */
+    /* 커널 압축 해제: 출력은 아직 실행 가능한 이미지가 아니라 압축 해제된 바이트 열이다 */
     debug_putstr("Decompressing Linux... ");
 
     __decompress(input_data, input_len, NULL, NULL,
@@ -288,12 +292,17 @@ asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
 
     debug_putstr("done.\n");
 
-    /* 재배치 처리 */
+    /* PT_LOAD 세그먼트 적재와 재배치를 마쳐야 실행 가능한 이미지가 된다 */
+    parse_elf(output);
+    handle_relocations(output, output_len, virt_addr - LOAD_PHYSICAL_ADDR);
+
     debug_putstr("Booting the kernel.\n");
 
     return output;
 }
 ```
+
+압축을 푼 출력은 그대로 실행할 수 있는 이미지가 아니다. `parse_elf`가 PT_LOAD 세그먼트를 적재하고 `handle_relocations`가 재배치를 끝낸 뒤에야 `output`이 실행 가능한 커널 이미지가 된다. 이 단계를 생략하고 `decompress → output`으로 바로 점프하는 설명은 raw binary를 직접 실행하는 별도 모형일 때만 성립한다.
 
 `__decompress`는 압축 알고리즘에 따라 다른 함수를 호출한다.
 - gzip: `gunzip`
@@ -506,11 +515,8 @@ static int __ref kernel_init(void *unused)
 {
     int ret;
 
-    /* 커널 초기화 완료 대기 */
+    /* kthreadd 준비 대기와 do_basic_setup을 포함한 기본 초기화 */
     kernel_init_freeable();
-
-    /* 남은 initcall 실행 */
-    do_basic_setup();
 
     /* initramfs의 init 경로 기본값 설정 */
     if (!ramdisk_execute_command)
@@ -521,6 +527,8 @@ static int __ref kernel_init(void *unused)
         ret = run_init_process(ramdisk_execute_command);
         if (!ret)
             return 0;
+        pr_err("Failed to execute %s (error %d)\n",
+               ramdisk_execute_command, ret);
     }
 
     /* 표준 init 경로들 시도 */
@@ -798,7 +806,7 @@ AllowIsolate=yes
 타겟 전환은 다음과 같다.
 
 ```bash
-# 현재 타겟 확인
+# 설정된 기본 타겟 확인 (현재 활성 타겟과 다를 수 있음)
 $ systemctl get-default
 graphical.target
 
@@ -1069,12 +1077,15 @@ systemd의 병렬 시작은 의존성이 없는 작업을 겹칠 수 있지만, 
 
 ```bash
 # GRUB에서 'e' 눌러 편집
+# 각 파라미터: 디버그 메시지 출력, 로그 레벨 (0-7), 초기 커널 메시지,
+# initcall 실행 시간 출력, systemd 디버그.
+# 줄 연속은 backslash-newline이어야 하므로 역슬래시 뒤에 주석을 두지 않는다.
 linux /vmlinuz-5.15.0 root=UUID=xxx \
-    debug \                    # 디버그 메시지 출력
-    loglevel=7 \              # 로그 레벨 (0-7)
-    earlyprintk=serial \      # 초기 커널 메시지
-    initcall_debug \          # initcall 실행 시간 출력
-    systemd.log_level=debug   # systemd 디버그
+    debug \
+    loglevel=7 \
+    earlyprintk=serial \
+    initcall_debug \
+    systemd.log_level=debug
 ```
 
 ### 부팅 시간 분석

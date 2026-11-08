@@ -403,11 +403,11 @@ HRESULT hr = D3D11CreateDevice(
 
 ### Device의 역할
 
-Device는 자원 생성을 담당한다. `CreateBuffer`, `CreateTexture2D`, `CreateShaderResourceView`, `CreateVertexShader`, `CreatePixelShader` 등이 모두 Device의 메서드다. Device의 자원 생성 메서드는 스레드 안전하게 설계돼 있어, 여러 스레드에서 동시에 텍스처나 버퍼를 만들어도 된다. 로딩 스레드가 백그라운드에서 자원을 만드는 동안 렌더 스레드가 그리기를 계속할 수 있는 이유다.
+Device는 자원 생성을 담당한다. `CreateBuffer`, `CreateTexture2D`, `CreateShaderResourceView`, `CreateVertexShader`, `CreatePixelShader` 등이 모두 Device의 메서드다. Device의 자원 생성 메서드는 스레드 안전하게 설계돼 있어, 여러 스레드에서 동시에 텍스처나 버퍼를 만들어도 된다. 로딩 스레드가 백그라운드에서 자원을 만드는 동안 렌더 스레드가 그리기를 계속할 수 있는 이유다. 단, 이 일반론에는 예외가 있다. `D3D11_CREATE_DEVICE_SINGLETHREADED` 플래그로 만든 device는 동시 호출이 금지되므로, 애플리케이션이 접근을 직접 직렬화해야 한다.
 
 ### Immediate Context의 역할
 
-Immediate Context는 GPU 명령을 기록하고 즉시 제출한다. `IASetVertexBuffers`, `VSSetShader`, `PSSetShaderResources`, `Draw`, `DrawIndexed`, `Dispatch` 등 파이프라인 상태를 묶고 그리기를 거는 모든 메서드가 여기에 속한다. Immediate Context는 스레드 안전하지 않다. 두 스레드가 동시에 호출하면 경쟁 상태(race condition)에 빠진다. 그래서 보통 렌더 스레드 하나가 Immediate Context를 독점한다.
+Immediate Context는 기본 명령 스트림(command stream)에 명령을 기록하고 제출하는 통로다. `IASetVertexBuffers`, `VSSetShader`, `PSSetShaderResources`, `Draw`, `DrawIndexed`, `Dispatch` 등 파이프라인 상태를 묶고 그리기를 거는 모든 메서드가 여기에 속한다. 여기서 "즉시"는 deferred command list를 거치지 않고 기본 스트림에 명령을 쌓는다는 뜻이지, API 호출이 반환되는 순간 GPU가 그 명령을 실행·완료한다는 뜻이 아니다. 기록·제출·실행·완료는 서로 다른 단계이며, 명령은 runtime/driver 버퍼링을 거쳐 GPU에 제출되므로 CPU 호출 반환과 GPU 실행 완료 시점도 별개다. Immediate Context는 스레드 안전하지 않다. 두 스레드가 동시에 호출하면 경쟁 상태(race condition)에 빠진다. 그래서 보통 렌더 스레드 하나가 Immediate Context를 독점한다.
 
 이 분리의 핵심은 "상태가 어디에 사는가"다. OpenGL은 바인딩이 전역 컨텍스트에 쌓이지만, Direct3D 11은 파이프라인 상태가 Context 객체에 산다. 자원 자체(Device가 만든 것)와 그 자원을 어떻게 묶었는지(Context가 추적하는 것)가 분리돼 있어, 자원 생성과 그리기를 다른 스레드가 맡을 수 있다.
 
@@ -609,5 +609,5 @@ COM과 DXGI만으로는 그릴 데이터가 생기지 않는다. Direct3D 자원
 
 - Microsoft Learn, [Direct3D 11 Graphics](https://learn.microsoft.com/en-us/windows/win32/direct3d11/atoc-dx-graphics-direct3d-11) — 공식 프로그래밍 가이드.
 - Microsoft Learn, [DXGI Overview](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/d3d10-graphics-programming-guide-dxgi) 와 [DirectX Graphics Samples](https://github.com/microsoft/DirectX-Graphics-Samples) — 스왑체인 모델·공식 예제.
-- Raymond Chen, [The Old New Thing](https://devblogs.microsoft.com/oldnewthing/) — COM 규약의 역사·설계 배경을 다루는 1차 자료.
+- Raymond Chen, [The Old New Thing](https://devblogs.microsoft.com/oldnewthing/) — 블로그 전체를 가리키는 시리즈 홈이므로 COM 규약의 직접 근거로는 쓰지 않고, 역사·설계 배경을 찾아보는 추가 읽을거리로만 둔다.
 - Frank Luna, *Introduction to 3D Game Programming with DirectX 11* — 표준 입문서.

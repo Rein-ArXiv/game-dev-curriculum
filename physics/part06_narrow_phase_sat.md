@@ -138,7 +138,7 @@ $$
 =\frac{\operatorname{depth}_{axis}}{\|a\|}
 $$
 
-edge cross product가 거의 0이면 정규화가 노이즈를 증폭한다. $\|a\|^2<\epsilon_{\text{axis}}^2$인 축은 버린다.
+edge cross product가 거의 0이면 정규화가 노이즈를 증폭한다. face unit normal과 원시 edge×edge는 크기와 단위가 다르므로 같은 $\epsilon_{\text{axis}}^2$로 검사하면 형상을 축소했을 때 모든 edge-cross 후보를 버릴 수 있다. edge 방향을 정규화한 뒤 $\sin\theta$ 기반 각도 임계값을 쓰거나, $\|e_a\times e_b\|^2\le\epsilon_{\text{angle}}^2\|e_a\|^2\|e_b\|^2$처럼 차원이 맞는 각도 기준으로 검사한다. zero edge는 별도로 검증한다.
 
 ## 3. SAT 실행과 containment MTV
 
@@ -196,7 +196,9 @@ AxisResult EvaluateAxis(Projection a, Projection b, Vec3 axis) {
 }
 ```
 
-모든 후보 중 가장 작은 양의 분리 거리를 가진 축이 MTV 후보다. 법선 방향은 최종적으로 A에서 B로 canonicalize한다.
+`EvaluateAxis`는 discrete overlap의 MTV를 만드는 경로다. 여기서 `epsilon`은 투영 반올림을 흡수하는 *수치 허용오차*이고, contact slop/skin처럼 실제 물리 거리를 뜻하는 값이 아니다. 그래서 이 경로는 `push < -epsilon`이면 Separated로 확정한다. 양의 separation을 가진 speculative 접촉은 별도 경로로 분리한다. 두 도형의 witness separation을 signed 값으로 유지한 채 $0 < \text{separation} \le \text{speculativeDistance}$인 축을 Speculative 상태로 넘기고, `epsilon`보다 작은 작은 음수 depth가 overlap으로 통과하는 경우와 섞지 않는다.
+
+overlap 경로에서는 모든 후보 중 가장 작은 양의 분리 거리를 가진 축이 MTV 후보다. 법선 방향은 최종적으로 A에서 B로 canonicalize한다.
 
 ### 중복 축
 
@@ -268,10 +270,11 @@ SmallVector<ClipVertex, 8> ClipAgainstPlane(
     for (size_t i = 0; i < input.size(); ++i) {
         const ClipVertex& a = input[i];
         const ClipVertex& b = input[(i + 1) % input.size()];
-        const float da = SignedDistance(plane, a.position);
-        const float db = SignedDistance(plane, b.position);
-        const bool insideA = da <= epsilon;
-        const bool insideB = db <= epsilon;
+        // 판정과 교차 보간이 같은 확장 평면을 쓰도록 ε을 먼저 뺀다.
+        const float da = SignedDistance(plane, a.position) - epsilon;
+        const float db = SignedDistance(plane, b.position) - epsilon;
+        const bool insideA = da <= 0.0f;
+        const bool insideB = db <= 0.0f;
 
         if (insideA) output.push_back(a);
         if (insideA != insideB) {
@@ -283,7 +286,7 @@ SmallVector<ClipVertex, 8> ClipAgainstPlane(
 }
 ```
 
-분모 $d_a-d_b$가 매우 작으면 edge가 평면과 거의 평행하다. `insideA != insideB`인 정상 부호 교차에서는 분모가 0이 아니지만 epsilon 분류가 개입하면 매우 작을 수 있으므로 제한과 유한성 검사가 필요하다.
+이때 inside 판정과 교차 보간은 *같은 경계*를 사용해야 한다. `da`, `db`에서 ε을 미리 빼 두면 inside 판정(`da <= 0`)과 교차 파라미터 $t=d_a/(d_a-d_b)$가 동일한 확장 평면을 기준으로 계산되므로, ε 때문에 교차점이 선분 밖($t\notin[0,1]$)으로 나가는 일이 생기지 않는다. 분모 $d_a-d_b$가 매우 작으면 edge가 평면과 거의 평행하다. `insideA != insideB`인 정상 부호 교차에서는 분모가 0이 아니지만 epsilon 분류가 개입하면 매우 작을 수 있으므로 제한과 유한성 검사가 필요하다.
 
 side plane clipping이 끝난 점을 reference face plane과 비교한다.
 
@@ -327,7 +330,7 @@ struct FeaturePair {
 };
 ```
 
-clip vertex는 원래 incident vertex ID와 clipping side plane ID를 전달한다. 교차로 새 점이 생기면 두 source feature를 canonical order로 조합한다.
+clip vertex는 원래 incident vertex ID와 clipping side plane ID를 전달한다. 교차로 새 점이 생기면 두 source feature를 canonical order로 조합한다. 예를 들어 `(incidentVertex, sidePlane)`을 `(작은 ID, 큰 ID)` 순서로 묶으면 A/B 입력 순서를 바꿔 같은 교차점을 만들어도 동일한 `FeaturePair`가 나온다. A/B를 교환할 때는 `featureA`와 `featureB`, `childA`와 `childB`를 함께 바꾼다. 이 규칙은 폴리헤드럴 face pair의 clipping 점을 서로 구별하기 위한 것이며, vertex ID가 없는 smooth shape에는 그대로 적용되지 않는다.
 
 ### manifold 갱신
 
@@ -356,6 +359,8 @@ $$
 $$
 
 이면 stale contact로 본다.
+
+feature ID가 없는 smooth shape의 접촉은 vertex ID 대신 이전 접촉점과의 local anchor 근접성으로 매칭한다. 새로 생긴 점은 normal·tangent impulse를 0으로 초기화하고, 매칭된 점만 이전 값을 승계한다.
 
 ### 정렬과 결정론
 

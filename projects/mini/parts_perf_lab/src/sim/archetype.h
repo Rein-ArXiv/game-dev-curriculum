@@ -12,20 +12,26 @@ namespace ppl {
 // Archetype 변종 — chunk 기반 SoA.
 //
 // 엔티티들을 *고정 크기 chunk* 로 분할하고, 각 chunk 안에서는 SoA 레이아웃을 쓴다.
-// Unity DOTS, Bevy ECS의 모델과 같은 형태다.
+// 이 lab은 *단일 component 조합* 만 다룬다. Entity generation, component 추가·삭제,
+// query matching, archetype migration은 구현하지 않았으므로, "ECS 전체 구현"이나
+// 다른 엔진(Unity DOTS, Bevy 등)의 구체 저장 방식과 같다고 단정하지 않는다.
 //
 // 장점:
-//   - 같은 컴포넌트 조합(=archetype)의 엔티티만 한 chunk에 모이므로 branch 없이 처리.
-//   - chunk 단위 부분 처리(예: chunk 절반만 활성)가 자연스럽다.
-//   - chunk 크기를 캐시 라인 배수로 잡아 prefetch 친화적.
+//   - 같은 컴포넌트 조합을 한 chunk에 모아 chunk 내부를 SoA로 처리.
+//   - chunk 단위 부분 처리(예: 마지막 chunk의 부분 채움)가 자연스럽다.
 //
 // 단점:
-//   - chunk 경계 처리, archetype migration의 부담.
-//   - 같은 archetype에서는 단순 SoA 대비 이득이 거의 없다(이 시뮬이 그 케이스).
+//   - chunk 경계 처리와 (전체 ECS로 확장할 때) archetype migration의 부담.
 //
-// 이 시뮬은 모든 엔티티가 같은 archetype(pos+vel)이라, *측정상* 으로는 SoA와
-// 거의 같은 결과가 나오는 게 정상이다. 차이가 미미하다는 것을 보여 주는 것이
-// 비교의 의도다.
+// Chunk의 네 배열 payload 합은 256*4float*4 = 4096 바이트지만, size 멤버와 정렬을
+// 포함한 sizeof(Chunk)는 그보다 크다(이번 x86-64 빌드에서 4104, alignof 8). 즉
+// "payload가 캐시 라인 배수"와 "구조체 전체가 캐시 라인 배수"는 다르다. 64바이트
+// 정렬(alignas)을 추가하면 padding 비용이 더 늘어난다.
+//
+// 이 시뮬은 모든 엔티티가 같은 component 조합이라, 단순 SoA와 큰 차이가 안 날
+// 수 있다. 다만 "SoA≈Archetype이어야 정상"이라는 결론을 미리 정하지 않는다.
+// 같은 결과를 내는 정확성과 측정 조건이 맞으면, 예상 순서가 나오지 않아도 실험은
+// 유효하다.
 class ArchetypeSimulation final : public ISimulation {
 public:
     static constexpr std::size_t kChunkCapacity = 256;

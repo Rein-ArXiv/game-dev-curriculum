@@ -63,7 +63,7 @@ stateDiagram-v2
     Active --> Draining: local close 또는 peer EOF
     Active --> Closing: protocol error 또는 reset
     Draining --> Closing: 송신 queue 소진 또는 deadline
-    Closing --> Reclaimable: in-flight I/O가 0
+    Closing --> Reclaimable: 신규 작업 차단 + 모든 I/O/completion/worker 참조 회수
     Reclaimable --> [*]
 ```
 
@@ -331,12 +331,13 @@ $$
 nonblocking 소켓을 `EWOULDBLOCK`까지 무제한으로 비우면 공격이나 과부하 때 시뮬레이션이 영원히 실행되지 않을 수 있다. 패킷 개수 또는 시간 예산을 둔다.
 
 ```cpp
-void PumpReceive(Socket& socket, Clock::time_point deadline) {
+void PumpReceive(Socket& socket, Clock::time_point softDeadline) {
     constexpr std::size_t kMaxPackets = 2048;
     std::size_t processed = 0;
 
-    while (processed < kMaxPackets && Clock::now() < deadline) {
-        auto count = ReceiveBatch(socket, receiveViews_);
+    while (processed < kMaxPackets && Clock::now() < softDeadline) {
+        const std::size_t remaining = kMaxPackets - processed;
+        auto count = ReceiveBatch(socket, receiveViews_, remaining);
         if (count == 0) {
             break;
         }
@@ -348,7 +349,7 @@ void PumpReceive(Socket& socket, Clock::time_point deadline) {
 }
 ```
 
-예산 때문에 남은 패킷은 커널 큐에 머문다. 이 상태가 반복되면 수신 지연과 drop이 증가하므로 계측을 통해 admission control이나 sharding으로 넘어가야 한다.
+개수 예산은 `ReceiveBatch`에 남은 cap을 넘겨 batch 전체가 cap을 넘지 않게 하거나, 남은 잔여분을 다음 호출로 보존해야 한다. 루프 앞에서 `processed`만 검사하고 가변 batch 전체를 처리하면 $2048$을 넘길 수 있다. 여기서 시간 예산은 이미 받은 batch의 처리 시간을 되돌릴 수 없는 *soft deadline*이고, 개수 상한은 hard cap이다. 예산 때문에 남은 패킷은 커널 큐에 머문다. edge-triggered backend에서는 예산 중단 후 미수신 데이터가 남아도 새 edge가 오지 않을 수 있으므로, 중단한 세션을 `EAGAIN`까지 읽도록 자체 ready queue에 재등록하거나 재스케줄해야 한다. 이 상태가 반복되면 수신 지연과 drop이 증가하므로 계측을 통해 admission control이나 sharding으로 넘어가야 한다.
 
 ## 4. 패킷 버퍼와 풀
 
@@ -617,11 +618,11 @@ Zero-copy, registered I/O, kernel bypass는 이 모델 위의 선택지다. 복�
 
 ## 더 읽을거리
 
-- W. Richard Stevens 외, *UNIX Network Programming, Volume 1*
+- W. Richard Stevens 외, *UNIX Network Programming, Volume 1* — 인용할 판본과 판본별 공저자 구성을 함께 명시할 것.
 - Linux man-pages, [`recvmsg(2)`](https://man7.org/linux/man-pages/man2/recvmsg.2.html), [`recvmmsg(2)`](https://man7.org/linux/man-pages/man2/recvmmsg.2.html), [`sendmmsg(2)`](https://man7.org/linux/man-pages/man2/sendmmsg.2.html)
 - Linux kernel documentation, [MSG_ZEROCOPY](https://docs.kernel.org/networking/msg_zerocopy.html)
 - Linux kernel documentation, [Scaling in the Linux Networking Stack](https://docs.kernel.org/networking/scaling.html)
 - Microsoft Learn, [RIORegisterBuffer](https://learn.microsoft.com/en-us/windows/win32/api/mswsock/nc-mswsock-lpfn_rioregisterbuffer) — Registered I/O의 등록 버퍼 계약과 함수 테이블 획득 방식.
 - Jens Axboe, [Efficient IO with io_uring](https://kernel.dk/io_uring.pdf)
-- Intel, [DPDK Programmer's Guide](https://doc.dpdk.org/guides/prog_guide/)
+- DPDK Project, [DPDK Programmer's Guide](https://doc.dpdk.org/guides/prog_guide/) — 프로젝트 guide이며 개별 기능의 직접 절 링크가 아니므로, 인용할 기능의 절과 버전을 함께 명시할 것.
 - Raj Jain, *The Art of Computer Systems Performance Analysis*

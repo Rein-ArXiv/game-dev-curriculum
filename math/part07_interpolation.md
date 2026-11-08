@@ -40,7 +40,9 @@
 |---|---|---|
 | C0 | 값이 연속 | 끊김 없이 이어지지만 *꺾임 가능* |
 | C1 | 값과 1차 도함수 (속도) 연속 | 부드럽게 이어지고 *속도 점프 없음* |
-| C2 | 값·속도·가속도 모두 연속 | *가속의 변화도 부드러움* |
+| C2 | 값·1차·2차 도함수 (속도·가속도) 연속 | *가속의 변화도 부드러움* |
+
+이 등급은 *같은 매개변수* 에서의 도함수 연속성이다. C1은 키에서 *1차 도함수 벡터 자체* (크기와 방향 모두) 가 연속이라는 뜻이며, 접선 방향만 일치하는 것보다 강하다 — 방향만 같고 크기가 다른 경우는 *G1 (geometric continuity)* 이다. C2는 *2차 도함수 벡터* 의 연속성이다. 정칙 곡선에서 C2는 곡률 연속을 함의하지만, *곡률 값이 같다는 사실만으로* 일반적인 C2 조건이 충족되지는 않는다. 속도를 재매개변수화하면 G1/G2를 C1/C2로 만들 수 있다.
 
 게임에서:
 
@@ -53,21 +55,23 @@
 
 보간 곡선이 *한 키프레임 사이* 에서는 부드럽게 정의되어도, *키프레임 자체* 에서 어떤 등급인지가 중요하다.
 
+그림의 '접선 일치'와 '접선·곡률 일치'는 *직관적 요약* 이며, 정확한 정의는 위의 도함수 연속성이다.
+
 ```mermaid
 flowchart LR
     K0[키 0] -->|C0| K1[키 1]
     K1 -->|C0| K2[키 2]
 
-    K0 -->|C1| K1b[키 1<br/>접선 일치]
+    K0 -->|C1| K1b[키 1<br/>1차 도함수 벡터 연속<br/>접선 방향만 맞는 G1과 구분]
     K1b -->|C1| K2b[키 2]
 
-    K0 -->|C2| K1c[키 1<br/>접선·곡률 일치]
+    K0 -->|C2| K1c[키 1<br/>2차 도함수 벡터 연속<br/>정칙 곡선에서 곡률 연속을 함의]
     K1c -->|C2| K2c[키 2]
 ```
 
 - **C0 만**: 각 키 사이를 직선으로 잇기. 키마다 *방향 갑자기 바뀜* 가능.
-- **C1**: 키 양쪽의 *접선이 일치*. 키를 지날 때 *속도 안 끊김*.
-- **C2**: 접선과 *곡률* 모두 일치. *가속도 점프 없음*.
+- **C1**: 키 양쪽의 *1차 도함수 벡터가 일치*. 키를 지날 때 *속도 안 끊김*. 접선 방향만 맞는 G1과 구분한다.
+- **C2**: *2차 도함수까지 일치*. 정칙 곡선에서 곡률 연속을 함의하고 *가속도 점프 없음*.
 
 게임 카메라가 *키프레임 시퀀스* 를 따라갈 때 C0 이면 *키마다 카메라가 흔들리는* 느낌. C1 이면 매끄럽지만 *가속이 갑자기 변함*. C2 가 가장 자연스럽지만 *비싸다*.
 
@@ -102,7 +106,7 @@ T Lerp(T a, T b, float t) {
 }
 ```
 
-자주 사용하는 *최적화 형태* `a + (b - a) * t`. 곱셈이 한 번 적다. 부동소수점은 분배법칙이 성립하지 않아 두 식은 다른 함수이고, 컴파일러도 (`-ffast-math` 없이는) 서로 바꿔 최적화하지 않는다. 부동소수점 정밀도 측면에서는 두 형태가 *키 양 끝에서 비트 단위 차이* 가 있을 수 있다 — 일반 게임 코드에서는 무관.
+자주 사용하는 *최적화 형태* `a + (b - a) * t`. 곱셈이 한 번 적다. 부동소수점은 분배법칙이 성립하지 않아 두 식은 다른 함수이고, 컴파일러도 (`-ffast-math` 없이는) 서로 바꿔 최적화하지 않는다. 정밀도 차이는 비트 끝자리 문제에 그치지 않는다: 양 끝 $a, b$ 가 유한해도 $b - a$ 가 overflow하면 보간 구간 전체가 Inf가 될 수 있고, $t = 1$ 에서도 반올림 때문에 $b$ 를 정확히 돌려주지 못할 수 있다. 일반 게임 범위에서는 무관하지만, 넓은 입력 범위가 가능하면 *입력 범위 제한* 을 계약으로 두거나 `std::lerp` 처럼 endpoint와 유한성을 보장하는 스칼라 구현을 쓴다. 벡터는 성분별로 같은 robust lerp를 적용한다.
 
 ### 2.2 적용 가능한 타입
 
@@ -146,15 +150,18 @@ $$
 해결: *gamma 보정* (linear space 보간).
 
 ```cpp
-vec3 LerpSRGB(vec3 a, vec3 b, float t) {
-    vec3 aLin = pow(a, vec3(2.2));   // sRGB → linear
+// 감마 2.2 멱함수 근사. 표준 sRGB piecewise transfer가 아니다.
+vec3 LerpGamma22(vec3 a, vec3 b, float t) {
+    vec3 aLin = pow(a, vec3(2.2));   // 감마 2.2 → 근사 linear
     vec3 bLin = pow(b, vec3(2.2));
     vec3 cLin = Lerp(aLin, bLin, t);  // linear에서 보간
-    return pow(cLin, vec3(1.0/2.2)); // linear → sRGB
+    return pow(cLin, vec3(1.0/2.2)); // 근사 linear → 감마 2.2
 }
 ```
 
-게임 셰이더는 *대부분 linear 공간에서 작업* 후 *최종 출력에서만 gamma 적용*. 색상 보간이 자연스러운 형태로.
+이 함수는 *감마 2.2 멱함수 근사* 다. 표준 sRGB는 *선형 toe 구간을 가진 piecewise transfer* 라서 정확한 sRGB 변환이 아니다. 정밀한 변환이 필요하면 표준 transfer를 구현한다. 또한 *linear light에서의 평균* 이 모든 지각적 중간색을 보장하지는 않으며, *알파 premultiplication* 과 *지각적 (perceptual) 색상 보간* 은 별도의 목적과 기법이다.
+
+게임 셰이더는 *대부분 linear 공간에서 작업* 후 *최종 출력에서만 gamma 적용*. 색상 보간이 자연스러운 형태로. 최종 sRGB 인코딩에는 멱함수 근사 대신 표준 piecewise transfer를 쓴다.
 
 ### 2.5 Lerp의 일반화: 가중 평균
 
@@ -305,12 +312,18 @@ T HermiteInterpolate(T p0, T m0, T p1, T m1, float t) {
 
 ### 4.5 키 사이 연속성
 
-여러 키프레임 사이를 Hermite로 잇는 게 일반적. *키의 두 접선 (오른쪽으로 가는 접선·왼쪽에서 오는 접선) 을 일치* 시키면 C1 보장.
+여러 키프레임 사이를 Hermite로 잇는 게 일반적. *키의 두 접선 (오른쪽으로 가는 접선·왼쪽에서 오는 접선) 을 일치* 시키면 C1 보장. 다만 이 접선 숫자의 의미는 *매개변수 구간 길이* 에 묶여 있다. 위 코드의 $t$ 는 각 구간에서 $[0,1]$ 이지만, 실시간 키라면 구간 길이 $\Delta t_i = t_{i+1} - t_i$ 가 서로 다를 수 있다. 같은 접선 숫자를 넣어도 *물리 속도* 는 $\vec{m} / \Delta t_i$ 이므로 $\Delta t_i$ 가 다르면 키에서 속도가 불연속이다. 키에 *물리 속도* $\vec{v}_i$ 를 저장하고 구간 $i$ 에서 다음처럼 매개변수 접선으로 환산한다.
+
+$$
+\vec{m}_0 = \vec{v}_i \, \Delta t_i, \quad \vec{m}_1 = \vec{v}_{i+1} \, \Delta t_i
+$$
+
+그러면 각 구간의 $d\vec{p}/dt = \vec{m}/\Delta t_i = \vec{v}$ 가 되어 키에서 *시간 기준 C1* 이 성립한다. 같은 접선 숫자를 그대로 쓰는 것은 구간 길이가 모두 1일 때만 이 조건을 만족한다.
 
 ```cpp
 struct HermiteKey {
     vec3  position;
-    vec3  tangent;   // 양쪽 접선이 일치 = C1 보장
+    vec3  tangent;   // 매개변수 접선. 시간 간격이 다르면 구간별 v*Δt로 환산
 };
 
 vec3 HermitePath(const std::vector<HermiteKey>& keys, float t) {
@@ -324,7 +337,7 @@ vec3 HermitePath(const std::vector<HermiteKey>& keys, float t) {
 }
 ```
 
-각 키에서 *왼쪽 끝 접선 = 오른쪽 시작 접선*. 자동으로 C1.
+구간 길이가 모두 같을 때 각 키에서 *왼쪽 끝 접선 = 오른쪽 시작 접선* 이면 C1. 구간 길이가 다르면 위의 $\vec{v}\Delta t$ 환산이 함께 필요하다.
 
 C2 까지 보장하려면 *키마다 곡률 정보 (2차 도함수)* 도 일치시켜야 — *비싸다*. 게임 카메라는 보통 C1 으로 충분.
 
@@ -482,11 +495,13 @@ $$
 
 | $\tau$ | 효과 |
 |---|---|
-| $0.0$ | 직선 (각 키에서 꺾임) |
+| $0.0$ | 각 구간이 직선이지만 양끝 정지 ($3t^2-2t^3$ smoothstep 속도). 키마다 꺾임 |
 | $0.5$ | 표준 Catmull-Rom |
 | $1.0$ | 큰 곡률 (overshoot 가능) |
 
 게임 에디터의 *긴장도 슬라이더* 가 디자이너가 곡선의 *부드러움 정도* 를 조절하는 도구.
+
+$\tau = 0$ 은 *정속 직선 Lerp* 가 아니다. 양 끝 접선이 0이라 각 구간은 직선 모양이되 양끝에서 멈췄다가 다시 가속하고, 키에서는 기하 경로가 꺾인다. 또한 이 글의 $\tau$ 는 Catmull-Rom 계수 관례이고, 다른 도구의 *tension* $T$ 와는 $\tau = (1-T)/2$ 처럼 다른 매개변수다. 어느 관례를 쓰는지 코드·UI에서 명시한다.
 
 ### 6.3 게임 활용
 
@@ -588,9 +603,12 @@ Riemann sum 형태. N 이 크면 정확. 32 ~ 64 분할이 *대부분 게임에 
 ```cpp
 struct ArcLengthLUT {
     std::vector<float> tValues;     // 균등 s에 대응하는 t
-    float totalLength;
+    float totalLength = 0.0f;
+    bool  built       = false;
 
     void Build(const Curve& c, int sampleCount = 64) {
+        built = false;
+        if (sampleCount < 1) return;              // 표본수 검사
         // 1. 균일 t로 표본 + 호 길이 계산
         std::vector<float> samples(sampleCount + 1);
         samples[0] = 0;
@@ -603,18 +621,30 @@ struct ArcLengthLUT {
         }
         totalLength = samples.back();
 
-        // 2. 균등 s 인덱스에 대응하는 t 찾기
         tValues.resize(sampleCount + 1);
+        if (totalLength <= 0.0f) {
+            // 영길이 곡선 — 0으로 나누지 않도록 균등 t로 채우고 종료.
+            for (int i = 0; i <= sampleCount; ++i)
+                tValues[i] = float(i) / sampleCount;
+            built = true;
+            return;
+        }
+
+        // 2. 균등 s 인덱스에 대응하는 t 찾기
         for (int i = 0; i <= sampleCount; ++i) {
             float targetS = totalLength * (float(i) / sampleCount);
             tValues[i] = FindTForS(samples, targetS, sampleCount);
         }
+        built = true;
     }
 
     float TFromS(float s) const {
+        if (!built || tValues.size() < 2 || totalLength <= 0.0f) return 0.0f;
+        // s를 [0, totalLength]로 clamp — 끝점 포함.
+        s = std::clamp(s, 0.0f, totalLength);
         float idx = (s / totalLength) * (tValues.size() - 1);
         int   i0  = std::clamp(int(idx), 0, int(tValues.size()) - 2);
-        float frac = idx - i0;
+        float frac = std::clamp(idx - i0, 0.0f, 1.0f);
         return Lerp(tValues[i0], tValues[i0 + 1], frac);
     }
 };
@@ -629,11 +659,15 @@ struct ArcLengthLUT {
 ```cpp
 // 매 프레임
 distance += speed * dt;
+// 순환 트랙이면 끝 범위를 넘지 않도록 감는다.
+if (loop) distance = std::fmod(distance, lut.totalLength);
+// 일회성 트랙은 LUT가 s를 [0, totalLength]로 clamp하므로
+// 끝을 넘겨도 t <= 1이고 마지막 점에 머문다.
 float t = lut.TFromS(distance);
 character.position = curve.At(t);
 ```
 
-*거리 누적* + *호 길이 LUT 변환*. 곡선 모양에 무관하게 *균등 속도*.
+*거리 누적* + *호 길이 LUT 변환*. 곡선 모양에 무관하게 *균등 속도*. LUT가 `s` 를 $[0, \text{totalLength}]$ 로 clamp하므로 `distance` 가 끝을 넘어도 $t \le 1$ 이 보장된다. 순환 트랙은 `distance` 를 직접 감고, 일회성 트랙은 도달 시 정지한다. 8편 스플라인의 `ArcLengthLUT` 구현도 같은 계약 (미빌드/영길이 검사, s clamp, 끝점 처리) 을 쓴다.
 
 ### 7.6 적용 시나리오
 
@@ -743,30 +777,41 @@ Robert Penner가 2002년 저서 (*Programming Macromedia Flash MX* 의 easing �
 
 이 함수들의 *1차 도함수* 가 *속도 곡선* 이다.
 
-- *Ease-out*: 끝에서 도함수 0 — *완전 정지로 부드러움*.
-- *Ease-in*: 시작에서 도함수 0 — *천천히 시동*.
-- *Bounce*: 도함수가 *불연속점 여러 개* — *튕김 느낌*.
+- **Ease-out 계열**: 끝으로 갈수록 느려지는 *경향* 이 있지만 *끝 도함수가 항상 0인 것은 아니다*. Quadratic·Cubic 등은 끝 도함수 0이지만, Bounce는 마지막 튕김 직후라 끝 도함수가 0이 아니고, Elastic은 endpoint 분기 때문에 작은 불연속을 가질 수 있다.
+- **Ease-in 계열**: 시작이 느린 경향. Expo $2^{10(t-1)}$ 는 $t=0$ 에서 $2^{-10}$ 로 0이 아니며, 정확한 0이 필요하면 endpoint 분기를 둔다.
+- **Bounce/Elastic**: 도함수 불연속점이 여러 개 — *튕김·진동 느낌*.
+
+함수 이름은 *미분 보장* 을 뜻하지 않으므로, 각 함수의 끝값·끝 도함수·불연속 여부를 확인하고 쓴다. 주요 예:
+
+| 함수 | $f(0)$ | $f(1)$ | 끝 도함수 | 비고 |
+|---|---|---|---|---|
+| EaseOutQuad | 0 | 1 | 0 | |
+| EaseOutCubic | 0 | 1 | 0 | |
+| EaseOutBounce | 0 | 1 | $\ne 0$ | 마지막 튕김 구간의 접선이 유한 |
+| EaseOutElastic | 0 | 1 | $\ne 0$ | 식의 극한값과 endpoint 사이에 작은 불연속 가능 |
+| EaseInExpo $2^{10(t-1)}$ | $2^{-10}$ | 1 | | 시작값이 정확히 0이 아님 |
 
 게임 디자이너가 *easing 함수 미분 그래프* 를 보면 *어떤 느낌인지* 직관 가능.
 
 ### 8.7 커스텀 곡선 — Bezier 기반 Easing
 
-CSS의 `cubic-bezier(0.42, 0, 0.58, 1.0)` 같은 형태. *3차 Bezier* 의 시작·끝을 (0,0), (1,1) 로 고정하고 *두 제어점 (x, y) 로 모양 결정*.
+CSS의 `cubic-bezier(0.42, 0, 0.58, 1.0)` 같은 형태. *3차 Bezier* 의 시작·끝을 (0,0), (1,1) 로 고정하고 *두 제어점 (x, y) 로 모양 결정*. CSS 사양에서 $p_{1x}, p_{2x}$ 는 $[0,1]$ 로 제한된다 — 그래야 $x(t)$ 가 단조라서 $x = t$ 의 역이 유일하다. 임의의 $x$ 제어값을 허용하면 $x(t)$ 가 비단조가 되어 한 $x$ 에 여러 매개변수가 대응하고 역함수가 유일하지 않다. 시작·끝이 고정되어 $f(0)=0, f(1)=1$ 이다.
 
 이 형태의 장점은 *디자이너가 시각적으로 곡선을 그려* easing 함수를 만들 수 있다는 것. Penner의 표준 카탈로그를 넘어 *프로젝트 고유* 의 감각.
 
 ```cpp
 float CustomEasing(float t, float p1x, float p1y, float p2x, float p2y) {
-    // 3차 Bezier: (0,0), (p1x, p1y), (p2x, p2y), (1,1)
-    // x = t로 푸는 역함수 후 y 반환 (Newton 또는 binary search)
+    // 3차 Bezier: (0,0), (p1x, p1y), (p2x, p2y), (1,1). p1x, p2x ∈ [0,1].
+    // x = t로 푸는 역함수 후 y 반환.
+    // bracket [0,1]을 유지하는 Newton + 이분법 safeguard.
     float foundT = SolveBezierX(t, p1x, p2x);
     return EvaluateBezierY(foundT, p1y, p2y);
 }
 ```
 
-Newton 또는 이분 탐색으로 *x = t 에 해당하는 매개변수* 를 찾고 *y 좌표 반환*. 비싸지만 *디자인 자유도* 가 압도적.
+`SolveBezierX` 는 $x(t)$ 가 $[0,1]$ 에서 단조임을 전제로 bracket $[0,1]$ 을 유지하는 Newton 반복에 이분법 safeguard를 더하고, $t = 0, 1$ 은 endpoint로 그대로 돌려준다. *x = t 에 해당하는 매개변수* 를 찾고 *y 좌표 반환*. 비싸지만 *디자인 자유도* 가 압도적.
 
-게임 엔진의 *Animation Curve* (Unity) / *Timeline Curve* (Unreal) 가 이 패턴.
+게임 엔진의 *AnimationCurve* (Unity) / *Timeline curve* (Unreal) 도 시간-값 곡선을 제공하지만, 내부 표현이 이 CSS식 Bezier와 같다고 단정하지 않는다 — 가중/비가중 접선 (weighted/unweighted tangent) 을 가진 Hermite 계열로 표현하는 경우가 많고, 접선·보간 모드를 별도 API로 다룬다.
 
 
 ---

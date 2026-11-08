@@ -345,7 +345,7 @@ void main() {
 
 흐름은 다음과 같다. 이 예제의 local size가 32이므로 CPU는 `ceil(meshletCount / 32)`개의 Task Shader 워크그룹을 dispatch한다. 마지막 워크그룹의 남는 invocation은 `id < meshletCount` 검사로 거른다. Task Shader가 메시릿 단위로 절두체 컬링과 백페이스 콘 컬링을 수행하고, 살아남은 메시릿 인덱스를 페이로드에 모은다. `EmitMeshTasksEXT`가 살아남은 개수만큼 Mesh Shader 워크그룹을 발급하고, 페이로드를 통해 어떤 메시릿을 그릴지 전달한다.
 
-이 구조의 효과는 정량적으로 크다. 수천만 폴리곤 씬에서 실제 화면에 보이는 폴리곤은 픽셀 수에 가깝게 수렴하므로, 절두체 밖이나 뒷면 메시릿을 GPU에서 일찍 버리면 정점 변환과 래스터화 비용이 화면 해상도에 비례하는 수준으로 줄어든다. CPU는 dispatch 한 번만 하면 되므로 드로우 콜 비용도 사라진다.
+이 구조의 효과는 크지만, 컬링이 처리량을 자동으로 화면 픽셀 수에 비례하도록 제한한다고 단정할 수는 없다. 화면 안에 아주 작은 정면 메시릿을 많이 놓으면 절두체·백페이스 컬링을 모두 통과하므로, 해상도가 고정돼도 살아남는 메시릿 수는 늘어난다. 이 코드가 하는 일은 컬링 단계의 visibility rejection이고, 픽셀 수에 가까운 기하 예산은 LOD·오클루전 컬링·screen-space error·별도 geometry budget 정책으로 제한해야 한다. 다만 절두체 밖이나 뒷면 메시릿을 GPU에서 일찍 버리는 것만으로도 정점 변환·래스터화 낭비가 크게 줄고, CPU는 dispatch 한 번으로 드로우 콜 비용을 없앨 수 있다.
 
 `EmitMeshTasksEXT`는 워크그룹의 *모든 invocation* 이 uniform control flow에서 정확히 한 번 호출해야 한다. 인자는 첫 invocation의 값이 사용되고 호출 자체가 `barrier()`를 암시한다. 대표 스레드만 조건부로 호출하면 미정의 동작이다. 위 코드의 앞선 배리어는 `visibleCount`와 페이로드 집계가 끝난 뒤 모든 invocation이 같은 호출 지점으로 오게 한다.
 
@@ -469,7 +469,7 @@ flowchart TB
     AS --> MS[Miss<br/>어디에도 안 맞음]
 ```
 
-Ray Generation 셰이더가 진입점이다. 픽셀마다 한 번씩 호출되어 카메라에서 광선을 만들어 `traceRayEXT`로 발사한다. 발사된 광선은 Acceleration Structure를 순회하며 교차를 찾는다. 가장 가까운 교차가 확정되면 Closest Hit 셰이더가 그 표면의 셰이딩을 계산한다. Any Hit는 교차가 발견될 때마다 호출되어 투명 표면을 통과시킬지 결정한다. Intersection은 삼각형이 아닌 사용자 정의 프리미티브(구, 복셀 등)의 교차 판정을 직접 구현할 때만 쓴다. 광선이 어떤 표면에도 닿지 않으면 Miss 셰이더가 호출되어 배경색이나 환경 맵을 반환한다.
+Ray Generation 셰이더가 진입점이다. 픽셀마다 한 번씩 호출되어 카메라에서 광선을 만들어 `traceRayEXT`로 발사한다. 발사된 광선은 Acceleration Structure를 순회하며 교차를 찾는다. 가장 가까운 교차가 확정되면 Closest Hit 셰이더가 그 표면의 셰이딩을 계산한다. Any Hit는 광선이 허용된 *후보 교차*를 지날 때 호출되어 그 교차를 계속 처리할지 결정한다. 모든 기하 교차마다 반드시 호출되는 것은 아니다. opaque 플래그가 설정된 교차, 이미 확정된 hit보다 먼 교차, ray/instance 컬링으로 제거된 교차는 건너뛸 수 있고 API·플래그에 따라 중복 호출 보장도 다르다. opaque는 종료(terminate)나 무시(ignore) 계약으로 처리한다. Intersection은 삼각형이 아닌 사용자 정의 프리미티브(구, 복셀 등)의 교차 판정을 직접 구현할 때만 쓴다. 광선이 어떤 표면에도 닿지 않으면 Miss 셰이더가 호출되어 배경색이나 환경 맵을 반환한다.
 
 ## 7. Acceleration Structure 빌드
 
@@ -716,7 +716,9 @@ void main() {
     // ... PBR 셰이딩 ...
     vec3  L    = normalize(lightPos - worldPos);
     float dist = length(lightPos - worldPos);
-    bool shadowed = TraceShadow(worldPos + L * 0.001, L, dist);
+    vec3  shadowOrigin = worldPos + L * 0.001;
+    float shadowDist   = length(lightPos - shadowOrigin);   // 옮긴 origin에서 다시 계산해 TMax로 쓴다
+    bool shadowed = TraceShadow(shadowOrigin, L, shadowDist);
     if (!shadowed) {
         color += directLighting;
     }
@@ -725,7 +727,7 @@ void main() {
 
 Ray Query는 기존 래스터 파이프라인에 광선 기반 효과를 점진적으로 얹기 좋다. 이미 동작하는 PBR 프래그먼트 셰이더에 그림자 광선 한 줄을 추가하면 화면 공간 그림자의 한계를 넘는 정확한 그림자를 얻는다. `gl_RayFlagsTerminateOnFirstHitEXT`는 첫 교차에서 순회를 멈추라는 플래그로, 그림자는 가림 여부만 알면 되므로 가장 가까운 교차를 끝까지 찾을 필요가 없다. 이 플래그가 그림자 광선의 비용을 크게 줄인다.
 
-광선 시작점에 `L * 0.001`을 더하는 것은 자기 그림자(self-shadowing) 아티팩트, 즉 표면이 자신을 그림자로 가리는 문제를 막기 위한 오프셋이다. 부동소수점 정밀도 때문에 광선 시작점이 표면 바로 위에 있으면 자기 자신과 교차할 수 있다. 이 오프셋이 작으면 여전히 줄무늬가 남고, 크면 그림자가 표면에서 떠 보인다. 장면 스케일에 맞춰 조정하는 값이다.
+광선 시작점에 `L * 0.001`을 더하는 것은 자기 그림자(self-shadowing) 아티팩트, 즉 표면이 자신을 그림자로 가리는 문제를 막기 위한 오프셋이다. 부동소수점 정밀도 때문에 광선 시작점이 표면 바로 위에 있으면 자기 자신과 교차할 수 있다. 이 오프셋이 작으면 여전히 줄무늬가 남고, 크면 그림자가 표면에서 떠 보인다. 장면 스케일에 맞춰 조정하는 값이다. 오프셋으로 origin을 옮긴 뒤에는 광원까지의 거리도 그 origin에서 다시 계산해 TMax로 써야 한다. 옮기기 전 거리를 그대로 유지하면 광선 끝이 광원 뒤로 넘어가, 광원 뒤쪽의 가림체를 그림자로 잘못 판정할 수 있다.
 
 ## 9. 세 기술의 조합 시나리오
 

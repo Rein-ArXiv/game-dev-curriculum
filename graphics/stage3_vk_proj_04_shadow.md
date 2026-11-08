@@ -175,11 +175,15 @@ Vulkan의 NDC 깊이 범위는 OpenGL의 [-1, 1]이 아니라 [0, 1]이다. 위 
     for (auto& c : worldCorners) center += c;
     center /= 8.0f;
 
+    // lightDir이 (0,±1,0)에 가까우면 고정 up과 평행해 lookAt 기저가 퇴화한다.
+    glm::vec3 up =
+        std::abs(glm::dot(glm::normalize(lightDir), glm::vec3(0, 1, 0))) < 0.999f
+            ? glm::vec3(0, 1, 0) : glm::vec3(0, 0, 1);
     glm::mat4 lightView =
-        glm::lookAt(center - lightDir * 50.0f, center, glm::vec3(0, 1, 0));
+        glm::lookAt(center - lightDir * 50.0f, center, up);
 ```
 
-여기서 `nearSplit`과 `farSplit`은 카메라부터의 거리이며, near 코너에서 far 코너로 향하는 광선 위의 점으로 보간한다. 빛 카메라를 구간 중심에서 임의의 50m만 물리는 방식은 장면 크기에 종속되어 caster를 잘라낼 수 있다. Receiver sub-frustum의 light-space 범위에 더해 그림자를 투사할 수 있는 caster bounds를 포함하고, 그 결과로 직교 투영의 near/far를 계산해야 한다.
+여기서 `nearSplit`과 `farSplit`은 카메라부터의 거리이며, near 코너에서 far 코너로 향하는 광선 위의 점으로 보간한다. 빛 카메라를 구간 중심에서 임의의 50m만 물리는 방식은 장면 크기에 종속되어 caster를 잘라낼 수 있다. Receiver sub-frustum의 light-space 범위에 더해 그림자를 투사할 수 있는 caster bounds를 포함하고, 그 결과로 직교 투영의 near/far를 계산해야 한다. `lightDir`이 (0,±1,0)에 가까우면 고정 up `(0,1,0)`과 평행해져 `lookAt`의 오른쪽 축 길이가 0이 되므로, 평행할 때는 `(0,0,1)` 같은 다른 축을 고른다. 안정된 orthonormal basis helper를 쓰는 경우에도 이 평행 입력 처리를 helper 계약으로 명시한다.
 
 ### 빛 공간 AABB와 투영 행렬
 
@@ -214,10 +218,13 @@ CSM의 가장 눈에 띄는 아티팩트는 카메라가 움직이거나 회전�
     // 5'. 투영 직전, AABB를 텍셀 격자에 스냅한다.
     float worldUnitsPerTexel = std::max(maxV.x - minV.x, maxV.y - minV.y) / shadowMapSize;
 
+    const float rawMaxX = maxV.x, rawMaxY = maxV.y;   // 원본 최대 경계 보존
     minV.x = std::floor(minV.x / worldUnitsPerTexel) * worldUnitsPerTexel;
     minV.y = std::floor(minV.y / worldUnitsPerTexel) * worldUnitsPerTexel;
-    maxV.x = minV.x + worldUnitsPerTexel * shadowMapSize;
-    maxV.y = minV.y + worldUnitsPerTexel * shadowMapSize;
+    // max=min+기존 폭으로 두면 원본 최대 경계가 잘릴 수 있으므로, 스냅된 bounds가
+    // 원본을 포함하도록 필요할 때만 확장한다(포함 보장과 안정화는 별개).
+    maxV.x = std::max(rawMaxX, minV.x + worldUnitsPerTexel * shadowMapSize);
+    maxV.y = std::max(rawMaxY, minV.y + worldUnitsPerTexel * shadowMapSize);
 ```
 
 light-space 투영 원점과 폭을 텍셀 격자에 맞추면 작은 카메라 이동이 그림자 투영을 매 프레임 부분 텍셀씩 흔드는 현상을 줄일 수 있다. 이것만으로 모든 shimmer가 사라지는 것은 아니다. 표면이 그림자 텍셀을 가로지르는 투영 aliasing, 움직이는 광원·물체, bias와 필터 변화는 남는다. 절두체 조각의 외접구 반지름으로 정사영 폭을 정하면 카메라 회전에 따른 폭 변화를 줄일 수 있지만, FOV·aspect·split 거리 변경에는 다시 계산해야 한다. 스냅은 light-space의 두 축과 실제 shadow-map 해상도를 기준으로 적용한다.
@@ -229,7 +236,7 @@ for (auto& c : worldCorners) radius = std::max(radius, glm::length(c - center));
 radius = std::ceil(radius * 16.0f) / 16.0f;   // 미세 변동 흡수
 ```
 
-폭 고정과 텍셀 스냅을 함께 적용해야 떨림이 완전히 사라진다. 둘 중 하나만 적용하면 회전 시에는 여전히 끓는다.
+폭 고정과 텍셀 스냅을 함께 적용하면 카메라 이동에 따른 부분 텍셀 흔들림의 한 종류를 줄일 수 있다. 다만 위에서 스냅하는 값은 카메라를 따라 함께 움직이는 light-view 공간의 로컬 AABB이므로, 같은 월드 표면의 텍셀 위상까지 월드에 고정되지는 않는다. 진짜 stable CSM을 원하면 orientation을 고정하고 폭을 외접구 등으로 안정화한 뒤, 월드에 고정된 light basis/anchor에서 중심(또는 최종 shadow origin)의 텍셀 좌표를 스냅해야 한다. 둘 중 하나만 적용하면 회전 시에는 여전히 끓고, 이 처리만으로 모든 shimmer가 사라진다고 단정하지 않는다.
 
 ## 4. Texture Array로 캐스케이드 저장
 
@@ -339,12 +346,13 @@ b.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
 vkCmdPipelineBarrier(cmd,
+    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
     VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,   // 깊이 쓰기 완료 지점
     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,       // 샘플링 시작 지점
     0, 0, nullptr, 0, nullptr, 1, &b);
 ```
 
-`subresourceRange`의 `layerCount`를 `CASCADE_COUNT`로 두어 모든 층을 한 번에 전이한다. 이 배리어를 빠뜨리면 검증 레이어가 레이아웃 불일치를 보고하거나, 운이 나쁘면 메인 패스가 아직 쓰이지 않은 깊이를 읽어 그림자가 깜빡인다. 그림자 디버깅에서 가장 먼저 의심할 지점이 이 동기화다.
+깊이 쓰기는 early 또는 late fragment tests 단계에서 일어날 수 있으므로 producer 범위에 두 stage를 모두 둔다. 이 배리어는 해당 depth image의 이전 프레임 재사용이나 layout transition·queue ownership까지 보장하지는 않으므로, 그런 외부 계약은 완료 fence나 소유권 이전 절차로 별도로 맞춘다. `subresourceRange`의 `layerCount`를 `CASCADE_COUNT`로 두어 모든 층을 한 번에 전이한다. 이 배리어를 빠뜨리면 검증 레이어가 레이아웃 불일치를 보고하거나, 운이 나쁘면 메인 패스가 아직 쓰이지 않은 깊이를 읽어 그림자가 깜빡인다. 그림자 디버깅에서 가장 먼저 의심할 지점이 이 동기화다.
 
 ## 5. Geometry Shader와 Multiview
 

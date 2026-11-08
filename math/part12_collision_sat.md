@@ -518,10 +518,11 @@ OBB-OBB 는 변 후보가 적다 (3축씩) — 외적 9개. 일반 다면체는 
 std::vector<vec3> EdgeEdgeAxes(const Polyhedron& a, const Polyhedron& b) {
     std::vector<vec3> axes;
     for (auto& ea : a.edges) {
-        vec3 dirA = ea.end - ea.start;
+        vec3 dirA = normalize(ea.end - ea.start);   // 방향만 사용 — 길이 제거
         for (auto& eb : b.edges) {
-            vec3 dirB = eb.end - eb.start;
-            vec3 c = cross(dirA, dirB);
+            vec3 dirB = normalize(eb.end - eb.start);
+            vec3 c = cross(dirA, dirB);             // |c| = sin(각)
+            // 절대 길이가 아니라 *각도* 기준. 모델을 축소해도 후보가 사라지지 않는다.
             if (length_squared(c) > 1e-6f) {
                 axes.push_back(normalize(c));
             }
@@ -531,7 +532,7 @@ std::vector<vec3> EdgeEdgeAxes(const Polyhedron& a, const Polyhedron& b) {
 }
 ```
 
-n × m 외적. *고차 다면체에 부적합*.
+n × m 외적. *고차 다면체에 부적합*. 정규화한 변 방향끼리의 외적이라 임계값이 *각도* 를 뜻하므로 물체 크기와 무관하다. 평행에 가까운 변 쌍의 축을 생략하는 것은 *보수적* 근사로, 그 경우 실제로는 분리인 배치를 교차로 볼 수 있으므로 임계값과 근사 정책을 명시한다.
 
 ### 6.4 Gauss Map 기반 최적화
 
@@ -572,6 +573,8 @@ struct SATResult {
     vec3  normal;
 };
 
+// 중심 대칭 투영 (OBB 등) 전용. 일반 폴리토프는 구간 끝점 기준 push 를
+// 쓴다 (4.3절). centerDelta 부호 비교는 중심 대칭일 때만 구간 끝점과 일치.
 void TrackMinOverlap(SATResult& r, vec3 axis,
                        float halfA, float halfB,
                        vec3 centerDelta) {
@@ -590,7 +593,7 @@ void TrackMinOverlap(SATResult& r, vec3 axis,
 
 ### 7.3 MTV 의 부호와 push 방향
 
-법선의 *부호* 가 *a 가 어느 방향으로 밀려야 하는지* 결정. 두 가지 부호 처리 패턴.
+법선의 *부호* 가 *a 가 어느 방향으로 밀려야 하는지* 결정. 아래 centerDelta 기반 보정은 구간이 중심에 대해 *대칭* 인 투영 (OBB·원 등) 에서만 4.3절의 *구간 끝점 기준 push* 와 일치한다. 비대칭 볼록 다각형은 4.4절 반례처럼 중심 비교가 반대로 나올 수 있으므로, 일반 폴리토프는 4.3절 코드처럼 *구간 끝점의 push 방향* 을 직접 쓴다. 두 가지 부호 처리 패턴이 있다.
 
 **A. a → b 방향으로 통일**:
 
@@ -623,12 +626,12 @@ void ResolvePenetration(vec3& posA, vec3& posB, SATResult sat, float splitA) {
 
 ```mermaid
 flowchart LR
-    Box1[박스 1 면] -->|sutherland-hodgman 클리핑| Manifold[접촉 다각형]
+    Box1[박스 1 면] -->|sutherland-hodgman 클리핑| Manifold[기하 접촉 다각형<br/>꼭짓점 수는 더 많을 수 있음]
     Box2[박스 2 면] --> Manifold
-    Manifold --> Points[접촉점 1~4개]
+    Manifold -->|contact reduction| Points[엔진이 축약 저장한 manifold<br/>1~4점, 기하학적 상한 아님]
 ```
 
-물리 엔진은 *접촉 다각형의 코너 1~4 점* 을 contact 로 사용. *각 contact 에 임펄스* 를 적용해 *안정적 접촉 응답*.
+물리 엔진은 *접촉 다각형* 에서 *contact 를 추리거나 줄여 (contact reduction)* 제한된 개수 (흔히 1~4개) 만 저장한다. 이 개수는 *기하학적 상한이 아니라 엔진의 선택 정책 (reduction/cache 용량)* 이다 — 클리핑 다각형의 꼭짓점 수는 그보다 많을 수 있다. 각 contact 에 임펄스를 적용해 *안정적 접촉 응답* 을 만든다.
 
 이 추출 알고리즘 (Sutherland-Hodgman 클리핑 등) 은 SAT 다음 단계. Box2D / Bullet 의 *manifold 생성 코드* 가 산업 표준.
 
@@ -650,16 +653,16 @@ flowchart LR
 
 ### 8.2 볼록 분해 (Convex Decomposition)
 
-비볼록 도형을 *여러 볼록 조각으로 쪼갠다*. 각 조각이 *완전 볼록* 이라 SAT 가능.
+비볼록 도형을 *여러 볼록 조각으로 쪼갠다*. 각 조각이 *완전 볼록* 이라 SAT 가능. 분해는 일반적으로 *근사* 다 — 볼록 hull 이 오목한 빈 공간을 메워 원본보다 커질 수 있다.
 
 | 알고리즘 | 특성 |
 |---|---|
 | HACD (Hierarchical Approximate Convex Decomposition) | 메쉬 → 근사 볼록 조각, 오프라인 임포트 파이프라인용 |
-| V-HACD | HACD 개선판, 게임 엔진 표준. 보통 임포트 시 베이크 |
+| V-HACD | HACD 개선판. *근사* 볼록 분해이며 엔진·버전별 통합 범위는 제품 문서로 확인 |
 | Triangulation | 가장 단순, 조각 많음 |
 | Hand-authored | 디자이너가 직접 박스 배치 |
 
-게임 엔진 (Unity, Unreal) 이 *V-HACD 또는 hand-authored* 를 채택. 메쉬 임포트 시 *자동 분해* 또는 *디자이너가 박스로 근사*.
+Unity/Unreal 등 여러 엔진이 임포트 파이프라인에서 *볼록 분해 도구* 를 제공하거나 외부 도구를 받아들이지만, 어떤 알고리즘을 기본으로 쓰는지·자동인지 수동인지는 엔진·버전·플러그인에 따라 다르다. 분해 결과는 *근사* 라서 오목한 빈 공간을 메우는 오차가 생기고, 조각 수·hull 정확도·성능이 트레이드오프다.
 
 ### 8.3 분해 후 충돌 검사
 

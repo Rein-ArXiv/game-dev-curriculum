@@ -107,7 +107,7 @@ class VirtualFileSystem {
 
 마운트(mount) 순서가 *오버라이드 우선순위* 를 만든다. 베이스 게임 패키지를 먼저 마운트하고 패치 패키지를 나중에 마운트하면, 같은 경로의 에셋은 *패치 쪽이 이긴다* — 이것이 패치·DLC·모드의 기반이다. 원본 패키지를 건드리지 않고 *덮어쓰는 패키지를 추가* 하는 것만으로 에셋을 교체한다. 개발 모드에서는 *느슨한 파일(loose file) 디렉토리* 를 최상위로 마운트해, 패키지를 다시 굽지 않고도 개별 파일을 교체한다(7절).
 
-이 예제의 VFS는 경로를 `(패키지, 오프셋, 크기, 압축·암호화 메타데이터)`로 해석할 뿐 데이터를 읽지 않는다. 툴의 작은 동기 요청은 이 위치를 즉시 읽을 수 있지만, 런타임 스트리밍은 위치를 비동기 I/O 큐에 넘겨야 메인 스레드가 막히지 않는다. 경로 해석과 I/O 완료를 같은 `Open` 호출로 숨기면 실수로 동기 읽기를 호출하기 쉽다.
+이 예제의 VFS는 경로를 `(패키지, 오프셋, 크기, 압축·암호화 메타데이터)`로 해석할 뿐 데이터를 읽지 않는다. 툴의 작은 동기 요청은 이 위치를 즉시 읽을 수 있지만, 런타임 스트리밍은 위치를 비동기 I/O 큐에 넘겨야 메인 스레드가 막히지 않는다. 경로 해석과 I/O 완료를 같은 `Open` 호출로 숨기면 실수로 동기 읽기를 호출하기 쉽다. 비동기 요청은 해석 시점의 위치만 받아서는 안 되고 그 요청이 도는 동안 마운트가 유지되도록 요청마다 마운트 스냅샷 또는 파일 소유 핀을 함께 잡아 reader 종료까지 unmount·pak 교체를 지연해야 하며, entry의 offset/length도 발급한 pak 버전과 묶어 읽어야 한다.
 
 패키지 복호화는 VFS가 반환한 위치 뒤의 변환 단계에 둘 수 있다. 그러나 클라이언트가 복호화 키와 평문을 모두 가져야 하는 구조에서 암호화는 자산 추출 비용을 높일 뿐 비밀성을 영구 보장하지 않는다. 플랫폼 라이선스 검증인 DRM, 전송 구간 보호, 패키지 변조 검증, 에셋 난독화는 위협 모델과 키 수명이 서로 다르므로 하나의 “암호화” 기능으로 합치지 않는다.
 
@@ -136,7 +136,7 @@ struct ResourceSlot {
 };
 ```
 
-핸들은 슬롯 배열의 인덱스와 세대(generation)다. 실제 데이터 포인터는 슬롯 안에만 있으므로 재배치 시 간접 참조 지점만 바꿀 수 있다. 세대 검사는 해제 후 슬롯 재사용을 감지하지만, 카운터가 래핑되지 않을 충분한 비트 폭과 정책이 필요하다. `Resolve` 결과의 생포인터를 장기간 보관하면 다음 재배치에서 다시 무효가 되므로, 포인터 대여 범위를 프레임·잡·read guard 같은 짧은 수명으로 제한해야 한다.
+핸들은 슬롯 배열의 인덱스와 세대(generation)다. 실제 데이터 포인터는 슬롯 안에만 있으므로 재배치 시 간접 참조 지점만 바꿀 수 있다. 세대 검사는 해제 후 슬롯 재사용을 감지하지만, 카운터가 래핑되지 않을 충분한 비트 폭과 정책이 필요하다. `Resolve` 결과의 생포인터를 장기간 보관하면 다음 재배치에서 다시 무효가 되므로, 포인터 대여 범위를 프레임·잡·read guard 같은 짧은 수명으로 제한해야 한다. 또한 아래 `Resolve`는 인덱스·세대만 확인하므로 `Unloaded`·`Loading`·`Failed` 슬롯도 그대로 반환한다 — 유효한 핸들과 실제로 사용 가능한 `Loaded` 자원은 다르므로, 데이터 대여는 `Loaded`(그리고 GPU 상주)까지 확인하는 별도 질의나 read guard로 분리해야 한다.
 
 ```cpp
 ResourceSlot* Resolve(ResourceHandle h) {
@@ -154,8 +154,10 @@ ResourceSlot* Resolve(ResourceHandle h) {
 ```cpp
 ResourceHandle Acquire(uint64_t assetId) {
     ResourceHandle h = FindOrCreateSlot(assetId);
-    Resolve(h)->refCount++;          // 예제는 리소스 스레드 직렬화를 가정
-    if (Resolve(h)->state == Unloaded) RequestLoad(h);  // 첫 참조면 로드 시작
+    ResourceSlot* s = Resolve(h);
+    if (s->refCount++ == 0)          // 0→1 재참조
+        cache_.OnAcquire(h);         // eviction 후보에서 먼저 제거
+    if (s->state == Unloaded) RequestLoad(h);  // 첫 참조면 로드 시작
     return h;
 }
 
@@ -188,6 +190,14 @@ void LoadWithDependencies(ResourceHandle h) {
         ResourceHandle dep = Acquire(depId);   // 참조 카운트 +1, 재귀 로드
         Resolve(h)->heldDeps.push_back(dep);   // 내가 잡은 의존성 기록
     }
+    // Acquire 반환은 의존성 ready를 보장하지 않는다: 강한 의존성의 완료를 기다린다.
+    for (ResourceHandle dep : Resolve(h)->heldDeps) {
+        if (!WaitReadyOrFail(dep)) {           // 실패·취소는 부모로 전파
+            UnloadDependencies(h);             // 취득 도중 실패 — 이미 잡은 pin을 되돌린다
+            MarkFailed(h);
+            return;
+        }
+    }
     LoadPayload(h);
 }
 
@@ -198,7 +208,7 @@ void UnloadDependencies(ResourceHandle h) {
 }
 ```
 
-참조 카운팅은 공유 에셋의 소유자 수를 표현한다. 동일 ID의 동시 요청을 한 물리 로드로 합치는 일은 `Unloaded→Loading` 전이를 원자적으로 소유하고 나머지 요청을 같은 future에 결합하는 별도 deduplication 규칙이 담당한다. 모델 A와 B가 같은 텍스처 T를 쓰면 T의 강한 참조 수는 2이며, 둘이 모두 놓은 뒤에야 캐시·언로드 후보가 된다.
+참조 카운팅은 공유 에셋의 소유자 수를 표현한다. 동일 ID의 동시 요청을 한 물리 로드로 합치는 일은 `Unloaded→Loading` 전이를 원자적으로 소유하고 나머지 요청을 같은 future에 결합하는 별도 deduplication 규칙이 담당한다. 의존성 `Acquire`의 반환도 그 의존성이 `Loaded`임을 보장하지 않으므로, 재귀 로드가 비동기라면 모든 강한 의존성의 완료(또는 실패)를 기다린 뒤에만 부모를 `Loaded`로 게시하고, 취득 도중 실패하면 이미 잡은 의존성 참조를 되돌린다. 모델 A와 B가 같은 텍스처 T를 쓰면 T의 강한 참조 수는 2이며, 둘이 모두 놓은 뒤에야 캐시·언로드 후보가 된다.
 
 순환 의존성(A→B→A)은 참조 카운팅의 약점이다 — 서로를 잡고 있어 외부 참조가 사라져도 둘 다 0이 안 된다. 에셋 의존성은 보통 *DAG(방향 비순환 그래프)* 로 설계해 순환을 빌드 시점에 금지하는 것이 정석이다. 쿠킹 단계에서 의존성을 위상 정렬해 순환을 *빌드 에러* 로 잡는다.
 
@@ -215,7 +225,7 @@ flowchart LR
     Queue --> W2[워커 2]
     W1 -->|디스크·디코드| Done[완료 큐]
     W2 --> Done
-    Done -->|폴링·GPU 업로드| Main
+    Done -->|폴링·GPU 업로드| Pub[세대 검증 → 최종 publication gate]; Pub --> Main
 ```
 
 핵심은 작업을 *단계(stage)* 로 쪼개는 것이다. 디스크 읽기와 압축 해제는 워커가 맡는다. GPU 단계의 스레드 규칙은 API와 엔진 소유 모델에 따라 다르다. OpenGL 컨텍스트처럼 현재 스레드 제약이 있는 경우도 있고, 명시적 API처럼 워커가 커맨드를 기록하고 복사 큐에 제출할 수 있는 경우도 있다. 어느 경우든 리소스 생명주기와 제출 순서를 소유하는 렌더 계층을 통과시켜야 한다. 일반적인 파이프라인은 "디스크 → 디코드 → GPU 전송 기록·제출 → 사용 가능 신호 → 메인 통지"다.
@@ -241,17 +251,21 @@ struct LoadJob {
 struct LoadScheduler {
     std::priority_queue<LoadJob*, std::vector<LoadJob*>, ByPriority> pending_;
     std::mutex mtx_;
+    std::condition_variable cv_;
+    bool stopped_ = false;
 
     void Submit(LoadJob* job) {
-        std::lock_guard lk(mtx_);
-        pending_.push(job);
+        { std::lock_guard lk(mtx_); pending_.push(job); }
+        cv_.notify_one();
     }
-    LoadJob* Next() {                 // 워커가 호출
-        std::lock_guard lk(mtx_);
-        if (pending_.empty()) return nullptr;
+    LoadJob* NextOrWait() {           // 워커가 호출: empty 확인과 대기를 같은 동기화 경계에서
+        std::unique_lock lk(mtx_);
+        cv_.wait(lk, [&] { return !pending_.empty() || stopped_; });
+        if (pending_.empty()) return nullptr;   // stopped_
         LoadJob* j = pending_.top(); pending_.pop();
         return j;
     }
+    void Stop() { { std::lock_guard lk(mtx_); stopped_ = true; } cv_.notify_all(); }
 };
 ```
 
@@ -259,13 +273,13 @@ struct LoadScheduler {
 
 ### 취소
 
-비동기 로딩에서 *취소(cancellation)* 는 필수다. 플레이어가 빠르게 지나친 영역의 에셋, 닫혀버린 메뉴의 텍스처는 로드할 필요가 없어진다. 취소 없이는 *이미 무의미해진 로드* 가 큐를 채워 정작 필요한 로드를 밀어낸다. 취소는 *각 단계 시작 시 플래그 검사* 로 구현한다 — 진행 중인 디스크 읽기 한 청크는 끝내되, 다음 단계로 넘어가기 전에 취소되었으면 중단하고 자원을 회수한다.
+비동기 로딩에서 *취소(cancellation)* 는 필수다. 플레이어가 빠르게 지나친 영역의 에셋, 닫혀버린 메뉴의 텍스처는 로드할 필요가 없어진다. 취소 없이는 *이미 무의미해진 로드* 가 큐를 채워 정작 필요한 로드를 밀어낸다. 취소는 *각 단계 시작 시 플래그 검사* 로 구현한다 — 진행 중인 디스크 읽기 한 청크는 끝내되, 다음 단계로 넘어가기 전에 취소되었으면 중단하고 자원을 회수한다. 취소 플래그를 세우는 것과 job을 회수하는 것은 별개이므로, 취소된 job은 슬롯 상태·waiter·GPU 수명을 정리하고 완료를 통지한 뒤 회수한다. 동일 물리 로드를 공유하는 요청 중 하나가 취소돼도 다른 참조가 남아 있으면 로드 자체는 취소하지 않는다.
 
 ```cpp
 void WorkerLoop(LoadScheduler& sched) {
-    while (running_) {
-        LoadJob* j = sched.Next();
-        if (!j) { WaitForWork(); continue; }
+    while (true) {
+        LoadJob* j = sched.NextOrWait();                     // empty 확인과 대기가 같은 동기화 경계
+        if (!j) break;                                       // Stop() 이후
         if (j->cancelled.load()) { Recycle(j); continue; }   // 단계 진입 전 검사
 
         switch (j->stage) {
@@ -288,8 +302,8 @@ void WorkerLoop(LoadScheduler& sched) {
 
 ```cpp
 void UpdateStreaming(Vec3 playerPos) {
-    int cx = int(playerPos.x / kCellSize);
-    int cz = int(playerPos.z / kCellSize);
+    int cx = int(std::floor(playerPos.x / kCellSize));   // Part09 WorldToCell과 같은 floor 규약
+    int cz = int(std::floor(playerPos.z / kCellSize));
     std::set<CellId> wanted;
     for (int dz = -kRadius; dz <= kRadius; ++dz)
     for (int dx = -kRadius; dx <= kRadius; ++dx) {
@@ -333,30 +347,35 @@ $$\rho=\max\!\left(\sqrt{\Big(\tfrac{\partial u}{\partial x}\Big)^2+\Big(\tfrac{
 
 $$M_\text{res}(m)=b\,T^2\sum_{k=m}^{\log_2 T}\frac1{4^k}\approx\frac43\,b\Big(\frac{T}{2^m}\Big)^2=\frac43\,b\,S^2.$$
 
-이 이상 모델에서는 $M_\text{res}$가 원본 텍스처 해상도 $T$보다 화면 footprint $S$에 의해 정해진다는 점이 핵심이다. 4096² 텍스처를 256픽셀로 보면 밉4부터 $\tfrac43\cdot256^2=87{,}381$바이트$\approx85$KiB — 같은 형식의 전체 사슬 21.33MiB와 비교하면 약 $1/256$이다. 실제 상주량은 페이지·타일 단위와 필터 여유분 때문에 이 하한보다 커질 수 있다.
+이 이상 모델에서는 $M_\text{res}$가 원본 텍스처 해상도 $T$보다 화면 footprint $S$에 의해 정해진다는 점이 핵심이다. 다만 위 등식은 $\lambda$를 연속으로 본 근사이고 실제 밉은 $m=\lfloor\lambda\rfloor$의 정수라, $T/S$가 정확히 2의 거듭제곱이 아니면 $T/2^m$은 $S$가 아니라 $[S,2S)$에 놓인다. 따라서 정수 밉 이후 실제 면적은 $S^2$가 아니라 $[S^2,4S^2)$ 규모이며, $\tfrac43$ 꼬리 근사도 실제 블록 크기와 마지막 밉의 패딩을 무시한 하한이다. 4096² 텍스처를 256픽셀로 보는 경우는 $T/S=16$으로 경계에 정확히 걸려 밉4부터 $\tfrac43\cdot256^2=87{,}381$바이트$\approx85$KiB — 같은 형식의 전체 사슬 21.33MiB와 비교하면 약 $1/256$이다. 실제 상주량은 페이지·타일 단위와 필터 여유분, 정수 밉 경계 때문에 이 하한보다 커질 수 있다.
 
 이 식은 가상 텍스처가 디스크의 전체 원본 크기와 현재 상주 메모리를 분리할 수 있는 이유를 보여 준다. 그러나 실제 상주량이 화면 픽셀 수만으로 엄밀히 닫히는 것은 아니다. 여러 뷰, 가려졌다가 곧 나타날 타일의 프리페치, 이방성 footprint, 타일 경계와 페이지 테이블, 최소 상주 mip, 캐시 여유분과 반복 UV가 추가된다. 따라서 화면 footprint는 작업 집합의 주항이고, 실제 예산은 이 오버헤드와 시간적 working set을 포함해 측정한다.
 
 경계 조건이 이 모델의 한계를 드러낸다.
 
 - *트라이리니어·이방성.* 트라이리니어는 인접 두 밉을 샘플링하므로 둘 다 상주해야 한다. 이방성 footprint는 화면 픽셀의 텍스처 공간 장축과 단축을 따로 본다. 단축 길이로 더 고운 밉을 고르고 장축을 따라 여러 샘플을 쓰되, 장축/단축 비가 최대 이방성을 넘으면 실효 단축을 `major/maxAniso`까지 키운다. 단순히 항상 $\log_2(\text{maxAniso})$를 빼는 것은 과보수적일 수 있다.
-- *밉 팝과 히스테리시스.* $m=\lfloor\lambda\rfloor$는 정수 경계에서 튄다. 카메라가 $\lambda{=}4$ 부근에서 진동하면 밉4를 올렸다 내렸다 반복(스트리밍 스래싱)한다. 거리 스트리밍과 같은 히스테리시스가 필요하다 — 승급은 $\lambda<m-\epsilon$, 강등은 $\lambda>m+\epsilon$에서만.
+- *밉 팝과 히스테리시스.* $m=\lfloor\lambda\rfloor$는 정수 경계에서 튄다. 카메라가 $\lambda{=}4$ 부근에서 진동하면 밉4를 올렸다 내렸다 반복(스트리밍 스래싱)한다. 거리 스트리밍과 같은 히스테리시스가 필요하다 — 승급은 $\lambda<m_\text{res}-\epsilon$, 강등은 $\lambda>m_\text{res}+\epsilon$에서만 한다. 이때 경계는 *연속* $\lambda$에 두어야 하며, 정수 desired 사이의 상수 차이로 비교하면 한 단계짜리 요청을 영원히 무시하거나 경계 진동을 막지 못하는 설정이 생긴다.
 - *스트리밍 지연.* 순간이동·급접근으로 $\lambda$가 급락하면 고해상 밉이 아직 디스크에 있어 그 로드 지연 동안 흐릿하게 보인다(블러 인). 상주 집합 갱신은 카메라보다 한 발 앞서야 하고, 그래서 곧 가까워질 텍스처를 미리 채운다(5절 캐시 워밍).
 - *업로드 대역폭.* 밉 한 꼬리를 새로 올리는 비용은 $\tfrac43 b(T/2^m)^2$ 바이트다. 여러 텍스처가 동시에 한 레벨씩 승급하면 프레임당 업로드가 몰려 히치가 난다 — 승급도 우선순위 큐로 분산한다.
 
 ```cpp
-// texel-space footprint의 장축/단축 길이로 보수적 밉을 정한다.
-int DesiredMip(float major, float minor, int maxAniso) {
+// texel-space footprint의 장축/단축 길이로 연속 LOD lambda를 계산한다.
+float DesiredLambda(float major, float minor, int maxAniso) {
     float effectiveMinor = std::max(minor, major / std::max(maxAniso, 1));
-    float lambda = std::log2(std::max(effectiveMinor, 1e-8f));
-    int m = (int)std::floor(lambda);
-    return std::clamp(m, 0, kMaxMip);
+    return std::log2(std::max(effectiveMinor, 1e-8f));
 }
-void UpdateResidentMip(TextureStream& t, int desired) {
-    // residentMip이 작을수록 고해상. desired가 더 작으면(고해상 필요) 승급.
-    if (desired < t.residentMip - kMipHysteresis) t.residentMip = desired;       // 승급
-    else if (desired > t.residentMip + kMipHysteresis) t.residentMip = desired;  // 강등
-    // 경계 내면 유지 — 진동 흡수
+// wanted=요청 목표, requested=발행된 로드, resident=실제 사용 가능한 수준.
+// 승급·강등은 정수 desired 차가 아니라 연속 lambda의 진입·이탈 경계에서 판정한다.
+void UpdateResidentMip(TextureStream& t, float lambda) {
+    // residentMip이 작을수록 고해상. lambda가 경계를 벗어날 때만 wantedMip을 갱신.
+    int m = std::clamp((int)std::floor(lambda), 0, kMaxMip);
+    if (lambda < t.residentMip - kMipHysteresis) t.wantedMip = m;       // 승급
+    else if (lambda > t.residentMip + kMipHysteresis) t.wantedMip = m;  // 강등
+    // 경계 내면 wanted 유지 — 한 단계 요청도 장기 유지되면 반영된다
+    if (t.wantedMip != t.requestedMip) { t.requestedMip = t.wantedMip; RequestMipLoad(t); }
+}
+void OnMipLoadComplete(TextureStream& t) {   // 로드·fence 완료 후에만 호출
+    t.residentMip = t.requestedMip;          // 완료 전에는 resident를 올리지 않는다
 }
 ```
 
@@ -373,12 +392,16 @@ struct MemoryBudget {
     size_t audio;
     size_t animations;
 };
-struct MemoryUsage { size_t textures, meshes, audio, animations; };
+struct MemoryUsage {
+    size_t textures, meshes, audio, animations;  // 물리 상주(active) 바이트
+    size_t inflight;                             // 로드·디코드·staging 예약 바이트
+    size_t pendingEviction;                      // 참조 0, fence/reclaim 대기 — 아직 물리 상주
+};
 ```
 
 예산을 타입별로 쪼개는 이유는 *한 타입의 폭주가 다른 타입을 굶기지 않게* 하기 위해서다. 텍스처가 통제 없이 늘어 사운드·메시 메모리까지 먹으면, 오디오가 끊기고 콜리전 메시가 못 올라온다. 타입별 상한은 *각 시스템의 최소 동작* 을 보장하는 칸막이다.
 
-예산은 물리 메모리 총량이 아니라 OS·그래픽 드라이버·엔진 코어·최악 장면의 일시적 할당을 제외한 뒤 정한다. 통합 메모리와 분리 VRAM, 품질 등급, 백그라운드 정책에 따라 텍스처·메시·오디오·스트리밍 버퍼의 몫이 달라진다. 플랫폼 이름만으로 고정 표를 만들면 기기 세대와 장면 working set을 놓친다.
+예산은 물리 메모리 총량이 아니라 OS·그래픽 드라이버·엔진 코어·최악 장면의 일시적 할당을 제외한 뒤 정한다. 통합 메모리와 분리 VRAM, 품질 등급, 백그라운드 정책에 따라 텍스처·메시·오디오·스트리밍 버퍼의 몫이 달라진다. 플랫폼 이름만으로 고정 표를 만들면 기기 세대와 장면 working set을 놓친다. 또한 LRU에서 논리적으로 뺀 바이트는 GPU/reader fence 전에는 실제로 회수되지 않으므로, 물리 상주와 인플라이트 예약, 아직 회수되지 않은 퇴거 대기 바이트를 따로 집계하고 공유 에셋은 한 번만 센다.
 
 ### 예산 초과 처리
 
@@ -389,7 +412,7 @@ flowchart TB
     Check{예산과 회수 여유} -->|정상 범위| Normal[정상]
     Check -->|soft watermark 초과| Soft[소프트 압박<br/>참조 0 캐시 정리]
     Check -->|hard watermark 초과| Hard[하드 압박<br/>밉 레벨 강등·LOD 축소]
-    Hard -->|여전히 초과| Crit[크리티컬<br/>저우선 에셋 강제 언로드]
+    Hard -->|여전히 초과| Crit[크리티컬<br/>저우선 에셋 강제 언로드]; Crit -.-> PinNote[hard pin·참조 보호는 무시하지 않음<br/>강제 퇴거는 보호되지 않은 저우선 캐시 한정]
 ```
 
 soft/hard watermark는 회수가 완료되기까지 필요한 시간과 인플라이트 업로드의 최악 크기를 남겨 두도록 정한다. 첫 단계는 참조 0 캐시를 줄이고, 부족하면 밉·LOD·프리페치 범위를 낮춘다. 활성 사용자가 읽는 에셋을 강제로 해제해서는 안 되며, 마지막에는 품질 저하·로드 거부·안전한 화면 전환 같은 명시적 실패 경로가 필요하다. 모든 OOM을 복구할 수 있다고 가정할 수는 없으므로 예약 메모리와 실패 주입 테스트도 둔다.
@@ -407,18 +430,26 @@ soft/hard watermark는 회수가 완료되기까지 필요한 시간과 인플�
 - *재배치 가능 힙(relocatable heap)*: 핸들 간접 참조(2절)를 이용해 *블록을 모아 압축(compaction)* 한다. 빈 공간을 한쪽으로 몰아 큰 연속 블록을 만든다. 핸들 덕에 *데이터가 움직여도 참조는 안 깨진다*.
 
 ```cpp
-// 개념 예제: reader가 없는 safe point, trivially relocatable 블록만 가정
+// 개념 예제: reader가 없는 safe point, trivially relocatable 블록만 가정.
+// 목적지를 먼저 계산·검증한 뒤 slot과 Block 메타데이터를 한 커밋으로 갱신한다.
 void Compact(RelocatableHeap& heap) {
-    uint8_t* writePtr = heap.base;
+    std::vector<size_t> dst;                 // 이동 전에 계획을 완성
+    size_t write = 0;
+    for (const Block& b : heap.LiveBlocksInOrder()) {   // 정렬된 live block만
+        if (!b.size || !b.alignment) return;            // 잘못된 계획이면 상태를 건드리지 않는다
+        dst.push_back(AlignUp(write, b.alignment));
+        write = dst.back() + b.size;
+    }
+    size_t i = 0;
     for (Block& b : heap.LiveBlocksInOrder()) {
-        writePtr = AlignUp(writePtr, b.alignment);
+        uint8_t* writePtr = heap.base + dst[i++];
         if (b.ptr != writePtr) {
             memmove(writePtr, b.ptr, b.size);   // 앞으로 당긴다
+            b.ptr = writePtr;                   // heap 내부 메타데이터도 함께 갱신
             Resolve(b.owner)->data = writePtr;  // 슬롯 포인터 갱신 (핸들은 불변)
         }
-        writePtr += b.size;
     }
-    heap.freeTop = writePtr;   // 뒤쪽 전체가 연속 여유 공간
+    heap.freeTop = heap.base + write;   // 뒤쪽 전체가 연속 여유 공간
 }
 ```
 
@@ -504,7 +535,7 @@ LRU의 약점은 *대형 순차 스캔* 이다. 한 번만 쓰고 버릴 에셋(
 
 ```mermaid
 flowchart LR
-    A{병목은?} -->|디스크 느림| B[강하게 압축<br/>읽을 바이트 ↓]
+    A{병목은?} -->|디스크 느림| B[강하게 압축<br/>읽을 바이트 ↓]; B -.-> CompNote[정성 휴리스틱: 디스크 대역폭 대 디코드 처리량 비교<br/>플랫폼 보편 성능 보장 아님]
     A -->|디스크 빠름·CPU 여유 적음| C[약하게/무압축<br/>디코드 비용 ↓]
 ```
 
@@ -545,19 +576,22 @@ OS의 파일 변경 알림으로 에셋 디렉터리를 감시한다. 편집기�
 
 ```cpp
 void OnFileChanged(std::string_view path) {
-    uint64_t id = HashPath(path);
-    ResourceSlot* s = FindLoadedSlot(id);
-    if (!s) return;                       // 로드 안 된 에셋이면 무시
+    // 경로 해시가 아니라 manifest가 발급한 안정 AssetId로 해석한다.
+    for (uint64_t id : ManifestAssetIds(path)) {
+        auto target = FindLoadedHandle(id);   // 로드 안 된 에셋이면 무시
+        if (!target) continue;
 
-    // 백그라운드에서 새 버전 로드 (3절 비동기 파이프라인 재사용)
-    ResourceHandle newData = LoadFresh(id);
-    // 메인 스레드 안전 지점에서 교체
-    PendingSwap swap{ .target = s, .fresh = newData };
-    swapQueue_.Push(swap);                // 프레임 경계에서 적용
+        // 백그라운드에서 새 버전 로드 (3절 비동기 파이프라인 재사용)
+        ResourceHandle newData = LoadFresh(id);
+        // 장기 raw 포인터 대신 핸들·기대 세대·콘텐츠 revision을 넘긴다
+        PendingSwap swap{ .target = *target, .expectedGeneration = target->generation,
+                          .revision = ++contentRevision_[id], .fresh = newData };
+        swapQueue_.Push(swap);                // 프레임 경계에서 적용, 최신 revision만 반영
+    }
 }
 ```
 
-핸들 간접 참조는 CPU가 다음에 `Resolve`할 때 새 버전을 보게 만든다. 그러나 머티리얼이 GPU descriptor나 네이티브 리소스 핸들을 캐시했다면 슬롯 포인터 교체만으로 갱신되지 않는다. 의존성 그래프를 통해 descriptor 재빌드·버전 변경 통지를 보내거나, 렌더 시 안정 ID를 다시 해석하는 테이블이 필요하다.
+핸들 간접 참조는 CPU가 다음에 `Resolve`할 때 새 버전을 보게 만든다. 큐에 넣은 항목은 장기 대여이므로 적용 시 expectedGeneration을 다시 확인해 슬롯 재사용을 걸러내고, 여러 편집이 겹치면 최신 revision의 로드가 완료된 뒤에만 교체한다. 그러나 머티리얼이 GPU descriptor나 네이티브 리소스 핸들을 캐시했다면 슬롯 포인터 교체만으로 갱신되지 않는다. 의존성 그래프를 통해 descriptor 재빌드·버전 변경 통지를 보내거나, 렌더 시 안정 ID를 다시 해석하는 테이블이 필요하다.
 
 타입별 주의점이 있다. 텍스처·메시는 *GPU 리소스 재생성* 이 필요하므로 렌더 스레드 안전 지점에서 교체한다. 의존성이 바뀌는 변경(머티리얼이 새 텍스처를 참조하게 됨)은 *의존성 그래프를 다시 풀어*(2절) 새 의존성을 잡고 옛것을 놓는다. 셰이더는 *재컴파일* 이 끼어 가장 비싸다.
 
@@ -593,7 +627,7 @@ vfs.Mount("patch3.pak",/*priority=*/2);   // 최신 패치가 이긴다
 | 캐시 적중률 | LRU 캐시 hit/miss | 낮으면 디스크 재읽기 |
 | 인플라이트 로드 수 | 진행 중 비동기 작업 | 큐 적체 |
 | 디스크 읽기 대역폭 | 실제 I/O 처리량 | 이론치 미달 |
-| 중복 로드 횟수 | 같은 에셋 재로드 | 0이어야 정상 |
+| 중복 로드 횟수 | 같은 asset+revision 활성 물리 요청 중복 | 0이어야 정상 |
 
 ```cpp
 struct ResourceProfile {
@@ -603,6 +637,7 @@ struct ResourceProfile {
     float  cacheHitRate;
     int    inflightLoads;
     int    duplicateLoadsThisSession;
+    int    suppressedDuplicateRequests;
     float  diskMBps;
 };
 ```
@@ -628,15 +663,19 @@ void RequestLoad(ResourceHandle h) {
     ResourceSlot* s = Resolve(h);
     if (!s) return;
     if (s->state == Loading || s->state == Loaded) {
-        ++profile_.duplicateLoadsThisSession;   // 상태 검사를 우회한 발행 = 중복
-        return;                                 // 진행 중·완료된 로드에 합류
+        ++profile_.suppressedDuplicateRequests;  // 상태 검사가 막은 중복 시도 — 실제 로드 아님
+        return;                                  // 진행 중·완료된 로드에 합류
+    }
+    if (HasOtherActivePhysicalLoad(h)) {         // 같은 asset+revision에 살아있는 물리 요청이 둘
+        ++profile_.duplicateLoadsThisSession;    // 상태 검사를 우회한 실제 중복 (0이어야 정상)
+        return;
     }
     s->state = Loading;
     SubmitLoadJob(h);                           // 3절 비동기 파이프라인
 }
 ```
 
-슬롯 조회에서 걸러진 요청은 *중복 방지 성공* 이므로 세지 않는다. 실제 중복은 이미 `Loading`·`Loaded`인 에셋에 새 물리 로드가 발행될 때만 생기므로 계수도 그 발행 지점 한 곳에서 한다 — 위 표가 이 값을 0으로 기대하는 이유이며, 0이 아니면 상태 검사를 우회한 경로가 있다는 뜻이다.
+슬롯 조회에서 걸러진 요청은 *중복 방지 성공* 이므로 세지 않는다. `Loading`·`Loaded` 분기에서 조기 반환한 시도는 *차단한 중복 시도* 로서 `suppressedDuplicateRequests` 에만 세고, 실제 중복은 같은 asset+revision에 활성 물리 요청이 둘 이상 존재하는 사건으로 정의해 `duplicateLoadsThisSession` 에 센다 — 위 표가 후자를 0으로 기대하는 이유이며, 0이 아니면 상태 검사를 우회해 물리 로드가 두 번 발행된 경로가 있다는 뜻이다.
 
 경로를 키로 쓰기 전에 가상 파일 시스템의 규칙에 따라 정규화한다. `.`·`..` 해소, 구분자와 루트 규칙 통일은 일반적으로 필요하지만, 무조건 소문자화하면 대소문자를 구분하는 파일 시스템이나 패키지에서 서로 다른 에셋을 충돌시킨다. 가장 안전한 기본 키는 쿠킹 단계가 발급한 안정적 asset ID이며, 경로 비교의 대소문자와 Unicode 정규화는 mount별 계약으로 둔다. 디버그 빌드에서는 서로 다른 원본이 같은 ID를 갖는 충돌도 검사한다.
 

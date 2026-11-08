@@ -313,18 +313,17 @@ static ssize_t pipe_read(struct kiocb *iocb, struct iov_iter *to)
         unsigned int mask = pipe->ring_size - 1;
 
         if (!pipe_empty(head, tail)) {
-            /* 데이터 읽기 */
+            /* 데이터 읽기: buffer 잔여량과 출력 공간 중 작은 값만 */
             struct pipe_buffer *buf = &pipe->bufs[tail & mask];
-            size_t chars = buf->len;
+            size_t want = min_t(size_t, buf->len, iov_iter_count(to));
+            size_t copied = copy_page_to_iter(buf->page, buf->offset, want, to);
 
-            /* 사용자 공간으로 복사 */
-            copy_page_to_iter(buf->page, buf->offset, chars, to);
+            /* 실제 복사된 byte만큼만 소비·반환한다 */
+            buf->offset += copied;
+            buf->len -= copied;
+            ret += copied;
 
-            buf->offset += chars;
-            buf->len -= chars;
-            ret += chars;
-
-            /* 버퍼가 비었으면 tail 증가 */
+            /* 남은 byte가 0일 때만 buffer를 해제한다 */
             if (!buf->len) {
                 pipe->tail = tail + 1;
             }
@@ -340,10 +339,14 @@ static ssize_t pipe_read(struct kiocb *iocb, struct iov_iter *to)
             break;  // return 0 (EOF)
         }
 
-        /* 블록 */
+        /* 블록: 데이터 도착 또는 writer 종료(EOF)를 기다린다 */
         mutex_unlock(&pipe->mutex);
-        wait_event_interruptible(pipe->rd_wait,
-                                 !pipe_empty(pipe->head, pipe->tail));
+        if (wait_event_interruptible(pipe->rd_wait,
+                                     !pipe_empty(pipe->head, pipe->tail) ||
+                                     !pipe->writers)) {
+            mutex_lock(&pipe->mutex);
+            break;  /* 시그널: 이미 복사한 byte를 반환 */
+        }
         mutex_lock(&pipe->mutex);
     }
 
@@ -1073,20 +1076,37 @@ while (1) {
            (struct sockaddr*)&client_addr, client_len);
 }
 
-// 클라이언트
+// 클라이언트: 서버가 회신할 수 있도록 고유 주소에 bind한다
 int sock_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+
+struct sockaddr_un client_addr;
+memset(&client_addr, 0, sizeof(client_addr));
+client_addr.sun_family = AF_UNIX;
+snprintf(client_addr.sun_path, sizeof(client_addr.sun_path),
+         "/tmp/dgram_client_%d", getpid());
+unlink(client_addr.sun_path);
+if (bind(sock_fd, (struct sockaddr*)&client_addr, sizeof(client_addr)) == -1)
+    perror("bind");
+
+// 응답이 없을 때 무한 대기하지 않도록 수신 타임아웃을 둔다
+struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
 struct sockaddr_un server_addr;
 memset(&server_addr, 0, sizeof(server_addr));
 server_addr.sun_family = AF_UNIX;
 strncpy(server_addr.sun_path, "/tmp/dgram_socket", sizeof(server_addr.sun_path) - 1);
 
-sendto(sock_fd, "Hello", 5, 0,
-       (struct sockaddr*)&server_addr, sizeof(server_addr));
+if (sendto(sock_fd, "Hello", 5, 0,
+           (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1)
+    perror("sendto");
 
 char buf[256];
 ssize_t n = recvfrom(sock_fd, buf, sizeof(buf), 0, NULL, NULL);
-printf("Reply: %.*s\n", (int)n, buf);
+if (n == -1)
+    perror("recvfrom");
+else
+    printf("Reply: %.*s\n", (int)n, buf);
 
 close(sock_fd);
 ```
@@ -1275,10 +1295,24 @@ sem_init(&buf->empty, 1, BUFFER_SIZE);
 sem_init(&buf->full, 1, 0);
 buf->in = buf->out = 0;
 
+// EINTR이면 재시도하고 다른 오류면 실패를 알린다.
+// 성공한 wait에만 대응하는 post를 수행한다.
+static int sem_wait_retry(sem_t *sem) {
+    while (sem_wait(sem) == -1) {
+        if (errno != EINTR)
+            return -1;
+    }
+    return 0;
+}
+
 // 생산자
 void produce(struct shared_buffer *buf, int item) {
-    sem_wait(&buf->empty);      // 빈 슬롯 대기
-    sem_wait(&buf->mutex);      // 버퍼 잠금
+    if (sem_wait_retry(&buf->empty) == -1)   // 빈 슬롯 대기
+        return;                              // 획득 실패 시 진입하지 않음
+    if (sem_wait_retry(&buf->mutex) == -1) { // 버퍼 잠금
+        sem_post(&buf->empty);               // 앞선 획득만 되돌림
+        return;
+    }
 
     buf->buffer[buf->in] = item;
     buf->in = (buf->in + 1) % BUFFER_SIZE;
@@ -1289,8 +1323,12 @@ void produce(struct shared_buffer *buf, int item) {
 
 // 소비자
 int consume(struct shared_buffer *buf) {
-    sem_wait(&buf->full);       // 찬 슬롯 대기
-    sem_wait(&buf->mutex);      // 버퍼 잠금
+    if (sem_wait_retry(&buf->full) == -1)    // 찬 슬롯 대기
+        return -1;
+    if (sem_wait_retry(&buf->mutex) == -1) { // 버퍼 잠금
+        sem_post(&buf->full);                // 앞선 획득만 되돌림
+        return -1;
+    }
 
     int item = buf->buffer[buf->out];
     buf->out = (buf->out + 1) % BUFFER_SIZE;
@@ -2158,7 +2196,9 @@ close(file_fd);
 **2) 연결 풀 (connection pooling)**
 
 ```c
-// 공유 메모리에 연결 풀
+// 주의: fd 정수는 프로세스별 fd table의 index다. 여기 available[]은
+// fork로 상속해 같은 open file description을 공유할 때만 각 프로세스에서
+// 같은 객체를 가리키며, 그렇지 않으면 SCM_RIGHTS로 descriptor를 전달해야 한다.
 struct connection_pool {
     pthread_mutex_t mutex;
     int available[MAX_CONNECTIONS];

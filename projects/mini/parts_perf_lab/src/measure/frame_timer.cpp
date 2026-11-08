@@ -2,6 +2,17 @@
 
 namespace ppl {
 
+void FrameTimer::BeginFrame() {
+    frameStart_ = Clock::now();
+}
+
+void FrameTimer::EndFrame() {
+    const auto end = Clock::now();
+    const auto dur = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        end - frameStart_).count();
+    lastFrameWallMs_ = static_cast<float>(dur) / 1.0e6f;
+}
+
 void FrameTimer::BeginUpdate() {
     updateStart_ = Clock::now();
 }
@@ -28,6 +39,7 @@ void FrameTimer::CommitFrame(float allocMs, float containerMs) {
     lastAllocMs_     = allocMs;
     lastContainerMs_ = containerMs;
 
+    frameWallMs_[head_] = lastFrameWallMs_;
     updateMs_[head_]    = lastUpdateMs_;
     drawMs_[head_]      = lastDrawMs_;
     allocMs_[head_]     = lastAllocMs_;

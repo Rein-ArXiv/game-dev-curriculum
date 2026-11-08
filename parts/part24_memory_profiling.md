@@ -97,7 +97,7 @@ Valgrind는 2002년 Julian Seward가 개발한 메모리 디버거다. 핵심 �
 1. **프로그램 바이너리를 디스어셈블**: x86-64 기계어를 중간 표현(IR)으로 변환
 2. **IR을 계측**: 모든 메모리 접근 앞뒤에 검증 코드 삽입
 3. **다시 기계어로 컴파일**: 계측된 IR을 실행 가능한 코드로 변환
-4. **가상 CPU에서 실행**: Valgrind가 제공하는 샌드박스 환경에서 실행
+4. **가상 CPU에서 실행**: Valgrind가 제공하는 계측 실행 환경에서 실행
 
 ```text
 원본 바이너리:        계측된 코드:
@@ -118,17 +118,18 @@ Valgrind의 Memcheck 도구는 모든 바이트를 추적한다:
 
 ```text
 A bit (Addressable):  바이트당 1개. 0 = 접근 금지, 1 = 접근 가능
-V bit (Valid/Defined): 데이터 비트당 1개(바이트당 8개). 0 = 미초기화, 1 = 초기화됨
+V bit (Valid/Defined): 데이터 비트당 1개(바이트당 8개). 0 = 초기화됨(defined), 1 = 미초기화(undefined)
+                       (직관과 반대이므로 실제 VALGRIND_GET_VBITS/monitor xb 표기와 맞춘다)
 ```
 
 ```c
 int* p = malloc(4);
 // Valgrind 상태:
-//   p[0..3]: A=1 (할당됨), V=0 (미초기화)
+//   p[0..3]: A=1 (할당됨), V=1 (미초기화)
 
 *p = 42;
 // 상태 업데이트:
-//   p[0..3]: A=1, V=1 (초기화됨)
+//   p[0..3]: A=1, V=0 (초기화됨)
 
 free(p);
 // 상태 업데이트:
@@ -262,30 +263,37 @@ struct Foo {
 
 만약 5바이트 차원에서만 의미 있는 데이터라면(예: `struct __attribute__((packed)) { char a; int b; }`로 패딩이 제거된 5바이트 구조체) shadow 값은 5가 되어 첫 5바이트만 유효임을 표시한다. 즉 패딩 유무가 shadow 값을 결정한다.
 
+이 shadow 값은 객체가 8바이트 경계에 놓인 독립 할당의 시작이라는 전제에서만 성립한다. `alignof`가 4인 타입이나 객체 내부 필드는 granule 경계와 어긋날 수 있고, 그런 subobject 접근은 allocation redzone과 다른 검출 범위다.
+
 ### 빠른 검증 로직
 
 메모리 접근을 검증하는 함수는 놀랍도록 간단하다:
 
 ```c
 bool is_addressable(uintptr_t addr, size_t size) {
-    // Shadow byte 위치 계산
-    int8_t* shadow = (int8_t*)((addr >> 3) + kShadowOffset);
-    int8_t k = *shadow;
+    if (size == 0) return true;
+    if (addr + size < addr) return false;  // 주소 합 overflow
 
-    // k == 0: 8바이트 전부 OK
-    if (k == 0) return true;
+    const uintptr_t last = addr + size - 1;
+    for (uintptr_t p = addr; ; ) {
+        // 현재 p가 속한 granule의 shadow byte
+        const int8_t k = *(int8_t*)((p >> 3) + kShadowOffset);
+        if (k < 0) return false;  // redzone/freed 등 접근 금지
 
-    // k < 0: 접근 금지 영역
-    if (k < 0) return false;
+        const uintptr_t granule_end = (p & ~(uintptr_t)7) + 8;
+        const uintptr_t access_end =
+            last < granule_end ? last : granule_end - 1;
 
-    // k > 0: 8바이트 granule의 앞 k바이트만 addressable
-    // 마지막 바이트 오프셋 확인
-    int last_byte = (addr & 7) + size - 1;
-    return last_byte < k;
+        // k > 0이면 granule의 앞 k바이트만 addressable하다
+        if (k > 0 && (access_end & 7) >= (uintptr_t)k) return false;
+
+        if (access_end == last) return true;
+        p = access_end + 1;
+    }
 }
 ```
 
-이 함수는 **인라인되고 최적화**되어 수 사이클 내에 실행된다. 비트 시프트와 메모리 읽기 한 번, 조건 분기 몇 개면 끝이다.
+이 함수의 단일 granule fast path는 **인라인되고 최적화**되어 수 사이클 내에 실행된다. 비트 시프트와 메모리 읽기 한 번, 조건 분기 몇 개면 끝이고, 여러 granule에 걸친 접근만 반복한다.
 
 x86-64 어셈블리로 보면:
 
@@ -376,7 +384,7 @@ int y = 42;   // shadow(y) = 0x00
 int z = x + y; // shadow(z) = 0xFF (오염 전파)
 ```
 
-MSan의 한계는 **전체 프로그램 재컴파일**이 필요하다는 점이다. C 표준 라이브러리까지 계측해야 하므로, 특수 빌드된 libc를 사용해야 한다.
+MSan의 한계는 원칙적으로 **전체 프로그램 재컴파일**이 필요하다는 점이다. 런타임이 제공하는 libc interceptor가 계측되지 않은 libc 호출 일부를 처리하지만, 계측되지 않은 코드를 지나면 오염 추적이 끊길 수 있다.
 
 ### ThreadSanitizer (TSan): 데이터 레이스 탐지
 
@@ -491,9 +499,9 @@ GUI는 다음을 제공한다:
 Google의 gperftools는 두 가지를 제공한다:
 
 1. **tcmalloc**: 빠른 메모리 할당자
-2. **Heap profiler**: 샘플링 기반 프로파일링
+2. **Heap profiler**: allocation site별 할당·해제를 기록하는 프로파일러
 
-샘플링 프로파일러는 **모든** 할당을 추적하지 않고, 일정 간격(예: 512KB마다)으로 스택 트레이스를 기록한다. 오버헤드가 낮아 프로덕션 환경에서도 사용 가능하다.
+`HeapProfilerStart`/`HeapProfilerStop`이 쓰는 heap profiler는 할당과 해제를 모두 계측하고 allocation site별(호출 스택 기준) 정보를 기록한다. tcmalloc에는 이와 별개로 일정 간격(예: 512KB마다)으로 샘플링하는 heap sampling 기능이 있으며, 이쪽이 오버헤드가 낮아 프로덕션 환경에 적합하다.
 
 ```c
 #include <gperftools/heap-profiler.h>
@@ -529,14 +537,17 @@ pprof --text ./myapp myapp.0001.heap
 #include <gperftools/malloc_extension.h>
 
 size_t allocated = 0, heap_size = 0;
-MallocExtension::instance()->GetNumericProperty(
+bool ok = MallocExtension::instance()->GetNumericProperty(
     "generic.current_allocated_bytes", &allocated);
-MallocExtension::instance()->GetNumericProperty(
+ok &= MallocExtension::instance()->GetNumericProperty(
     "generic.heap_size", &heap_size);
+if (!ok) {
+    // 속성 이름과 제공 여부는 allocator·버전에 따라 다르다
+}
 
-double fragmentation = heap_size == 0
+double retained_or_unused = heap_size == 0
     ? 0.0 : 1.0 - (double)allocated / heap_size;
-printf("Fragmentation: %.2f%%\n", fragmentation * 100);
+printf("Retained or unused: %.2f%%\n", retained_or_unused * 100);
 ```
 
 jemalloc은 `malloc_stats_print`로 더 상세한 정보를 제공한다.
@@ -576,34 +587,43 @@ Google은 Android 11부터 일부 시스템 컴포넌트에 HWASan을 적용하�
 ```c
 #include <sanitizer/asan_interface.h>
 
+constexpr size_t kRedzone = 32;
+
 void* my_allocator::allocate(size_t size) {
-    size_t redzone_size = 32;
-    void* p = system_malloc(size + 2 * redzone_size);
+    // size + 좌우 redzone이 size_t를 넘지 않는지 먼저 검사한다
+    if (size > SIZE_MAX - 2 * kRedzone) return nullptr;
+
+    void* p = system_malloc(size + 2 * kRedzone);
+    if (!p) return nullptr;  // 할당 실패를 호출자에게 전달한다
 
     // 왼쪽 redzone 설정
-    ASAN_POISON_MEMORY_REGION(p, redzone_size);
+    ASAN_POISON_MEMORY_REGION(p, kRedzone);
 
     // 사용자 영역
-    void* user_ptr = (char*)p + redzone_size;
+    void* user_ptr = (char*)p + kRedzone;
     ASAN_UNPOISON_MEMORY_REGION(user_ptr, size);
 
     // 오른쪽 redzone 설정
-    ASAN_POISON_MEMORY_REGION((char*)user_ptr + size, redzone_size);
+    ASAN_POISON_MEMORY_REGION((char*)user_ptr + size, kRedzone);
 
     return user_ptr;
 }
 
 void my_allocator::deallocate(void* user_ptr, size_t size) {
     // 전체 영역을 poison
-    void* p = (char*)user_ptr - 32;
-    ASAN_POISON_MEMORY_REGION(p, size + 64);
+    void* p = (char*)user_ptr - kRedzone;
+    ASAN_POISON_MEMORY_REGION(p, size + 2 * kRedzone);
 
-    // Quarantine에 넣기 (즉시 해제하지 않음)
+    // Quarantine은 한도를 두고, 넘치면 가장 오래된 블록을 실제로 해제한다
     quarantine.push(p);
+    while (quarantine.size() > kQuarantineLimit) {
+        system_free(quarantine.front());
+        quarantine.pop();
+    }
 }
 ```
 
-`ASAN_POISON_MEMORY_REGION`은 shadow memory를 업데이트하여 해당 영역을 접근 금지로 표시한다. 이렇게 하면 커스텀 할당자도 ASan의 보호를 받는다.
+`ASAN_POISON_MEMORY_REGION`은 shadow memory를 업데이트하여 해당 영역을 접근 금지로 표시한다. 이렇게 하면 커스텀 할당자도 ASan의 보호를 받는다. 다만 이 스케치는 over-aligned 요청, poison 세분성(8바이트 granule), 할당 메타데이터 저장 위치를 단순화한 것이다. 실제 통합에서는 정렬을 받는 할당 API, 소유 메타데이터, bounded quarantine과 실제 free 경로를 함께 정의해야 한다.
 
 ## 8. 실전: 게임과 서버의 메모리 디버깅
 
@@ -673,24 +693,27 @@ Valgrind Massif로 프로파일링한 결과:
  30      3,000,000        3,072,000      3,000,000        72,000
 ```
 
-선형적으로 증가하고 있었다. 스택 트레이스를 보니 `listTypePush`에서 할당된 메모리였다:
+선형적으로 증가하고 있었다. 스택 트레이스를 보니 리스트 push 내부에서 만든 사본이 해제되지 않고 있었다:
 
 ```c
-void listTypePush(robj *subject, robj *value, int where) {
+// 가상의 push 구현: 호출자가 넘긴 borrowed value는 소비하지 않는다.
+void listPushCopy(robj *subject, robj *value, int where) {
     if (subject->encoding == OBJ_ENCODING_QUICKLIST) {
-        quicklistPush(subject->ptr, value->ptr, ...);
-        // value를 해제하지 않음!
+        robj *stored = dup_robj(value);   // 내부 보관용 사본 생성
+        quicklistPush(subject->ptr, stored, where);
+        // stored를 참조하는 곳이 없어지면 decrRefCount(stored) 해야 한다
     }
 }
 ```
 
-`quicklistPush`는 내부적으로 복사하는데, 원본 `value`를 해제하지 않았다. 수정:
+함수가 내부에서 만든 `stored`를 해제하지 않아 누수가 생겼다. 실제 Redis의 `listTypePush`는 호출자가 소유한 `value`를 소비하지 않으므로 borrowed 입력에 `decrRefCount`를 호출하면 이중 해제가 된다. 수정:
 
 ```c
-void listTypePush(robj *subject, robj *value, int where) {
+void listPushCopy(robj *subject, robj *value, int where) {
     if (subject->encoding == OBJ_ENCODING_QUICKLIST) {
-        quicklistPush(subject->ptr, value->ptr, ...);
-        decrRefCount(value);  // 참조 카운트 감소
+        robj *stored = dup_robj(value);
+        quicklistPush(subject->ptr, stored, where);
+        decrRefCount(stored);  // 내부에서 만든 사본의 참조 카운트만 감소
     }
 }
 ```
@@ -718,16 +741,17 @@ allocated by thread T0 here:
 비트맵 버퍼의 경계를 1픽셀 넘어서 쓰고 있었다. 잘못된 크기 계산이 원인이었다:
 
 ```cpp
-// Before:
-size_t buffer_size = rect.width() * rect.height() * 4;  // 정렬 전 width로 할당
-// 하지만 그리기는 4바이트 정렬된 stride를 쓴다...
+// Before: 픽셀 수 기준으로만 계산해 실제 행 stride와 어긋났다
+size_t buffer_size = rect.width() * rect.height() * 4;
 
-// After:
-int stride = (rect.width() + 3) / 4 * 4;
-size_t buffer_size = stride * rect.height();  // 올바른 크기
+// After: bytes-per-pixel을 반영해 행 바이트 수를 구하고 정렬한다
+const size_t kBytesPerPixel = 4;  // RGBA
+size_t row_bytes = checked_mul(rect.width(), kBytesPerPixel);
+size_t stride = checked_align_up(row_bytes, kStrideAlignment);
+size_t buffer_size = checked_mul(stride, rect.height());  // 올바른 크기
 ```
 
-이 버그는 대부분의 PDF에서는 문제없었지만, 특정 크기(width가 4의 배수가 아닌 경우)에서만 터졌다. ASan의 redzone이 없었다면 힙 메타데이터를 덮어쓰고 훨씬 나중에 원인 불명의 크래시로 나타났을 것이다.
+이 버그는 대부분의 PDF에서는 문제없었지만, 행 바이트 수가 stride 정렬의 배수가 아닌 특정 크기에서만 터졌다. ASan의 redzone이 없었다면 힙 메타데이터를 덮어쓰고 훨씬 나중에 원인 불명의 크래시로 나타났을 것이다.
 
 ### 단편화 진단 시나리오
 
@@ -815,13 +839,14 @@ int* p = nullptr;
 int v = *p;            // UBSan: null pointer dereference
 
 // alignment 위반
-char buf[8];
+alignas(int) char buf[8];
 int* ip = reinterpret_cast<int*>(buf + 1);
 *ip = 0;               // UBSan: misaligned access
 
 // 잘못된 enum 값
 enum Color { Red, Green, Blue };
-Color c = static_cast<Color>(7);  // UBSan: load of invalid value
+Color c = static_cast<Color>(7);
+int e = c;             // UBSan: load of invalid value
 ```
 
 UBSan은 ASan·TSan보다 가벼운 구성이 가능해 통합 테스트나 fuzz 빌드에 함께 켜기 좋지만 비용은 검사 집합별로 측정한다. `-fsanitize=undefined`는 자주 쓰는 검출기를 묶으며, 세부 검출기는 `-fsanitize=signed-integer-overflow,null,alignment` 같이 명시적으로 고를 수 있다.
@@ -854,7 +879,7 @@ int y = x + 1;         // shadow(y)도 오염
 if (y == 0) { /* */ }  // MSan: use of uninitialized value
 ```
 
-검출이 가능하려면 프로그램이 사용하는 모든 코드가 MSan으로 계측되어 있어야 한다. 표준 라이브러리, 제삼자 라이브러리까지 모두 다시 빌드해야 하므로 도입 비용이 크다.
+검출이 가능하려면 프로그램이 사용하는 모든 코드가 MSan으로 계측되어 있어야 한다. 다만 MSan 런타임은 libc 함수에 대한 interceptor를 제공하므로 계측되지 않은 libc 호출 일부는 그 경로로 처리된다. 계측이 필요한 것은 프로젝트와 그 의존성의 C++ 코드이며, 계측되지 않은 라이브러리를 지나면 해당 데이터의 오염 추적이 끊길 수 있다.
 
 ### LeakSanitizer
 
@@ -867,12 +892,12 @@ clang-tidy, cppcheck, PVS-Studio, Coverity 같은 정적 분석기는 코드를 
 | 축 | Sanitizer (동적) | 정적 분석기 |
 |---|---|---|
 | 분석 시점 | 실행 중 | 컴파일 전/후 |
-| 입력 | 실제 실행 경로 | 가능한 모든 경로의 추상 해석 |
-| 검출률 | 실행된 경로 안에서는 정확 | 실행되지 않는 경로도 잡지만 false positive 발생 |
+| 입력 | 실제 실행 경로 | 가능한 모든 경로를 근사(도구에 따라 AST 수준 lint부터 추상 해석까지) |
+| 검출률 | 검출 모델 범위 안에서 실행 경로의 증거 제공 | 실행되지 않는 경로도 잡지만 false positive 발생 |
 | 비용 | 런타임 오버헤드 | CI에서 수 분~수십 분의 분석 시간 |
 | 강점 | 실제 발생 가능한 버그 확인 | 작성 직후 즉시 피드백, 커버되지 않은 코드 검사 |
 
-정적 분석기는 테스트가 닿지 않는 코드 경로의 의심스러운 패턴을 잡는다. sanitizer는 실행된 경로에 한해 정확한 진단을 낸다. 두 도구는 보완 관계이며, "정적 분석 → 단위 테스트 + sanitizer → fuzzer + sanitizer" 순으로 깊이 있는 검출을 쌓아 올리는 것이 일반적이다.
+정적 분석기는 테스트가 닿지 않는 코드 경로의 의심스러운 패턴을 잡는다. sanitizer는 계측·검출 모델 범위 안에서 실행된 경로의 진단을 내며, 모델 밖 오류나 누락된 계측은 잡지 못한다. 두 도구는 보완 관계이며, "정적 분석 → 단위 테스트 + sanitizer → fuzzer + sanitizer" 순으로 깊이 있는 검출을 쌓아 올리는 것이 일반적이다.
 
 clang-tidy는 sanitizer와 같은 LLVM 인프라 위에서 동작하면서도 정적 분석 쪽에 위치한다. `bugprone-*`, `cert-*`, `cppcoreguidelines-*` 그룹의 체크는 sanitizer가 잡지 못하는 디자인 수준 결함(잘못된 캐스팅, RAII 누락, 위험한 매크로)을 잡는다.
 
@@ -923,7 +948,7 @@ sanitizer는 디버깅 도구이지 보안 메커니즘이 아니다. 릴리즈 
 
 서드파티 라이브러리와 sanitizer가 충돌하는 경우도 흔하다. 직접 `mmap`/`mprotect`를 사용하는 JIT, 자체 stack switching을 하는 코루틴 라이브러리, 커스텀 할당자가 대표적이다. 이 경우 `__sanitizer_*` 인터페이스로 명시적으로 메모리 영역을 등록하거나, 해당 코드 경로를 `__attribute__((no_sanitize("address")))`로 빼야 한다.
 
-마지막으로, sanitizer는 버그를 *찾는* 도구이지 *막는* 도구가 아니다. 막는 일은 설계가 한다. RAII로 자원 수명을 객체 수명에 묶고, 소유권을 명시하고, 공유 데이터는 가능한 불변으로 두고, 수명이 예측 가능한 객체는 풀에서 할당한다. 이런 설계 위에서 sanitizer는 적은 비용으로 큰 안전망 역할을 한다.
+마지막으로, sanitizer는 버그를 *찾는* 도구이지 *막는* 도구가 아니다. 막는 일은 설계가 한다. RAII로 자원 수명을 객체 수명에 묶고, 소유권을 명시하고, 공유 데이터는 가능한 불변으로 두고, 수명이 예측 가능한 객체는 풀에서 할당한다. 다만 풀은 할당 비용과 주소 재사용을 바꿀 뿐 dangling·stale pointer를 자동으로 막지 않으므로, 세대 핸들과 명시적 수명 종료·회수 계약을 함께 둔다. 이런 설계 위에서 sanitizer는 적은 비용으로 큰 안전망 역할을 한다.
 
 ### Fuzzer와의 결합
 
@@ -943,8 +968,8 @@ OSS-Fuzz는 이 조합을 대규모로 운영하는 사례다. 수백 개 오픈
 지금까지 다룬 도구들은 대부분 Linux 또는 Clang/GCC 기반이다. Windows에서는 약간 다른 도구 셋이 쓰인다.
 
 - **Application Verifier (AppVerif)**: heap, handle, lock에 대한 동적 검증 도구. `HEAP_TAIL_CHECKING_ENABLED`는 `HeapAlloc`에 넘기는 플래그가 아니라 GFlags/Application Verifier가 프로세스 heap 검증을 위해 활성화하는 모드다. `HeapValidate`와 PageHeap 같은 진단 기능과 조합한다.
-- **PageHeap**: Windows의 디버그 힙 모드. 모든 할당을 페이지 경계에 정렬하고 가드 페이지를 두어 overflow를 즉시 segfault로 만든다. 메모리 사용량이 폭증하므로 짧은 재현용 빌드에 한정해 켠다.
-- **MSVC의 `/fsanitize=address`**: Visual Studio 2019 16.9부터 ASan을 공식 지원한다. Linux의 ASan과 같은 compiler-rt 인프라를 쓰지만 검출 범위가 같지는 않다. 누수 검출(LSan)이 없고, stack-use-after-return은 별도 컴파일러 옵션을 요구하며, initialization order fiasco·intra-object overflow·container overflow 같은 검사는 포함되지 않는다.
+- **PageHeap**: Windows의 디버그 힙 모드. standard page heap은 할당 끝에 fill 패턴을 써 두고 해제 시점에 손상 여부를 검사하며, full page heap은 할당마다 끝에 접근 불가 페이지를 두어 overflow를 즉시 접근 위반으로 만든다. 검출 시점과 메모리 사용량이 모드에 따라 다르므로 짧은 재현용 빌드에 한정해 켠다.
+- **MSVC의 `/fsanitize=address`**: Visual Studio 2019 16.9부터 ASan을 공식 지원한다. Linux의 ASan과 같은 compiler-rt 인프라를 쓰지만 검출 범위가 같지는 않다. 누수 검출(LSan)이 없고, stack-use-after-return은 별도 컴파일러 옵션을 요구하며, initialization order fiasco·intra-object overflow 같은 검사는 포함되지 않는다. container overflow는 VS2022 17.2 이후 `std::vector`, 17.6 이후 `std::string`에 대해 STL annotation으로 검출되며, custom allocator는 8바이트 정렬 등 조건을 만족할 때만 검출 범위에 들어간다.
 - **clang-tidy on Windows**: clang-cl 툴체인 위에서 동작한다. Visual Studio가 직접 통합한다.
 
 게임 콘솔은 공개 범위가 제한된 SDK별 메모리·GPU 진단 도구를 제공할 수 있다. 기능과 지원 이름은 SDK 버전에 따라 달라지므로 공개 PC 도구와 같은 검출 범위를 가정하지 말고 해당 플랫폼 문서에서 heap guard, allocation trace와 GPU residency 기능을 확인한다.

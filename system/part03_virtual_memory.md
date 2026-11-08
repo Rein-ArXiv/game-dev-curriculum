@@ -290,11 +290,11 @@ Virtual Address (48 bits used out of 64)
 
 ```text
 Page Table Entry (64 bits)
-┌──┬─────┬─────────────────────────────┬────┬─┬─┬─┬─┬───┬───┬───┬───┬─┐
-│NX│ AVL │  Physical Frame Number      │AVL │G│P│D│A│PCD│PWT│U/S│R/W│P│
-│  │     │  (PFN) or Next Level Table  │    │ │S│ │ │   │   │   │   │ │
-└──┴─────┴─────────────────────────────┴────┴─┴─┴─┴─┴───┴───┴───┴───┴─┘
- 63 62:52             51:12             11:9 8 7 6 5  4   3   2   1  0
+┌──┬─────┬───────────────────────────┬────┬─┬───┬─┬─┬───┬───┬───┬───┬─┐
+│NX│ AVL │  Physical Frame Number    │AVL │G│PAT│D│A│PCD│PWT│U/S│R/W│P│
+│  │     │ (PFN) or Next Level Table │    │ │   │ │ │   │   │   │   │ │
+└──┴─────┴───────────────────────────┴────┴─┴───┴─┴─┴───┴───┴───┴───┴─┘
+ 63 62:52            51:12            11:9 8  7  6 5  4   3   2   1  0
 ```
 
 주요 비트들:
@@ -325,9 +325,9 @@ Page Table Entry (64 bits)
 - 1: 페이지가 쓰여짐 (하드웨어가 자동 설정)
 - 페이지를 스왑 아웃할 때 디스크에 쓸지 결정
 
-**PS (Page Size, bit 7)**
-- PD 엔트리에서: 1이면 2MB 페이지, 0이면 다음 레벨 테이블
-- PDPT 엔트리에서: 1이면 1GB 페이지
+**PAT (Page Attribute Table, bit 7)**
+- 4KiB leaf PTE에서: PAT. PCD(bit 4)와 함께 메모리 타입/캐시 정책을 선택한다
+- 상위 PDE/PDPTE(leaf가 아닌 entry)에서 같은 bit 7은 **PS (Page Size)**로, 1이면 2MB/1GB large page를 선택한다. 같은 bit 위치라도 page-table level과 leaf 여부에 따라 의미가 다르다
 
 **G (Global, bit 8)**
 - 1: 전역 페이지 (TLB에서 CR3 변경 시에도 유지)
@@ -613,27 +613,41 @@ dotraplinkage void do_page_fault(struct pt_regs *regs, unsigned long error_code)
     unsigned long address = read_cr2();  // CR2: 폴트를 일으킨 가상 주소
     struct mm_struct *mm = current->mm;
     struct vm_area_struct *vma;
+    unsigned int flags = FAULT_FLAG_DEFAULT;
 
-    // 1. 커널 모드 폴트 vs 사용자 모드 폴트
-    if (unlikely(error_code & X86_PF_PROT)) {
-        // Protection fault
+    // 1. present/protection 원인과 user/kernel 주체는 서로 다른 비트다.
+    if (likely(!(error_code & X86_PF_PROT))) {
+        // Not-present (P=0). 사용자 공간의 not-present fault도 여기 해당한다.
     } else {
-        // Not-present fault
+        // Protection violation (P=1): 권한 위반.
     }
+    if (error_code & X86_PF_USER)
+        flags |= FAULT_FLAG_USER;   // 주체가 사용자 모드인지는 이 비트로 판단한다
+    if (error_code & X86_PF_WRITE)
+        flags |= FAULT_FLAG_WRITE;
 
-    // 2. 유효한 주소인지 확인
+    // 2. find_vma는 vm_end > address인 첫 VMA를 반환한다. address를 포함한다는
+    //    보장이 없으므로 caller가 vm_start를 검사한다.
     vma = find_vma(mm, address);
     if (!vma)
         goto bad_area;
 
-    // 3. 권한 확인
-    if (error_code & X86_PF_WRITE) {
-        if (!(vma->vm_flags & VM_WRITE))
-            goto bad_area;
-    }
+    // 3. 포함 여부와 stack 확장 대상 여부 확인
+    if (vma->vm_start <= address)
+        goto good_area;
+    if (!(vma->vm_flags & VM_GROWSDOWN))
+        goto bad_area;
+    if (expand_stack(vma, address))
+        goto bad_area;
 
-    // 4. 페이지 할당 및 매핑
-    return handle_mm_fault(vma, address, flags);
+good_area:
+    // 4. 접근 종류가 VMA 권한과 맞는지 확인
+    if ((error_code & X86_PF_WRITE) && !(vma->vm_flags & VM_WRITE))
+        goto bad_area;
+
+    // 5. 페이지 할당 및 매핑 (do_page_fault는 void trap handler다)
+    handle_mm_fault(vma, address, flags, regs);
+    return;
 
 bad_area:
     // Segmentation fault: 사용자에게 SIGSEGV 전달
@@ -681,17 +695,26 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
     struct page *old_page = vmf->page;
     struct page *new_page;
 
-    // 페이지가 공유 중인지 확인
-    if (page_count(old_page) > 1) {
-        // 새 페이지 할당
-        new_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma, address);
-
-        // 데이터 복사
-        copy_user_highpage(new_page, old_page, address, vma);
-
-        // 새 페이지로 매핑
-        set_pte_at(mm, address, pte, mk_pte(new_page, vma->vm_page_prot));
+    // 익명 독점 페이지일 때만 복사 없이 재사용한다. page_count 하나로
+    // 판단하지 않고 매핑 수, KSM 여부, pin/추가 참조와 해당 커널 버전의
+    // 독점성 조건을 함께 본다.
+    if (PageAnon(old_page) && !PageKsm(old_page) &&
+        total_mapcount(old_page) == 1 && page_count(old_page) == 1) {
+        // 독점 소유: 복사 없이 쓰기 가능으로 전환
+        set_pte_at(mm, address, pte,
+                   maybe_mkwrite(pte_mkdirty(vmf->orig_pte), vma));
+        return VM_FAULT_WRITE;
     }
+
+    // 그 밖의 private file 매핑, 공유 페이지, pin된 페이지는 copy 경로로 보낸다.
+    new_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma, address);
+
+    // 데이터 복사
+    copy_user_highpage(new_page, old_page, address, vma);
+
+    // 새 페이지로 매핑
+    set_pte_at(mm, address, pte, mk_pte(new_page, vma->vm_page_prot));
+    return VM_FAULT_WRITE;
 }
 ```
 
@@ -981,11 +1004,13 @@ vm_fault_t filemap_fault(struct vm_fault *vmf)
 
 **2) Readahead 튜닝**
 ```bash
-# 파일 시스템 readahead 크기 설정 (KB)
+# block device readahead 크기 설정 (512-byte sector 단위, 256 sectors = 128KiB)
 $ blockdev --setra 256 /dev/sda
+```
 
-# 프로세스별 readahead 힌트
-$ posix_fadvise(fd, offset, len, POSIX_FADV_WILLNEED);
+```c
+// 프로세스별 readahead 힌트 (C 라이브러리 호출)
+posix_fadvise(fd, offset, len, POSIX_FADV_WILLNEED);
 ```
 
 ### 익명 메모리 vs 파일 백드 메모리
@@ -1181,32 +1206,37 @@ $ cat /proc/self/maps
 struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
 {
     struct rb_node *rb_node;
-    struct vm_area_struct *vma;
+    struct vm_area_struct *vma = NULL;
 
     // 캐시 확인 (마지막으로 찾은 VMA)
     vma = vmacache_find(mm, addr);
     if (likely(vma))
         return vma;
 
-    // 레드-블랙 트리 탐색
+    // 레드-블랙 트리 탐색: vm_end > addr인 첫 VMA를 찾는다
     rb_node = mm->mm_rb.rb_node;
     while (rb_node) {
-        vma = rb_entry(rb_node, struct vm_area_struct, vm_rb);
+        struct vm_area_struct *tmp;
 
-        if (vma->vm_end > addr) {
-            if (vma->vm_start <= addr)
-                return vma;  // 찾음!
+        tmp = rb_entry(rb_node, struct vm_area_struct, vm_rb);
+
+        if (tmp->vm_end > addr) {
+            vma = tmp;
+            if (tmp->vm_start <= addr)
+                break;  // addr를 포함하면 확정
             rb_node = rb_node->rb_left;
         } else {
             rb_node = rb_node->rb_right;
         }
     }
 
-    return NULL;
+    return vma;
 }
 ```
 
 시간 복잡도: O(log N)
+
+`find_vma`의 반환 계약은 `addr`를 **포함하는** VMA가 아니라 `vm_end > addr`인 첫 VMA를 반환한다는 것이다. 예를 들어 `[0x2000, 0x3000)` VMA 하나만 있을 때 `addr=0x1000`이면 이 VMA가 반환된다. 호출자는 `addr < vm_start`인지(스택 확장 대상인지)를 별도로 검사해야 한다.
 
 ### VMA 연산
 
@@ -1641,18 +1671,22 @@ static unsigned long shrink_inactive_list(unsigned long nr_to_scan,
     ↓
 2. Dirty 비트 확인
     ↓
-3. 스왑 공간 할당 (swap slot)
+3. PTE lock 획득 및 swap slot/page 참조 확보
     ↓
-4. 페이지 내용을 스왑으로 쓰기 (I/O)
+4. 스왑 공간 할당 (swap slot)
     ↓
-5. 페이지 테이블 엔트리 변경:
+5. 페이지 내용을 스왑으로 쓰기 (I/O) — 성공을 확인해야 한다
+    ↓
+6. I/O 성공 후 페이지 테이블 엔트리를 swap entry로 변경:
    - Present 비트: 0
    - PFN 대신 swap entry 저장
     ↓
-6. 물리 페이지 해제
+7. 해당 주소 범위의 stale writable TLB 번역 무효화 (TLB shootdown 완료)
     ↓
-7. TLB 플러시
+8. 참조 회수와 실제 회수 조건을 확인한 뒤 물리 페이지 해제
 ```
+
+PTE를 swap entry로 바꾼 것만으로 원래 페이지를 즉시 재사용할 수 있는 것은 아니다. 스왑 I/O 성공, 해당 주소의 TLB shootdown 완료, 그리고 페이지에 대한 남은 참조 회수가 모두 확인된 뒤에야 물리 페이지를 해제할 수 있다. 그 전에 다른 CPU가 stale writable TLB로 접근하거나 진행 중인 writeback이 버퍼를 붙들고 있으면 데이터 손실이나 다른 객체 덮어쓰기가 가능하다.
 
 페이지 테이블 엔트리의 스왑 엔트리:
 
@@ -1961,9 +1995,16 @@ struct task_struct {
 // Per-CPU 변수 선언
 DEFINE_PER_CPU(int, my_counter);
 
-// 현재 CPU의 변수 접근
+// 현재 CPU의 변수 읽기
 int val = this_cpu_read(my_counter);
-this_cpu_write(my_counter, val + 1);
+
+// read와 write를 두 번의 this_cpu_* 호출로 나눈 갱신은 하나의 원자 연산이 아니다.
+// 그 사이 CPU migration이나 같은 CPU의 interrupt가 값을 바꿀 수 있다.
+// 단일 CPU 대상 증가/가산은 this_cpu_inc / this_cpu_add로 한 번에 수행한다.
+this_cpu_add(my_counter, 1);
+
+// 여러 필드를 함께 갱신하는 복합 연산이면 preemption/interrupt 비활성화처럼
+// 같은 CPU의 끼어들기를 막는 보호 계약을 코드에 명시해야 한다.
 
 // 특정 CPU의 변수 접근
 int val_cpu2 = per_cpu(my_counter, 2);

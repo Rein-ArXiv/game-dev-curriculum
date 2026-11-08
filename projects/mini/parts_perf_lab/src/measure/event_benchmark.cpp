@@ -5,16 +5,28 @@
 
 namespace ppl {
 
+void EventBenchmark::ResetLast() {
+    lastAllocCount_ = 0;
+    lastAllocBytes_ = 0;
+    lastFrameMs_    = 0.0f;
+    attempted_      = 0;
+    failed_         = 0;
+    status_         = BenchStatus::Skipped;
+}
+
 void EventBenchmark::Init(std::size_t targetEventCount) {
     target_ = targetEventCount;
+    // target=0으로 다시 Init한 뒤 RunFrame을 돌려도 직전 프레임 결과가 남지 않는다.
+    ResetLast();
 }
 
 void EventBenchmark::RunFrame(IAllocator* alloc) {
+    // 매 프레임 먼저 비운다. null/0 경로에서도 옛 allocator의 frame 카운터가
+    // 새 결과로 보이지 않게 한다.
+    ResetLast();
+
     if (!alloc || target_ == 0) {
-        lastAllocCount_ = 0;
-        lastAllocBytes_ = 0;
-        lastFrameMs_    = 0.0f;
-        return;
+        return;  // Skipped
     }
 
     using Clock = std::chrono::steady_clock;
@@ -28,8 +40,12 @@ void EventBenchmark::RunFrame(IAllocator* alloc) {
     Node* head = nullptr;
     std::size_t count = 0;
     for (std::size_t i = 0; i < target_; ++i) {
+        ++attempted_;
         void* p = alloc->Allocate(sizeof(Node), alignof(Node));
-        if (!p) break;  // Pool/Slab 풀 고갈 시 nullptr
+        if (!p) {
+            ++failed_;   // Pool/Slab 고갈 등
+            break;
+        }
         Node* node = static_cast<Node*>(p);
         node->id   = static_cast<std::uint32_t>(i);
         node->dist = 0.0f;
@@ -41,6 +57,8 @@ void EventBenchmark::RunFrame(IAllocator* alloc) {
 
     lastAllocCount_ = count;
     lastAllocBytes_ = count * sizeof(Node);
+    status_ = (count == target_) ? BenchStatus::Valid
+                                 : BenchStatus::InvalidCapacity;
 
     // 노드별 Deallocate. Arena는 통계만 기록(메모리는 Reset이 회수).
     // Pool은 free list에 push, Reset이 list를 다시 초기화.

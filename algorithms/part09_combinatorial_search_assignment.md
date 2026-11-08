@@ -46,7 +46,7 @@ Big-O의 밑과 factorial은 작은 parameter 차이에도 실행 가능성을 �
 
 ### 작은 parameter의 가치
 
-전체 월드 entity가 백만 개여도 squad slot이 8개라면 $2^8$ 탐색은 작다. 반대로 콘텐츠 설정으로 slot 수가 무제한 증가할 수 있으면 현재는 빠른 구현이 미래에는 폭발한다. Parameter 상한을 제품 계약에 둬야 한다.
+고정된 8개 대상의 포함 여부는 $2^8$가지다. 그러나 전체 월드 entity가 백만 개이고 그중에서 8개를 고르는 문제라면 공간은 $C(N,8)$이며, $N=10^6$이면 약 $2.48\times10^{43}$다. 서로 구별되는 8개 슬롯에 중복 없이 배치하면 $P(N,8)=C(N,8)\cdot8!$이다. 따라서 slot 수가 8로 작다는 사실만으로 탐색이 $2^8$로 줄어들지는 않는다. 작은 slot 수가 실제로 이득이 되려면 후보 축소, 상태 압축, matching 같은 별도 구조를 함께 설명해야 한다. 반대로 콘텐츠 설정으로 slot 수가 무제한 증가할 수 있으면 현재는 빠른 구현이 미래에는 폭발하므로 parameter 상한을 제품 계약에 둬야 한다.
 
 ## 2. Backtracking의 상태와 불변식
 
@@ -68,7 +68,7 @@ void Search(State& state, int depth) {
 }
 ```
 
-핵심 불변식은 재귀 진입 시 `state`가 depth까지의 정확한 부분해이고 모든 hard constraint를 만족한다는 것이다. `Undo` 뒤 state가 bit 단위까지 원래와 같아야 sibling branch가 서로 오염되지 않는다.
+핵심 불변식은 재귀 진입 시 `state`가 depth까지의 정확한 부분해이고 모든 hard constraint를 만족한다는 것이다. `Undo` 뒤 state는 논리적으로 관찰 가능한 값이 원래와 같아야 sibling branch가 서로 오염되지 않는다. Padding·capacity·cache·할당 주소처럼 의미를 바꾸지 않는 표현 차이까지 bitwise로 같을 필요는 없고, state hash가 같다는 것도 충돌 가능성 때문에 완전 복원의 증명은 아니다. Hash는 복구 누락을 탐지하는 보조 수단으로만 쓴다.
 
 ### Apply/Undo와 복사
 
@@ -83,7 +83,7 @@ choice를 적용하며 변경 전 값을 log에 기록
 log를 checkpoint까지 역적용
 ```
 
-예외·조기 return에도 복구되도록 scope guard를 사용할 수 있다.
+예외·조기 return에도 복구되도록 scope guard를 사용할 수 있다. `GenerateChoices`가 `state` 내부를 참조하는 view를 반환하면 `Apply`가 그 range를 무효화할 수 있으므로, choice 목록을 snapshot하거나 반복자 안정성을 보장하고 예외·취소 시 rollback 계약을 명시한다.
 
 ### 순열 생성
 
@@ -190,6 +190,8 @@ Search(state):
   else: child를 유망한 순서로 탐색
 ```
 
+`LowerBound(state) >= best`는 최적값 하나나 최적해 하나를 찾을 때는 안전하지만, 같은 최적값의 모든 해를 열거할 때는 동률 가지까지 제거한다. 모든 최적해를 모으려면 `LowerBound(state) > best`만 자르거나 동률 completion을 수집하는 규약을 별도로 둔다. 한 최적해 모드와 모든 최적해 모드를 구분한다.
+
 ### Bound의 조건
 
 Lower bound는 실제 가능한 completion 비용보다 클 수 없다.
@@ -209,7 +211,7 @@ Bound가 너무 낮으면 안전하지만 pruning이 약하다. 실제 최적보
 - DFS: 메모리가 작고 feasible incumbent를 빨리 찾을 수 있다.
 - Best-first: bound가 가장 좋은 node부터 확장해 강한 탐색 순서를 제공하지만 open set 메모리가 커진다.
 
-시간 제한 시 현재 incumbent를 반환하려면 그것이 실제 feasible 해인지 보장해야 한다. Bound와 incumbent의 차이는 아직 남은 optimality gap의 상한으로 사용할 수 있다.
+시간 제한 시 현재 incumbent를 반환하려면 그것이 실제 feasible 해인지 보장해야 한다. Optimality gap은 현재 한 노드의 bound가 아니라 아직 열려 있는 전체 frontier를 대표하는 lower bound로 계산한다. 최소화에서는 $L=\min(U,\min_{\text{frontier}} LB)$를 유지하고 $0\le U-OPT\le U-L$을 보고한다. Feasible incumbent가 아직 없는 경우와 frontier가 빈 경우는 별도 상태로 구분한다.
 
 ### Memoization과 차이
 
@@ -317,7 +319,7 @@ L -> R의 원래 edge: capacity 1
 모든 R 정점 -> sink: capacity 1
 ```
 
-정수 capacity max flow는 정수 flow를 가지므로 flow 1인 `L->R` edge가 matching이다.
+정수 capacity에서는 정수 augmentation을 보존하는 max-flow 알고리즘(Ford-Fulkerson, Edmonds-Karp, Dinic 등)이 정수 최적 flow를 찾으므로 flow 1인 `L->R` edge가 matching이다. 정수 capacity가 보장하는 것은 정수 최적해의 존재와 정수 augmentation이며, 임의의 최적 flow가 모두 정수라는 뜻은 아니다.
 
 ### Augmenting path
 
@@ -351,7 +353,7 @@ $$
 cost(f)=\sum_{(u,v)\in E}f(u,v)cost(u,v)
 $$
 
-Residual reverse edge에는 `-cost`를 둬 이전 선택을 취소할 수 있게 한다. Negative residual cost가 생기므로 shortest path 알고리즘의 전제를 맞추기 위해 potential을 사용한 reduced cost나 Bellman-Ford 계열 초기화가 필요할 수 있다.
+Residual reverse edge에는 `-cost`를 둬 이전 선택을 취소할 수 있게 한다. Negative residual cost가 생기므로 shortest path 알고리즘의 전제를 맞추기 위해 potential을 사용한 reduced cost나 Bellman-Ford 계열 초기화가 필요할 수 있다. 다만 초기 feasible flow가 이미 최소비용이거나 negative residual cycle이 없어야 potential이 모든 residual edge에서 reduced cost를 음이 아니게 유지하며, 도달 가능한 정점 범위와 potential 갱신 범위를 함께 명시한다. 그 범위 밖의 negative cycle이나 도달 불가 정점은 별도 초기화나 다른 알고리즘으로 처리한다.
 
 ### Assignment와 Hungarian algorithm
 
@@ -407,7 +409,7 @@ $n$개 선택을 절반으로 나눠 각 절반의 $2^{n/2}$ 결과를 생성하
 
 ```text
 feasible incumbent가 있음: 품질 미확정 해 반환 가능
-lower/upper bound가 있음: optimality gap 보고 가능
+frontier 전체를 대표하는 bound가 있음: optimality gap 보고 가능
 feasible 해가 없음: 미발견인지 불가능 증명인지 구분
 ```
 
@@ -430,9 +432,10 @@ Timeout을 “해 없음”으로 처리하면 정확성 버그다.
 
 - 생성한 모든 해가 constraint를 만족한다.
 - 작은 domain의 모든 feasible 해가 정확히 한 번 나온다.
-- Apply/Undo 전후 state hash가 같다.
+- Apply/Undo 전후 논리적으로 관찰 가능한 state가 같고, state hash는 탐지 보조로만 사용한다.
 - Symmetry breaking을 끄고 canonicalize한 결과 집합과 켠 결과가 같다.
 - Pruning을 끈 기준 탐색과 최적 값이 같다.
+- 동률 최적해를 모두 열거하는 모드에서는 `>=` 대신 `>` pruning을 사용해 최적값의 모든 해가 나오는지 확인한다.
 
 ### Flow 검증
 

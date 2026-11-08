@@ -10,10 +10,13 @@
 namespace ppl {
 
 void* MallocAllocator::Allocate(std::size_t size, std::size_t alignment) {
+    // 공통 계약: 0바이트 요청은 no-op(nullptr)이고 어떤 카운터도 바꾸지 않는다.
+    if (size == 0) return nullptr;
     // alignment는 0이 아니고 2의 거듭제곱이어야 한다.
     // 잘못된 값이면 nullptr을 돌려준다 (assert 대신 nullptr이 측정 흐름에 안전).
-    if (size == 0 || !IsValidAlignment(alignment) ||
+    if (!IsValidAlignment(alignment) ||
         size > std::numeric_limits<std::size_t>::max() - (alignment - 1)) {
+        RecordFailure();
         return nullptr;
     }
 
@@ -32,6 +35,8 @@ void* MallocAllocator::Allocate(std::size_t size, std::size_t alignment) {
 
     if (ptr) {
         RecordAlloc(size);
+    } else {
+        RecordFailure();  // 실제 확보 실패
     }
     return ptr;
 }

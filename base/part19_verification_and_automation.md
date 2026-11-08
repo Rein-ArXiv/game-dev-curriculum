@@ -29,11 +29,17 @@
 렌더링: 좌표와 자원 수명, 이미지 오차
 ```
 
-테스트 이름은 조건과 기대 결과를 드러내야 한다.
+테스트 이름은 조건과 기대 결과를 드러내야 하고, 본문에는 실행과 단언이 있어야 한다. 주석만 있는 이름은 테스트가 아니다.
 
 ```cpp
 TEST(Inventory, DuplicateOperationDoesNotGrantItemTwice) {
-    // 동일 operation ID의 반복이 수량을 두 번 늘리지 않는지 검사한다.
+    Inventory inventory = MakeInventoryWithQuantity(/*quantity=*/0);
+    const OperationId op = 42;
+
+    GrantItem(inventory, op, /*itemType=*/7, /*quantity=*/1);
+    GrantItem(inventory, op, /*itemType=*/7, /*quantity=*/1);  // 같은 operation 재시도
+
+    EXPECT_EQ(QuantityOf(inventory, 7), 1);
 }
 ```
 
@@ -57,11 +63,13 @@ TEST(Inventory, DuplicateOperationDoesNotGrantItemTwice) {
 ```text
 decode(encode(x)) == x
 sort(sort(x)) == sort(x)
-remove(insert(S, x), x) preserves prior members
-rollback(commit-failed transaction) preserves balance
+x ∉ S이면 remove(insert(S, x), x) == S (멀티집합은 새로 추가한 항목만 제거)
+확인된 중단이면 효과가 반영되지 않음
+확인된 커밋이면 효과가 반영됨
+결과 불명이면 operation 조회·멱등 재시도로 확정
 ```
 
-손실 표현에서는 정확한 등호 대신 허용 오차와 범위를 사용한다.
+`sort(sort(x)) == sort(x)`는 항상 빈 배열을 반환하는 함수도 통과하므로, 순서와 원소 보존을 함께 검사하고 독립 기준 구현이나 고정된 golden bytes와 비교한다. encode/decode도 같은 잘못된 규칙을 공유하면 왕복 시험만으로 외부 형식 호환성을 검증할 수 없다. 손실 표현에서는 정확한 등호 대신 허용 오차와 범위를 사용한다.
 
 통합 테스트는 외부 시스템을 무조건 mock으로 바꾸지 않는다. mock은 호출 의도를 검증하지만 실제 SQL 격리, 파일 원자성, 네트워크 부분 읽기, GPU validation을 재현하지 못할 수 있다.
 
@@ -99,7 +107,7 @@ comparison: baseline confidence interval
 
 ## 4. 재현 가능한 빌드
 
-같은 소스에서 같은 의미의 산출물을 만들려면 빌드 입력을 명시해야 한다.
+동일 입력·환경에서 동일 바이트를 만드는 재현성, 어떤 입력과 도구로 만들었는지 아는 추적 가능성, 빌드 도중 외부의 변하는 입력에 의존하지 않는 환경 통제는 서로 다른 목표다. 같은 소스에서 같은 의미의 산출물을 만들려면 빌드 입력을 명시해야 한다.
 
 ```text
 소스 commit
@@ -123,13 +131,13 @@ build time
 signature
 ```
 
-모든 바이트가 완전히 동일한 reproducible build가 어려워도 어떤 입력으로 만들었는지 추적 가능해야 한다.
+모든 바이트가 완전히 동일한 reproducible build가 어려워도 어떤 입력으로 만들었는지 추적 가능해야 한다. `build time`은 비교 대상 산출물 안에 들어가면 바이트 재현성을 깨뜨릴 수 있으므로 별도 메타데이터로 분리하거나 결정적인 시각을 사용한다.
 
 컨테이너는 서버 빌드와 테스트 환경을 고정하는 한 방법이다. 컨테이너 자체가 테스트 격리, 보안, 준비 완료를 자동 보장하지 않는다. 이미지 태그, base image 수명, health check, 볼륨과 네트워크 의존성을 명시한다.
 
 ## 5. 지속적 통합
 
-지속적 통합(CI)은 변경을 공유 브랜치에 합치기 전에 자동 빌드와 검증을 실행하는 실천이다. 특정 서비스의 YAML이 핵심이 아니라, 어떤 변경이 어떤 검사를 통과해야 하는지가 핵심이다.
+지속적 통합(CI)은 변경을 공유 기준선에 자주 합치고 자동 빌드와 검증을 실행하는 실천이며, 병합 전 검사는 그 일부다. 특정 서비스의 YAML이 핵심이 아니라, 어떤 변경이 어떤 검사를 통과해야 하는지가 핵심이다.
 
 ```mermaid
 flowchart LR

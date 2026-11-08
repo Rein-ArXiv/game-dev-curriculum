@@ -142,10 +142,10 @@ $$
 C_{\text{out}} = C_s' + (1 - \alpha_s) C_d, \qquad C_s' = \alpha_s C_s \;(\text{이미 곱해진 값})
 $$
 
-블렌드 식이 `src = ONE`, `dst = ONE_MINUS_SRC_ALPHA`가 되어 *합성이 결합법칙* 을 만족한다. 이게 왜 중요한가 — 세 가지 실질적 이득이 있다.
+블렌드 식이 `src = ONE`, `dst = ONE_MINUS_SRC_ALPHA`가 되어 색·알파가 정규화 없는 하나의 선형 식으로 더해진다. 결합법칙은 프리멀티플라이드 고유의 성질이 아니라 올바른 over 연산 자체의 성질이며, straight-alpha over도 단계마다 RGB를 $\alpha$로 나눠 되돌리는 정규화를 거치면 같은 결합법칙을 만족한다. 합성 연산 자체와 저장 표현을 구별해야 한다. 이게 왜 중요한가 — 세 가지 실질적 이득이 있다.
 
 1. **필터링이 올바르다**: 텍스처를 축소(밉맵·이중선형)할 때, 스트레이트 알파는 *투명 픽셀의 (의미 없는) 색* 까지 평균에 끌어들여 엣지에 검은/흰 *프린지(fringe)* 를 만든다. 프리멀티플라이드는 색이 이미 알파로 가중돼 있어 투명 픽셀이 색에 기여하지 않으므로 프린지가 없다.
-2. **합성 체인이 안전하다**: 여러 반투명 레이어를 중간 버퍼에 모았다가 다시 합성할 때, 프리멀티플라이드만이 수학적으로 일관된다.
+2. **합성 체인이 안전하다**: 여러 반투명 레이어를 중간 버퍼에 모았다가 다시 합성할 때, 프리멀티플라이드는 색·알파를 같은 선형 식으로 다뤄 저장 표현과 합성 연산이 어긋나지 않게 해 준다. 정규화를 빼먹은 잘못된 straight-alpha 합성식이 문제이지, 올바른 straight-alpha over 자체가 일관성을 잃는 것은 아니다.
 3. **가산 혼합과 통합**: premultiplied over 식을 쓰는 HDR 합성 파이프라인에서는 $\alpha=0$이면서 RGB 에너지가 있는 확장 표현을 가산광에 사용할 수 있다. 다만 이는 $0\le C'\le\alpha$인 일반 불투명도 색의 범위를 벗어나는 별도 콘텐츠 계약이므로, 파일 포맷·필터·후처리가 음이 아닌 HDR RGB를 보존하는지 확인해야 한다.
 
 UI 합성·이미지 처리·필름 합성에서 프리멀티플라이드가 널리 쓰이는 이유다. 텍스처를 만들 때 미리 색에 알파를 곱해두거나, 로드 시 변환한다. 알파 컷아웃의 검은 테두리는 투명 texel의 RGB bleed, 잘못된 straight-alpha 필터링, sRGB 공간의 밉 생성, atlas 경계 누출 등이 모두 원인일 수 있으므로 중간 mip와 RGB·alpha 채널을 따로 검사한다.
@@ -258,5 +258,5 @@ UI 합성 위치도 출력 의미를 바꾼다.
 
 - John Novak, ["What every coder should know about gamma"](https://blog.johnnovak.net/2016/09/21/what-every-coder-should-know-about-gamma/) — 감마의 역사·지각 균등성·흔한 버그의 종합 정리.
 - Thomas Porter, Tom Duff, "Compositing Digital Images" (SIGGRAPH 1984) — over 연산과 프리멀티플라이드 알파의 원전.
-- [IEC 61966-2-1 (sRGB)](https://en.wikipedia.org/wiki/SRGB) — sRGB 전달 함수 명세 요약.
+- [sRGB 개요](https://en.wikipedia.org/wiki/SRGB) — sRGB 전달 함수의 제3자 요약(표준 원문은 IEC 61966-2-1).
 - Krzysztof Narkowicz, ["ACES Filmic Tone Mapping Curve"](https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/) — 실전 톤 매핑 근사.

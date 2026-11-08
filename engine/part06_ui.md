@@ -63,7 +63,7 @@ panel->AddChild(save);          // 트리에 영속
 // immediate: 매 프레임 호출, 객체 없음
 void DrawUI() {
     if (ImGui::Button("저장")) Save();   // 그리기+입력을 한 줄에
-}                                         // 프레임 끝나면 흔적 없음
+}                                         // 프레임 끝나면 호출 구조는 버려짐(상호작용 상태는 ID 키로 보존)
 ```
 
 ### 트레이드오프
@@ -72,7 +72,7 @@ void DrawUI() {
 
 | 축 | Retained | Immediate |
 |---|---|---|
-| 위젯 상태 | 프레임워크가 객체로 보관 | 호출 코드(게임 상태)가 소유 |
+| 위젯 상태 | 프레임워크가 객체로 보관 | 게임 데이터는 호출 코드 소유, 프레임워크는 ID 키 상호작용 상태 보존 |
 | 코드량 | 생성·연결·해제 코드 많음 | 한 줄로 그리기+입력 |
 | 동기화 | 모델↔뷰 바인딩 또는 명시적 갱신 | 호출 시 읽은 모델 상태를 즉시 반영 |
 | 비용 | 영속 트리·변경 추적·캐시 비용 | 매 프레임 선언 실행·레이아웃·명령 생성 비용 |
@@ -98,11 +98,15 @@ struct Widget {
     bool     dirtyLayout = true; // 레이아웃 재계산 필요
     bool     dirtyVisual = true; // 정점 재생성 필요
 
+    virtual ~Widget() = default;          // Widget* 삭제 계약: base로 delete해도 파생 소멸자 실행
+
     virtual void Measure(Vec2 avail) {}   // 1패스: 원하는 크기 계산
     virtual void Arrange(Rect final) {}   // 2패스: 자식 배치
     virtual void BuildGeometry(VertexBuffer&) {}
 };
 ```
+
+이 트리는 위젯을 `Widget*`로 소유·삭제하는 다형 컨테이너이므로 소멸자가 `virtual`이어야 한다(base로 delete해도 파생 위젯의 정리 코드가 실행된다). 바인딩된 구독 토큰 해제와 이벤트 디스패치 중 파괴 지연도 이 소멸 계약 위에서 정한다.
 
 트리 구조가 그대로 *세 가지 순회* 의 대상이 된다. 레이아웃(2절)은 트리를 아래→위(Measure), 위→아래(Arrange)로 두 번 훑고, 입력(5절)은 아래→위로 히트 테스트하며, 렌더(4절)는 깊이 우선으로 그린다. UI 시스템의 거의 모든 알고리즘이 이 트리 순회의 변형이다.
 
@@ -129,7 +133,7 @@ void Widget::SetText(const std::string& t) {
 
 가장 단순한 배치 규칙은 *앵커(anchor)* 다. 자식의 위치를 절대 픽셀이 아니라 *부모 사각형 안의 비율* 로 정의한다. 앵커 (0,0)은 부모의 좌상단, (1,1)은 우하단, (0.5,0.5)는 중앙이다. 부모 크기가 바뀌어도 자식은 비율을 유지하므로, 해상도가 달라져도 "우상단 미니맵"은 우상단에 남는다.
 
-*피벗(pivot)* 은 위젯 자신의 기준점이다. 피벗 (0.5,0.5)면 위젯의 중심이 앵커 지점에 놓이고, (0,0)이면 좌상단이 놓인다. 앵커가 "부모의 어디에 붙을지", 피벗이 "내 어디를 그 지점에 맞출지"를 정한다.
+*피벗(pivot)* 은 위젯 자신의 기준점이다. 피벗 (0.5,0.5)면 위젯의 중심, (0,0)이면 좌상단이 기준점이 된다. 아래 예제처럼 두 모서리 offset으로 사각형을 확정하는 모델에서 `pivot`은 사각형 위치를 바꾸지 않고 회전·스케일의 원점(transform origin)과 위치 표현 기준만 정한다. `anchoredPosition + pivot`으로 위치 자체를 정하는 모델과는 구분해서 읽어야 한다.
 
 ```cpp
 struct AnchorLayout {
@@ -328,7 +332,7 @@ public:
 
 UI는 작은 사각형과 글리프가 많아, 순진하게 위젯마다 드로우콜을 내면 CPU 명령 기록·상태 검증·제출 비용이 위젯 수에 비례한다. 드로우콜당 비용은 API, 드라이버, 검증 계층, 상태 변경량과 기록 방식에 따라 달라지므로 고정된 마이크로초 상수로 둘 수 없다. 중요한 사실은 작은 쿼드의 정점 작업보다 명령 수가 먼저 병목이 될 수 있다는 점이며, 실제 비용은 CPU 프로파일러로 측정한다.
 
-*배칭(batching)* 은 *여러 쿼드를 하나의 드로우콜로 합치는* 것이다. 같은 텍스처·셰이더·블렌드 상태를 쓰는 쿼드들의 정점을 하나의 큰 정점 버퍼에 모아 한 번에 그린다. 500개 위젯이 같은 아틀라스를 쓰면 드로우콜 1개로 끝난다.
+*배칭(batching)* 은 *여러 쿼드를 하나의 드로우콜로 합치는* 것이다. 같은 텍스처·셰이더·블렌드 상태를 쓰는 쿼드들의 정점을 하나의 큰 정점 버퍼에 모아 한 번에 그린다. 500개 위젯이 같은 아틀라스를 쓰고 clip·blend·파이프라인 상태가 연속이면 드로우콜 1개로 끝난다.
 
 ### 텍스처 아틀라스
 
@@ -339,10 +343,10 @@ struct Sprite {
     TextureId atlas;     // 같은 아틀라스를 공유해야 배칭됨
     Rect      uv;        // 아틀라스 안 위치 (0~1 정규화)
 };
-// 위젯이 같은 atlas를 가리키는 한, 정점만 모으면 드로우콜 1개
+// 같은 atlas와 호환 clip/blend/pipeline 상태가 연속이면 정점을 모아 드로우콜 1개
 ```
 
-아틀라스가 여러 장으로 나뉘면(텍스처가 너무 많아 한 장에 안 들어감), *아틀라스 단위로 드로우콜이 쪼개진다*. 그래서 자주 같이 그려지는 UI(같은 화면의 위젯들)는 *같은 아틀라스* 에 모으는 것이 중요하다. 빌드 파이프라인에서 아틀라스 패킹을 화면/메뉴 단위로 묶는 이유다.
+아틀라스가 여러 장으로 나뉘면(텍스처가 너무 많아 한 장에 안 들어감), *아틀라스 단위로 드로우콜이 쪼개진다*. 그래서 자주 같이 그려지는 UI(같은 화면의 위젯들)는 *같은 아틀라스* 에 모으는 것이 중요하다. 빌드 파이프라인에서 아틀라스 패킹을 화면/메뉴 단위로 묶는 이유다. 캔버스를 나눌 때도 화면의 시각적 z순서가 유지되도록 그리기 순서를 보존해야 한다.
 
 ### 정점 버퍼 빌드와 더티 재빌드
 
@@ -445,15 +449,19 @@ bool ShouldIsolate(int staticVerts, float dirtyProbability,
 ```cpp
 Widget* HitTest(Widget* node, Vec2 p) {
     if (!node->visible) return nullptr;
-    if (!node->worldRect.Contains(p)) return nullptr;
+    bool inside = node->worldRect.Contains(p);
+    if (!inside && node->clipChildren) return nullptr;  // 그리기와 같은 클리핑 규칙
     // 자식을 역순으로 (나중에 그린 = 위에 있는 것 우선)
     for (auto it = node->children.rbegin(); it != node->children.rend(); ++it) {
         if (Widget* hit = HitTest(*it, p))
             return hit;                       // 가장 위 자식이 먹음
     }
+    if (!inside) return nullptr;              // overflow로 통과한 자식만 경계 밖에서 맞음
     return node->interactive ? node : nullptr; // 자식이 안 먹으면 자신
 }
 ```
+
+그리기와 히트 테스트는 부모 경계를 같은 규칙으로 처리해야 한다. `clipChildren=false`면 자식이 부모 rect 밖으로 나가도 그려지므로 히트 테스트도 그 자식을 통과시키고, 자르려면 `BuildBatch`도 같은 경계에서 자식 순회를 멈춘다. 스크롤·캡처·외부 scissor가 경계를 만든다면 그 clip을 `worldRect`에 반영해 셋이 같은 사각형을 쓴다. 회전·스케일이 있으면 점을 역 local 변환으로 자식 공간에 옮겨 hit한다.
 
 히트 테스트의 함정은 비직사각 위젯과 투명 영역이다. 원형 버튼은 원·다각형 같은 명시적 hit shape를 쓰는 편이 빠르고 접근성 영역도 예측 가능하다. 텍스처 알파 테스트가 꼭 필요하면 CPU용 마스크·저해상도 비트맵을 따로 보관하며, 시각적으로 투명하더라도 의도한 최소 터치 영역은 유지해야 한다. 전체 화면 투명 패널은 `hitTestVisible`과 모달 정책을 명시하지 않으면 아래 입력을 조용히 삼킬 수 있다.
 
@@ -480,6 +488,10 @@ bool Dispatch(Widget* target, Event& e) {
 ```
 
 이 두 단계 모델이 *모달*, *드래그*, *툴팁*, *컨텍스트 메뉴* 같은 복잡한 상호작용을 깔끔하게 처리하게 한다. 캡처가 없으면 모달 창 뒤의 버튼이 클릭되는 버그를 일일이 막아야 하고, 버블이 없으면 "리스트 아이템 안의 어디를 눌러도 아이템이 선택됨" 같은 자연스러운 동작을 위젯마다 다시 짜야 한다.
+
+다만 캡처·버블은 이미 정해진 타깃의 경로를 따라갈 뿐, 타깃 선택 자체를 바꾸지 않는다. 모달과 배경 버튼이 형제라면 배경 버튼으로 정해진 경로에 모달이 없으므로, 모달의 캡처 콜백만으로 뒤 입력을 막을 수 없다. 모달 범위는 `activeModalRoot` 또는 `inputScope`를 히트 테스트·포커스 탐색에 먼저 적용해 정하고, 캡처 단계와 포인터 캡처(드래그 중 포인터 독점)는 용어와 수명을 분리해 다룬다.
+
+dispatch 경로는 raw `Widget*`의 벡터이므로, 콜백이 위젯을 제거·재부모화하면 남은 capture/bubble 단계와 `focused` 포인터가 무효가 될 수 있다. 이벤트 콜백 중 파괴는 지연 파괴(deferred destruction) 큐로 미루고, 재부모화 시 현재 경로를 유지할지 취소할지와 위젯 세대(handle) 검사 정책을 함께 정한다.
 
 ### 마우스·터치·게임패드 통합
 
@@ -510,12 +522,16 @@ struct FocusManager {
         if (next) SetFocus(next);
     }
     void SetFocus(Widget* w) {
+        if (w == focused) return;                             // 동일 위젯 재설정은 no-op
         if (focused) focused->OnEvent({UIEvent::FocusLost});
         focused = w;
-        w->OnEvent({UIEvent::FocusGained});                   // 하이라이트 표시
+        if (w) w->OnEvent({UIEvent::FocusGained});            // nullptr면 focus clear
     }
+    void ClearFocus() { SetFocus(nullptr); }
 };
 ```
+
+`SetFocus(nullptr)`는 포커스를 지우는 clear로 동작하고, 같은 위젯을 다시 설정하면 lost/gained를 중복 발행하지 않는다. 빈 모달·리스트에서 포커스를 비우는 API와 위젯 파괴 시 `ClearFocus` 호출 시점, 포커스 콜백의 reentrancy를 이벤트 경계 규약에서 함께 다룬다.
 
 포커스 이동에는 두 방식이 있다. *탭 순서(tab order)* 는 위젯마다 명시적 순번을 주는 선형 이동이고, *방향 탐색(directional)* 은 현재 포커스 위젯에서 *방향키가 가리키는 쪽에 가장 가까운* 위젯을 기하적으로 찾는다. 게임패드 UI는 방향 탐색이 자연스럽다 — 위를 누르면 위에 있는 버튼으로 간다. 함정은 *비어 있는 방향* 과 *순환* 이다. 방향키를 눌렀는데 그쪽에 위젯이 없으면 포커스가 사라지지 않게 현재 위치를 유지하고, 가장자리에서 반대편으로 감쌀지(wrap) 멈출지를 메뉴 성격에 맞게 정한다. 포커스 위젯은 *항상 시각적으로 표시* 되어야 한다 — 패드 사용자가 "지금 뭐가 선택됐는지" 모르면 메뉴를 못 쓴다.
 
@@ -618,6 +634,9 @@ struct ShapedGlyph {
 struct ShapeKey {
     TextHash text;
     FontStackId fonts;
+    float fontSize;            // 논리 em 크기
+    FontVariationId variation; // variable font 축 값
+    uint32_t fontRevision;     // 폰트 내용/버전
     LocaleId locale;
     TextDirection direction;
     FeatureSet features;
@@ -625,7 +644,7 @@ struct ShapeKey {
 };
 ```
 
-shape cache key에는 문자열만이 아니라 font stack, locale, 방향, OpenType feature와 줄바꿈 폭이 들어가야 한다. 폭이 달라지면 line break가 달라지고, locale과 font fallback이 달라지면 glyph와 advance도 달라진다. 반면 glyph atlas는 `(font face, glyph ID, raster size, render mode)`를 키로 둔다. shaping 결과와 bitmap raster cache를 분리하면 DPI 변경 때 문자열 전체를 다시 분석하지 않고 필요한 glyph만 다른 해상도로 굽을 수 있다.
+shape cache key에는 문자열만이 아니라 font stack, 논리 em 크기, variable font 축 값, 폰트 revision, locale, 방향, OpenType feature와 줄바꿈 폭이 들어가야 한다. 같은 text/font stack도 크기·variation·revision이 달라지면 glyph와 advance가 달라진다. 폭이 달라지면 line break가 달라지고, locale과 font fallback이 달라지면 glyph와 advance도 달라진다. 반면 glyph atlas는 `(font face, glyph ID, raster size, render mode)`를 키로 둔다. glyph atlas의 face ID도 같은 font instance(크기·variation·revision) 정책과 연결한다. shaping 결과와 bitmap raster cache를 분리하면 DPI 변경 때 문자열 전체를 다시 분석하지 않고 필요한 glyph만 다른 해상도로 굽을 수 있다.
 
 ### 줄바꿈, fallback과 아틀라스 수명
 
@@ -701,7 +720,7 @@ struct AccessibilityNode {
 ```mermaid
 flowchart LR
     Data[데이터 1000개] -->|뷰포트 계산| Window[보이는 범위<br/>예: 40~60번]
-    Window -->|풀에서 재사용| Widgets[실제 위젯 ~20개]
+    Window -->|풀에서 재사용| Widgets[실제 위젯 ~20개<br/>예시 수치]; Widgets -.-> PoolNote[shrink·overscroll·가변 높이 경계 조건<br/>scroll clamp·count 0 보장 필요]
     Widgets --> Screen[화면]
 ```
 
@@ -714,25 +733,37 @@ struct VirtualList {
     int   totalItems;            // 1000
     float itemHeight = 48;
     float scrollY = 0;
+    int   visibleCount = 0;      // 이번 프레임에 쓰는 위젯 수 (pool_ capacity와 구분)
     std::vector<Widget*> pool_;  // 화면 분량 + 여유분만 (예: 24개)
 
     void Update(float viewportH) {
-        int first = (int)(scrollY / itemHeight);            // 첫 보이는 인덱스
+        if (!std::isfinite(viewportH) || viewportH < 0 || !std::isfinite(scrollY)) return;
+        int total = std::max(0, totalItems);
+        float extent = total * itemHeight;
+        // 데이터 shrink·overscroll 뒤에도 scroll을 현재 content extent로 clamp
+        scrollY = std::clamp(scrollY, 0.0f, std::max(0.0f, extent - viewportH));
+
+        int first = std::clamp((int)(scrollY / itemHeight), 0, total);
         int count = (int)(viewportH / itemHeight) + 2;      // 여유 2개
-        first = std::max(0, first);
-        count = std::min(count, totalItems - first);
+        count = std::clamp(count, 0, total - first);        // 음수 count 방지
 
         EnsurePool(count);                  // 풀에 위젯 count개 확보
         for (int i = 0; i < count; ++i) {
             Widget* w = pool_[i];
             BindItem(w, dataModel[first + i]);          // 데이터 갈아끼우기
             w->localRect.pos.y = (first + i) * itemHeight - scrollY;
+            w->visible = true;
         }
+        for (int i = count; i < (int)pool_.size(); ++i)
+            pool_[i]->visible = false;       // 범위 밖에 남은 재사용 위젯 비활성
+        visibleCount = count;
     }
 };
 ```
 
 핵심은 *전체 콘텐츠 높이(totalItems × itemHeight)는 그대로 두되, 위젯은 보이는 만큼만* 만든다는 것이다. 스크롤바는 전체 높이 기준으로 그려지므로 사용자는 1000개가 다 있는 것처럼 느끼지만, 실제로는 24개 위젯이 데이터만 갈아끼우며 재활용된다. 1000개 항목 리스트의 메모리·레이아웃 비용이 24개 수준으로 떨어진다.
+
+`EnsurePool`은 `pool_`의 capacity를 확보하는 일과 이번 프레임에 실제로 쓰는 `visibleCount`를 분리한다. 범위가 줄면 남은 위젯을 숨기고, 재사용한 위젯은 이전 바인딩의 구독·비동기 이미지 요청·포커스 상태를 먼저 해제한 뒤 binding generation과 data item ID를 갱신해야 오래된 통지가 새 항목에 섞이지 않는다.
 
 ### 가변 높이와 점프 스크롤
 
@@ -740,14 +771,20 @@ struct VirtualList {
 
 ```cpp
 // 가변 높이: 누적 오프셋 테이블로 이진 탐색
-std::vector<float> cumHeight;    // cumHeight[i] = 0~i-1 항목 높이 합
+// cumHeight[i] = 0~i-1 항목 높이 합, cumHeight[N] = 전체 높이 (N = 항목 수)
+std::vector<float> cumHeight;
 int FindFirstVisible(float scrollY) {
     // scrollY를 초과하는 첫 누적 위치를 이진 탐색 → 그 직전이 첫 보이는 항목, O(log n)
-    int i = std::upper_bound(cumHeight.begin(), cumHeight.end(), scrollY)
-            - cumHeight.begin();
+    if (cumHeight.empty()) return 0;       // 빈 목록: end sentinel 0
+    int end = (int)cumHeight.size() - 1;   // cumHeight[N] = 전체 높이 = end sentinel
+    int i = (int)(std::upper_bound(cumHeight.begin(), cumHeight.end(), scrollY)
+                  - cumHeight.begin());
+    if (i > end) return end;               // scrollY가 전체 높이 이상이면 보이는 항목 없음
     return std::max(0, i - 1);
 }
 ```
+
+이 검색의 반환값은 첫 보이는 항목 index(0~N-1) 또는 목록 끝을 뜻하는 end sentinel N이다. 스크롤이 전체 높이에 도달하면 N을 반환하므로 호출자는 이를 유효한 항목 index로 쓰면 안 된다. 빈 목록은 N=0의 end를 반환한다.
 
 가변 높이의 *함정* 은 점프 스크롤이다. 스크롤바를 중간으로 확 끌면 안 본 항목들의 높이를 모르므로 위치가 어긋나, 끌었다 놓을 때 콘텐츠가 *튀는* 현상이 생긴다. 추정 높이로 일단 배치하고 실제 측정으로 보정하되, 보정이 시각적으로 안 튀게 *현재 보이는 항목을 기준점으로 고정* 한다.
 
@@ -807,7 +844,7 @@ struct UIProfile {
 
 ### 레이아웃 추적과 단계별 시각화
 
-레이아웃 버그는 *2패스 중 어디서 틀어졌는지* 가 핵심이다(2절). 측정값(desiredSize)과 배치 결과(finalRect)를 위젯마다 *덤프* 해, "이 위젯이 원한 크기"와 "실제 받은 크기"를 비교한다. 둘이 다르면 부모의 배치 로직이 자식 요청을 무시한 것이고, desiredSize가 0이면 측정이 실패한 것이다.
+레이아웃 버그는 *2패스 중 어디서 틀어졌는지* 가 핵심이다(2절). 측정값(desiredSize)과 배치 결과(finalRect)를 위젯마다 *덤프* 해, "이 위젯이 원한 크기"와 "실제 받은 크기"를 비교한다. 둘이 다르다고 곧바로 실패는 아니다 — 가용 공간, stretch, min/max, overflow 정책 때문에 정상 레이아웃에서도 두 값은 다르고, 빈·collapsed 위젯의 desiredSize=0도 정상일 수 있다. 부모의 sizing 정책과 constraint를 위반했는지, 정상 stretch·collapsed인지를 나란히 보고 실제 측정 오류와 구분한다.
 
 ```cpp
 void DumpLayout(Widget* w, int depth) {
@@ -844,4 +881,4 @@ UI는 시각적 산출물이라 디버깅도 시각적이어야 한다. 위젯 �
 - Chris Green, "Improved Alpha-Tested Magnification for Vector Textures and Special Effects"(Valve) — SDF 폰트로 해상도 독립 텍스트를 그리는 기법.
 - WPF / Avalonia 문서 — Measure/Arrange 2패스 레이아웃과 데이터 바인딩의 retained mode 구현 사례.
 - 모바일 플랫폼의 세이프 에어리어·디스플레이 컷아웃 가이드라인 — 노치·DPI 대응의 OS 측 규약.
-- "Game UI Discoveries"(GDC UX 트랙 발표들) — 게임패드 포커스 이동·입력 통합·가상화 리스트의 실무 사례.
+- "Game UI Discoveries"(GDC UX 트랙 발표들) — 특정 발표·저자를 지목하는 근거가 아니라 게임패드 포커스 이동·입력 통합·가상화 리스트 사례를 찾아보는 넓은 탐색 경로다.

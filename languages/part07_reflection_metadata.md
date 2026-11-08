@@ -218,6 +218,17 @@ template<> constexpr PropertyType PropertyTypeOf<float>() { return PropertyType:
     )
 ```
 
+여기서 `offsetof(Class, Member)`는 `Class` complete object의 시작을 기준으로 한 오프셋이다. 따라서 `(char*)obj + prop->offset`은 `obj`가 그 complete object의 시작 주소일 때만 맞는다. 다중·가상 상속에서 `Object*` base-subobject 주소가 complete object 시작과 다르면 다른 멤버 주소를 계산하게 된다. 또한 표준 레이아웃이 아닌 타입의 `offsetof`는 conditionally-supported이므로 지원 ABI와 상속 형태를 명시해야 한다. 더 안전한 방법은 raw offset 대신 typed member pointer(`M C::*`)를 저장하고, 타입 조정(dynamic_cast 또는 코드 생성 thunk) 후 `std::addressof(obj->*member)`로 접근하는 것이다.
+
+```cpp
+template<class C, class M>
+M* LocateMember(Object* base, M C::*member) {
+    // 전제: Object는 polymorphic이고 RTTI를 사용할 수 있다.
+    C* obj = dynamic_cast<C*>(base);
+    return obj ? std::addressof(obj->*member) : nullptr;
+}
+```
+
 ### 사용 예제
 
 ```cpp
@@ -256,7 +267,7 @@ void Serialize(Object* obj, BinaryWriter& writer) {
 장점:
 - 구현이 간단하다.
 - 외부 도구가 필요 없다.
-- 컴파일러 독립적이다.
+- 매크로 등록 자체는 컴파일러 독립적이지만, offset 기반 주소 계산은 지원 레이아웃 조건에서만 성립한다.
 - 정확히 필요한 것만 등록할 수 있다.
 
 단점:
@@ -280,7 +291,7 @@ flowchart LR
     A[헤더 파일] --> B[UnrealBuildTool 스캔]
     B --> C[UCLASS, UPROPERTY 매크로 검출]
     C --> D[UHT 실행]
-    D --> E[.generated.h 파일 생성]
+    D --> E[generated.h / .gen.cpp 생성]
     E --> F[C++ 컴파일러가 포함하여 컴파일]
 ```
 
@@ -428,8 +439,17 @@ void ParseHeader(const char* filename) {
         index, filename, nullptr, 0, nullptr, 0, CXTranslationUnit_None
     );
 
+    if (!unit) {
+        printf("Failed to parse: %s\n", filename);
+        clang_disposeIndex(index);
+        return;
+    }
+
     CXCursor cursor = clang_getTranslationUnitCursor(unit);
     clang_visitChildren(cursor, VisitorFunc, nullptr);
+
+    clang_disposeTranslationUnit(unit);
+    clang_disposeIndex(index);
 }
 
 CXChildVisitResult VisitorFunc(CXCursor cursor, CXCursor parent, CXClientData data) {
@@ -438,6 +458,7 @@ CXChildVisitResult VisitorFunc(CXCursor cursor, CXCursor parent, CXClientData da
     if (kind == CXCursor_ClassDecl) {
         CXString name = clang_getCursorSpelling(cursor);
         printf("Found class: %s\n", clang_getCString(name));
+        clang_disposeString(name);
 
         clang_visitChildren(cursor, [](CXCursor c, CXCursor p, CXClientData d) {
             if (clang_getCursorKind(c) == CXCursor_FieldDecl) {
@@ -450,6 +471,8 @@ CXChildVisitResult VisitorFunc(CXCursor cursor, CXCursor parent, CXClientData da
     return CXChildVisit_Recurse;
 }
 ```
+
+예외나 조기 반환 경로가 있는 도구에서는 위 핸들을 scope guard/RAII로 소유해 `clang_disposeString`, `clang_disposeTranslationUnit`, `clang_disposeIndex`가 항상 짝을 이루게 한다.
 
 ### RTTR (Run Time Type Reflection)
 
@@ -618,8 +641,11 @@ RuntimeType BuildRuntimeType() {
 void PropertyEditor::Show(Object* obj) {
     Class* type = obj->GetClass();
 
+    ImGui::PushID(obj);
     for (Property* prop : type->GetProperties()) {
+        ImGui::PushID(prop);  // 객체 수명 동안 안정된 식별자라는 계약
         const char* category = prop->GetMetadata("Category");
+        if (!category) category = "Default";  // 등록 단계에서 non-null을 보장하거나 여기서 대체한다
         if (!currentCategory || std::strcmp(category, currentCategory) != 0) {   // 포인터가 아니라 내용을 비교한다
             ImGui::SeparatorText(category);
             currentCategory = category;
@@ -632,9 +658,11 @@ void PropertyEditor::Show(Object* obj) {
         if (prop->HasMetadata("EditCondition")) {
             const char* condition = prop->GetMetadata("EditCondition");
             Property* condProp = type->FindProperty(condition);
-            bool* enabled = (bool*)condProp->GetValuePtr(obj);
+            bool* enabled = (condProp && condProp->IsA<BoolProperty>())
+                                ? (bool*)condProp->GetValuePtr(obj)
+                                : nullptr;  // 필드 존재와 Bool 타입을 검증한다
 
-            if (!*enabled) {
+            if (enabled && !*enabled) {
                 ImGui::BeginDisabled();
                 disabled = true;
             }
@@ -642,10 +670,15 @@ void PropertyEditor::Show(Object* obj) {
 
         if (prop->IsA<FloatProperty>()) {
             float* value = (float*)data;
+            bool hasMin = prop->HasMetadata("ClampMin");
+            bool hasMax = prop->HasMetadata("ClampMax");
             float min = prop->GetMetadataFloat("ClampMin", 0.0f);
             float max = prop->GetMetadataFloat("ClampMax", 100.0f);
 
-            if (prop->HasMetadata("ClampMin")) {
+            if (hasMin && hasMax && min > max) {
+                std::swap(min, max);  // 등록 단계에서 min<=max를 검증하는 것이 우선이다
+            }
+            if (hasMin || hasMax) {
                 ImGui::SliderFloat(prop->GetName(), value, min, max);
             } else {
                 ImGui::DragFloat(prop->GetName(), value);
@@ -663,8 +696,9 @@ void PropertyEditor::Show(Object* obj) {
             EnumProperty* enumProp = (EnumProperty*)prop;
             int* value = (int*)data;
 
-            if (ImGui::BeginCombo(prop->GetName(),
-                                  enumProp->GetValueName(enumProp->FindIndexByValue(*value)))) {
+            const char* currentName = enumProp->GetValueName(enumProp->FindIndexByValue(*value));
+            if (!currentName) currentName = "<invalid>";  // 미등록 값 표시
+            if (ImGui::BeginCombo(prop->GetName(), currentName)) {
                 for (int i = 0; i < enumProp->GetValueCount(); i++) {
                     if (ImGui::Selectable(enumProp->GetValueName(i))) {
                         *value = enumProp->GetValue(i);
@@ -680,17 +714,21 @@ void PropertyEditor::Show(Object* obj) {
                 OpenAssetPicker(value, prop->GetObjectClass());
             }
             ImGui::SameLine();
-            ImGui::Text(*value ? (*value)->GetName() : "None");
+            ImGui::TextUnformatted(*value ? (*value)->GetName() : "None");
         }
 
         if (disabled) {
             ImGui::EndDisabled();
         }
+        ImGui::PopID();
     }
+    ImGui::PopID();
 }
 ```
 
 이 코드는 모든 클래스에 대해 작동한다. 새로운 클래스를 추가해도 에디터 코드를 수정할 필요가 없다. 리플렉션 정보만 있으면 UI가 자동 생성된다.
+
+이 UI는 메타데이터 스키마가 검증됐다는 전제 위에서 동작한다. 등록 단계에서 `Category`를 non-null로 보장하거나 UI에서 기본 문자열로 대체하고, `EditCondition`은 존재하는 Bool 프로퍼티만 가리키도록 검증한다. 알 수 없는 enum 값은 invalid label로 표시하고, `ClampMin`/`ClampMax`는 한쪽만 있으면 나머지에 기본값(0/100)을 쓰며 `min<=max`를 검증한다. asset picker에 넘긴 `Object**`는 popup/picker가 완료될 때까지 유효해야 하므로, 동기 호출이면 호출 동안만, 비동기면 안정된 핸들로 수명을 보장한다.
 
 ### 2) 스크립팅: C++와 스크립트 바인딩
 
@@ -774,6 +812,15 @@ void Serializer::SaveToJson(Object* obj, JsonWriter& json) {
             continue;
         }
 
+        // 지원하지 않는 타입은 프로퍼티 이름을 쓰기 전에 실패한다.
+        if (!prop->IsA<FloatProperty>() && !prop->IsA<IntProperty>() &&
+            !prop->IsA<BoolProperty>() && !prop->IsA<EnumProperty>() &&
+            !prop->IsA<StructProperty>() && !prop->IsA<ArrayProperty>() &&
+            !prop->IsA<ObjectProperty>()) {
+            Error("Unsupported JSON property type: %s", prop->GetName());
+            return;  // 이미 쓴 출력의 폐기는 호출자/트랜잭션 계약이다
+        }
+
         json.WritePropertyName(prop->GetName());
 
         if (prop->IsA<FloatProperty>()) {
@@ -785,6 +832,13 @@ void Serializer::SaveToJson(Object* obj, JsonWriter& json) {
         }
         else if (prop->IsA<BoolProperty>()) {
             json.WriteBool(prop->GetValue<bool>(obj));
+        }
+        else if (prop->IsA<EnumProperty>()) {
+            json.WriteInt(prop->GetValue<int>(obj));
+        }
+        else if (prop->IsA<StructProperty>()) {
+            StructProperty* structProp = (StructProperty*)prop;
+            WriteValue(json, structProp->GetStructType(), prop->GetValuePtr(obj));
         }
         else if (prop->IsA<ArrayProperty>()) {
             ArrayProperty* arrayProp = (ArrayProperty*)prop;
@@ -833,9 +887,53 @@ Object* Serializer::LoadFromJson(JsonReader& json) {
             continue;
         }
 
+        // 쓰기와 같은 지원 타입 집합을 읽는다. 각 분기는 값 하나를 소비한다.
         if (prop->IsA<FloatProperty>()) {
             float value = json.ReadFloat();
             prop->SetValue(obj, value);
+        }
+        else if (prop->IsA<IntProperty>()) {
+            int value = json.ReadInt();
+            prop->SetValue(obj, value);
+        }
+        else if (prop->IsA<BoolProperty>()) {
+            bool value = json.ReadBool();
+            prop->SetValue(obj, value);
+        }
+        else if (prop->IsA<EnumProperty>()) {
+            int value = json.ReadInt();
+            prop->SetValue(obj, value);
+        }
+        else if (prop->IsA<StructProperty>()) {
+            StructProperty* structProp = (StructProperty*)prop;
+            ReadValue(json, structProp->GetStructType(), prop->GetValuePtr(obj));
+        }
+        else if (prop->IsA<ArrayProperty>()) {
+            ArrayProperty* arrayProp = (ArrayProperty*)prop;
+            void* arrayData = prop->GetValuePtr(obj);
+            arrayProp->Clear(arrayData);
+
+            json.ReadStartArray();
+            while (!json.IsEndArray()) {
+                void* elem = arrayProp->AddElement(arrayData);
+                ReadValue(json, arrayProp->GetInnerType(), elem);
+            }
+            json.ReadEndArray();
+        }
+        else if (prop->IsA<ObjectProperty>()) {
+            if (json.IsNull()) {
+                json.ReadNull();
+                prop->SetValue(obj, (Object*)nullptr);
+            } else {
+                prop->SetValue(obj, LoadFromJson(json));
+            }
+        }
+        else {
+            // 지원 집합(Float/Int/Bool/Enum/Struct/Array/Object) 밖의 등록 타입:
+            // 값을 소비하지 않고 실패한다.
+            Error("Unsupported JSON property type: %s", prop->GetName());
+            type->DestroyInstance(obj);  // 실패 시 부분 생성 객체 정리
+            return nullptr;
         }
     }
 
@@ -859,19 +957,21 @@ Object* Serializer::LoadFromJson(JsonReader& json) {
 }
 ```
 
+이 저장 모델은 객체 참조를 ID로 분리하지 않고 트리로 펼친다. 같은 객체를 두 곳에서 참조하면 별도 복사본이 되고, 순환 참조는 무한 재귀를 만든다. 따라서 현재 규약은 공유 identity를 보존하지 않는 tree 한정 저장이며, 순환을 금지하고 직렬화 깊이와 배열 길이에 상한을 둔다. 공유·순환을 보존해야 하면 객체 ID를 먼저 등록한 뒤 `$ref`/ID를 기록하고 2단계 로딩으로 복원하는 graph 모델을 별도로 선언해야 한다.
+
 리플렉션의 진가는 버전 호환성에서 드러난다.
 
 ```cpp
-// 구버전 데이터 로딩
+// 구버전 데이터 로딩. LoadFromJson은 현재 이름과 OldName alias만으로 lookup한다.
 Object* obj = LoadFromJson(oldFile);
 // - 새로운 프로퍼티는 기본값 사용
 // - 제거된 프로퍼티는 무시 (SkipValue)
-// - 이름이 바뀐 프로퍼티는 메타데이터로 처리
 
+// 이름 변경은 로더의 lookup 단계에서 OldName metadata로 매핑한다.
 Property* newProp = type->FindProperty("CurrentHealth");
 if (newProp->HasMetadata("OldName")) {
     const char* oldName = newProp->GetMetadata("OldName");
-    // "Health"를 "CurrentHealth"로 매핑
+    // 로더가 입력 이름 oldName을 newProp으로 매핑할 때 사용한다
 }
 ```
 
@@ -906,4 +1006,4 @@ C++26 작업 초안의 static reflection은 선언에서 serializer와 런타임
 - Tim Sweeney, "Core Technology of Unreal Engine 3", GDC 2005 - UObject 시스템 설계 철학
 - Chris Butcher, "Lessons from the Core Engine Architecture of Destiny", GDC 2015 - Bungie 엔진의 오브젝트 시스템 설계
 - Jason Gregory, "Game Engine Architecture", 3rd Edition - Chapter 16: Runtime Gameplay Foundation Systems
-- Martin Reddy, "API Design for C++" - Chapter 11: Scripting
+- Martin Reddy, "API Design for C++", 2nd Edition (2024) - Chapter 14: Scripting

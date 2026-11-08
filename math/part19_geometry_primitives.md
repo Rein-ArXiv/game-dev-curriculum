@@ -135,16 +135,23 @@ $$
 
 ```cpp
 // (A, B, C, D) with Ax + By + Cz + D = 0  →  Hessian (n·p = d)
-Plane PlaneFromGeneralForm(vec4 abcd) {
-    float len = length(vec3(abcd));
-    if (len < 1e-12f) return { vec3(0, 1, 0), 0.0f };  // 퇴화: 법선이 영벡터
-    return { vec3(abcd) / len, -abcd.w / len };
+// 진짜 0 법선 (퇴화) 이면 false 를 돌려 비활성 평면으로 표시한다.
+bool PlaneFromGeneralForm(vec4 abcd, Plane& out) {
+    vec3 n = vec3(abcd);
+    float m = std::max({ std::fabs(n.x), std::fabs(n.y), std::fabs(n.z) });
+    if (!(m > 0.0f) || !std::isfinite(m)) return false;   // 비활성/비정상 법선
+    vec3 s = n / m;                       // 최대 성분으로 먼저 스케일 (동차 스케일 불변)
+    float len = std::sqrt(dot(s, s));
+    out = { s / len, -abcd.w / (m * len) };   // -D / |(A,B,C)|
+    return true;
 }
 ```
 
-검산. $z = 5$ 평면을 일반형으로 쓰면 $z - 5 = 0$, 즉 $(A, B, C, D) = (0, 0, 1, -5)$. 변환하면 $\hat{n} = (0, 0, 1)$, $d = -(-5) / 1 = 5$ — 1.1절의 예와 같은 평면이다. *부호를 빠뜨리면* $d = -5$ 가 되어 평면이 $z = -5$ 로 옮겨가고, 원점을 사이에 둔 정반대 위치가 된다.
+검산. $z = 5$ 평면을 일반형으로 쓰면 $z - 5 = 0$, 즉 $(A, B, C, D) = (0, 0, 1, -5)$. 변환하면 $\hat{n} = (0, 0, 1)$, $d = -(-5) / 1 = 5$ — 1.1절의 예와 같은 평면이다.
 
-길이로 나누는 정규화를 빠뜨리면 *부호는 맞지만 거리가 배율만큼 틀린다*. 안팎 판정 (부호만) 은 통과하고 "몇 미터 밖" 같은 거리 비교만 조용히 어긋나므로, 정규화 누락은 부호 실수보다 늦게 발견된다.
+동차 계수는 *전체를 같은 배수로 스케일해도 같은 평면* 이다. $(0, 0, 10^{-13}, -5 \cdot 10^{-13})$ 도 $z = 5$ 인데, `len` 의 절대 크기만 보고 작다고 판단해 기본 평면을 돌려주면 *유효한 평면이 전혀 다른 기하로 바뀐다*. 그래서 최대 성분 $m$ 으로 먼저 나눠 크기를 1 근처로 올린 뒤 정규화한다 — 이 스케일링은 결과 평면을 바꾸지 않는다. 진짜 0 법선 $(0,0,0,D)$ 만 `false` 로 거부해 *비활성 평면* 으로 넘긴다.
+
+*부호를 빠뜨리면* $d = -5$ 가 되어 평면이 $z = -5$ 로 옮겨가고, 원점을 사이에 둔 정반대 위치가 된다. 길이로 나누는 정규화를 빠뜨리면 *부호는 맞지만 거리가 배율만큼 틀린다*. 안팎 판정 (부호만) 은 통과하고 "몇 미터 밖" 같은 거리 비교만 조용히 어긋나므로, 정규화 누락은 부호 실수보다 늦게 발견된다.
 
 ### 1.6 평면-평면 교차 (직선)
 
@@ -321,7 +328,7 @@ vec3 ClosestPointOnLine(vec3 p0, vec3 dir, vec3 point) {
 
 *점에서 직선으로 투영* — t 매개변수. *내적 / 길이²* 가 비례 매개변수.
 
-선분이면 *t 를 [0, 1] 클램프* 한다.
+선분이면 *t 를 클램프* 한다. 클램프 범위는 *dir 의 정의* 에 달려 있다 — `dir = B - A` (비정규화) 이면 $[0, 1]$ 이고, `dir` 이 *단위 벡터* 이면 $[0, L]$ ($L = |B-A|$) 다. 위 `ClosestPointOnLine` 의 `t` 는 `dot(point-p0, dir)/dot(dir, dir)` 로 *정규화와 무관한 비례 매개변수* 이므로 `dir = B - A` 인 선분에 그대로 $[0,1]$ 클램프를 쓴다. 만약 단위 방향 직선 함수와 같은 `dir` 을 재사용하면 *길이가 1 인 선분* 이 되어 원래 선분을 놓친다.
 
 ### 3.5 점-삼각형 거리
 
@@ -391,6 +398,8 @@ float AreaPolygon2D(const std::vector<vec2>& verts) {
 
 *Shoelace (신발끈)* 라는 이름은 *대각선으로 곱하는 패턴* 이 신발끈을 묶는 것 같다는 의미.
 
+이 공식은 *단순 다각형 (self-intersection 없음)* 의 부호 면적이다. 자기 교차 다각형에서는 `fabs` 값이 *채워진 면적* 이 아니라 winding 을 부호로 센 대수적 합이므로, 채워진 면적이 필요하면 단순 다각형들로 분해하거나 winding rule 을 먼저 정해야 한다. `AreaPolygon2D` 의 절댓값도 같은 전제 위에서만 면적이다. 다각형에 *구멍 (hole)* 이 있으면 바깥 링은 CCW, 구멍 링은 CW 로 두고 부호 면적을 합산하는 규약을 API 계약으로 고정한다.
+
 ### 4.2 부호 = winding
 
 - *부호 양수* → CCW (반시계).
@@ -449,9 +458,9 @@ bool PointInPolygon(vec2 p, const std::vector<vec2>& verts) {
 }
 ```
 
-*수평 광선이 다각형 변과 교차하는 횟수*. 홀수면 내부, 짝수면 외부.
+*수평 광선이 다각형 변과 교차하는 횟수*. 홀수면 내부, 짝수면 외부. 이 규칙은 *단순 다각형* 을 전제로 하고, 변 위에 정확히 놓인 점의 분류는 위 부등호 비교의 세부에 따라 달라진다. 경계를 내부로 볼지 외부로 볼지는 *API 계약으로 고정* 해야 하며, 경계 포함이 필요하면 변-점 거리를 먼저 검사한다.
 
-**Winding number** 는 더 일반화 (자기 교차 다각형도 OK).
+**Winding number** 는 더 일반화 (자기 교차 다각형도 OK) 이며, 자기 교차 다각형에는 위 parity 규칙이 정의되지 않으므로 이쪽을 쓴다.
 
 ### 4.5 게임 응용
 
@@ -490,8 +499,10 @@ vec3 Barycentric(vec3 p, vec3 v0, vec3 v1, vec3 v2) {
     float d20 = dot(e2, e0);
     float d21 = dot(e2, e1);
 
-    float denom = d00 * d11 - d01 * d01;
-    if (std::fabs(denom) < 1e-8f) return vec3(-1);  // degenerate triangle
+    float denom = d00 * d11 - d01 * d01;   // |e0|²|e1|² - (e0·e1)², 단위는 길이⁴
+    // denom 은 두 변 길이의 네제곱에 비례하므로 고정 절대 임계값은 단위·스케일을
+    // 바꾸면 정상 삼각형을 퇴화로 만든다. 무차원 비율 sin²θ = denom/(d00*d11) 로 판정한다.
+    if (!(denom > 1e-12f * d00 * d11)) return vec3(-1);  // 사실상 collinear
 
     float v = (d11 * d20 - d01 * d21) / denom;
     float w = (d00 * d21 - d01 * d20) / denom;
@@ -500,14 +511,16 @@ vec3 Barycentric(vec3 p, vec3 v0, vec3 v1, vec3 v2) {
 }
 ```
 
-Cramer's rule 형태. Möller-Trumbore가 *광선 매개변수* 와 *barycentric* 을 동시 추출.
+Cramer's rule 형태. Möller-Trumbore가 *광선 매개변수* 와 *barycentric* 을 동시 추출. 판정 임계값은 길이⁴ 차원의 절대값이 아니라 `denom/(d00·d11) = sin²θ` 라는 *무차원 비율* 이므로, 변 길이 단위를 mm 로 바꿔도 같은 삼각형이 같은 판정을 받는다.
 
 ### 5.3 보간
 
 barycentric (u, v, w) 가 있으면 *정점 attribute 보간*:
 
 ```cpp
-vec3 InterpolateBary(vec3 a0, vec3 a1, vec3 a2, vec3 bary) {
+// T 는 스칼라 곱과 덧셈이 정의되면 된다 (vec2, vec3, 색 등).
+template<class T>
+T InterpolateBary(T a0, T a1, T a2, vec3 bary) {
     return bary.x * a0 + bary.y * a1 + bary.z * a2;
 }
 
@@ -538,7 +551,7 @@ bool PointInTriangle(vec3 p, vec3 v0, vec3 v1, vec3 v2) {
 
 원근 투영 후 *2D 화면의 barycentric* 이 *3D 의 barycentric* 과 *다르다*. 단순 *화면 공간 선형 보간* 이면 *깊이 무시* — 텍스처가 왜곡 (affine texture mapping, PS1 시절 그래픽).
 
-해결: *attribute 를 1/w 로 나누고 보간 후 다시 곱*. *Perspective-Correct Interpolation*.
+해결: *attribute 를 w 로 나눈 attribute/w 를 보간하고, 1/w 도 함께 보간한 뒤 그 비율로 나눈다*. *Perspective-Correct Interpolation*. 즉 $a/w$ 와 $1/w$ 의 선형 보간값을 구해 `interpolated_per_w / inv_w_interpolated` 로 원래 attribute 를 복원한다 — "1/w 로 나눈 뒤 보간" 이 아니라 "attribute/w 를 보간한 뒤 1/w 의 보간값으로 나누는" 순서다.
 
 ```cpp
 // 셰이더 의사 코드
@@ -591,7 +604,8 @@ A. Andrew (1979). 더 단순한 구현.
 ```cpp
 // 교육용 코드. 산업 구현은 추가로 (1) 중복점 제거,
 // (2) collinear 케이스의 strict / non-strict 정책,
-// (3) float 비교를 epsilon 기반으로 등이 필요.
+// (3) orientation(Cross2D) 판정을 robust predicate 또는
+//     스케일 있는 오차 모델로 강화하는 것이 필요.
 float Cross2D(vec2 o, vec2 a, vec2 b);   // 정의는 아래
 
 std::vector<vec2> ConvexHull2D(std::vector<vec2> points) {
@@ -630,22 +644,27 @@ float Cross2D(vec2 o, vec2 a, vec2 b) {
 
 20여 줄. 게임 코드의 표준 사이즈. *교육용* — 중복점 / 모든 점이 한 직선 위 / float 동등성 비교 같은 함정은 *상용 라이브러리* (Boost.Geometry, CGAL) 가 처리.
 
+여기서 *정렬 비교자* 와 *orientation 판정* 을 구분해야 한다. 정렬 비교자 (`a.x < b.x || (a.x == b.x && a.y < b.y)`) 는 *일관된 전순서 (strict weak ordering)* 를 만족해야 하므로 epsilon 을 끼워 넣으면 안 된다 — `|a.x - b.x| < eps` 를 동등으로 취급하는 비교자는 추이성 (transitivity) 을 깨뜨려 `std::sort` 의 전제를 무너뜨린다. 반면 orientation 판정 (`Cross2D` 의 부호) 은 *robust predicate 또는 스케일 있는 오차 모델* 이 필요한 곳이다. "float 비교에는 epsilon" 이라는 조언을 정렬에 그대로 옮기지 말고, 정렬은 *정확한 순서*, 방향 판정은 *오차 모델 있는 부호* 로 분리한다.
+
 ### 6.4 3D QuickHull
 
 3D 의 표준. 재귀적.
 
-1. 가장 멀리 떨어진 4 점으로 *시작 사면체*.
-2. 사면체 밖의 점들 → *각 면의 가장 먼 점* 으로 사면체 확장.
-3. 새 점이 보이는 *기존 면들 제거 + 경계 모서리들로 새 면*.
-4. 더 이상 밖에 점 없을 때까지 반복.
+1. 차원을 먼저 판정한다 — 점들이 한 직선 위면 hull 은 선분, 한 평면 위면 2D hull (lower/upper), 그렇지 않을 때만 3D 로 진행.
+2. 3D 이면 *비공면 (non-coplanar)* 인 4 점으로 *시작 사면체* 를 만든다. 가장 멀리 떨어진 4 점이 우연히 공면일 수 있으므로, 공면이면 다른 점을 골라 *비공면 기저* 를 확보한다.
+3. 사면체 밖의 점들 → *각 면의 가장 먼 점* 으로 사면체 확장.
+4. 새 점이 보이는 *기존 면들 제거 + 경계 모서리들로 새 면*.
+5. 더 이상 밖에 점 없을 때까지 반복.
 
 평균 $O(n \log n)$, 최악 $O(n^2)$. 실용 구현은 *Qhull* 라이브러리.
+
+결과는 *볼록 외피 (convex hull)* 다 — 입력이 오목한 형상이어도 hull 은 그것을 감싼 볼록 껍질이지 원래의 오목한 외표면이 아니다.
 
 ### 6.5 게임 응용
 
 - **충돌 형상 단순화**: 복잡한 메쉬 → convex hull → SAT/GJK 검사.
 - **Bounding shape**: 객체의 *가장 타이트한 볼록 경계*.
-- **Voxel → mesh 변환**: voxel cluster 의 *외부 표면*.
+- **Voxel → mesh 변환**: voxel cluster 의 *볼록 외피* — 오목한 원래 외표면을 그대로 복원하는 것이 아니라 볼록 껍질을 취한다.
 - **점 군집의 영역**: 적의 *분포 영역* 시각화.
 
 게임 엔진 (Unity, Unreal) 의 *임포트 파이프라인* 이 자동 convex hull 생성. 디자이너가 *복잡한 메쉬* 를 *간단한 hull* 로 충돌 사용.
@@ -707,13 +726,15 @@ flowchart LR
 
 특성: 가능한 한 *동등삼각형 (equilateral)* 에 가깝게. 가는 sliver 가 적음.
 
+이 *최소각 최대화* 성질은 *2D* 의 정리다 — 2D Delaunay 는 가능한 삼각화 중 최소각을 최대화하고 sliver 가 적다. *3D tetrahedralization* 에서는 같은 보장이 성립하지 않아 *sliver (거의 평면인 tetrahedron)* 가 생길 수 있다. 또 점들이 *한 원 위 (cocircular, 3D 에서는 공면)* 에 있으면 외접원 조건을 만족하는 삼각화가 유일하지 않으므로 *일관된 tie-break 규약* 이 필요하다.
+
 활용: *내비메쉬* (균형 잡힌 메쉬가 path-finding 에 좋음), *terrain* 메쉬, *FEM (Finite Element Method)* 메쉬.
 
 ### 7.5 Constrained Delaunay
 
-원본 다각형 *경계를 보존* 하는 Delaunay. 다각형 내부만 분해 + 경계 변 강제.
+원본 다각형 *경계를 보존* 하는 Delaunay. 다각형 내부만 분해 + 경계 변 (constraint edge) 을 삼각형 변으로 강제하고, 내부의 나머지 변은 Delaunay 조건을 따른다. 여기서도 *2D* 결과이며, 경계 변이 교차하거나 퇴화하면 별도 처리가 필요하다.
 
-게임 내비메쉬 빌드의 표준 — *Recast & Detour* 라이브러리.
+게임 내비메쉬 빌드의 표준인 *Recast & Detour* 는 한 번의 constrained Delaunay 로 끝나지 않는다. `RecastMesh` 단계는 솔리드 복셀화 → walkable 영역 → region 분할 → contour 추출 → *contour polygonization* (`rcBuildPolyMesh`, 볼록 다각형 메쉬) 순서이고, 이 polygonization 은 일반 constrained Delaunay 가 아니다. `RecastMeshDetail` 단계가 그 볼록 폴리곤을 *detail triangle mesh* 로 세분한다. "Recast = constrained Delaunay" 라고 뭉뚱그리면 이 두 구현 단계가 섞인다.
 
 ### 7.6 알고리즘 선택
 
@@ -722,7 +743,7 @@ flowchart LR
 | Convex | Fan ($O(n)$) |
 | Simple (자기 교차 없음) | Ear clipping ($O(n^2)$) |
 | 점 집합 → 삼각화 | Delaunay |
-| 내비메쉬 | Constrained Delaunay (Recast) |
+| 내비메쉬 | Recast 의 contour 폴리곤화 + detail 메쉬 |
 
 대부분 게임 UI·메쉬는 *ear clipping* 또는 *fan*. 내비메쉬만 *Delaunay 변형*.
 
@@ -730,7 +751,7 @@ flowchart LR
 
 - **메쉬 임포트**: n각형 face → 삼각형들.
 - **UI 마스크**: 다각형 영역 → 삼각형으로 GPU 에 전송.
-- **내비메쉬 빌드**: 영역 → constrained Delaunay → path-finding.
+- **내비메쉬 빌드**: 영역 → Recast 의 contour 폴리곤화·detail 메쉬 → path-finding.
 - **절차적 형상**: 점 분포 → Delaunay → mesh.
 
 ## 8. Voronoi와 Delaunay
@@ -756,7 +777,7 @@ $$
 
 ### 8.2 셀 경계
 
-두 점 $p_i, p_j$ 의 *등거리 선* (perpendicular bisector) 이 두 셀의 *경계*.
+두 점 $p_i, p_j$ 의 *등거리 선* (perpendicular bisector) 은 두 셀 경계의 *후보* 다. 실제 경계는 그 선 중 *다른 site 들에 의하여 잘려나가지 않은 부분*, 즉 다른 점들과의 반평면 제약까지 모두 만족하는 조각이다. bisector 전체가 항상 두 셀의 경계가 되는 것은 아니다.
 
 ```cpp
 vec2 BisectorMidpoint(vec2 a, vec2 b) {
@@ -773,23 +794,25 @@ vec2 BisectorDirection(vec2 a, vec2 b) {
 
 ### 8.3 Delaunay 와의 쌍대 관계
 
-Voronoi diagram 의 *각 셀에 대응하는 점들을 변으로 잇기* 가 Delaunay triangulation.
+Voronoi diagram 의 *각 셀에 대응하는 생성점 (site) 을 변으로 잇기* 가 Delaunay triangulation.
 
 ```mermaid
 flowchart LR
     Voronoi[Voronoi diagram] -->|쌍대| Delaunay[Delaunay triangulation]
-    Voronoi --> Cells[셀의 중심 = 점]
+    Voronoi --> Cells[셀의 생성점 - site<br/>centroid와 다름]
     Delaunay --> Tris[그 점들의 삼각형 분해]
     Cells <-->|일대일 대응| Tris
 ```
 
 수학적 사실: *Voronoi 셀의 코너 = Delaunay 삼각형의 외접원 중심*. Voronoi diagram 의 *변* = Delaunay 의 *쌍대 변*.
 
+여기서 *생성점 (site)* 과 *셀의 centroid* 를 구분해야 한다. Delaunay 정점은 *site* $p_i$ 에 대응하고, 셀의 centroid 는 셀 모양의 무게중심으로 일반적으로 $p_i$ 와 다르다 (위 다이어그램의 "셀의 중심 = 점" 은 *site* 를 뜻하는 것으로 읽어야 한다). site 와 centroid 가 같다는 전제는 *Lloyd 이완이 이미 수렴한* 특수 상태일 뿐, 일반 Voronoi 의 성질이 아니다.
+
 ### 8.4 알고리즘
 
 - **Fortune's Algorithm** (Voronoi): $O(n \log n)$ sweep line.
 - **Bowyer-Watson** (Delaunay): incremental insert.
-- **Lloyd's Algorithm**: Voronoi 반복 — *centroid 로 점 옮기고 다시 Voronoi* 반복 → *균등 분포* 로 수렴.
+- **Lloyd's Algorithm**: Voronoi 반복 — *centroid 로 점 옮기고 다시 Voronoi* 반복 → *균등 분포* 로 수렴. 여기서 *각 site 를 자기 셀의 centroid 로 옮기는 한 단계* 가 Lloyd 이완이며, 반복하면 site 와 centroid 의 차이가 줄어 균등 분포로 수렴한다. 한 번의 Voronoi 계산에서 site = centroid 라는 뜻이 아니다.
 
 게임 코드는 보통 *외부 라이브러리* (CGAL, Triangle).
 

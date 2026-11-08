@@ -52,7 +52,7 @@ $$
 
 ```mermaid
 flowchart LR
-    Soft[변형체<br/>cloth / soft body] -->|점들의 거리 변함| Vertex[각 정점 독립 시뮬]
+    Soft[변형체<br/>cloth / soft body] -->|정점마다 독립 DOF| Vertex[정점별 자유도<br/>상호작용 없는 별도 시뮬 아님]
     Rigid[강체<br/>나무 박스, 차량] -->|모든 거리 불변| CM[질량중심 + 회전만 시뮬]
 ```
 
@@ -61,7 +61,7 @@ flowchart LR
 거리 불변 가정 덕분에:
 
 1. *모든 입자를 따로 시뮬* 하지 않아도 됨. *질량중심의 위치 + 회전* 만 알면 모든 점의 위치 복구 가능.
-2. *상태 변수* 가 *2D 에서 3 개* (x, y, θ), *3D 에서 7 개* (x, y, z, qx, qy, qz, qw) 만.
+2. 저장하는 *pose 성분* 은 *2D 에서 3 개* (x, y, θ), *3D 에서 7 개* (x, y, z, qx, qy, qz, qw) 다. 단 quaternion 4 성분은 *단위 구속* 을 받으므로 3D configuration 자유도는 *6* 이고, 선속도 3 + 각속도 3 을 포함한 *1차 동역학 상태 자유도* 는 *12* (2D 는 6) 다. *저장 성분 수와 자유도를 혼동하지 않는다*.
 3. *외력의 총합* + *총 토크* 만 추적. 점별 force 분포는 *적분 시점* 에 필요 없음.
 4. *부피 / 면적이 보존* → 충돌 도형이 *시뮬 도중 모양 변하지 않음*. 충돌 알고리즘이 *형상을 한 번 정의 후 평생 사용*.
 
@@ -83,10 +83,12 @@ flowchart LR
 | 타입 | 시뮬 | 충돌 영향 | 예시 |
 |---|---|---|---|
 | **Static** | 안 함 (고정) | 다른 객체에 영향 줌 | 벽, 바닥, 환경 콜라이더 |
-| **Kinematic** | 사용자 제어 (적분 안 함) | 다른 객체에 영향 줌 | 플랫폼, 엘리베이터, 캐릭터 |
+| **Kinematic** | 사용자 제어 — *힘에 의한 동역학 적분은 안 함* | 다른 객체에 영향 줌 | 플랫폼, 엘리베이터, 캐릭터 |
 | **Dynamic** (강체) | 물리 적분 | 양방향 영향 | 박스, 잔해, 발사체 |
 
 `Static` 과 `Kinematic` 도 *형상 고정* 이라 *기술적으로 강체*. *동역학 시뮬* 만 다르다.
+
+Kinematic 제어에는 *prescribed velocity 를 적분* 하는 방식과 *다음 target pose 에서 속도를 계산* 하는 방식이 있다. 둘 다 *힘에 의한 동역학 적분을 하지 않는다* 는 점은 같지만 *pose 전진을 하지 않는다는 뜻은 아니다*. solver 는 kinematic 접촉점의 *당시 속도* 를 읽어 dynamic body 에 반영해야 하며, kinematic body 의 transform 을 직접 대입하는 것과 충돌 응답은 별개 단계다. Static transform 변경도 엔진 API 별로 허용 여부와 비용이 다르다 — 일반적으로 broad-phase·sleep 상태 갱신이 따라온다.
 
 ### 1.5 이 글의 범위
 
@@ -152,9 +154,11 @@ vec2 ComputeCenterOfMass(const std::vector<Part>& parts) {
 
 ### 2.4 질량중심 좌표계
 
-물리 적분이 *질량중심을 원점* 으로 설정한 좌표계에서 수행. 강체의 *로컬 (body) 좌표계* 가 *질량중심 원점*.
+물리 적분이 *질량중심을 원점* 으로 설정한 좌표계에서 수행. *이 시리즈는 `body.position` 이 world 좌표계의 질량중심 (COM) 을 가리킨다고 선언한다*. 강체의 *로컬 (body) 좌표계* 도 질량중심 원점이다.
 
 이 선택이 *회전 동역학* 에서 결정적 — 토크가 질량중심 주위로 정의될 때 *병진과 회전이 독립*.
+
+엔진에 따라 *body/shape authoring 원점* 이 COM과 다를 수 있다. 그런 경우 transform 원점 $O_b$ 와 body 좌표계의 COM offset $\vec{c}_{body}$ 사이의 변환 $\vec{x}_{COM,world} = \vec{x}_{O_b,world} + R \, \vec{c}_{body}$ 를 별도로 유지해야 한다. 뒤의 `ApplyForceAtPoint` 가 $\vec{r} = \vec{p} - \vec{x}_{COM,world}$ 로 지렛대를 계산하는 것은 `position` 이 world COM일 때만 맞는다.
 
 ### 2.5 질량중심 외부 점
 
@@ -283,19 +287,19 @@ $$
 자유도 분리 덕분에:
 
 - 강체 라이브러리가 *병진 코드 + 회전 코드* 를 *별도 모듈* 로 작성 가능.
-- 충돌 응답이 *법선 임펄스 (병진) + 회전 임펄스* 를 *각각 계산*.
+- 충돌 응답은 병진·회전 효과가 *하나의 접촉 유효질량 (effective mass)* 으로 결합된다. 법선·회전 임펄스를 *독립적인 scalar 두 개로 따로 풀면* 접촉점의 속도 제약이 맞지 않는다 (Part08 의 coupled effective mass 참조).
 - *순수 병진 객체* (캐릭터 컨트롤러) 는 *회전 시뮬레이션 건너뜀* 가능.
 
 병진 부분만 먼저 보아도 강체의 선형 운동량, 힘 누적, invMass 관례를 독립적으로 이해할 수 있다. 이 분해 덕분에 회전 항은 같은 자료구조 안에서도 별도 식으로 관리된다.
 
 ### 4.5 분리가 깨지는 케이스
 
-대부분의 강체 시뮬이 위 분해를 *완전히 준수*. 예외:
+König 에너지·운동량 분해는 *회전 방정식 안에 gyroscopic 같은 비선형 항이 있어도 유지* 된다. 그 항은 *회전 내부의 축 간 결합* 이지 병진·회전 분해를 깨뜨리는 것이 아니다. 회전 방정식 자체에서 *생략할 수 없는 항* 이 있다는 뜻이다 (Part04 Euler 방정식).
 
-- *Gyroscopic precession* (회전축이 도는 효과): 회전 운동 자체가 *비선형* — 작은 시뮬은 무시, 정밀 시뮬만 고려.
+- *Gyroscopic precession* (회전축이 도는 효과): 회전 운동 자체가 *비선형*. 작은 시뮬은 무시할 수 있지만, 생략한 모델은 *비등방 자유회전에서 각운동량 보존을 체계적으로 어긋나게* 한다. 게임에서 시각적으로 미미해 *대부분 무시*.
 - *Variable mass system* (로켓): 질량이 시간에 따라 변함. 표준 강체 가정 벗어남.
 
-게임에서 *gyroscopic 효과* 는 시각적으로 미미해 *대부분 무시*. variable mass 는 특수 시스템.
+variable mass 는 특수 시스템이다.
 
 ## 5. RigidBody 자료구조
 
@@ -376,7 +380,7 @@ struct RigidBodyArray {
 };
 ```
 
-Jolt physics 는 `Body` 한 객체에 상태를 인라인으로 두고 동적 body 에만 붙는 `MotionProperties` 를 포인터로 분리한 hot/cold 분리 구조. Box2D / Bullet 은 *AoS (각 강체가 한 객체)* — 더 단순.
+Jolt physics 는 `Body` 한 객체에 상태를 인라인으로 두고 동적 body 에만 붙는 `MotionProperties` 를 포인터로 분리한 hot/cold 분리 구조. Box2D / Bullet 은 *AoS (각 강체가 한 객체)* — 더 단순. 다만 이런 비교는 *버전에 따라 달라진다* — 여기서의 Box2D 서술은 *2.4.1 의 C++ API (`b2Body`/`b2World`/`b2Island`/`b2ContactSolver`)* 기준이고, 최신 3.x C API 는 자료 구조와 소유권이 다르다. 소스 링크에는 태그 (예: Box2D `v2.4.1`) 를 붙여 버전을 고정한다.
 
 ### 5.5 객체와 형상의 분리
 
@@ -605,6 +609,7 @@ if (length(body.linearVelocity) < kLinearSleepEpsilon &&
 API 가 *mass 를 받아 invMass 를 자동 계산*.
 
 ```cpp
+// 질량만 조정한다. motion type, 관성, COM 은 바꾸지 않는다.
 void SetMass(RigidBody2D& body, float mass) {
     body.invMass = (mass > 0) ? 1.0f / mass : 0.0f;
 }
@@ -615,6 +620,8 @@ float GetMass(const RigidBody2D& body) {
 ```
 
 저장은 *invMass 만*, 외부 API 는 *mass 도 노출*. 두 형식을 *동기화 함수* 로.
+
+`SetMass` 는 *질량 accessor 만* 변경한다. `mass = 0` 으로 호출해도 기존 `invInertia` 가 남으므로 그 상태에 angular impulse 를 주면 회전하며 `type` 도 Dynamic 으로 남는다. 즉 `SetMass(0)` 은 `MakeStatic` 과 동치가 아니다. *질량 분포가 바뀌는* 경우에는 관성과 COM 을 함께 재계산해야 하고, *정적 전환* 이 목적이면 §7.1 의 `MakeStatic` 경로를 쓴다.
 
 ## 8. 상태 레이아웃
 
@@ -666,9 +673,9 @@ physics pose는 고정 step의 권위 상태다. renderer는 이전·현재 phys
 
 ## 더 읽을거리
 
-- Ian Millington, *Game Physics Engine Development*, 2nd ed., Ch. 5~6 — 강체 시뮬레이션의 표준 입문.
+- Ian Millington, *Game Physics Engine Development*, 2nd ed., Ch. 9~11 — 강체 시뮬레이션의 표준 입문. (Ch. 5~6 은 일반 힘 생성기·스프링의 배경 읽기.)
 - David Baraff, "Rigid Body Simulation" (SIGGRAPH Course Notes) — 학술적 정밀한 유도.
-- Erin Catto, "Box2D Manual" + v2.4 소스 (`b2_body.h`, `b2_body.cpp`) — 2D 강체의 reference 구현.
+- Erin Catto, "Box2D Manual" + v2.4.1 소스 (`b2_body.h`, `b2_body.cpp`, tag `v2.4.1`) — 2D 강체의 reference 구현.
 - Bullet Physics SDK Manual, "Rigid Body Dynamics" — 3D 강체의 산업 구현.
 - PhysX 5 SDK Guide, "Rigid Body Dynamics" — PhysX 의 API 모델.
 - Jorrit Rouwé, Jolt physics 소스 (`Body.h`, `MotionProperties.h`) — Body 와 MotionProperties 를 분리한 hot/cold 레이아웃의 모던 구현.

@@ -98,6 +98,11 @@ int main() {
     hud.Init(kWindowW, kWindowH, kHudH);
 
     while (!WindowShouldClose()) {
+        // frame wall은 루프 선두부터 EndDrawing(HUD·flush·swap 포함) 뒤까지다.
+        timer.BeginFrame();
+
+        // 데모는 wall dt를 쓴다. 서로 다른 설정을 인과 비교하려면 고정 dt·고정 step으로
+        // 재생하는 benchmark 모드가 필요하다(보충 구현 목표).
         const float dt = GetFrameTime();
 
         timer.BeginUpdate();
@@ -112,9 +117,13 @@ int main() {
         ClearBackground(Color{10, 10, 14, 255});
         sim->Draw();
         timer.EndDraw();
-        timer.CommitFrame(bench.LastFrameMs(), cbench.LastFrameMs());
+        // HUD는 직전 프레임의 CommitFrame 값을 읽는다(지표가 한 프레임 지연).
+        // frame wall이 EndDrawing을 포함해야 하므로 CommitFrame을 HUD 뒤로 옮겼다.
         hud.Draw(toggles, timer, sim->Count(), bench, *alloc, cbench);
         EndDrawing();
+
+        timer.EndFrame();
+        timer.CommitFrame(bench.LastFrameMs(), cbench.LastFrameMs());
 
         // 토글 변경 처리.
         // - layout 변경: 시뮬 인스턴스 자체를 교체.

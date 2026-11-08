@@ -91,18 +91,23 @@ argmax가 의도대로 동작하려면 행동 점수의 의미를 같은 의사�
 const Action* WeightedRandom(const std::vector<Scored>& scored, float topRatio = 0.85f) {
     float maxS = 0.0f;
     for (auto& s : scored) maxS = std::max(maxS, s.score);
-    // 최고점의 topRatio 이상인 후보만 추림 — 명백히 나쁜 행동 배제
+    // 최고점의 topRatio 이상이고 양수인 후보만 추림 — 명백히 나쁜 행동과 0 가중치 배제
     float sum = 0.0f;
     std::vector<const Scored*> pool;
     for (auto& s : scored)
-        if (s.score >= maxS * topRatio) { pool.push_back(&s); sum += s.score; }
+        if (std::isfinite(s.score) && s.score > 0.0f && s.score >= maxS * topRatio) {
+            pool.push_back(&s); sum += s.score;
+        }
+    if (pool.empty()) return nullptr;             // 선택 가능한 후보 없음
+    if (!std::isfinite(sum) || sum <= 0.0f)       // 양수 유한 총합이 없으면 명시적 fallback
+        return pool.front()->action;
     float r = RandFloat() * sum;                  // [0, sum)
     for (auto* s : pool) { r -= s->score; if (r <= 0.0f) return s->action; }
-    return pool.empty() ? nullptr : pool.back()->action;
+    return pool.back()->action;
 }
 ```
 
-`topRatio` 컷오프가 중요하다. 컷오프 없이 전체에서 가중 랜덤을 하면, 점수 0.05짜리 어리석은 행동도 작은 확률로 선택되어 NPC가 가끔 바보처럼 군다. The Sims가 가중 랜덤을 써서 같은 상황에서도 심(Sim)마다 조금씩 다른 선택을 하게 만들되, 컷오프로 "방광이 터지기 직전인데 TV를 보는" 사태는 막는다.
+`topRatio` 컷오프가 중요하다. 컷오프 없이 전체에서 가중 랜덤을 하면, 점수 0.05짜리 어리석은 행동도 작은 확률로 선택되어 NPC가 가끔 바보처럼 군다. The Sims가 가중 랜덤을 써서 같은 상황에서도 심(Sim)마다 조금씩 다른 선택을 하게 만들되, 컷오프로 "방광이 터지기 직전인데 TV를 보는" 사태는 막는다. 가중치가 0 이하이거나 비유한 점수는 풀에서 제외하고, 살아남은 양수 총합이 없으면 첫 후보를 의도적 fallback으로 반환한다.
 
 ### 확률적 선택의 형식화 — 볼츠만 분포와 온도
 
@@ -174,7 +179,7 @@ float Normalize(float raw, float minV, float maxV) {
 }
 ```
 
-예를 들어 "적과의 거리"가 0~50m 범위라면, 거리 10m는 0.2로 정규화된다. 하지만 이 선형 정규화 값을 그대로 효용으로 쓰면 부자연스럽다. "가까울수록 공격이 매력적"이라면 거리가 *반전* 되어야 한다(가까울수록 1). 반전은 정규화 뒤 `1 - x`로 처리하거나, `minV`와 `maxV`를 뒤집어 매핑하면 된다. 사정거리 안쪽에서는 거리 차가 거의 무의미하고 바깥에서 급격히 매력이 떨어지는 것처럼 비선형 관계가 필요하면 Response Curve로 정규화된 입력을 다시 변환한다.
+예를 들어 "적과의 거리"가 0~50m 범위라면, 거리 10m는 0.2로 정규화된다. 하지만 이 선형 정규화 값을 그대로 효용으로 쓰면 부자연스럽다. "가까울수록 공격이 매력적"이라면 거리가 *반전* 되어야 한다(가까울수록 1). 반전은 정규화를 유효 구간 `minV < maxV`로 유지한 뒤 `1 - Normalize(raw, minV, maxV)`로 처리한다. `Normalize`의 계약이 `maxV > minV`를 요구하므로 `minV`와 `maxV`를 뒤집어 매핑하면 안 된다. 사정거리 안쪽에서는 거리 차가 거의 무의미하고 바깥에서 급격히 매력이 떨어지는 것처럼 비선형 관계가 필요하면 Response Curve로 정규화된 입력을 다시 변환한다.
 
 ### 동적 범위 설계가 첫 번째 튜닝이다
 
@@ -331,7 +336,7 @@ Dave Mark가 제안한 또 다른 보정은 "make-up value"로, 요소 수가 �
 
 $$U = p + \left(1 - \frac{1}{n}\right)(1 - p)\,p, \quad p = \prod_i c_i$$
 
-요소가 1개면 $1 - 1/n = 0$이라 보정이 없고, 요소가 많아질수록 보정이 커진다. 기하평균보다 0 근처에서 부드럽다는 성질이 있어, 어느 쪽을 쓸지는 점수 분포를 보고 정한다. 다음은 기하평균 보정 구현이다.
+요소가 1개면 $1 - 1/n = 0$이라 보정이 없고, 요소가 많아질수록 보정이 커진다. 기하평균보다 0 근처에서 부드럽다는 성질이 있어, 어느 쪽을 쓸지는 점수 분포를 보고 정한다. 어느 보정이든 raw 곱 $p$에만 적용하고 DSE 가중치(`baseWeight`)는 보정 뒤에 곱한다 — 가중치를 먼저 곱하면 보정 입력이 [0,1]을 벗어난다. 다음은 기하평균 보정 구현이다.
 
 ```cpp
 float CombineMultiplicative(const std::vector<float>& cons) {
@@ -369,12 +374,14 @@ struct DSE {
         std::vector<float> vals;
         vals.reserve(considerations.size());
         for (const auto& c : considerations) vals.push_back(c.Eval(ctx));
-        return weight * CombineMultiplicative(vals);
+        // 순서 고정: raw product → 보정(입력 [0,1]) → baseWeight
+        const float compensated = CombineMultiplicative(vals);
+        return weight * compensated;
     }
 };
 ```
 
-`weight`는 DSE 사이의 *전역 우선순위* 를 준다. 두 DSE의 내부 곱이 같아도, "생존" 행동의 가중치를 1.5로, "탐색" 행동을 0.5로 두면 동점 상황에서 생존이 이긴다. 이 가중치는 0~1 정규화를 깨뜨리지만(가중치 1.5면 점수가 1을 넘을 수 있음), argmax 비교는 상대 크기만 보므로 문제없다 — 단, 가중 랜덤(1절)을 쓴다면 가중치가 확률에 직접 영향을 주므로 의도를 점검해야 한다.
+`weight`는 DSE 사이의 *전역 우선순위* 를 준다. 두 DSE의 내부 곱이 같아도, "생존" 행동의 가중치를 1.5로, "탐색" 행동을 0.5로 두면 동점 상황에서 생존이 이긴다. 이 가중치는 0~1 정규화를 깨뜨리지만(가중치 1.5면 점수가 1을 넘을 수 있음), argmax 비교는 상대 크기만 보므로 문제없다 — 단, 가중 랜덤(1절)을 쓴다면 가중치가 확률에 직접 영향을 주므로 의도를 점검해야 한다. 보정은 baseWeight를 곱하기 전 raw product에 적용하므로 보정 함수의 입력은 항상 [0,1]을 유지한다.
 
 ### 평가 비용의 정량화
 
@@ -663,8 +670,8 @@ The Sims의 광고 모델은 객체가 효용을 광고하게 해 확장성을 �
 ## 더 읽을거리
 
 - Dave Mark, *Behavioral Mathematics for Game AI* (2009) — Response Curve와 효용 결합, 단조 감소 보정의 원전.
-- Dave Mark & Kevin Dill, "Improving AI Decision Modeling Through Utility Theory" (GDC 2010) — IAUS의 공개 발표.
-- Luke Dicken, Dino Dini & Dave Mark, "Architecture Tricks: Managing Behaviors in Time, Space, and Depth" (GDC 2013 AI Summit) — Reasoner·버킷·타깃 평가 구조.
+- Dave Mark & Kevin Dill, "Improving AI Decision Modeling Through Utility Theory" (GDC 2010) — 효용 이론·Response Curve·선택 모델의 입문 발표.
+- Luke Dicken, Dino Dini & Dave Mark, "Architecture Tricks: Managing Behaviors in Time, Space, and Depth" (GDC 2013 AI Summit) — Reasoner·버킷·타깃 평가 구조. IAUS의 상세 설명은 GDC 2015 "Building a Better Centaur"에 있다.
 - Steve Rabin (ed.), *Game AI Pro* 1권, "An Introduction to Utility Theory"와 "Building Utility Decisions into Your Existing Behavior Tree" — 입문 정리와 BT 혼합.
 - Kevin Dill & Dave Mark, "Embracing the Dark Art of Mathematical Modeling in AI" (GDC 2012 AI Summit) — 곡선 설계 실무.
 - Will Wright / Ken Forbus, The Sims 욕구·광고 모델 디자인 강연 자료 — 객체 광고 기반 욕구 시뮬레이션.

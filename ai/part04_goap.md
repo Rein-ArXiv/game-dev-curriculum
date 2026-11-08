@@ -131,7 +131,7 @@ struct WorldState {
 | 1 | 0 | 이 명제는 거짓이어야/거짓이다 |
 | 0 | (무시) | 이 명제는 *무관* (don't care) |
 
-목표는 보통 *전체 상태가 아니라 일부 명제* 만 지정한다. "적이 죽었다(EnemyDead=true)"가 목표라면 그 외 명제(탄약·엄폐 여부)는 목표 입장에서 무관하다. 그 명제들은 mask 비트가 0이라 비교에서 빠진다. 현재 상태(start)는 보통 모든 비트가 mask=1인 완전한 상태이고, 목표와 회귀된 부분 목표는 mask가 듬성한 부분 상태다.
+목표는 보통 *전체 상태가 아니라 일부 명제* 만 지정한다. "적이 죽었다(EnemyDead=true)"가 목표라면 그 외 명제(탄약·엄폐 여부)는 목표 입장에서 무관하다. 그 명제들은 mask 비트가 0이라 비교에서 빠진다. 현재 상태(start)는 보통 모든 비트가 mask=1인 완전한 상태이고, 목표와 회귀된 부분 목표는 mask가 듬성한 부분 상태다. 명제 $k$개일 때 전방 탐색이 저장하는 unique world state는 모든 비트가 정해진 완전 상태라 최대 $2^k$개지만, 회귀 탐색의 subgoal key는 values·mask로 참/거짓/무관을 나타내는 부분 상태라 최대 $3^k$개다. 두 상한은 서로 다른 대상의 수이므로 같은 탐색량으로 혼용하지 않는다.
 
 ### 충족 검사와 거리
 
@@ -165,16 +165,17 @@ struct WorldState {
 
 ## 3. 행동의 전제조건과 효과
 
-각 행동은 세 가지를 가진다. *전제조건(precondition)*, *효과(effect)*, *비용(cost)*. 전제조건은 "이 행동이 적용 가능하려면 무엇이 참이어야 하는가", 효과는 "적용 후 무엇이 바뀌는가", 비용은 A* 간선 가중치다.
+각 행동은 세 가지를 가진다. *전제조건(precondition)*, *효과(effect)*, *비용(cost)*. 전제조건은 "이 행동이 적용 가능하려면 무엇이 참이어야 하는가", 효과는 "적용 후 무엇이 바뀌는가", 비용은 A* 간선 가중치다. 전제조건은 다시 시작 시점에만 확인하는 시작 조건(`CanStart`)과 Running 동안 계속 참이어야 하는 유지 불변식(`invariant`, MustRemainTrue)으로 나뉜다 — 탄약처럼 시작할 때 소비되는 조건은 시작 조건에만, 시야처럼 유지되어야 하는 조건은 불변식에 둔다.
 
 ```cpp
 struct Action {
     const char* name;
-    WorldState  precondition;   // 이 비트들이 만족돼야 실행 가능
-    WorldState  effect;         // 실행 후 이 비트들로 변경
-    float       cost = 1.0f;    // A* 간선 가중치 (선호도)
+    WorldState  precondition;  // 시작 조건(CanStart) — 시작 시 한 번 검사
+    WorldState  invariant;     // 유지 불변식(MustRemainTrue) — Running 동안 계속 검사
+    WorldState  effect;        // 완료 시 적용
+    float       cost = 1.0f;   // A* 간선 가중치 (선호도)
 
-    bool Applicable(const WorldState& s) const {   // 전방 적용 가능 여부
+    bool CanStart(const WorldState& s) const {     // 시작 가능 여부
         return s.Satisfies(precondition);
     }
 };
@@ -257,7 +258,7 @@ bool TryRegress(const WorldState& g, const Action& a, WorldState& out) {
 | FlankAttack | AtCover, AmmoAvailable, EnemyVisible | EnemyDead | 3 |
 | DirectAttack | AmmoAvailable, EnemyVisible | EnemyDead | 4 |
 
-비용은 행동의 *선호도* 를 인코딩한다. FlankAttack(3)이 DirectAttack(4)보다 싸므로, 둘 다 가능하면 플래너는 측면 공격을 선호한다. 효과가 같은 두 행동(둘 다 EnemyDead)이라도 전제조건과 비용이 달라, 상황과 선호에 따라 다른 경로가 선택된다. "전술적으로 더 나은" 계획을 비용으로 유도하는 것이 GOAP 튜닝의 한 축이다 — 코드를 고치지 않고 숫자만 바꿔 행동 경향을 조정한다.
+비용은 행동의 *선호도* 를 인코딩한다. FlankAttack(3)이 DirectAttack(4)보다 싸므로, 둘 다 가능하면 플래너는 측면 공격을 선호한다. 효과가 같은 두 행동(둘 다 EnemyDead)이라도 전제조건과 비용이 달라, 상황과 선호에 따라 다른 경로가 선택된다. "전술적으로 더 나은" 계획을 비용으로 유도하는 것이 GOAP 튜닝의 한 축이다 — 코드를 고치지 않고 숫자만 바꿔 행동 경향을 조정한다. 표의 전제조건은 시작 시점(`CanStart`)에 확인하는 조건이다. Running 동안 매 틱 확인해야 하는 조건이 다르면 각 행동의 `invariant`에 따로 적는다.
 
 ## 4. 목표와 우선순위
 
@@ -581,12 +582,13 @@ flowchart TB
 
 ### 실행기와 검증
 
-실행기(executor)는 계획을 한 행동씩 진행하며 *현재 행동의 전제조건* 만 값싸게 검증한다. 전체 계획을 매 틱 다시 짜지 않는다.
+실행기(executor)는 계획을 한 행동씩 진행하며 *현재 행동의 유지 불변식(`invariant`)* 만 값싸게 검증한다. 시작 전제조건(`CanStart`)은 행동을 시작할 때 한 번만 본다. 전체 계획을 매 틱 다시 짜지 않는다.
 
 ```cpp
 class PlanExecutor {
     std::vector<const Action*> plan_;
     size_t idx_ = 0;
+    bool   started_ = false;   // 현재 행동이 이미 시작됐는가
 public:
     enum class Status { Running, NeedReplan, Done };
 
@@ -594,31 +596,34 @@ public:
         if (idx_ >= plan_.size()) return Status::Done;
         const Action* cur = plan_[idx_];
 
-        // 1) 현재 행동의 전제조건이 깨졌으면 재계획
-        if (!ws.Satisfies(cur->precondition)) return Status::NeedReplan;
+        // 1) 시작 전제조건은 행동을 시작할 때 한 번만 검사
+        if (!started_ && !cur->CanStart(ws)) return Status::NeedReplan;
+        // 2) Running 동안에는 유지 불변식만 검사 (소비된 시작 조건은 재요구하지 않음)
+        if (started_ && !ws.Satisfies(cur->invariant)) return Status::NeedReplan;
 
-        // 2) 행동 실행 (애니메이션/이동 진행). 완료 시 다음으로
+        // 3) 행동 실행 (애니메이션/이동 진행). 완료 시 다음으로
         //    주의: 한 틱에 RunAction은 한 번만 호출(중복 호출 시 부작용·진행이 2배가 된다).
         ActionResult r = RunAction(a, *cur, dt);
-        if (r == ActionResult::Failed)    return Status::NeedReplan;
-        if (r == ActionResult::Completed) ++idx_;
+        started_ = true;
+        if (r == ActionResult::Failed)    { started_ = false; return Status::NeedReplan; }
+        if (r == ActionResult::Completed) { ++idx_; started_ = false; }
         return Status::Running;
     }
-    void SetPlan(std::vector<const Action*> p) { plan_ = std::move(p); idx_ = 0; }
+    void SetPlan(std::vector<const Action*> p) { plan_ = std::move(p); idx_ = 0; started_ = false; }
 };
 ```
 
 ### 비용과 빈도의 균형
 
-재계획 빈도가 비용과 직결된다. 매 틱 전체 재계획은 탐색 비용을 누적시키므로, 보통은 *현재 행동의 전제조건만 값싸게 검증* 하다가 깨질 때만 전체 탐색을 돌린다. F.E.A.R.이 택한 "짧은 계획 + 잦은 재계획"은 이 검증을 가볍게 유지하는 한 방식이다 — 계획이 짧으면 무효화 시 다시 짜는 비용도 작다.
+재계획 빈도가 비용과 직결된다. 매 틱 전체 재계획은 탐색 비용을 누적시키므로, 보통은 *현재 행동의 실행 불변식만 값싸게 검증* 하다가 깨질 때만 전체 탐색을 돌린다. F.E.A.R.이 택한 "짧은 계획 + 잦은 재계획"은 이 검증을 가볍게 유지하는 한 방식이다 — 계획이 짧으면 무효화 시 다시 짜는 비용도 작다.
 
 | 전략 | 검증 비용 | 반응성 | 위험 |
 |---|---|---|---|
 | 매 틱 전체 재계획 | 높음 | 즉각 | 프레임 예산 초과 |
-| 행동 전제만 검증 | 낮음 | 행동 경계에서만 | 행동 도중 변화 놓침 |
+| 매 틱 실행 불변식만 검증 | 낮음 | 불변식 변화는 매 틱 | 시작 전제 변화는 완료까지 놓침 |
 | 주기 + 즉시 트리거 혼합 | 중간 | 균형 | 튜닝 필요 |
 
-혼합 정책은 실용적인 출발점이다. 값싼 전제 검증을 자주 하고, 엄폐물 파괴·적 소멸 같은 명확한 무효화 이벤트에는 즉시 반응하며, 그 외의 전체 재계획은 예산과 허용 지연에 맞춘 주기로 제한한다. 주기는 고정된 수백 ms가 아니라 게임의 반응성 계약과 프로파일링으로 정한다. 목표 선택에 히스테리시스를 두면 비슷한 효용의 목표 사이에서 재계획이 진동하는 현상을 줄일 수 있다.
+혼합 정책은 실용적인 출발점이다. 값싼 불변식 검증을 자주 하고, 엄폐물 파괴·적 소멸 같은 명확한 무효화 이벤트에는 즉시 반응하며, 그 외의 전체 재계획은 예산과 허용 지연에 맞춘 주기로 제한한다. 주기는 고정된 수백 ms가 아니라 게임의 반응성 계약과 프로파일링으로 정한다. 목표 선택에 히스테리시스를 두면 비슷한 효용의 목표 사이에서 재계획이 진동하는 현상을 줄일 수 있다.
 
 ## 8. 성능 최적화
 
@@ -626,13 +631,13 @@ public:
 
 ### 메모리 풀과 재사용
 
-탐색마다 노드 벡터·우선순위 큐·닫힌 집합을 새로 할당하면 GC/힙 비용이 누적된다. 플래너 인스턴스를 *재사용* 하고 컨테이너를 `clear`만 해 용량을 유지한다.
+탐색마다 노드 벡터·우선순위 큐·닫힌 집합을 새로 할당하면 힙 비용이 누적된다. 플래너 인스턴스를 *재사용* 하고 컨테이너를 `clear`만 해 용량을 유지한다. 다만 재사용 범위는 컨테이너마다 다르다. `std::vector`(`nodes_`, `openHeap_`)는 `clear`가 원소 저장 공간(용량)을 그대로 보존하지만, `std::unordered_map`(`bestG_`)의 `reserve`/`clear`가 재사용하는 것은 bucket 배열이고 각 노드는 삽입마다 별도로 할당될 수 있다. 노드 단위 무할당까지 보장하려면 custom pool allocator를 붙이거나 연속형 탐색 테이블을 별도로 설계해야 한다.
 
 ```cpp
 class Planner {
     std::vector<PlanNode>        nodes_;     // reserve 후 clear 재사용
     std::vector<int>             openHeap_;  // 직접 관리하는 바이너리 힙
-    std::unordered_map<WorldState, float, WSHash> bestG_;
+    std::unordered_map<WorldState, float, WSHash> bestG_;  // bucket 배열만 재사용
 public:
     Planner() { nodes_.reserve(256); bestG_.reserve(256); }
     void Reset() { nodes_.clear(); openHeap_.clear(); bestG_.clear(); }
@@ -653,20 +658,31 @@ NPC마다 플래너를 하나씩 가지거나, 풀에서 빌려 쓴다. 핵심�
 계획이 한 프레임 예산을 넘길 위험이 있으면 두 가지로 대응한다.
 
 - *예산 제한 탐색*: 확장 노드 수에 상한(예: 200)을 두고, 초과하면 탐색을 포기해 기본 행동으로 후퇴한다. 무한 탐색으로 프레임이 튀는 것보다 낫다.
-- *시분할(time-slicing)*: 여러 NPC의 재계획을 한 프레임에 몰지 않고 라운드로빈으로 분산한다. NPC 200마리가 동시에 재계획하면 스파이크가 나므로, 프레임당 N마리만 재계획하도록 큐잉한다.
+- *시분할(time-slicing)*: 여러 NPC의 재계획을 한 프레임에 몰지 않고 라운드로빈으로 분산한다. NPC 200마리가 동시에 재계획하면 스파이크가 나므로, 프레임당 N마리만 재계획하도록 큐잉한다. 순환 시작 인덱스를 영속시켜 매 프레임 같은 앞쪽 에이전트만 처리하는 기아를 막는다.
 
 ```cpp
 // 프레임당 재계획 예산 — 스파이크 방지
+// size_t nextReplan_ = 0;   // 다음 프레임에 재계획을 시작할 순환 인덱스 (AIManager 멤버)
 void AIManager::Tick(float dt) {
-    int budget = kReplansPerFrame;          // 예: 8
+    // 1) 실행기는 매 프레임 모든 에이전트에서 진행하고 반환값을 needsReplan에 연결 (AI-003)
     for (Agent* a : agents_) {
-        a->executor.Tick(*a, a->worldState, dt);
-        if (a->needsReplan && budget > 0) {
-            a->Replan();                     // 비싼 탐색
-            --budget;
-        }
+        const PlanExecutor::Status result = a->executor.Tick(*a, a->worldState, dt);
+        if (result == PlanExecutor::Status::NeedReplan)
+            a->needsReplan = true;
+        // Running/Done은 여기서 추가 동작 없이 다음 단계로
     }
-    // 예산 초과분은 다음 프레임으로 자연 이월 (needsReplan 유지)
+    // 2) 재계획은 순환 시작 인덱스에서 예산만큼만 (고정 순서 기아 방지, AI-006)
+    const size_t n = agents_.size();
+    int budget = kReplansPerFrame;          // 예: 8
+    for (size_t scanned = 0; scanned < n && budget > 0; ++scanned) {
+        Agent* a = agents_[nextReplan_];
+        nextReplan_ = (nextReplan_ + 1) % n;
+        if (!a->needsReplan) continue;
+        // 재계획 경계에서 현재 행동을 중단하고 예약을 정리한 뒤 탐색한다
+        a->Replan();                        // 비싼 탐색
+        a->needsReplan = false;             // 처리 완료 해제, 미처리분은 다음 프레임 이월
+        --budget;
+    }
 }
 ```
 

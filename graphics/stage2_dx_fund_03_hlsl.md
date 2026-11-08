@@ -380,7 +380,7 @@ float4 PSMain(PSInput input) : SV_Target {
 }
 ```
 
-`ResourceDescriptorHeap`과 `SamplerDescriptorHeap`은 SM 6.6에서 추가된 전역 배열로, 바인딩된 디스크립터 힙 전체를 인덱스로 접근하게 해 준다. 이런 바인드리스(bindless) 자원 인덱싱은 DXIL과 SM 6.6 이상에서만 가능하다. 머티리얼마다 텍스처를 따로 바인딩하지 않고 인덱스만 바꿔 수천 개의 텍스처를 한 번의 바인딩으로 다루는 패턴의 기반이 된다.
+`ResourceDescriptorHeap`과 `SamplerDescriptorHeap`은 SM 6.6에서 추가된 전역 배열로, 바인딩된 디스크립터 힙 전체를 인덱스로 접근하게 해 준다. 이런 직접 힙 인덱싱(direct heap indexing) 기반 바인드리스(bindless) 자원 인덱싱은 DXIL과 SM 6.6 이상에서만 가능하다. 그 이전에도 descriptor table과 unbounded array(`Texture2D textures[]`)로 제한적인 바인드리스 인덱싱을 할 수 있지만, `ResourceDescriptorHeap`처럼 힙 전체를 임의로 인덱싱하지는 못한다. 머티리얼마다 텍스처를 따로 바인딩하지 않고 인덱스만 바꿔 수천 개의 텍스처를 한 번의 바인딩으로 다루는 패턴의 기반이 된다.
 
 ## 5. Shader Model 진화
 
@@ -389,10 +389,10 @@ Shader Model은 셰이더가 쓸 수 있는 기능의 버전 표시다. 하드�
 | SM | 도입 시점 | 주요 기능 |
 |---|---|---|
 | 5.0 | DX11 (2009) | VS / HS / DS / GS / PS / CS 표준 파이프라인 |
-| 5.1 | DX11.3 | 자원 배열 동적 인덱싱, 디스크립터 모델 확장 |
-| 6.0 | DXC 도입 | Wave Intrinsics, 16비트 타입 기반 |
+| 5.1 | D3D12 (Windows 10) | descriptor table·unbounded array 기반 자원 배열 동적 인덱싱 |
+| 6.0 | DXC 도입 | Wave Intrinsics |
 | 6.1 | | Barycentric, ViewInstancing |
-| 6.2 | | `float16_t`, `int16_t` 명시적 16비트 타입 |
+| 6.2 | | `float16_t`, `int16_t` native 16비트 타입, 16-bit storage |
 | 6.3 | | DXR 1.0 (Ray Tracing) |
 | 6.4 | | int8 packed dot product(`dot4add_*8packed`) · half `dot2add` — ML 가속 명령, Variable Rate Shading |
 | 6.5 | | DXR 1.1 (Inline RT), Mesh Shader, Sampler Feedback |
@@ -400,7 +400,7 @@ Shader Model은 셰이더가 쓸 수 있는 기능의 버전 표시다. 하드�
 | 6.7 | | 고급 텍스처 연산, Quad 통신 확장 |
 | 6.8 | 2024 | Work Graphs |
 
-SM 5.x에서 6.0으로의 도약은 컴파일러 교체(FXC → DXC)와 맞물려 있어 가장 큰 분기점이다. 그 이후의 6.x 마이너 버전은 점진적으로 하드웨어 기능을 추가한다. 게임이 타겟하는 최소 SM은 지원할 GPU의 범위가 결정한다. 폭넓은 하드웨어를 지원하려면 SM 6.0~6.2 정도를 기준으로 잡고, 레이 트레이싱이나 메시 셰이더 같은 신기능은 런타임에 지원 여부를 질의해 분기한다.
+이 표의 도입 시점은 참고용이며, 실제 사용 가능 여부는 API/runtime 버전, 셰이더 모델, 컴파일러 옵션(fxc/DXC), 디바이스 기능 지원이 각각 맞아야 결정된다. min-precision(min16float 등) 표현과 `float16_t` 같은 native 16비트 타입도 구분해야 한다. SM 5.x에서 6.0으로의 도약은 컴파일러 교체(FXC → DXC)와 맞물려 있어 가장 큰 분기점이다. 그 이후의 6.x 마이너 버전은 점진적으로 하드웨어 기능을 추가한다. 게임이 타겟하는 최소 SM은 지원할 GPU의 범위가 결정한다. 폭넓은 하드웨어를 지원하려면 SM 6.0~6.2 정도를 기준으로 잡고, 레이 트레이싱이나 메시 셰이더 같은 신기능은 런타임에 지원 여부를 질의해 분기한다.
 
 ### Wave Intrinsics
 
@@ -552,7 +552,7 @@ flowchart LR
     RS --> SS[Static Samplers<br/>고정 샘플러]
 ```
 
-네 종류는 비용과 인덱싱 단계가 다르다. Root Constants는 32비트 값 여러 개를 루트에 직접 박는다. Vulkan의 푸시 상수와 같은 역할로, 인덱싱 없이 셰이더가 바로 읽으므로 가장 빠르다. Root Descriptor는 CBV/SRV/UAV 한 개의 GPU 주소를 루트에 직접 담아 한 단계 인덱싱으로 접근한다. Descriptor Table은 디스크립터 힙의 연속된 슬롯 묶음을 가리키며, 루트에는 힙 시작 위치만 두고 실제 자원은 힙을 거쳐 찾으므로 두 단계 인덱싱이 든다. Static Sampler는 컴파일 시점에 값이 정해지는 샘플러로, 디스크립터 슬롯을 전혀 차지하지 않는다.
+네 종류는 비용과 인덱싱 단계가 다르다. Root Constants는 32비트 값 여러 개를 루트에 직접 박는다. Vulkan의 푸시 상수와 같은 역할로, 인덱싱 없이 셰이더가 바로 읽으므로 가장 빠르다. Root Descriptor는 CBV/SRV/UAV 한 개의 GPU 주소를 루트에 직접 담아 한 단계 인덱싱으로 접근한다. 다만 root SRV/UAV는 GPU 가상 주소 기반 버퍼 접근이라 raw/structured buffer와 CBV 같은 버퍼 자원에만 쓸 수 있고, 일반 텍스처는 descriptor table 경로를 거쳐야 한다. Descriptor Table은 디스크립터 힙의 연속된 슬롯 묶음을 가리키며, 루트에는 힙 시작 위치만 두고 실제 자원은 힙을 거쳐 찾으므로 두 단계 인덱싱이 든다. Static Sampler는 컴파일 시점에 값이 정해지는 샘플러로, 디스크립터 슬롯을 전혀 차지하지 않는다.
 
 ### 비용 트레이드오프
 

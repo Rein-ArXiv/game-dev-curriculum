@@ -181,11 +181,17 @@ struct bio *bio_alloc(struct block_device *bdev,
 int bio_add_page(struct bio *bio, struct page *page,
                  unsigned int len, unsigned int offset)
 {
-    struct bio_vec *bv = &bio->bi_io_vec[bio->bi_vcnt];
+    struct bio_vec *bv;
+
+    if (bio->bi_vcnt >= bio->bi_max_vecs)
+        return 0;  /* 추가 거부: caller가 반환값을 검사해야 한다 */
+
+    bv = &bio->bi_io_vec[bio->bi_vcnt];
     bv->bv_page = page;
     bv->bv_len = len;
     bv->bv_offset = offset;
     bio->bi_vcnt++;
+    bio->bi_iter.bi_size += len;  /* request가 소비하는 전체 길이 갱신 */
     return len;
 }
 
@@ -498,6 +504,7 @@ ssize_t generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
     struct address_space *mapping = file->f_mapping;
     pgoff_t index;
     struct page *page;
+    size_t copied;
 
     index = iocb->ki_pos >> PAGE_SHIFT;
 
@@ -507,13 +514,28 @@ ssize_t generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
         page_cache_sync_readahead(mapping, &file->f_ra, file, index, ...);
         page = find_get_page(mapping, index);
     }
+    if (!page)
+        return -EAGAIN;  /* caller가 readahead 완료 후 재시도 */
 
-    if (PageUptodate(page)) {
-        copy_page_to_iter(page, offset, bytes, iter);
+    /* 페이지 존재만으로 읽기 완료가 아님: lock과 Uptodate를 확인 */
+    if (!trylock_page(page))
+        return -EAGAIN;
+    if (!PageUptodate(page)) {
+        /* I/O 미완료 page: lock 해제 후 I/O 완료를 기다렸다 재시도 */
+        unlock_page(page);
+        put_page(page);
+        return -EAGAIN;
     }
 
+    /* i_size 경계를 넘는 요청은 잘라냄 */
+    if (iocb->ki_pos + bytes > i_size_read(file_inode(file)))
+        bytes = i_size_read(file_inode(file)) - iocb->ki_pos;
+
+    copied = copy_page_to_iter(page, offset, bytes, iter);
+
+    unlock_page(page);
     put_page(page);
-    return bytes;
+    return copied;  /* 실제 복사된 byte 수 */
 }
 ```
 
@@ -567,16 +589,23 @@ ssize_t __blockdev_direct_IO(struct kiocb *iocb, struct inode *inode,
     if (iocb->ki_pos & (blocksize - 1))
         return -EINVAL;
 
-    /* bio 생성 및 제출 */
+    /* bio 생성 및 제출: 실제 소비·제출된 byte만큼만 전진 */
     while (iov_iter_count(iter)) {
+        bytes = min_t(size_t, iov_iter_count(iter), nr_pages * PAGE_SIZE);
+
         bio = bio_alloc(bdev, nr_pages, iocb->ki_flags & IOCB_WRITE ?
                         REQ_OP_WRITE : REQ_OP_READ, GFP_KERNEL);
 
-        iov_iter_get_pages(iter, pages, bytes, &start);
+        /* iov_iter_get_pages는 pin한 byte만큼 iter를 소비한다 */
+        bytes = iov_iter_get_pages(iter, pages, bytes, &start);
         for (i = 0; i < nr_pages; i++)
             bio_add_page(bio, pages[i], PAGE_SIZE, 0);
 
         submit_bio(bio);
+
+        /* iterator 소비와 완료 byte에 대응해 file position을 한 번만 전진 */
+        iocb->ki_pos += bytes;
+        transferred += bytes;
     }
 
     blk_finish_plug(&plug);
@@ -838,10 +867,31 @@ int vfs_fsync_range(struct file *file, loff_t start, loff_t end, int datasync)
 데이터베이스 WAL(Write-Ahead Logging) 예시는 다음과 같다.
 
 ```c
-write(wal_fd, wal_record, sizeof(wal_record));
-fdatasync(wal_fd);  /* WAL이 디스크에 안전하게 기록됨 */
+/* WAL record가 전량 기록되고 fdatasync가 성공해야 commit으로 진행한다 */
+static int wal_commit(int wal_fd, const void *record, size_t len)
+{
+    const char *p = record;
+    size_t written = 0;
+    ssize_t n;
 
-write(data_fd, data, sizeof(data));  /* 실제 데이터 쓰기 */
+    while (written < len) {
+        n = write(wal_fd, p + written, len - written);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;  /* 부분 기록: commit 성공으로 진행하지 않음 */
+        }
+        written += n;
+    }
+
+    if (fdatasync(wal_fd) != 0)
+        return -1;  /* 내구성 확보 실패: commit 실패 상태 */
+
+    return 0;
+}
+
+if (wal_commit(wal_fd, wal_record, sizeof(wal_record)) == 0)
+    write(data_fd, data, sizeof(data));  /* 실제 데이터 쓰기 */
 ```
 
 ## 8. NVMe와 멀티큐
@@ -897,12 +947,32 @@ static blk_status_t nvme_queue_rq(struct blk_mq_hw_ctx *hctx,
     struct nvme_queue *nvmeq = hctx->driver_data;
     struct request *req = bd->rq;
     struct nvme_command cmd;
+    u8 lba_shift = ns->head->lba_shift;       /* namespace logical block 크기 */
+    u64 sector_512 = blk_rq_pos(req);         /* block layer 512B sector */
+    u32 byte_len = blk_rq_bytes(req);
+    u32 block_count, nlb;
+    u64 slba;
+
+    /* namespace LBA 단위 정렬·0길이 검사 */
+    if (byte_len == 0 ||
+        ((sector_512 << 9) & ((1ULL << lba_shift) - 1)) ||
+        (byte_len & ((1U << lba_shift) - 1)))
+        return BLK_STS_IOERR;
+
+    /* sector_512(512B) -> namespace LBA, byte -> native block 변환 */
+    slba = sector_512 >> (lba_shift - 9);
+    block_count = byte_len >> lba_shift;
+    nlb = block_count - 1;
+
+    /* NLB 범위와 namespace 끝을 넘지 않는지 검사 */
+    if (block_count > 65536 || slba + block_count > ns->head->nsze)
+        return BLK_STS_IOERR;
 
     cmd.rw.opcode = rq_data_dir(req) == WRITE
                   ? nvme_cmd_write : nvme_cmd_read;
     cmd.rw.nsid = cpu_to_le32(ns->head->ns_id);
-    cmd.rw.slba = cpu_to_le64(blk_rq_pos(req));
-    cmd.rw.length = cpu_to_le16((blk_rq_bytes(req) >> 9) - 1);
+    cmd.rw.slba = cpu_to_le64(slba);
+    cmd.rw.length = cpu_to_le16(nlb);
 
     /* Submission Queue에 명령 추가 */
     memcpy(&nvmeq->sq_cmds[nvmeq->sq_tail], &cmd, sizeof(cmd));

@@ -101,8 +101,9 @@ struct Task {
 };
 
 struct PrimitiveTask : Task {
-    WorldState  precondition;   // 실행 가능 조건
-    WorldState  effect;         // 실행 후 상태 변화 (계획 중 가상 적용)
+    WorldState  precondition;   // 시작 조건(CanStart) — 단계 시작 시 한 번 검사
+    WorldState  invariant;      // 유지 불변식(MustRemainTrue) — Running 동안 계속 검사
+    WorldState  effect;         // 완료 시 확정되는 상태 변화 (계획 중 가상 적용)
     std::function<TaskStatus(World&)> operatorFn;   // 실제 실행체
 };
 
@@ -510,17 +511,19 @@ $$N=\frac{s^{h+1}-1}{s-1}\approx\frac{s}{s-1}\,L=\Theta(L).$$
 
 내부 노드는 잎보다 $\frac{1}{s-1}$배만큼 적어, 전체가 잎 수의 상수배다($s{=}2$면 약 $2L$, $s{=}3$이면 약 $1.5L$). 무백트래킹 플래너의 비용은 *계획 길이에 선형* 이고, 이것이 "분해 트리 크기에 비례"의 정확한 형태다.
 
+이 $\Theta(L)$은 어디까지나 *노드 방문 횟수*의 상한이다. 위 `Decompose` 구현은 결정 지점마다 `history.push_back({task, i + 1, ws, stack, plan.size()})` 로 작업 스택 전체를 복사하므로, 실제 실행 비용에는 이 스냅샷 복사 총량과 Method 순회가 더해진다. 미처리 task가 $N, N-1, \dots$개 남은 지점에서 각각 전체 스택을 복사하면 복사 원소 수는 $N(N+1)/2=\Theta(N^2)$다. 즉 노드 방문 횟수와 구현 비용은 별개이며, 공유 불변 스택 + 인덱스·diff만 기록하는 복사 없는 checkpoint를 쓰면 그 계약에서만 스냅샷 비용이 상수로 묶인다.
+
 **백트래킹의 최악은 $m^{C}$다.** 코드의 `Decompose`/`Backtrack` 은 메서드 선택을 *우선순위 순 DFS* 로 훑고, 막히면 가상 상태·스택·계획 길이를 복원해 다음 메서드를 시도한다. 최악은 막힘이 가장 깊은 잎에서만 드러나는 경우다 — 그러면 서로 다른 *메서드 배정 조합* 을 모두 시도한다. 분해에 등장하는 Compound 결정 지점이 $C$개, 각 $m$개의 적용 가능한 메서드를 가지면 조합 수는 $m^{C}$다. 구체 반례로 못 박자. 루트가 $[X_1,\dots,X_C]$로 펼쳐지고 각 $X_i$가 $m$개의 무조건 적용 가능한 메서드를 가지며, 시퀀스 끝에 목표 Primitive $G$의 전제를 *어떤 조합도* 만족시키지 못하면, DFS는 $G$에 닿기 전 $m^{C}$개의 완성된 Primitive 시퀀스를 만들고 매번 $G$에서 막혀 되감는다. $m{=}3,\,C{=}4$면 $G$의 전제 검사가 정확히 $3^4=81$회 일어난다(아래 검증). 이 지수가 "최악의 경우 시도하는 Method 조합의 수"의 닫힌 형태다.
 
 게임이 이 지수를 피하는 이유는 둘이다. 전순서(§1)는 *앞 작업의 effect가 뒤 작업 전제를 즉시 거른다* — 막힘이 잎이 아니라 분해 도중 일찍 드러나, 가지가 $m^{C}$로 자라기 전에 잘린다. 그리고 강한 전제(작업당 매칭 메서드가 보통 1개)는 유효 $m$을 1에 가깝게 눌러 $m^{C}\to 1$로 붕괴시킨다. 실측 선형성은 $m\approx1$의 결과이지 알고리즘이 주는 보장이 아니다.
 
-**GOAP와의 분기 대조.** 같은 깊이 $d$에서 GOAP A*의 탐색 트리는 적용 가능한 행동 수 $b\le|A|$로 분기해 최악 $O(b^{d})$이며 상한은 상태 공간 크기 $2^{P}$다. HTN은 분기를 *Compound 노드에서 $m$개 메서드* 로만, 그것도 결정 지점 $C$곳에서만 한다(각 Method가 하위 작업을 2개 이상 펼치면 $C\le d$지만, 하위 작업 1개짜리 Method 사슬에서는 $C$가 $d$를 넘을 수 있다).
+**GOAP와의 분기 대조.** 같은 깊이 $d$에서 GOAP A*의 탐색 트리는 적용 가능한 행동 수 $b\le|A|$로 분기해 최악 $O(b^{d})$다. 여기서 상한으로 자주 인용하는 $2^{P}$는 *전방 탐색이 저장하는 서로 다른 완전 Boolean 세계 상태*의 수다. 회귀 key처럼 value와 mask를 가진 부분 상태(명제당 참/거짓/무관)를 노드로 쓰면 key 공간은 $3^{P}$이며, 이는 $2^{P}$와 같은 양이 아니다. 재개방·중복 노드까지 포함한 실제 작업량도 이 unique-state 수와 분리해 따진다. HTN은 분기를 *Compound 노드에서 $m$개 메서드* 로만, 그것도 결정 지점 $C$곳에서만 한다(각 Method가 하위 작업을 2개 이상 펼치면 $C\le d$지만, 하위 작업 1개짜리 Method 사슬에서는 $C$가 $d$를 넘을 수 있다).
 
 | 양 | GOAP | HTN |
 |---|---|---|
 | 분기 위치 | 모든 상태 | Compound 노드만 |
 | 분기 폭 | $b\le\lvert A\rvert$ | $m$(적용 메서드) |
-| 최악 탐색량 | $O(b^{d})$, 상한 $2^{P}$ | $O(m^{C})$ |
+| 최악 탐색량 | $O(b^{d})$, 전방 상태 상한 $2^{P}$ | $O(m^{C})$ |
 | 행동 풀 $\lvert A\rvert{=}20$·$d{=}6$ | $20^{6}\approx6.4\times10^{7}$ | $C{=}4,m{=}3\Rightarrow 3^{4}=81$ |
 
 디자이너가 분해를 짜는 노동이 곧 런타임 분기 $\lvert A\rvert^{d}$를 컴파일 타임 $m^{C}$로 바꾼다. 위 절 마지막 문장의 정량형이 이 표다.
@@ -540,6 +543,7 @@ struct PlanRunner {
     std::vector<std::string> plan;
     size_t                   cursor = 0;
     WorldState               planWS;   // 계획을 만들 때의 WorldState 스냅샷
+    bool                     started = false;  // 현재 커서의 Primitive가 이미 시작됐는가
 
     enum class Result { Idle, Running, Done, Failed };
     Result last = Result::Idle;
@@ -547,17 +551,23 @@ struct PlanRunner {
     Result Tick(const Domain& d, World& world, const WorldState& curWS) {
         if (cursor >= plan.size()) return last = Result::Done;
 
-        // 1) 세계가 계획 전제를 무너뜨렸는지 검사 (plan 무효화)
+        const PrimitiveTask& p = d.Primitive(plan[cursor]);
+
+        // 1) 시작 조건(CanStart)은 아직 시작하지 않은 단계에만 검사한다.
+        if (!started && !curWS.Satisfies(p.precondition)) return last = Result::Failed;
+
+        // 2) 계획 무효화 검사 — 실행 중인 단계는 불변식, 남은 단계는 시작 조건
         if (!StillValid(d, curWS)) return last = Result::Failed;
 
-        // 2) 현재 Primitive 실행
-        const PrimitiveTask& p = d.Primitive(plan[cursor]);
+        // 3) 현재 Primitive 실행
         TaskStatus s = p.operatorFn(world);
         if (s == TaskStatus::Success) {
             ++cursor;
+            started = false;   // 다음 단계는 다시 시작 조건부터
             return last = (cursor >= plan.size() ? Result::Done : Result::Running);
         }
         if (s == TaskStatus::Failure) return last = Result::Failed;
+        started = true;        // 이제부터는 불변식만 검사
         return last = Result::Running;   // 아직 진행 중
     }
 };
@@ -567,19 +577,24 @@ struct PlanRunner {
 
 ### Plan 무효화: 계획이 낡았는지 감시
 
-실행 중 세계는 계속 변한다. 계획을 만들 때는 적이 보였는데, 실행 도중 적이 사라질 수 있다. 이미 만든 계획이 *여전히 유효한가* 를 매 틱 싸게 검사하는 것이 `StillValid` 다. 한 가지 방법은 계획에 *남은* Primitive들의 전제조건을 현재 WorldState에 대해 다시 검사하는 것이다.
+실행 중 세계는 계속 변한다. 계획을 만들 때는 적이 보였는데, 실행 도중 적이 사라질 수 있다. 이미 만든 계획이 *여전히 유효한가* 를 매 틱 싸게 검사하는 것이 `StillValid` 다. 한 가지 방법은 계획에 *남은* Primitive들의 시작 전제조건과, *실행 중인* Primitive의 유지 불변식을 현재 WorldState에 대해 다시 검사하는 것이다.
 
 ```cpp
 bool PlanRunner::StillValid(const Domain& d, const WorldState& curWS) const {
     WorldState ws = curWS;
     for (size_t i = cursor; i < plan.size(); ++i) {
         const PrimitiveTask& p = d.Primitive(plan[i]);
-        if (!ws.Satisfies(p.precondition)) return false;  // 남은 단계 전제 붕괴
+        // 실행 중인 단계는 시작 전제가 아니라 유지 불변식을 검사하고,
+        // 아직 시작하지 않은 남은 단계는 시작 조건(CanStart)을 검사한다.
+        const WorldState& cond = (i == cursor) ? p.invariant : p.precondition;
+        if (!ws.Satisfies(cond)) return false;             // 전제/불변식 붕괴
         ws = ws.Apply(p.effect);                           // 가상 진행하며 검사
     }
     return true;
 }
 ```
+
+여기서 시작 전제(CanStart)와 유지 불변식(MustRemainTrue)을 구분하는 것이 핵심이다. 첫 틱에 탄약을 예약·소비하는 `Shoot`의 `AmmoOK` 같은 시작 전제는 실행이 끝날 때까지 참일 필요가 없다. 따라서 Running 재검증에는 `invariant`(예: 사격 자세 유지)를 쓰고, 남은 단계들의 시작 전제만 가상 진행으로 확인한다. 완료 시 확정되는 effect는 계획 중에는 낙관적으로 가상 적용한다.
 
 이 검사가 너무 비싸면 더 싼 휴리스틱을 쓴다 — 계획 생성 시점의 핵심 명제 몇 개(예: `EnemyVisible`)만 기억해 두고, 그 값이 바뀌면 즉시 무효화한다. Killzone 류의 실전 구현은 보통 "센서 값이 의미 있게 바뀌면 재계획"이라는 *이벤트 기반 무효화* 를 쓴다 — 매 틱 전체 계획을 재검증하기보다, 무효화 트리거를 거는 편이 싸다.
 
@@ -587,7 +602,7 @@ bool PlanRunner::StillValid(const Domain& d, const WorldState& curWS) const {
 
 매번 처음부터 재계획하면 *행동이 떨린다* — 계획이 미세하게 바뀔 때마다 NPC가 행동을 바꿔 어색해진다. 두 가지 완화책이 있다.
 
-첫째, *부분 재계획(partial replan)* 이다. 변경이 일어난 하위 트리만 다시 분해하고 나머지는 유지한다. SHOP 스타일에서는 작업 스택의 일부만 무효화해 재분해를 그 지점부터 시작한다. 둘째, *계획 비교* 다. 새 계획을 만든 뒤, 현재 실행 중인 계획과 비교해 *접두사가 같으면 커서를 유지* 한다 — 이미 하던 행동을 끊지 않는다.
+첫째, *부분 재계획(partial replan)* 이다. 변경이 일어난 하위 트리만 다시 분해하고 나머지는 유지한다. SHOP 스타일에서는 작업 스택의 일부만 무효화해 재분해를 그 지점부터 시작한다. 둘째, *계획 비교* 다. 새 계획을 만든 뒤 현재 실행 중인 계획과 비교하되, *이름 접두사가 같다는 것만으로는 충분하지 않다*. 각 단계의 Plan step ID, 인자(대상·좌표), request generation, 이미 완료한 prefix의 이력이 현재 실행 인스턴스와 호환되고 실패한 단계가 아닐 때만 커서를 유지한다. 실패를 반환한 단계는 유지하지 않고 취소한 뒤 새 계획으로 재시작한다.
 
 ```mermaid
 flowchart TB
@@ -597,9 +612,9 @@ flowchart TB
     Run --> S{Status?}
     S -->|Success| Adv[커서++]
     S -->|Running| Wait[유지]
-    S -->|Failure| RP
-    RP --> Cmp{새 계획이<br/>현재와 접두사 동일?}
-    Cmp -->|예| Keep[커서 유지, 떨림 없음]
+    S -->|"Failure: 실패 단계 취소"| RP
+    RP --> Cmp{접두사 일치,<br/>ID·인자·세대<br/>호환?}
+    Cmp -->|예| Keep[커서 유지<br/>Running·인자·세대 호환]
     Cmp -->|아니오| Swap[새 계획 교체, 커서=0]
     Adv --> Done{계획 끝?}
     Done -->|아니오| Tick

@@ -90,7 +90,7 @@ $$
 
 ### 엔트로피는 파일 크기 예언이 아니다
 
-표본에서 계산한 empirical entropy는 선택한 심볼과 문맥 모델에 대한 하한이다. 실제 포맷에는 다음 비용이 추가된다.
+표본에서 계산한 empirical entropy는 선택한 심볼과 문맥 모델에 대한 기대 길이 하한이며, 개별 파일이나 모든 포맷에 대한 무조건 하한이 아니다. 실제 포맷에는 다음 비용이 추가된다.
 
 - 빈도표나 코드 길이
 - 블록 헤더와 원본 크기
@@ -138,7 +138,7 @@ $$
 H(X) \le L < H(X)+1
 $$
 
-을 만족한다. 단, 이 결과는 심볼별 독립 coding의 평균 길이에 관한 것이며 포맷 헤더와 블록 비용은 포함하지 않는다.
+을 만족한다. 단, $H(X)\le L<H(X)+1$은 명시한 확률 모델에 대한 기대 길이 명제이며 포맷 헤더와 블록 비용은 포함하지 않는다. 형식이 심볼당 최소 1 bit나 고정 길이를 강제하면, 예를 들어 심볼 하나짜리 alphabet에서 $H=0$이어도 $L=1$이 되어 개별 파일 길이는 이 하한에 묶이지 않는다.
 
 ### Huffman의 greedy 선택
 
@@ -202,16 +202,24 @@ Node* BuildHuffman(std::span<const std::uint64_t> frequencies) {
 4. 길이가 늘면 차이만큼 왼쪽으로 shift한다.
 
 ```cpp
-std::uint32_t code = 0;
+// 미사용 심볼의 길이 0을 제외하고, 지원 폭 상한과 Kraft 부등식을
+// 먼저 검증한다. 실패하면 code 생성을 시작하지 않는다.
+if (!ValidateCodeLengths(sortedByLengthThenSymbol)) {
+    return std::nullopt;
+}
+
+std::uint64_t code = 0;   // 64비트 중간값으로 최대 32비트 길이를 계산한다
 int previousLength = 0;
 
 for (Entry& entry : sortedByLengthThenSymbol) {
     code <<= entry.length - previousLength;
-    entry.code = code;
+    entry.code = static_cast<std::uint32_t>(code);
     ++code;
     previousLength = entry.length;
 }
 ```
+
+이 루프는 미사용 심볼의 길이 0을 제외하고, 각 길이가 지원 폭 이하이며 정렬 순서가 단조인지, Kraft 잔여 공간이 음수가 아닌지 검증한 뒤에만 실행한다(§8의 불변식). 과밀한 길이 $\{1,1,1\}$은 표현 가능한 prefix code가 아니므로 거부하고, 지원 폭을 넘는 길이는 더 넓은 중간 타입으로 처리하거나 실패로 반환한다. DEFLATE의 최대 길이 15는 이 표현 폭이 아니라 포맷 계층이 정하는 제약이다.
 
 복호기는 상위 $k$비트 lookup table로 짧은 코드를 한 번에 처리하고, 긴 코드만 보조 테이블이나 트리를 사용한다. $k$를 키우면 table memory는 $O(2^k)$로 늘고 긴 코드의 fallback은 줄어든다.
 
@@ -307,7 +315,7 @@ output: "ABCDABCDABCDABCD"
 
 중요한 점은 match source와 destination이 겹칠 수 있다는 것이다. 위 예시는 4바이트 pattern을 반복 생성한다. 일반 `memcpy`처럼 겹침이 없다고 가정하면 복호화가 틀린다.
 
-안전한 의미론은 한 바이트씩 이미 생성된 출력을 다시 읽는 것이다.
+안전한 의미론은 한 바이트씩 이미 생성된 출력을 다시 읽는 것이다. `memmove`로도 일반 대체할 수 없다. `distance=1`, `length=4`이면 방금 쓴 바이트를 다음 반복에서 다시 읽어 pattern을 전파해야 하는데, `memmove`는 시작 시점의 원본을 한 번만 임시 보존하므로 이 반복 의미를 재현하지 못한다. 이 겹침 규칙은 DEFLATE(RFC 1951)의 match 정의와 연결된다.
 
 ```cpp
 bool CopyMatch(
@@ -316,7 +324,7 @@ bool CopyMatch(
     std::size_t distance,
     std::size_t length)
 {
-    if (distance == 0 || distance > write) {
+    if (write > output.size() || distance == 0 || distance > write) {
         return false;
     }
     if (length > output.size() - write) {
@@ -331,7 +339,7 @@ bool CopyMatch(
 }
 ```
 
-최적화된 decoder는 distance와 length에 따라 vector copy를 사용하지만 이 byte-wise 의미와 같은 결과를 내야 한다.
+이 helper는 실패 시 `write`와 출력 버퍼를 변경하지 않는다. 최적화된 decoder는 distance와 length에 따라 vector copy를 사용하지만 이 byte-wise 의미와 같은 결과를 내야 한다.
 
 ### Window
 
@@ -363,13 +371,13 @@ LZ77은 sliding window의 byte offset을 사용하므로 decoder dictionary가 �
 
 ### 압축 속도는 검색이 결정한다
 
-Decoder는 주어진 match를 복사하면 되지만 encoder는 현재 위치와 같은 문자열을 window에서 찾아야 한다. Window 전체를 모든 위치에서 비교하면 최악에
+Decoder는 주어진 match를 복사하면 되지만 encoder는 현재 위치와 같은 문자열을 window에서 찾아야 한다. Window 전체를 모든 위치에서 비교하고 후보마다 최대 $L_{\max}$바이트를 다시 비교하면 최악에
 
 $$
-O(nW)
+O(n W L_{\max})
 $$
 
-시간이 든다.
+시간이 든다. 후보 비교가 상수 시간이거나 LCP를 재사용하거나 매칭 길이만큼 건너뛰는 전제가 있을 때만 더 강한 상한이 성립한다.
 
 ### Hash chain
 
@@ -382,7 +390,9 @@ prev[position & windowMask] = candidate;
 head[h] = position;
 ```
 
-후보를 최대 $c$개만 검사하면 대략 $O(nc)$로 제한할 수 있다. 압축 level은 흔히 이 후보 수, search depth, lazy matching을 조절한다.
+이 갱신은 다음 전제를 요구한다. `Hash4`는 `position + 4 <= input.size()`일 때만 호출하고, 꼬리의 남은 바이트는 literal 경로로 넘긴다. `hashMask`와 `windowMask`는 각각 hash table과 window 크기가 2의 거듭제곱일 때만 유효하다. 재사용한 ring slot의 `prev`는 `candidate >= position - window`이고 `candidate < position`인 항목만 가리키며, window 밖으로 밀려난 candidate는 잘라낸다. `int` 위치는 입력 크기 상한 안에서만 쓰고, 필요하면 epoch/rebase로 구분한다. 후보 순회는 step budget으로 제한한다.
+
+후보를 최대 $c$개만 검사하면 대략 $O(n c L_{\max})$로 제한할 수 있다. LCP를 재사용하거나 매칭 길이만큼 건너뛰면 상각 비용이 줄어들 수 있다. 압축 level은 흔히 이 후보 수, search depth, lazy matching을 조절한다.
 
 충돌이 많은 입력에서는 후보들이 같은 짧은 prefix만 공유해 긴 비교가 반복될 수 있다. 최소 match 길이, 빠른 mismatch 검사, longest match 상한으로 비용을 제한한다.
 
@@ -493,18 +503,24 @@ $$
 이다. 압축이 유리하려면
 
 $$
-\frac{r}{B_i} + \frac{1}{B_d}
+\frac{r}{B_i} + \frac{1}{B_d} + \frac{T_{\text{fixed}}}{S}
 <
 \frac{1}{B_i}
 $$
 
-즉
+이고, 오른쪽 분모가 양수일 때(즉 $(1-r)/B_i > T_{\text{fixed}}/S$) 다음으로 정리된다.
+
+$$
+B_d > \frac{1}{\frac{1-r}{B_i} - \frac{T_{\text{fixed}}}{S}}
+$$
+
+$r \ge 1$이면 압축해도 원본보다 작아지지 않으므로 순수 직렬 모델에서는 이득이 없다. $T_{\text{fixed}}$를 무시한
 
 $$
 B_d > \frac{B_i}{1-r}
 $$
 
-이어야 한다. 예를 들어 $r=0.5$면 decoder가 저장 장치 대역폭의 2배보다 빨라야 직렬 모델에서 이득이다.
+는 큰 입력이나 고정비가 작을 때의 근사이며, 양의 고정비에서는 필요조건일 뿐 충분조건이 아니다. 작은 블록에서는 실제로 더 느릴 수 있다. 예를 들어 $r=0.5$이고 $T_{\text{fixed}}\approx 0$이면 decoder가 저장 장치 대역폭의 2배보다 빨라야 직렬 모델에서 이득이다.
 
 I/O와 복호화를 겹치면 총시간은 합보다
 
@@ -540,7 +556,7 @@ Decoder가 5 GB/s라고 해도 출력 5 GB/s만 쓰는 것이 아니다. 압축 
 
 ### 압축은 전처리의 영향을 받는다
 
-정수 delta, byte shuffle, prediction residual처럼 데이터 의미를 아는 reversible transform은 entropy를 낮출 수 있다.
+정수 delta, byte shuffle, prediction residual처럼 데이터 의미를 아는 reversible transform은 전체 결합 엔트로피를 줄이지 않는다. 대신 단순한 부호 모델이 포착하기 쉬운 상관·빈도 구조를 드러내어 실제 부호 길이를 줄일 수 있다.
 
 ```text
 원본 위치: 1000, 1003, 1007, 1010
@@ -562,7 +578,7 @@ bool CheckedAdvance(
     std::size_t limit,
     std::size_t& result)
 {
-    if (amount > limit - position) {
+    if (position > limit || amount > limit - position) {
         return false;
     }
     result = position + amount;
@@ -570,7 +586,7 @@ bool CheckedAdvance(
 }
 ```
 
-`position + amount > limit`처럼 먼저 더하면 정수 overflow 뒤 검사가 통과할 수 있다.
+`position + amount > limit`처럼 먼저 더하면 정수 overflow 뒤 검사가 통과할 수 있다. 뺄셈 형태라도 `position <= limit`를 먼저 확인하지 않으면 unsigned underflow로 큰 remaining이 생겨 손상된 위치를 허용한다. 실패 시 `result`는 변경되지 않는다.
 
 ### 검증해야 할 불변식
 

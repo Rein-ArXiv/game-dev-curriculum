@@ -391,7 +391,8 @@ flowchart TB
     K2 --> K3[PT_INTERP에서 ld.so 경로 추출]
     K3 --> K4[ld.so 메모리 로드]
     K4 --> K5[사용자 공간으로 점프 → ld.so의 _start]
-    K5 --> L1[프로그램과 의존 라이브러리 로드]
+    K4 -.-> N[주 실행 ELF의 PT_LOAD는 커널이 먼저 매핑한 뒤 interpreter로 진입]
+    K5 --> L1[의존 라이브러리 로드]
     L1 --> L2[재배치 수행 GOT 패치]
     L2 --> L3[프로그램의 _start로 점프]
     L3 --> L4[libc 초기화 후 main 호출]
@@ -591,13 +592,14 @@ static size_t total_allocated = 0;
 
 void *malloc(size_t size) {
     void *ptr = real_malloc(size);
-    total_allocated += size;
+    if (ptr)
+        total_allocated += malloc_usable_size(ptr);  // 할당과 같은 usable-size 기준
     return ptr;
 }
 
 void free(void *ptr) {
-    size_t size = malloc_usable_size(ptr);
-    total_allocated -= size;
+    if (ptr)
+        total_allocated -= malloc_usable_size(ptr);
     real_free(ptr);
 }
 ```
@@ -608,6 +610,15 @@ void free(void *ptr) {
 int open(const char *path, int flags, ...) {
     if (strstr(path, "/etc/passwd")) {
         fprintf(stderr, "SECURITY: Attempt to open %s\n", path);
+    }
+
+    // mode가 필요한 flags일 때만 va_arg로 꺼내 원래 open 계약대로 전달한다
+    if ((flags & O_CREAT) || ((flags & O_TMPFILE) == O_TMPFILE)) {
+        va_list ap;
+        va_start(ap, flags);
+        mode_t mode = va_arg(ap, mode_t);
+        va_end(ap);
+        return real_open(path, flags, mode);
     }
     return real_open(path, flags);
 }
@@ -872,15 +883,15 @@ void func() {
 }
 ```
 
-TLS는 특수한 GOT 메커니즘을 사용한다.
+TLS 접근은 실행 파일/공유 라이브러리/PIE 여부에 따라 서로 다른 모델과 relocation을 사용한다. 아래는 실행 파일에서의 local-exec 접근 예시다.
 
 ```asm
 mov    %fs:0x0, %rax           # FS는 TLS 베이스
-add    my_errno@tpoff, %rax
+add    $my_errno@tpoff, %rax   # offset immediate (local-exec)
 mov    (%rax), %eax
 ```
 
-`%fs`는 스레드-로컬 스토리지 베이스를 가리키는 특수 레지스터다.
+`%fs`는 스레드-로컬 스토리지 베이스를 가리키는 특수 레지스터다. `@tpoff`는 local-exec 모델의 offset relocation이므로 공유 라이브러리·PIE·linker relaxation 등 다른 모델에 그대로 적용되지 않으며, 각 모델은 해당 relocation 규약을 따른다.
 
 ### dlopen: 런타임 로딩
 

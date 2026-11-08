@@ -154,7 +154,8 @@ struct CellRequest {
 ```cpp
 struct PreparedCell {
     CellId id;
-    uint64_t worldGeneration;
+    uint64_t worldGeneration;    // 준비된 월드 epoch
+    uint64_t requestGeneration;  // 어느 요청의 결과인가
     std::vector<EntityRecord> entities;
     std::vector<AssetHandle> pinnedAssets;
     CellBounds bounds;
@@ -167,26 +168,33 @@ struct PreparedCell {
 ```cpp
 ActivationResult World::Activate(PreparedCell&& prepared) {
     if (prepared.worldGeneration != generation_)
-        return ActivationResult::Stale;
+        return ActivationResult::Stale;                            // 월드 전환
+    if (prepared.requestGeneration != activeRequestGeneration_[prepared.id])
+        return ActivationResult::Stale;                            // 재요청으로 대체
     if (!Validate(prepared))
         return ActivationResult::Invalid;
 
     ActivationJournal journal;
+    journal.created.reserve(prepared.entities.size());             // 부작용 전에 용량 확보
     for (const EntityRecord& record : prepared.entities) {
-        EntityHandle handle = entities_.Create(record.persistentId);
-        journal.created.push_back(handle);
+        EntityHandle handle = entities_.Create(record.persistentId);   // strong guarantee
+        journal.created.push_back(handle);                         // 재할당 없음
         if (!AttachComponents(handle, record, journal)) {
             journal.Rollback(*this);
             return ActivationResult::Failed;
         }
     }
     RegisterCellIndexes(prepared.id, journal.created);
-    PublishCell(prepared.id, std::move(journal.created));
+    PublishCell(prepared.id, std::move(prepared.pinnedAssets), std::move(journal.created));
     return ActivationResult::Committed;
 }
 ```
 
-중간 실패에서 일부 entity만 남지 않게 activation journal로 rollback한다. 더 단순한 방법은 필요한 용량을 사전 예약하고 모든 검증을 먼저 끝내 commit 구간이 실패하지 않도록 만드는 것이다.
+`Validate()`는 live pointer가 없는지, entity record의 persistent ID와 스키마 버전이 요청과 맞는지, `CellBounds`와 `residentBytes`가 상한 안인지를 검사한다. `worldGeneration`은 월드 전환 epoch이고 `requestGeneration`은 같은 월드에서 같은 셀을 다시 요청할 때마다 증가하는 토큰이므로, 완료 callback뿐 아니라 commit 직전에도 현재 활성 요청과 다시 비교한다.
+
+중간 실패에서 일부 entity만 남지 않게 activation journal로 rollback한다. 스니펫은 부작용 전에 journal 용량을 확보하므로 `push_back`이 재할당으로 실패하지 않고, `entities_.Create`는 실패 시 아무것도 만들지 않는 strong guarantee를, `Commit`·`Destroy`는 실패하지 않는 no-fail 계약을 갖는다. 더 단순한 방법은 필요한 용량을 사전 예약하고 모든 검증을 먼저 끝내 commit 구간이 실패하지 않도록 만드는 것이다.
+
+`PreparedCell::pinnedAssets`는 성공 commit에서 `PublishCell`로 이동해 활성 셀이 소유한다. 실패·stale 반환 시에는 `prepared`의 소유권이 호출자에게 남아 pin을 회수하며, entity component가 pin을 따로 소유하는 경우에도 그 획득을 commit 안에서 명시한다.
 
 ### 프레임 예산 안의 commit
 
@@ -197,6 +205,8 @@ N_{\text{activate/frame}}
 =\min\left(N_{\text{remaining}},
 \left\lfloor\frac{B_{\text{activation}}}{\bar C_{\text{entity}}}\right\rfloor\right)
 $$
+
+$\bar C_{\text{entity}}$는 계획값이므로 이 식만으로 hard frame budget을 보장할 수 없다. attachment 비용 분산과 고정 등록비, 할당 spike를 고려해 측정된 deadline으로 batch를 중단하거나 보수적 상한을 사용한다. staging 중 live query 차단과 구획별 원자적 subcell commit 원칙은 그대로 유지한다.
 
 부분 활성화 중인 셀은 외부 query에 보이지 않게 하거나, 구획별로 일관된 subcell commit을 정의해야 한다. “절반 생성된 Active 셀”은 피한다.
 
@@ -270,7 +280,7 @@ E_{\text{error}}=
 {\max(M_{\text{actual}},1)}
 $$
 
-추정 오차가 큰 asset type을 계측해 메타데이터 모델을 보정한다.
+추정 오차가 큰 asset type을 계측해 메타데이터 모델을 보정한다. 예약값은 추정치이므로 실제 decode·GPU 메모리가 더 크면 hard limit가 깨질 수 있다. 추가 예약이 실패하면 prepare를 중단하거나 축소하고, bounded decoding과 peak staging, 공유 에셋의 중복 집계, retired 메모리를 Part05의 예산 모델과 연결한다.
 
 ### 퇴거 점수
 
@@ -287,7 +297,7 @@ $$
 - $P$: pin 중요도
 - $S$: 저장해야 할 dirty 비용
 
-점수가 높을수록 퇴거하기 쉽다고 정의할 수 있다. 가중치는 장르와 이동 속도에 종속된다.
+점수가 높을수록 퇴거하기 쉽다고 정의할 수 있다. 가중치는 장르와 이동 속도에 종속된다. 다만 pin과 미저장 dirty는 유한한 음의 가중치로 표현할 수 없는데, 매우 큰 거리·나이에서는 금지 후보가 최고 점수를 받을 수 있기 때문이다. 따라서 먼저 `eligible = (mandatory pin 없음) AND (clean OR durable save 완료)`로 후보를 필터링한 뒤 그 안에서 score를 적용한다. 적격 후보가 없으면 hard limit에서도 무리하게 퇴거하지 않고 admission을 거절하거나 품질을 낮춘다.
 
 ### 히스테리시스
 
@@ -332,6 +342,8 @@ destination 셀이 unloaded이면 선택이 필요하다.
 - 이동 엔티티를 셀 독립 global layer가 소유한다.
 
 플레이어처럼 항상 존재해야 하는 객체는 global layer가 자연스럽다. 정적 장식물까지 global로 올리면 partition의 이점이 사라진다.
+
+런타임에서 source 제거와 destination 추가를 한 tick commit 안에서 처리해도, 두 셀 파일을 각각 독립 저장하면 크래시 후 객체가 양쪽에 존재하거나 양쪽에서 사라질 수 있다. migration을 공통 journal/manifest sequence 트랜잭션으로 기록하거나 영속 entity 소유권을 별도 레코드로 관리하고, 두 dirty 셀의 checkpoint 세대를 묶는다.
 
 ### floating origin
 
@@ -428,7 +440,9 @@ slot_B.tmp   sequence=41 writing
 manifest     active=A
 ```
 
-시작 시 모든 후보의 header, 길이, checksum을 검증하고 가장 높은 *유효한* sequence를 선택한다. manifest만 믿으면 manifest가 먼저 갱신되고 payload가 손상된 경우 복구할 수 없다.
+시작 시 모든 후보의 header, 길이, checksum을 검증하고 가장 높은 *유효한* sequence를 선택한다. manifest만 믿으면 manifest가 먼저 갱신되고 payload가 손상된 경우 복구할 수 없다. 유효 후보는 여기에 더해 world ID와 schema 버전이 현재와 맞고, 인증이 필요한 경우 인증을 통과하며, sequence가 단조 증가하는 경우로 한정한다. checksum만 맞는 다른 world나 지원하지 않는 save는 선택하지 않는다. 완전한 tmp가 manifest 게시 전에 존재할 수 있으므로, 그 tmp를 후보로 삼을 때의 commit/ack 시점과 `NewCommittedState`의 의미도 정한다.
+
+파일 교체 자체가 원자적이어도 저장 대상 상태가 논리적으로 일관되지 않으면 소용이 없다. live world를 순회하며 서로 다른 tick의 필드를 읽으면 파일이 완전히 쓰이고 checksum이 맞아도 불가능한 혼합 상태가 저장된다. tick commit에서 immutable save snapshot을 만들거나 MVCC/copy-on-write epoch를 고정하고, 저널 복구의 replay 시작 sequence와 snapshot cut, log 절단 순서를 함께 기록한다.
 
 ### 저널과 스냅샷
 
@@ -456,7 +470,7 @@ $$
 \text{count}\times\text{elementSize}\le\text{remaining}
 $$
 
-곱셈 overflow를 피하려면 `count <= remaining / elementSize` 형태로 검사한다. checksum은 우발적 손상 검출이며 변조 방지가 필요하면 인증된 MAC이나 서명을 사용한다.
+곱셈 overflow를 피하려면 `count <= remaining / elementSize` 형태로 검사한다. 이 나눗셈은 `elementSize > 0`일 때만 유효하므로 상수 크기의 양수 전제를 먼저 둔다. 또한 범위가 유효한 압축 입력도 과도한 출력·중첩·객체 수를 요구할 수 있으므로 `decodedBytes`, `entityCount`, `recursionDepth` 상한을 함께 둔다. checksum은 우발적 손상 검출이며 변조 방지가 필요하면 인증된 MAC이나 서명을 사용한다.
 
 ## 9. 권위 상태와 복제 경계
 
@@ -533,13 +547,13 @@ $F_k$는 저장 절차의 임의 중단 지점이다. 복구 결과가 둘 사�
 | unresolved persistent refs | 셀 경계 관계가 깨지는가 |
 | fallback proxy duration | 낮은 품질 상태가 얼마나 보이는가 |
 
-평균 load time만 보면 빠른 이동 중 발생하는 긴 꼬리를 놓친다. 플레이어 속도 $v$, preload 거리 $d$, P99 준비 시간 $L_{99}$는 최소한 다음 관계를 만족해야 한다.
+평균 load time만 보면 빠른 이동 중 발생하는 긴 꼬리를 놓친다. 플레이어 속도 $v$, preload 거리 $d$, P99 준비 시간 $L_{99}$에 대해 다음 관계를 설계 목표로 삼는다.
 
 $$
 \frac{d}{v}>L_{99}+M
 $$
 
-$M$은 activation, scheduling jitter, I/O 변동을 위한 여유다. 이 관계가 깨지면 최적화 이전에 설계상 stutter가 예정되어 있다.
+$M$은 activation, scheduling jitter, I/O 변동을 위한 여유다. 이 관계는 주어진 속도와 지연 분포에서의 설계 목표이며, 만족해도 1% 꼬리·teleport·속도 변동에서 실패할 수 있고 어겨도 placeholder나 이동 제한으로 stutter를 피할 수 있다. 따라서 실패 빈도, fallback duration, 연속 구간의 상관을 함께 측정한다.
 
 ---
 

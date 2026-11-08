@@ -141,7 +141,7 @@ bool RayPlane(vec3 ro, vec3 rd, vec3 n, float d,
 }
 ```
 
-분모 0 (광선이 평면과 평행) 은 *교차 없음*. *tMin / tMax 구간 검사* 로 광선 뒤쪽 + 너무 먼 hit 제외.
+분모 0 (광선이 평면과 평행) 은 *교차 없음*. *tMin / tMax 구간 검사* 로 광선 뒤쪽 + 너무 먼 hit 제외. 평행 판정 임계값 `1e-6` 도 방향의 정규화 여부에 따라 의미가 달라지므로, 4.5 절의 AABB 평행 분기와 같은 *단위·축척 정책* 을 쓴다 — 유한 `tMax` 아래에서는 작은 denom 이 낳는 큰 t 가 구간 검사로 걸러지므로 임계값과 구간 계약을 함께 정한다.
 
 ### 2.2 Plane 의 부호 관례
 
@@ -225,6 +225,8 @@ bool RaySphere(vec3 ro, vec3 rd, vec3 center, float radius,
 ```
 
 판별식 음수 → 교차 안 함. 두 해 중 *유효 구간 안의 가장 작은 t (= 가까운 hit)* 선택.
+
+*수치 범위의 한계.* 이 교과서 형태는 `b² - 4ac` 에서 상쇄가 생길 수 있다 — 원점과 중심이 모두 큰 좌표이고 반지름이 작으면 두 큰 수의 차가 유효숫자를 잃고, 근 계산 `(-b ± √Δ)/(2a)` 자체도 서로 가까운 큰 근에서 자릿수를 잃는다. 실무에서는 (1) 원점을 구 중심 기준으로 재기준화한 뒤 계산, (2) 중간값을 double 로, (3) 안정 근 공식 $q = -\tfrac{1}{2}(b + \operatorname{sign}(b)\sqrt{\Delta})$, $t_0 = q/a$, $t_1 = c/q$ 를 쓴다. 다만 이 재배치도 접선 근처나 극단적 스케일에서는 오차 경계를 보장하지 않으며, 그 한계는 Part20 에서 다룬다.
 
 ### 3.3 광선이 구 안에서 시작
 
@@ -342,8 +344,8 @@ bool RayAABBSafe(vec3 ro, vec3 rd, AABB box, float& tNear, float& tFar) {
     tFar  = +INFINITY;
 
     for (int i = 0; i < 3; ++i) {
-        if (std::fabs(rd[i]) < 1e-8f) {
-            // 광선이 i 축에 평행. ro[i] 가 slab 밖이면 miss.
+        if (rd[i] == 0.0f) {
+            // 광선이 i 축에 정확히 평행. ro[i] 가 slab 밖이면 miss.
             if (ro[i] < box.min[i] || ro[i] > box.max[i]) return false;
             // 안에 있으면 그 축의 t 구간이 [-∞, +∞] — 다른 축으로 결정.
         } else {
@@ -362,6 +364,8 @@ bool RayAABBSafe(vec3 ro, vec3 rd, AABB box, float& tNear, float& tFar) {
 ```
 
 NaN 안 남. *축별 분기* 가 들어가 4.3 의 분기 없는 코드보다 *약간 느림*. BVH hot path 는 *4.3 의 빠른 코드 + 별도 디버그 가드*, 일반 사용은 *4.5 의 안전 코드*.
+
+평행 판정은 *정확한 0* 으로만 한다. 방향이 비정규화되어도 된다는 계약에서 `fabs(rd[i]) < 1e-8` 같은 임계값은 방향을 *스케일만 바꿔도* 교차 판정을 뒤집는다 — 축 방향 성분이 작지만 0 이 아니면 슬랩을 언젠가 지나므로 교차가 존재할 수 있는데, 임계값이 그 축을 평행으로 오인하면 miss 로 사라진다. 정확한 0 분기에서는 그 축을 건너뛰고 나머지 축이 t 구간을 결정하며, 0 이 아닌 작은 성분은 큰 t 를 낳을 뿐 *유한 tMax* 구간 검사가 걸러낸다. 즉 이 함수의 유효성은 *유한 tMax* 와 *허용 이동 오차* 계약 위에서 읽어야 하고, RayPlane 의 분모 임계값도 같은 단위·축척 정책을 따른다.
 
 ### 4.6 BVH 트래버설의 hot path
 
@@ -494,11 +498,22 @@ bool RayOBB(vec3 ro, vec3 rd, OBB box, float& t) {
 
     AABB localAABB { -box.extents, box.extents };
     float tNear, tFar;
-    return RayAABBSafe(localRO, localRD, localAABB, tNear, tFar) && (t = tNear, true);
+    if (!RayAABBSafe(localRO, localRD, localAABB, tNear, tFar)) return false;
+
+    // tNear/tFar 는 광선이 볼륨 안에 있는 *구간* 이다. 원점이 상자 안이면
+    // tNear = 0 이므로, 표면 질의로 쓰려면 출구면 tFar 를 골라야 한다 —
+    // RaySphere·RayCapsule 의 "내부 시작이면 출구 표면" 규약과 맞춘다.
+    bool inside = localRO.x > localAABB.min.x && localRO.x < localAABB.max.x &&
+                  localRO.y > localAABB.min.y && localRO.y < localAABB.max.y &&
+                  localRO.z > localAABB.min.z && localRO.z < localAABB.max.z;
+    t = inside ? tFar : tNear;
+    return true;
 }
 ```
 
 OBB 의 *로컬 = AABB*. 광선만 변환 후 *Slab Test*. 추가 비용은 *변환 6 dot*.
+
+`RayAABBSafe` 가 돌려주는 `tNear`/`tFar` 는 *광선이 볼륨 안에 머무는 구간* 이지 표면 hit 가 아니다. 외부에서 시작하면 `tNear` 가 첫 표면이지만, 내부에서 시작하면 `tNear = 0` 이 원점 자신을 가리킨다. 그래서 `RayOBB` 는 원점이 상자 안인 경우 출구 `tFar` 를 골라 `RaySphere`·`RayCapsule` 과 같은 *출구 표면 규약* 을 유지한다. 볼륨 구간 자체가 필요한 호출자는 `tNear`/`tFar` 를 그대로 받는 별도 함수를 쓴다 — 두 용도를 한 반환값에 섞지 않는다.
 
 ### 6.2 Ray-Cylinder
 
@@ -589,10 +604,26 @@ bool RayCapsule(vec3 ro, vec3 rd, vec3 a, vec3 b, float r,
         }
     }
 
-    // (2) 양 끝 sphere
-    float ts;
-    if (RaySphere(ro, rd, a, r, tMin, std::min(tMax, bestT), ts)) bestT = std::min(bestT, ts);
-    if (RaySphere(ro, rd, b, r, tMin, std::min(tMax, bestT), ts)) bestT = std::min(bestT, ts);
+    // (2) 양 끝 sphere — 두 근을 모두 보고 *바깥 반구* 후보만 채택한다.
+    //     캡슐 경계는 각 캡의 외향 반구뿐이고, 내향 반구는 원통 안에 묻혀 있다.
+    auto checkCapSphere = [&](vec3 center, bool capA) {
+        float rr = dot(rd, rd);
+        if (!(rr > 0.0f)) return;
+        vec3  m = ro - center;
+        float bq = dot(m, rd);
+        float cq = dot(m, m) - r * r;
+        float disc = bq * bq - rr * cq;
+        if (disc < 0) return;
+        float sqrtD = std::sqrt(disc);
+        for (float t : { (-bq - sqrtD) / rr, (-bq + sqrtD) / rr }) {
+            if (t < tMin || t > tMax || t > bestT) continue;
+            float proj = dot(ro + t * rd - center, ab);
+            // a 캡은 ab 반대쪽(투영 ≤ 0), b 캡은 ab 방향(투영 ≥ 0)만 표면이다.
+            if (capA ? proj <= 0.0f : proj >= 0.0f) bestT = t;
+        }
+    };
+    checkCapSphere(a, true);
+    checkCapSphere(b, false);
 
     if (bestT == INFINITY) return false;
     tOut = bestT;
@@ -600,7 +631,7 @@ bool RayCapsule(vec3 ro, vec3 rd, vec3 a, vec3 b, float r,
 }
 ```
 
-세 후보 (측면 두 해, 양 끝 sphere) 모두 모은 후 *최소 유효 t*. *a == b 퇴화* 케이스에 sphere 폴백. 캐릭터 캡슐 광선 검사에 활용.
+측면 두 해와 양 끝 구의 *바깥 반구* 후보를 모두 모은 후 *광선 구간 안의 최소 유효 t* 를 고른다. 각 캡 구의 두 근을 모두 검사하되 끝점 축 투영이 해당 외향 반구에 속하는 후보만 채택하므로, 캡슐 내부에서 시작하면 내부에 묻힌 구의 진입점이 아니라 실제로 나가는 출구 표면이 선택된다 — `RaySphere`·`RaySphereNormalized` 의 "내부 시작이면 출구" 규약과 같다. 후보 선택은 모두 `[tMin, tMax]` 구간 검사를 거친다. *a == b 퇴화* 케이스에 sphere 폴백. 캐릭터 캡슐 광선 검사에 활용.
 
 ### 6.4 Ray-Quad
 
@@ -771,7 +802,7 @@ ray.origin = hitPoint + 0.001f * surfaceNormal;  // origin 을 표면 밖으로
 
 ### 8.3 광선 시작점 보정
 
-PBRT 의 robust 한 방법: *부동소수점 오차에 비례한 epsilon*.
+아래는 *휴리스틱* 이다 — hit point 좌표 크기에 비례해 epsilon 을 키우는 근사적 회피책이다. PBRT 의 정식 오차 처리와 같지 않고, 원점이 0 에 가까우면 offset 도 0 이 되어 acne 가 남으며 큰 좌표에서는 offset 이 필요 이상으로 커져 *얇은 물체를 건너뛸* 수 있다.
 
 ```cpp
 float epsilon = std::max(std::fabs(hitPoint.x),
@@ -782,17 +813,20 @@ ray.origin = hitPoint + epsilon * surfaceNormal;
 
 씬 좌표가 *큰 값* 일수록 부동소수점 오차도 큼. *비례 epsilon* 으로 *씬 스케일 자동 조정*.
 
+PBRT 4판 Ch. 6.8 (Managing Rounding Error) 의 `OffsetRayOrigin` 은 이 근사와 다르다. 부동소수점 연산 오차 상한 `pError` (대략 $\gamma(7) \cdot |p|$ 꼴) 를 구해 법선에 투영한 크기 `d = dot(|n|, pError)` 로 offset 을 정하고, 다시 각 성분을 *다음 representable float* (`nextFloatUp` / `nextFloatDown`) 으로 밀어 실제 반올림 오차까지 보정한다. 스칼라 epsilon 하나로 대체할 수 없는 절차이며, 그래서 위 코드는 *정확한 PBRT 방식* 이 아니라 휴리스틱으로 읽어야 한다.
+
 ### 8.4 Möller-Trumbore 의 수밀성 (watertight)
 
 기본 Möller-Trumbore 는 *삼각형 모서리에서 광선이 새는* 함정. 두 인접 삼각형의 *공유 모서리* 에서 광선이 *둘 다 miss* 또는 *둘 다 hit*.
 
-PBRT 가 채택한 *watertight 교차* (Woop·Benthin·Wald, 2013 — Möller-Trumbore 와 별개 알고리즘) 는 *부호 일관성* 으로 수밀성 보장. 광선 방향 부호 분기 + 정밀 정수 산술.
+PBRT 가 채택한 *watertight 교차* (Woop·Benthin·Wald, 2013 — Möller-Trumbore 와 별개 알고리즘) 는 *인접 삼각형이 공유 모서리를 같은 규칙으로 판정* 하도록 만들어 수밀성을 보장한다. 핵심은 *일관된 경계 소유 규약* 과 *정밀도 fallback* 이지 "정밀 정수 산술" 자체가 아니다. 광선 방향에서 가장 큰 성분 축 'k' 를 골라 나머지 두 축을 정렬하고, 2D ij 평면에서 공유 변의 어느 쪽이 hit 를 소유하는지를 부호 일관 신호 검사로 정한다. 경계 근처에서 부동소수점 계산이 부족하면 *double 로 fallback* 해 두 삼각형이 같은 판정을 내리도록 한다.
 
 ```text
 # 의사 코드:
 1. 광선 방향에서 가장 큰 성분 축을 'k' 로 선택, 다른 두 축이 'i', 'j'.
 2. 정점들을 광선 좌표로 변환 (원점 → 광선 origin, k 축 → 광선 방향).
 3. 2D ij 평면에서 *부호 일관성을 보장하는 신호 검사* 로 hit 판정.
+4. 오차 한계를 넘는 경계 계산은 double fallback 으로 재평가.
 ```
 
 PBRT 4판의 표준. 산업 레이트레이서는 모두 watertight 변형.
@@ -801,7 +835,7 @@ PBRT 4판의 표준. 산업 레이트레이서는 모두 watertight 변형.
 
 `det == 0` 또는 `det ≈ 0` 의 처리. 광선이 삼각형 평면과 *거의 평행* 일 때 부동소수점 오차로 *false positive* 또는 *false negative*.
 
-대응: *epsilon 비교* + *광선 방향 보정 (epsilon 만큼 흔듬)*. 산업 코드는 *부호 일관성* 으로 *수밀성 보장*.
+대응: *epsilon 비교* 로 평행·접선을 명시적으로 분기하고, watertight 교차에서는 *공유 경계 소유 규약 + double fallback* 을 일관되게 적용한다. 광선 방향을 epsilon 만큼 흔드는 jitter 는 *경계를 이동시킬 뿐* 수밀성을 만들지 못하므로, 그것으로 문제를 덮지 않는다.
 
 ### 8.6 멀티스레드와 결정론
 

@@ -152,10 +152,11 @@ uniform highp float uTime;      // 선언에 직접 한정자를 붙인다
 브라우저의 JavaScript 엔진(V8, SpiderMonkey, JavaScriptCore)은 *JIT 컴파일러* 다. 자주 도는 코드(hot path)를 런타임에 기계어로 컴파일해 빠르게 만든다. 잘 최적화된 JS는 네이티브의 상당 비율까지 따라간다. 문제는 *변덕* 이다 — JIT는 코드가 *형태가 일정(monomorphic)* 하다고 가정해 최적화하는데, 그 가정이 깨지면 *역최적화(deoptimization)* 가 일어나 인터프리터로 떨어진다.
 
 ```javascript
-// 같은 함수에 형태가 다른 객체를 섞어 넣으면 megamorphic → 역최적화
-function update(e) { e.x += e.vx; }       // e의 "형태"가 매번 같아야 빠름
+// 같은 함수에 형태가 다른 객체를 섞으면 inline cache가 불리해질 수 있다 (항상 역최적화가 아님)
+function update(e) { e.x += e.vx; }       // e의 "형태"가 일관될수록 유리
 update({ x: 0, vx: 1 });
-update({ x: 0, vx: 1, hp: 100 });         // 다른 형태 → 인라인 캐시 오염
+update({ x: 0, vx: 1, hp: 100 });         // shape 다양성 증가 → 최적화에 불리할 수 있음
+// 실제 deopt를 주장하려면 engine/version·warmup·trace 결과가 필요하다
 // 완화: 엔티티 형태를 통일하거나, SoA(구조 분리 배열)로 형태 자체를 없앤다
 ```
 
@@ -181,6 +182,8 @@ const view = new Float32Array(wasm.memory.buffer, ptr, count * 4);
 wasm.updateAll(ptr, count);        // 호출 1회로 전체 처리
 ```
 
+view 수명 계약이 빠지면 위 코드는 깨진다. `WebAssembly.Memory.grow()`나 allocator 재배치는 기존 `memory.buffer`를 분리(detach)하므로 이미 만든 view는 length 0·원소 undefined가 된다(공유 버퍼라도 기존 view 길이가 늘지는 않는다). 따라서 grow·재배치 이후에는 `memory.buffer`와 `ptr`를 다시 조회해 view를 재생성해야 하며, 재생성 위치와 스레드 동기화는 helper 계약으로 둔다. 여기서 말하는 공유는 JS와 WASM이 같은 `ArrayBuffer`를 본다는 뜻이고, 반드시 `SharedArrayBuffer`/멀티스레드를 뜻하지는 않는다.
+
 원칙은 *경계는 굵고 드물게* 다. 데이터를 WASM 선형 메모리에 *공유 뷰(typed array view)* 로 펼쳐 두고, JS와 WASM이 *같은 메모리* 를 읽고 쓰게 하면 복사가 사라진다. 호출 횟수를 줄이고 한 번에 큰 작업을 넘긴다.
 
 ### 무엇을 WASM으로, 무엇을 JS로
@@ -190,7 +193,7 @@ wasm.updateAll(ptr, count);        // 호출 1회로 전체 처리
 ```mermaid
 flowchart LR
     JS[JavaScript<br/>UI·이벤트·네트워크·글루] -->|굵은 경계| WASM[WASM<br/>물리·디코드·시뮬레이션]
-    WASM -->|공유 선형 메모리| JS
+    WASM -->|같은 선형 메모리 view| JS
     JS -->|렌더 명령| GFX[WebGL/WebGPU]
 ```
 
@@ -268,14 +271,17 @@ const { instance } = await WebAssembly.instantiateStreaming(
 
 JS는 GC 언어라 명시적 free가 없지만, *참조가 남아 있으면 수거되지 않는다* — 해제하지 않은 이벤트 리스너, 닫지 않은 클로저, 끊지 않은 타이머가 전형적 누수원이다. 특히 WebGL/WebGPU의 GPU 리소스(텍스처·버퍼)는 GC가 즉시 회수하지 않으므로 *명시적 destroy* 가 필요하다.
 
-프레임마다 객체를 새로 만들면 *GC 압박* 이 커지고, GC 일시정지가 프레임을 끊는다. *오브젝트 풀(object pool)* 로 미리 확보한 객체를 재사용해 할당 자체를 없앤다.
+프레임마다 객체를 새로 만들면 *GC 압박* 이 커지고, GC 일시정지가 프레임을 끊는다. *오브젝트 풀(object pool)* 로 미리 확보한 객체를 재사용해 반복 할당을 줄인다. 다만 `acquire`가 고갈 시 `new`로 폴백하므로 할당과 GC pause가 완전히 사라지는 것은 아니며, pool 크기·확장 정책·반환 시 객체 reset을 함께 설계해야 한다.
 
 ```javascript
-// 풀: 프레임마다 new 하지 않는다 → GC 압박과 일시정지 제거
+// 풀: 반복 할당을 줄여 할당 압박을 낮춘다 (모든 할당·GC pause를 없애지는 못한다)
 class ParticlePool {
   constructor(n) { this.free = Array.from({length:n}, () => new Particle()); this.used = []; }
-  acquire() { const p = this.free.pop() ?? new Particle(); this.used.push(p); return p; }
-  releaseAll() { this.free.push(...this.used); this.used.length = 0; }   // 매 프레임 일괄 반환
+  acquire() { const p = this.free.pop() ?? new Particle(); this.used.push(p); return p; }  // 고갈 시 새 객체
+  releaseAll() {                                  // 매 프레임 일괄 반환
+    for (let i = 0; i < this.used.length; ++i) this.free.push(this.used[i]);   // spread 대신 loop
+    this.used.length = 0;
+  }
 }
 ```
 
@@ -301,7 +307,7 @@ worker.postMessage({ pixels: buf }, [buf]);   // buf는 이 쪽에서 detached �
 
 4절에서 짚었듯 PNG/JPEG는 *전송* 만 작지, GPU에 올라가면 *비압축 픽셀* 로 펼쳐진다. 1024×1024 RGBA 텍스처 하나가 GPU 메모리에서 *4MB* 다. 텍스처 수십~수백 장이면 GPU 메모리가 금세 천장을 친다. 그래서 웹 게임은 *GPU가 직접 읽는 압축 포맷* — 압축된 채로 메모리에 상주하고 샘플링 시 디코딩되는 포맷 — 을 써야 한다.
 
-문제는 GPU 압축 포맷이 *하드웨어마다 다르다* 는 것이다. 데스크톱은 *S3TC(DXT/BC)*, 모바일은 *ETC2* 또는 *ASTC* 를 지원하고, 한 GPU가 다른 포맷을 못 읽기도 한다. 모든 포맷으로 텍스처를 다 굽고 배포하면 *다운로드 크기가 배수로* 늘어난다.
+문제는 GPU 압축 포맷이 *하드웨어마다 다르다* 는 것이다. 어떤 GPU는 *S3TC(DXT/BC)*, 어떤 GPU는 *ETC2* 또는 *ASTC* 를 지원하고(데스크톱/모바일 이분법으로 정해지지 않으므로 실제 지원 format와 변환 가능 조합으로 고른다), 한 GPU가 다른 포맷을 못 읽기도 한다. 모든 포맷으로 텍스처를 다 굽고 배포하면 *다운로드 크기가 배수로* 늘어난다.
 
 ### Basis Universal과 KTX2
 
@@ -311,8 +317,8 @@ worker.postMessage({ pixels: buf }, [buf]);   // buf는 이 쪽에서 detached �
 flowchart LR
     Src[원본 텍스처] --> Basis[Basis 인코딩<br/>.ktx2 한 벌]
     Basis -->|다운로드| RT[런타임 트랜스코더]
-    RT -->|데스크톱| BC[BC7/DXT]
-    RT -->|모바일| ASTC[ASTC/ETC2]
+    RT -->|BC 계열 지원| BC[BC7/DXT]
+    RT -->|ASTC/ETC2 지원| ASTC[ASTC/ETC2]
 ```
 
 ```javascript
@@ -366,7 +372,7 @@ await db.put("saves", saveState, "slot1");          // 비동기 쓰기
 const cached = await db.get("assets", assetUrl);    // 캐시 히트면 네트워크 생략
 ```
 
-함정은 *비동기성과 트랜잭션 수명* 이다. 트랜잭션은 *await로 다른 작업을 기다리는 사이 자동으로 닫힌다* — 한 트랜잭션 안에서 네트워크 요청 같은 외부 await를 끼우면 트랜잭션이 끝나 버려 후속 쓰기가 실패한다. 읽기·쓰기를 *한 트랜잭션 안에서 동기적으로* 묶는 설계가 필요하다.
+함정은 *비동기성과 트랜잭션 수명* 이다. 트랜잭션은 IDB 요청이 없는 상태에서 *다른 작업(microtask 경계를 넘는 외부 `await`)을 기다리면 자동으로 닫힌다* — 한 트랜잭션 안에서 네트워크 요청 같은 외부 await를 끼우면 트랜잭션이 끝나 버려 후속 쓰기가 실패한다. 반대로 IDB request promise를 연쇄해 await하는 것은 정상적인 사용이다. 그래서 외부 데이터는 *트랜잭션을 열기 전에 준비* 하고, 트랜잭션 안에서는 IDB 요청만 연쇄하며 `tx.done`으로 commit을 확인한다.
 
 ### Service Worker와 오프라인
 
@@ -374,18 +380,33 @@ const cached = await db.get("assets", assetUrl);    // 캐시 히트면 네트�
 
 ```javascript
 // Service Worker: 캐시 우선, 없으면 네트워크 → 즉시 로딩 + 오프라인
-self.addEventListener("fetch", (e) => {
-  e.respondWith(
-    caches.match(e.request).then((hit) =>
-      hit ?? fetch(e.request).then((res) => {
-        const copy = res.clone();
-        caches.open("v1").then((c) => c.put(e.request, copy));   // 받으면서 캐시
-        return res;
-      })
-    )
-  );
+// 쓰기 promise를 event lifetime에 연결한다 (waitUntil/await 없이는 응답 종료와 함께 취소될 수 있다).
+self.addEventListener("fetch", (event) => {
+  const request = event.request;
+  const url = new URL(request.url);
+  // 앱의 정적 versioned assets만 처리한다 (GET + same-origin + 경로 범위).
+  if (request.method !== "GET" || url.origin !== self.location.origin ||
+      !url.pathname.startsWith("/assets/")) return;
+
+  const result = (async () => {
+    const cache = await caches.open("assets-v1");
+    const hit = await cache.match(request);
+    if (hit) return { response: hit, copy: null, cache };
+    const response = await fetch(request);
+    // 원본 response가 소비되기 전에 먼저 복제한다.
+    return { response, copy: response.ok ? response.clone() : null, cache };
+  })();
+
+  event.respondWith(result.then(({ response }) => response));
+  event.waitUntil(result.then(async ({ copy, cache }) => {
+    if (copy) await cache.put(request, copy);       // 쓰기 완료를 이벤트 수명에 묶는다
+  }).catch((error) => {
+    console.warn("Asset cache write unavailable", error);   // 캐시 실패는 응답을 망치지 않는다
+  }));
 });
 ```
+
+이 예시는 캐시 실패가 정상 응답을 망치지 않도록 쓰기 promise를 `waitUntil`에 연결한 *명세·정적 분석 기반* 코드이며, 실제 브라우저에서 worker 종료·`QuotaExceeded`·오프라인 시나리오로 실행한 것은 아니다. 대상 URL 범위(GET·same-origin·경로)와 캐시 실패 정책(quota, range, `Vary: *`), 버전 업그레이드·오래된 캐시 삭제 정책은 앱이 별도로 정한다. `waitUntil`은 프로세스 crash·OS 종료까지의 디스크 commit primitive가 아니다.
 
 ### 영속성은 보장이 아니다
 
@@ -399,15 +420,28 @@ self.addEventListener("fetch", (e) => {
 1절에서 봤듯 브라우저는 엔진·버전으로 갈리고, 기능 지원이 제각각이다. *브라우저 이름이나 User-Agent로 분기하는 것은 깨지기 쉽다* — UA 문자열은 위장되거나 바뀌고, 같은 브라우저도 버전에 따라 능력이 다르다. 원칙은 *능력 탐지(feature detection)* 다 — 이름이 아니라 *그 기능이 실제로 있는지* 를 묻는다.
 
 ```javascript
-// 이름이 아니라 능력으로 분기한다
+// 이름이 아니라 능력으로 분기하되, "존재 플래그"와 "실제 생성 성공"을 구분한다
 const caps = {
   webgpu: "gpu" in navigator,
   webgl2: !!document.createElement("canvas").getContext("webgl2"),
   sharedMem: typeof SharedArrayBuffer !== "undefined",   // COOP/COEP 의존
   wasmSimd: await wasmFeatureDetect.simd(),
 };
-const backend = caps.webgpu ? "webgpu" : caps.webgl2 ? "webgl2" : "webgl1";
+
+async function tryCreateWebGPU() {
+  if (!caps.webgpu) return null;
+  const adapter = await navigator.gpu.requestAdapter();   // navigator.gpu가 있어도 null 가능
+  if (!adapter) return null;
+  const device = await adapter.requestDevice().catch(() => null);   // device 생성 실패 분기
+  return device;   // 필수 feature/limit 검증까지 통과해야 확정
+}
+const backend =
+  (await tryCreateWebGPU()) ? "webgpu" :
+  caps.webgl2               ? "webgl2" :
+  document.createElement("canvas").getContext("webgl") ? "webgl1" : "unsupported";
 ```
+
+여기서도 *존재 플래그와 생성 성공은 별개* 다. `navigator.gpu`가 있어도 `requestAdapter()`가 null을 반환할 수 있고, adapter가 있어도 `requestDevice()`나 필수 feature/limit 검증이 실패할 수 있다. WebGL2/WebGL1도 context 생성이 실패할 수 있으므로, 후보를 순서대로 시도해 성공한 것만 확정하고 모두 실패하면 *명시적 unsupported UI* 로 간다.
 
 ### 폴백 사다리
 
@@ -415,17 +449,21 @@ const backend = caps.webgpu ? "webgpu" : caps.webgl2 ? "webgl2" : "webgl1";
 
 ```mermaid
 flowchart TB
-    Start[부팅] --> A{WebGPU?}
+    Start[부팅] --> A{WebGPU adapter/device<br/>생성 성공?}
     A -->|예| WG[WebGPU 경로]
-    A -->|아니오| B{WebGL2?}
+    A -->|아니오| B{WebGL2 컨텍스트<br/>생성 성공?}
     B -->|예| W2[WebGL2 경로]
-    B -->|아니오| W1[WebGL1 경로]
+    B -->|아니오| B1{WebGL1 컨텍스트<br/>생성 성공?}
+    B1 -->|예| W1[WebGL1 경로]
+    B1 -->|아니오| Unsup[unsupported UI]
     WG --> C{공유 메모리?}
     W2 --> C
     W1 --> C
     C -->|예| MT[멀티스레드]
     C -->|아니오| ST[싱글스레드 폴백]
 ```
+
+공유 메모리 분기는 빌드 산출물과도 연결된다 — pthread 멀티스레딩은 같은 소스의 *별도 WASM 빌드*(pthread 링크 옵션·공유 메모리)와 배포 헤더(COOP/COEP)가 갖춰져야 하며, 런타임 flag만 켠다고 단일 스레드 빌드가 멀티스레드로 바뀌지는 않는다.
 
 각 분기는 *비용* 이다. WebGPU·WebGL 두 백엔드, 멀티·싱글스레드 두 경로를 유지하면 코드와 QA가 배로 든다. 그래서 *목표 시장* 으로 사다리 길이를 정한다 — 데스크톱 위주면 WebGL2 기준선이 충분하고, 모바일·구형 포함이면 WebGL1·싱글스레드 폴백까지 내려가야 한다.
 
@@ -472,9 +510,9 @@ telemetry.report({
 
 ## 더 읽을거리
 
-- MDN Web Docs — WebGL, WebGPU, WebAssembly, IndexedDB, Service Worker API 레퍼런스.
-- W3C WebGPU 명세와 WGSL 명세 — 파이프라인·바인드 그룹·컴퓨트의 정확한 동작.
-- Emscripten 공식 문서 — C/C++의 WASM 컴파일, 선형 메모리, pthread 빌드.
-- Khronos KTX2 / Basis Universal 문서 — 트랜스코딩 가능한 GPU 압축 텍스처.
-- web.dev — 로딩 성능, Core Web Vitals, PWA·오프라인 전략의 실무 가이드.
-- V8 / SpiderMonkey 블로그 — JIT 최적화와 역최적화, GC 동작의 내부 원리.
+- MDN Web Docs — GPU.requestAdapter, WebAssembly.Memory.grow, WebGL/WebGPU, IndexedDB, Service Worker API(확인한 함수 범위).
+- W3C WebGPU·WGSL 명세 — 파이프라인·바인드 그룹·컴퓨트 동작(대상 버전·절 미확인).
+- Emscripten 공식 문서 — WASM 컴파일, 선형 메모리, pthreads 지원(스레드는 별도 빌드 산출물).
+- Khronos KTX2 명세(2.0 rev.4) / Basis Universal 저장소 — 트랜스코딩 가능한 GPU 압축 텍스처(일부 target만 확인).
+- web.dev — 로딩 성능, Core Web Vitals, PWA·오프라인 전략(Storage for the web 개요만 확인).
+- V8 / SpiderMonkey 블로그 — JIT 최적화와 역최적화, GC 동작(V8 fast properties 확인; SpiderMonkey 특정 글 미확인).

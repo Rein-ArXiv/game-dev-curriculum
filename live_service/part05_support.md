@@ -72,10 +72,10 @@ flowchart TB
 
 ```text
 카테고리: 계정 | 결제·환불 | 버그·기술 | 신고·제재 | 게임플레이 문의 | 기타
-우선순위: P0(서비스 장애·다수 영향) | P1(개인 결제·계정 잠김) | P2(일반) | P3(개선 의견)
+우선순위(점수가 등급을 결정): P0(50점+ — 서비스 장애·다수 영향 또는 결제·평판 복합) | P1(30~49점 — 개인 결제·계정 잠김) | P2(15~29점) | P3(0~14점 — 일반·개선 의견)
 ```
 
-우선순위 산정은 *영향 범위 × 긴급도* 로 점수화하는 편이 자의적 판단보다 일관된다. "돈이 걸렸나", "플레이가 막혔나", "여러 명에게 번지나"가 세 축이다.
+우선순위 산정은 *영향 범위 × 긴급도* 로 점수화하는 편이 자의적 판단보다 일관된다. "돈이 걸렸나", "플레이가 막혔나", "여러 명에게 번지나"가 세 축이다. 가중 점수 정책이 위 등급 라벨보다 우선하므로, 괄호 안 사례는 일반 등급의 보장이 아니라 대표 조건이다.
 
 ```python
 def priority_score(ticket):
@@ -162,7 +162,7 @@ $$
 
 (검증: 이 수치 예의 좌변·우변 모두 0.27548). 이 가정 안에서 P0 대기를 낮춘 만큼 다른 클래스의 가중 대기가 늘어난다. 다중 서버, class별 service distribution, 선점과 abandonment에서는 식이 달라지지만 우선순위가 용량 자체를 만들지는 않는다는 운영 결론은 남는다. 모두의 대기를 줄이려면 staffing, 처리 시간, 도착 부하나 자동 해결률을 바꿔야 한다.
 
-**에스컬레이션 = 마감 기반 오버플로와 인내.** 시간 기반 에스컬레이션은 한 티켓의 누적 대기가 SLA 마감에 다가갈 때 발동하는 *오버플로 밸브* 로, 꼬리(최악 대기)를 보호한다. 유한한 인내(마감)를 모델에 넣으면 $M/M/c+M$(Erlang A)이 되어, 이탈/에스컬레이션율 $\theta$가 대기 상한을 만든다. 실패 경계 셋: (1) 포아송 가정은 장애 시 깨진다 — 한 번의 장애가 *상관된* 수천 건을 동시에 만들어 도착이 버스트가 되므로, 정상 상태 Erlang C는 장애 중 대기를 과소평가한다. 온콜·오버플로는 평균이 아니라 *버스트* 기준으로 설계한다(8절의 티켓/DAU 이상 탐지와 연결). (2) 에스컬레이션이 새 티켓을 파면 컨텍스트가 끊기고 부하가 이중 계상된다. (3) 모든 클래스에 빡빡한 SLA를 주면 보존 법칙이 $\rho$를 끌어올리거나 SLA를 깨뜨린다 — 모두를 P0로 약속할 수는 없다.
+**에스컬레이션 = 마감 기반 오버플로와 인내.** 시간 기반 에스컬레이션은 한 티켓의 누적 대기가 SLA 마감에 다가갈 때 발동하는 *오버플로 밸브* 로, 꼬리(최악 대기)를 보호한다. 유한한 평균 인내를 모델에 넣으면 $M/M/c+M$(Erlang A)이 되지만, 지수 인내시간은 유한한 평균을 가질 뿐 결정적 최댓값(hard maximum)은 없다 — 분포는 모든 유한 $t$에서 양의 꼬리를 남기므로, 평균·꼬리 완화와 hard bound를 구분해야 한다. 에스컬레이션은 시스템 이탈이 아니라 다른 큐로 옮기는 것이므로, overflow 대상 큐의 용량·시간 예산을 함께 넣어야 운영적 상한이 된다. 실패 경계 셋: (1) 포아송 가정은 장애 시 깨진다 — 한 번의 장애가 *상관된* 수천 건을 동시에 만들어 도착이 버스트가 되므로, 정상 상태 Erlang C는 장애 중 대기를 과소평가한다. 온콜·오버플로는 평균이 아니라 *버스트* 기준으로 설계한다(8절의 티켓/DAU 이상 탐지와 연결). (2) 에스컬레이션이 새 티켓을 파면 컨텍스트가 끊기고 부하가 이중 계상된다. (3) 모든 클래스를 P0로 약속하면 우선순위 재분배로 다른 클래스의 가중 대기가 늘고, 처리 용량을 늘리지 않으면 SLA를 지킬 수 없다 — SLA 선언 자체가 $\rho$를 바꾸지는 않는다.
 
 ```python
 # Erlang C / 서비스 수준 / 보존 법칙 검증 (요지)
@@ -192,7 +192,7 @@ flowchart TB
     In[문의 유입] --> Self{셀프서비스로<br/>해결 가능?}
     Self -->|예| Deflect[FAQ·가이드<br/>티켓 미생성]
     Self -->|아니오| Bot{정형 문제?<br/>봇 처리 가능}
-    Bot -->|예| AutoFix[자동 해결<br/>비번재설정·재화재지급]
+    Bot -->|예| AutoFix[자동 해결<br/>비번재설정·재화재지급<br/>인증·소유확인·멱등 검증 포함]
     Bot -->|아니오| Classify[AI 자동분류]
     Classify --> Human[상담원]
     AutoFix -->|실패·불만| Human
@@ -310,7 +310,7 @@ def grant_currency(agent, player_id, amount, reason, ticket_id):
 | 증거 | 강도 | 비고 |
 |---|---|---|
 | 가입 이메일·전화 접근 | 강 | OTP로 확인 |
-| 최초 결제 정보 (카드 끝 4자리·영수증) | 강 | 위조 어려움 |
+| 최초 결제 정보 (카드 끝 4자리·영수증) | 중 | 보조 증거 — 단독 신원증명 아님 |
 | 자주 쓰는 기기·IP 일치 | 중 | 디바이스 핑거프린트 |
 | 가입일·최초 캐릭터명·연동 플랫폼 | 중 | 알 만한 정보 |
 | 닉네임·레벨만 진술 | 약 | 단독 불충분 |
@@ -319,14 +319,16 @@ def grant_currency(agent, player_id, amount, reason, ticket_id):
 
 ### 해킹·탈취 대응
 
-계정 탈취가 신고되면 시간이 핵심이다 — 공격자가 재화를 빼돌리거나 결제를 일으키기 전에 *동결* 해야 한다. 표준 흐름은 *즉시 잠금 → 본인확인 → 피해 복구 → 재발 방지* 다.
+계정 탈취가 신고되면 시간이 핵심이다 — 공격자가 재화를 빼돌리거나 결제를 일으키기 전에 *동결* 해야 한다. 다만 무인증 신고만으로 곧바로 전면 동결하면 타인 계정 가용성을 노린 DoS가 되므로, 먼저 *신고 신뢰도·기존 인증 상태·위험 신호* 를 평가한다. 검증된 신고·위험 신호일 때만 전면 동결하고, 그렇지 않으면 민감 거래·결제만 막는 *제한적 보호 hold* 로 시작한다. 표준 흐름은 *동결(또는 보호 hold) → 본인확인 → 피해 복구 → 재발 방지* 다.
 
 ```mermaid
 flowchart TB
-    Report[탈취 신고] --> Freeze[즉시 동결<br/>로그인·거래·결제 차단]
+    Report[탈취 신고] --> Check{검증된 신고/위험 신호<br/>또는 제한적 보호 hold}
+    Check -->|검증됨| Freeze[즉시 동결<br/>로그인·거래·결제 차단]
+    Check -->|미검증| Hold[보류·추가 증거 요청]
     Freeze --> Verify[강화된 본인확인]
     Verify -->|성공| Restore[피해 복구<br/>재화·아이템 롤백]
-    Verify -->|실패| Hold[보류·추가 증거 요청]
+    Verify -->|실패| Hold
     Restore --> Secure[보안 강화<br/>비번 재설정·세션 무효화·2FA 권유]
 ```
 
@@ -361,20 +363,27 @@ def refund_decision(purchase, account):
 
 ### 플랫폼별 환불의 현실
 
-모바일·콘솔·스토어 결제는 *환불 권한이 게임이 아니라 플랫폼* 에 있다. iOS는 App Store가, Android는 Google Play가, 콘솔·PC 스토어는 각 플랫폼이 환불을 처리한다. 게임이 직접 결제를 취소할 수 없고, 플랫폼이 환불하면 *영수증(트랜잭션)이 무효화* 되었다는 신호가 (검증·웹훅을 통해) 게임에 도달한다.
+모바일·콘솔·스토어 결제는 *환불 권한이 게임이 아니라 플랫폼* 에 있다. iOS는 App Store가, Android는 Google Play가, 콘솔·PC 스토어는 각 플랫폼이 환불을 처리한다. 소비자가 플랫폼에 환불을 신청하는 것이 기본 경로지만, 게임도 권한·상품·주문 상태가 허용하면 플랫폼 환불 개시 API(예: Google Play `orders.refund`)로 직접 환불을 시작할 수 있다. 플랫폼이 환불하면 *영수증(트랜잭션)이 무효화* 되었다는 신호가 (검증·웹훅/RTDN·Server Notification을 통해) 게임에 도달한다.
 
-이 구조가 어뷰징 표면을 만든다 — 플레이어가 *플랫폼에 환불을 받아 돈을 돌려받고도 게임 내 재화는 그대로 쓴다*. 그래서 게임은 환불 웹훅을 받으면 *해당 재화를 회수* 해야 한다. 회수 시 잔액이 음수가 되면(이미 다 썼으면) 음수 잔액 또는 제재로 다룬다.
+이 구조가 어뷰징 표면을 만든다 — 플레이어가 *플랫폼에 환불을 받아 돈을 돌려받고도 게임 내 재화는 그대로 쓴다*. 그래서 게임은 환불 웹훅을 받으면 *해당 재화를 회수* 해야 한다. 웹훅은 진위 검증 없이 신뢰하지 않고, 중복·재전송은 refund/order ID 기준으로 멱등하게 처리한다. 회수 시 잔액이 음수가 되면(이미 다 썼으면) 음수 잔액 또는 제재로 다룬다.
 
 ```python
-def on_platform_refund_webhook(tx):
-    grant = find_grant_by_transaction(tx.id)
-    inventory.revoke(grant.player, grant.items)      # 지급분 회수
-    if inventory.balance(grant.player) < 0:
-        flag_negative_balance(grant.player)          # 다 쓴 뒤 환불 → 어뷰징 의심
-    audit_log("platform_refund_revoke", tx=tx.id)
+def on_platform_refund_webhook(notification):
+    verify_platform_signature(notification)          # 1) 플랫폼 서명·진위 검증
+    tx = requery_authoritative_order(notification)   # 2) 권위 주문 상태 재조회
+    with db.transaction() as txn:                    # 3) 멱등 전이·원장 commit
+        # 4) refund/order ID 기준 중복·재전송은 같은 거래로 처리
+        if not txn.mark_refund_if_absent(tx.refund_id):
+            return txn.load_refund_result(tx.refund_id)  # 기존 결과 재생
+        grant = find_grant_by_transaction(tx.order_id)
+        inventory.revoke(grant.player, grant.items)  # 회수·마커는 같은 commit(다른 서비스면 outbox)
+        if inventory.balance(grant.player) < 0:
+            flag_negative_balance(grant.player)      # 다 쓴 뒤 환불 → 어뷰징 의심
+        txn.append_audit("platform_refund_revoke", tx=tx.order_id)
+    ack_platform(notification)                       # 5) durable commit 후 ACK
 ```
 
-플랫폼 환불 정책·웹훅 형식은 각 플랫폼 문서를 따른다([App Store Server Notifications](https://developer.apple.com/documentation/appstoreservernotifications), [Google Play Real-time developer notifications](https://developer.android.com/google/play/billing/rtdn-reference)). 핵심은 *환불은 플랫폼이 하고, 회수는 게임이 한다* 는 비대칭이다.
+플랫폼 환불 정책·웹훅 형식은 각 플랫폼 문서를 따른다([App Store Server Notifications](https://developer.apple.com/documentation/appstoreservernotifications), [Google Play Real-time developer notifications](https://developer.android.com/google/play/billing/rtdn-reference)). 구분해야 할 비대칭은 *플랫폼 결제 환불* 과 *인게임 재화 회수* 가 서로 다른 원장이라는 점이다 — 환불 개시 API를 쓰든 소비자 신청을 받든, 게임은 후속 동기화로 주문 상태를 재조회해 재화를 회수한다.
 
 ### 부정결제(Fraud)와 차지백
 
@@ -431,7 +440,8 @@ flowchart TB
 
 ```python
 def appeal_review(case, original_action, new_agent):
-    assert new_agent.id != original_action.agent_id   # 재심은 다른 상담원
+    if new_agent.id == original_action.agent_id:       # 운영 계약: assert 대신 명시적 거부
+        raise PermissionError("재심은 다른 상담원")
     evidence = reload_evidence(case)                   # 원 증거 재검토
     if evidence.insufficient or evidence.contradicted:
         reverse_sanction(case, reason="재심 — 근거 부족")
@@ -449,7 +459,7 @@ def appeal_review(case, original_action, new_agent):
 
 보상은 신뢰 회복의 직접 수단이다 — 버그로 손해 본 플레이어, 점검 보상, 장애 사과. 두 모드가 있다. *개별 보상* 은 상담원이 한 플레이어에게 티켓 처리 중 지급한다. *대량 보상* 은 운영팀이 *전체 또는 세그먼트* 에 일괄 지급한다(점검 보상, 장애 사과 우편).
 
-보상 설계에서 *경제 영향* 을 먼저 본다. 보상은 *재화를 무에서 만든다* — 인게임 경제에 인플레이션을 주입한다. 버그 피해 보상은 *피해 추정치에 비례* 하게, 사과 보상은 *경제를 흔들지 않는 선* 에서 정한다. 보상 기준을 사례별 직관이 아니라 *표* 로 두면 일관되고 어뷰징 표면이 준다.
+보상 설계에서 *경제 영향* 을 먼저 본다. 보상은 *재화를 무에서 만든다* — 통화량(공급)을 늘리지만, 이것이 곧 물가 인플레이션을 뜻하지는 않는다. 물가 압력은 화폐유통속도·거래량·재화 생산량(MV=PQ)과 품목·품질을 고정한 가격지수, 유저 수를 함께 봐야 판단할 수 있다. 버그 피해 보상은 *피해 추정치에 비례* 하게, 사과 보상은 *경제를 흔들지 않는 선* 에서 정한다. 보상 기준을 사례별 직관이 아니라 *표* 로 두면 일관되고 어뷰징 표면이 준다.
 
 | 사유 | 보상 성격 | 산정 |
 |---|---|---|
@@ -565,10 +575,8 @@ def support_abuse_check(player, request_type):
 ## 더 읽을거리
 
 - Apple App Store Server Notifications / Google Play Real-time Developer Notifications 문서 — 플랫폼 환불·구독 웹훅의 표준 흐름.
-- Zendesk / Freshdesk 개발자 문서 — 티켓 라우팅·SLA·트리거·자동화 규칙의 산업 표준 워크플로.
-- PCI DSS 및 각 카드 네트워크의 차지백·분쟁(dispute) 가이드 — 부정결제 대응의 기준.
-- OWASP Authentication / Account Recovery Cheat Sheet — 본인확인과 계정 복구의 보안 모범 사례.
-- GDC 라이브 운영·커뮤니티 트랙 발표들 — 신고·제재·투명성과 플레이어 신뢰의 실무 사례.
+- PCI DSS(카드 데이터 보안)와 각 카드 네트워크의 차지백·분쟁(dispute) 가이드 — 전자는 결제 데이터 보안 기준, 후자는 부정결제 대응의 기준이다.
+- OWASP Forgot Password Cheat Sheet / Authentication Cheat Sheet — 본인확인과 계정 복구의 보안 모범 사례.
 - N. Gans, G. Koole, A. Mandelbaum, "Telephone Call Centers: Tutorial, Review, and Research Prospects," *Manufacturing & Service Operations Management* 5(2), 2003 — Erlang C 인력 산정과 콜센터 큐잉의 표준 리뷰.
 - S. Halfin, W. Whitt, "Heavy-Traffic Limits for Queues with Many Exponential Servers," *Operations Research* 29(3), 1981 — 제곱근 인력 법칙(QED 영역)의 원전.
 - L. Kleinrock, *Queueing Systems, Vol. 2: Computer Applications*, Wiley, 1976 — 우선순위 대기와 보존 법칙.

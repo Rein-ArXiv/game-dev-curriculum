@@ -176,6 +176,10 @@ void* code = mmap(
     MAP_PRIVATE | MAP_ANONYMOUS, // 파일 없음
     -1, 0
 );
+if (code == MAP_FAILED) {
+    perror("mmap");
+    exit(EXIT_FAILURE);   // 할당 실패이므로 memcpy/mprotect로 진행하지 않는다
+}
 
 // 2. 기계어 쓰기
 unsigned char machine_code[] = {
@@ -186,7 +190,11 @@ unsigned char machine_code[] = {
 memcpy(code, machine_code, sizeof(machine_code));
 
 // 3. 권한 변경: 쓰기 제거, 실행 추가
-mprotect(code, 4096, PROT_READ | PROT_EXEC);
+if (mprotect(code, 4096, PROT_READ | PROT_EXEC) != 0) {
+    perror("mprotect");
+    munmap(code, 4096);   // 권한 전환이 실패하면 매핑을 해제하고 진행하지 않는다
+    exit(EXIT_FAILURE);
+}
 
 // 4. 함수로 실행
 int (*func)() = (int(*)())code;
@@ -207,6 +215,9 @@ LPVOID code = VirtualAlloc(
     MEM_COMMIT | MEM_RESERVE,
     PAGE_READWRITE
 );
+if (!code) {
+    exit(EXIT_FAILURE);   // VirtualAlloc 실패이므로 이후 단계로 진행하지 않는다
+}
 
 // 2. 기계어 쓰기
 unsigned char machine_code[] = { /* ... */ };
@@ -214,7 +225,10 @@ memcpy(code, machine_code, sizeof(machine_code));
 
 // 3. 권한 변경 (RW → RX)
 DWORD old_protect;
-VirtualProtect(code, 4096, PAGE_EXECUTE_READ, &old_protect);
+if (!VirtualProtect(code, 4096, PAGE_EXECUTE_READ, &old_protect)) {
+    VirtualFree(code, 0, MEM_RELEASE);   // 권한 전환 실패 시 매핑을 해제한다
+    exit(EXIT_FAILURE);
+}
 
 // 4. 명령어 캐시 플러시
 // MSDN: "Applications should call FlushInstructionCache if they
@@ -263,7 +277,7 @@ x86-64는 SMC(Self-Modifying Code) 탐지 하드웨어가 있어 대부분 자�
 typedef int (*jit_func)(int);
 
 jit_func compile_add(int constant) {
-    // x86-64: int add(int x) { return x + constant; }
+    // Linux x86-64 System V ABI: int add(int x) { return x + constant; }
     //   mov eax, edi       ; 첫 인자(x)를 eax로
     //   add eax, constant  ; constant 더하기
     //   ret
@@ -275,7 +289,8 @@ jit_func compile_add(int constant) {
     };
 
     // imm32를 호스트의 little-endian 표현으로 삽입한다.
-    // x86-64 호스트를 전제하며, 정렬·별칭 UB를 피하려고 memcpy를 쓴다.
+    // Linux x86-64 System V ABI 호스트를 전제하며, 정렬·별칭 UB를 피하려고 memcpy를 쓴다.
+    // Windows x64는 첫 정수 인자가 rcx라 이 레지스터 규약을 그대로 쓸 수 없다.
     memcpy(template + 3, &constant, sizeof(constant));
 
     // 실행 가능한 메모리 할당
@@ -283,9 +298,14 @@ jit_func compile_add(int constant) {
                       PROT_READ | PROT_WRITE,
                       MAP_PRIVATE | MAP_ANONYMOUS,
                       -1, 0);
+    if (code == MAP_FAILED)
+        return NULL;
 
     memcpy(code, template, sizeof(template));
-    mprotect(code, 4096, PROT_READ | PROT_EXEC);
+    if (mprotect(code, 4096, PROT_READ | PROT_EXEC) != 0) {
+        munmap(code, 4096);
+        return NULL;
+    }
 
     return (jit_func)code;
 }
@@ -293,6 +313,9 @@ jit_func compile_add(int constant) {
 int main() {
     jit_func add5 = compile_add(5);
     jit_func add100 = compile_add(100);
+
+    if (!add5 || !add100)
+        return 1;
 
     printf("add5(10) = %d\n", add5(10));      // 15
     printf("add100(23) = %d\n", add100(23));  // 123
@@ -371,7 +394,7 @@ void* exec_view = mmap(..., PROT_READ | PROT_EXEC, ...);
 // write_view로 쓰고, exec_view로 실행
 ```
 
-Apple Silicon macOS에서는 임의의 RWX/dual mapping이 제한되며, JIT은 `mmap(MAP_JIT)`으로 할당한 영역을 `pthread_jit_write_protect_np`로 스레드별 W↔X 전환하며 써야 한다. iOS는 third-party JIT을 아예 금지한다 (단, JavaScriptCore 같은 시스템 프레임워크는 예외).
+Apple Silicon macOS에서는 임의의 RWX/dual mapping이 제한되며, JIT은 `mmap(MAP_JIT)`으로 할당한 영역을 `pthread_jit_write_protect_np`로 스레드별 W↔X 전환하며 써야 한다. iOS는 일반 게임 앱처럼 entitlement 없는 배포에서 third-party JIT을 강하게 제한하며, JavaScriptCore 같은 시스템 프레임워크는 예외다. 다만 Apple은 EU의 iOS 17.4+/iPadOS 18+에서 승인된 alternative browser engine 개발자에게는 JIT 기능을 제공하므로, 이를 임의 앱의 일반 허용으로 일반화하지 않는다(2026-09-21 정책 기준).
 
 **전략 3: 플랫폼 메커니즘 (macOS MAP_JIT + Entitlement)**
 ```objective-c
@@ -436,78 +459,101 @@ typedef struct Node {
 
 ### 2단계: 코드 생성
 
-x86-64 calling convention:
+이 예제는 Linux x86-64의 System V ABI를 전제한다. 같은 x86-64라도 Windows x64의 첫 정수 인자는 `rcx`이므로 아래 레지스터 규약을 그대로 옮기지 않는다.
+
+x86-64 System V calling convention:
 - 첫 번째 인자: `rdi` (32비트는 `edi`)
 - 반환값: `rax` (32비트는 `eax`)
 
 **레지스터 머신 접근**:
 ```c
-void codegen(Node* node, unsigned char** code) {
+typedef struct {
+    unsigned char* base;
+    size_t used;
+    size_t capacity;
+} Emitter;
+
+#define MAX_AST_DEPTH 256
+
+// subtraction 기반 검사: used > capacity이거나 n > capacity - used이면 실패
+static bool emit_bytes(Emitter* e, const unsigned char* bytes, size_t n) {
+    if (e->used > e->capacity || n > e->capacity - e->used)
+        return false;
+    memcpy(e->base + e->used, bytes, n);
+    e->used += n;
+    return true;
+}
+
+bool codegen(Node* node, Emitter* e, int depth) {
+    if (depth > MAX_AST_DEPTH)
+        return false;
+
     switch (node->type) {
     case NUM:
         // mov eax, immediate
-        emit_mov_eax_imm(code, node->value);
-        break;
+        return emit_mov_eax_imm(e, node->value);
 
     case VAR:
         // mov eax, edi (x는 첫 인자)
-        emit_mov_eax_edi(code);
-        break;
+        return emit_mov_eax_edi(e);
 
     case MUL:
-        codegen(node->left, code);   // 좌변 → eax
-        emit_push_eax(code);          // 저장
-        codegen(node->right, code);   // 우변 → eax
-        emit_pop_ecx(code);           // 좌변 → ecx
-        emit_imul_eax_ecx(code);      // eax *= ecx
-        break;
+        if (!codegen(node->left, e, depth + 1)) return false;   // 좌변 → eax
+        if (!emit_push_eax(e)) return false;   // 저장
+        if (!codegen(node->right, e, depth + 1)) return false;   // 우변 → eax
+        if (!emit_pop_ecx(e)) return false;    // 좌변 → ecx
+        return emit_imul_eax_ecx(e);           // eax *= ecx
 
     case ADD:
-        codegen(node->left, code);
-        emit_push_eax(code);
-        codegen(node->right, code);
-        emit_pop_ecx(code);
-        emit_add_eax_ecx(code);
-        break;
+        if (!codegen(node->left, e, depth + 1)) return false;   // 좌변 → eax
+        if (!emit_push_eax(e)) return false;
+        if (!codegen(node->right, e, depth + 1)) return false;   // 우변 → eax
+        if (!emit_pop_ecx(e)) return false;
+        return emit_add_eax_ecx(e);
     }
+    return false;
 }
 ```
 
 ### x86-64 기계어 인코딩
 
 ```c
-void emit_mov_eax_imm(unsigned char** code, int imm) {
-    *(*code)++ = 0xB8;  // opcode
-    memcpy(*code, &imm, sizeof(imm));  // 정렬되지 않은 주소에 int lvalue로 쓰면 UB다
-    *code += 4;
+bool emit_mov_eax_imm(Emitter* e, int imm) {
+    unsigned char op = 0xB8;  // opcode
+    if (!emit_bytes(e, &op, 1)) return false;
+    unsigned char bytes[4];
+    memcpy(bytes, &imm, sizeof(imm));  // 정렬되지 않은 주소에 int lvalue로 쓰면 UB다
+    return emit_bytes(e, bytes, sizeof(bytes));
 }
 
-void emit_mov_eax_edi(unsigned char** code) {
-    *(*code)++ = 0x89;  // MOV r/m32, r32
-    *(*code)++ = 0xF8;  // ModR/M: edi → eax
+bool emit_mov_eax_edi(Emitter* e) {
+    unsigned char bytes[] = { 0x89, 0xF8 };  // MOV r/m32, r32; ModR/M: edi → eax
+    return emit_bytes(e, bytes, sizeof(bytes));
 }
 
-void emit_push_eax(unsigned char** code) {
-    *(*code)++ = 0x50;  // PUSH rax
+bool emit_push_eax(Emitter* e) {
+    unsigned char bytes[] = { 0x50 };  // PUSH rax
+    return emit_bytes(e, bytes, sizeof(bytes));
 }
 
-void emit_pop_ecx(unsigned char** code) {
-    *(*code)++ = 0x59;  // POP rcx
+bool emit_pop_ecx(Emitter* e) {
+    unsigned char bytes[] = { 0x59 };  // POP rcx
+    return emit_bytes(e, bytes, sizeof(bytes));
 }
 
-void emit_imul_eax_ecx(unsigned char** code) {
-    *(*code)++ = 0x0F;  // two-byte opcode
-    *(*code)++ = 0xAF;
-    *(*code)++ = 0xC1;  // ModR/M: ecx
+bool emit_imul_eax_ecx(Emitter* e) {
+    unsigned char bytes[] = { 0x0F, 0xAF, 0xC1 };  // two-byte opcode; ModR/M: ecx
+    return emit_bytes(e, bytes, sizeof(bytes));
 }
 
-void emit_add_eax_ecx(unsigned char** code) {
-    *(*code)++ = 0x01;  // ADD r/m32, r32
-    *(*code)++ = 0xC8;  // ModR/M: ecx → eax
+bool emit_add_eax_ecx(Emitter* e) {
+    unsigned char bytes[] = { 0x01, 0xC8 };  // ADD r/m32, r32; ModR/M: ecx → eax
+    return emit_bytes(e, bytes, sizeof(bytes));
 }
 
-void emit_ret(unsigned char** code) {
-    *(*code)++ = 0xC3;
+bool emit_ret(Emitter* e) {
+    unsigned char bytes[] = { 0xC3 };
+    return emit_bytes(e, bytes, sizeof(bytes));
 }
 ```
 
@@ -521,12 +567,20 @@ jit_func compile_expr(Node* ast) {
                       PROT_READ | PROT_WRITE,
                       MAP_PRIVATE | MAP_ANONYMOUS,
                       -1, 0);
+    if (code == MAP_FAILED)
+        return NULL;
 
-    unsigned char* ptr = (unsigned char*)code;
-    codegen(ast, &ptr);
-    emit_ret(&ptr);
+    Emitter e = { (unsigned char*)code, 0, 4096 };
+    if (!codegen(ast, &e, 0) || !emit_ret(&e)) {
+        // 경계를 넘기 전에 중단하고 부분 생성 코드는 실행하지 않는다.
+        munmap(code, 4096);
+        return NULL;
+    }
 
-    mprotect(code, 4096, PROT_READ | PROT_EXEC);
+    if (mprotect(code, 4096, PROT_READ | PROT_EXEC) != 0) {
+        munmap(code, 4096);
+        return NULL;
+    }
     return (jit_func)code;
 }
 
@@ -538,6 +592,10 @@ int main() {
     );
 
     jit_func f = compile_expr(ast);
+    if (!f) {
+        fprintf(stderr, "compile failed\n");
+        return 1;
+    }
     printf("f(5) = %d\n", f(5));   // 13
     printf("f(10) = %d\n", f(10)); // 23
 }
@@ -645,7 +703,7 @@ for i = 1, 1e6 do
 end
 ```
 
-LuaJIT은 `sqrt` 호출을 trace에 인라인하여, 루프 전체를 단일 기계어 시퀀스로 만든다.
+LuaJIT은 FFI 호출의 ABI 경계와 마샬링 비용을 줄이는 방향으로 `sqrt` 호출을 trace에 통합한다. 다만 특정 builtin 인식·intrinsic 치환이 있는 함수의 본체 인라인과 임의 C 함수 인라인은 다르며, 이 예제를 특정 버전에서 machine-code dump로 확인한 것은 아니다.
 
 ## 6. Inline Caching: 동적 타입의 최적화
 
@@ -693,28 +751,36 @@ area(new Circle(15));  // 계속 Circle만 옴
 **최적화**: 호출 지점에 "이전 타입"과 "메서드 포인터"를 캐시:
 
 ```c
-// 가상의 런타임 구조
+// 가상의 런타임 구조: IC는 호출 지점(call-site)마다 하나씩 존재한다.
 struct CallSite {
-    void* cached_type;      // 마지막으로 본 타입
-    void* cached_method;    // 해당 메서드 포인터
+    const char* selector;        // 이 call-site에 고정된 method 이름
+    unsigned method_table_epoch; // method table이 바뀔 때 증가
+    void* cached_type;           // 마지막으로 본 타입
+    void* cached_method;         // 해당 메서드 포인터
 };
 
 void* inline_cache_lookup(CallSite* site, Object* obj, const char* name) {
-    // Fast path: 타입이 같으면 캐시된 메서드 반환
-    if (obj->type == site->cached_type) {
+    // Fast path: selector, 타입, method table epoch가 모두 같을 때만 hit
+    if (name == site->selector
+        && obj->type == site->cached_type
+        && site->method_table_epoch == current_method_table_epoch) {
         return site->cached_method;  // ← O(1)
     }
 
-    // Slow path: 타입이 바뀜
+    // Slow path: selector, 타입, epoch 중 하나가 바뀜
     void* method = lookup_method(obj->type, name);  // ← O(log n) or O(n)
 
     // 캐시 업데이트
+    site->selector = name;
+    site->method_table_epoch = current_method_table_epoch;
     site->cached_type = obj->type;
     site->cached_method = method;
 
     return method;
 }
 ```
+
+fast path의 hit 조건에는 이 call-site의 selector, 타입, method table epoch가 모두 들어가야 한다. cache는 호출 지점별로 고정된 selector를 가지며, hot reload처럼 같은 type이라도 method table의 lookup 의미가 바뀌면 epoch 검사나 전역 invalidation으로 기존 항목을 폐기한다. part06의 hot reload 교체 절차에도 이 무효화 단계가 포함되어야 한다.
 
 대부분의 호출 지점이 monomorphic으로 유지된다는 관찰은 Hölzle, Chambers, Ungar의 PIC 논문(ECOOP 1991)부터 반복적으로 보고되어 왔고, 이것이 IC가 실효성을 갖는 근거다.
 
@@ -819,19 +885,29 @@ JIT 컴파일:
 ```assembly
 ; Guard: a가 SMI(Small Integer)인가?
 test eax, 1
-jnz deopt_label
+jnz slow_path
 
 ; Guard: b가 SMI인가?
 test edx, 1
-jnz deopt_label
+jnz slow_path
 
-; 정수 덧셈 (빠름)
+; 원래 operand a는 add가 파괴하므로 느린 경로가 쓸 값을 먼저 보존한다.
+; SMI type guard만으로는 (2^30-1)+1처럼 범위를 넘는 값을 막지 못한다.
+mov r8, rax        ; 원래 a 보존
 add eax, edx
+jo  overflow_or_deopt
 ret
 
-deopt_label:
+overflow_or_deopt:
+    mov rax, r8    ; 보존한 원래 operand 복원
+    ; slow path: wider/number 덧셈 또는 deopt frame state 복구
+    jmp slow_path
+
+slow_path:
     call deoptimize
 ```
+
+SMI type guard는 표현 범위를 보장하지 않으므로 overflow 시에는 원래 operand와 deopt frame state를 복구해야 한다. 보존되지 않은 operand로 slow path를 계산하면 잘못된 값이 나온다.
 
 나중에:
 ```javascript
@@ -929,7 +1005,7 @@ Lua bytecode → Trace Recorder → SSA IR →
 
 2. **Trace compiler**: 루프가 hot해지면:
  ```
- for i=1,1e6 do
+ for i=1,1e3 do
  sum = sum + i * i
  end
  ```
@@ -937,7 +1013,7 @@ Lua bytecode → Trace Recorder → SSA IR →
  Recorded trace:
  ```
  [1] int SLOAD #1 ; load i
- [2] > int LE i 1000000
+ [2] > int LE i 1000
  [3] int MUL i i
  [4] int ADD sum [3]
  [5] int ADD i 1
@@ -946,7 +1022,9 @@ Lua bytecode → Trace Recorder → SSA IR →
 
  SSA optimization → register allocation → x64:
  ```assembly
- cmp ebx, 1000000
+ ; 1e3까지의 제곱합은 signed 32-bit 범위에 들어간다.
+ ; 원래 1e6 범위라면 sum이 2^31을 넘으므로 wide/number 표현과 overflow·widening 경로가 필요하다.
+ cmp ebx, 1000
  jg exit
  mov eax, ebx
  imul eax, ebx
@@ -964,6 +1042,8 @@ Lua bytecode → Trace Recorder → SSA IR →
  local p = ffi.new("Point", 10, 20)
  p.x = p.x + 5 -- 컴파일되면 단순 메모리 접근
  ```
+
+FFI 구조체 접근이 trace에서 단순 로드/스토어로 내려가는 것은 FFI 메모리 접근 최적화의 예다. 이 코드 역시 특정 LuaJIT 버전의 machine-code dump로 확인한 것이 아니며, 임의 C 함수 본체의 인라인 여부와는 구분한다.
 
 LuaJIT은 단일 개발자(Mike Pall)가 만들었음에도, 특정 워크로드(수치 계산 루프, FFI를 통한 C 데이터 직접 접근)에서 매우 강한 성능을 보인다. 다만 이는 워크로드별 결과이고, JS 엔진과의 일반적인 우열을 매기는 비교는 언어·벤치마크·버전에 따라 결과가 크게 달라지므로 단정하기 어렵다.
 
@@ -1001,8 +1081,8 @@ function add(a, b) {
 
 **Ignition bytecode**:
 ```text
-Ldar a0          ; Load argument 0 (a)
-Add a1, [0]      ; Add argument 1 (b), feedback slot 0
+Ldar a1          ; Load argument 1 (b) into the accumulator
+Add a0, [0]      ; Add a (register lhs) + accumulator (rhs), feedback slot 0
 Return
 ```
 
@@ -1024,8 +1104,15 @@ jnz deopt
 ; Integer add
 mov rax, rdi
 add rax, rsi
+jo  overflow_or_deopt
 ret
+overflow_or_deopt:
+    ; rdi/rsi의 원래 SMI 값은 아직 보존돼 있다. wider number 덧셈이나
+    ; deopt frame state 복구로 넘긴다.
+    jmp slow_path_or_deopt
 ```
+
+SMI type guard는 값 범위를 보장하지 않는다. 덧셈이 SMI 범위를 넘으면 overflow guard로 slow path/deopt에 진입해 원래 operand와 복구된 frame state로 wide/number 계산을 수행한다.
 
 V8 팀의 "Ignition and TurboFan" 블로그(2017)에 자세한 설명이 있다.
 
@@ -1102,8 +1189,10 @@ vpaddd xmm0, xmm0, xmm1
 | **접근** | Tracing | Method + IC | Method |
 | **Tier** | 2 (Int + JIT) | 4 (Ign + Spark + Maglev + Turbo) | 2 (Quick + Opt) |
 | **최적화 기준** | Trace | Call site | Method |
-| **Deopt** | Guard failure → interp | Bailout → Ignition | Deopt → Tier 0 |
+| **Deopt** | Guard failure → interp | Bailout → Ignition | 미확인(Dynamic PGO/GDV는 fast/slow 경로) |
 | **특화** | Type+path | Type | Type |
+
+.NET의 deopt 동작은 일반 Dynamic PGO/GDV guard 실패의 fast/slow 경로 및 일반 호출 폴백과 tier 전환/OSR/deoptimization을 구분해야 한다. 표의 .NET Deopt 항목은 정확한 runtime 버전의 JIT dump가 확인되기 전까지 일반 규칙으로 두지 않는다.
 
 바이너리나 런타임의 크기를 한 줄로 비교하는 것은 의미가 약하다. 정적/동적 링크, ICU·표준 라이브러리·GC·디버그 심볼 포함 여부와 배포 방식이 서로 다르기 때문이다. LuaJIT은 비교적 작은 런타임과 trace 특화 설계를 택하고, V8은 JavaScript 의미론과 여러 최적화 계층을 구현하며, .NET JIT은 IL의 정적 타입·런타임 프로파일 정보를 함께 활용한다. 어느 쪽이 더 공격적인지는 최적화 종류와 워크로드별로 비교해야 한다.
 
@@ -1130,7 +1219,7 @@ JIT 컴파일은 하드웨어와 소프트웨어, 보안과 성능, 정적 정�
 - V8 Team, ["Launching Ignition and TurboFan"](https://v8.dev/blog/launching-ignition-and-turbofan), 2017
 - V8 Team, ["Sparkplug — a non-optimizing JavaScript compiler"](https://v8.dev/blog/sparkplug), 2021
 - V8 Team, ["Maglev - V8's Fastest Optimizing JIT"](https://v8.dev/blog/maglev), 2023
-- V8 Team, ["Untrusted code mitigations"](https://v8.dev/docs/untrusted-code-mitigations), 2018
+- V8 Team, ["Untrusted code mitigations"](https://v8.dev/docs/untrusted-code-mitigations), 2018 — JIT spraying 방어가 아니라 별개 위협(Spectre) 완화 자료다.
 - Microsoft, [".NET Core 2.1 Tiered Compilation"](https://devblogs.microsoft.com/dotnet/tiered-compilation-preview-in-net-core-2-1/), 2018
 
 ### 최적화 기법
@@ -1143,16 +1232,16 @@ JIT 컴파일은 하드웨어와 소프트웨어, 보안과 성능, 정적 정�
 - Ben Niu and Gang Tan, ["RockJIT: Securing Just-In-Time Compilation Using Modular Control-Flow Integrity"](https://dl.acm.org/doi/10.1145/2660267.2660281), CCS 2014
 
 ### 시스템 프로그래밍
-- Intel, ["Intel 64 and IA-32 Architectures Software Developer's Manual"](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html), Volume 2 (Instruction Set Reference)
-- AMD, ["AMD64 Architecture Programmer's Manual"](https://www.amd.com/en/support/tech-docs), Volume 3 (General Purpose and System Instructions)
+- Intel, ["Intel 64 and IA-32 Architectures Software Developer's Manual"](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html), Volume 2 (Instruction Set Reference) — 명령 인코딩 자료이며 메모리 보호·NX는 System Programming 쪽 volume 소관이다. 링크는 매뉴얼 문서 포털이다.
+- AMD, ["AMD64 Architecture Programmer's Manual"](https://www.amd.com/en/support/tech-docs), Volume 3 (General Purpose and System Instructions) — tech-docs는 문서 묶음 포털이므로 인용할 때는 개별 volume/revision/절을 고정한다.
 - Linux man pages: [`mmap(2)`](https://man7.org/linux/man-pages/man2/mmap.2.html), [`mprotect(2)`](https://man7.org/linux/man-pages/man2/mprotect.2.html)
 
 ### 오픈소스 구현
-- [LuaJIT source code](https://github.com/LuaJIT/LuaJIT) (특히 `src/lj_trace.c`, `src/lj_asm_x86.h`)
-- [V8 source code](https://chromium.googlesource.com/v8/v8.git) (특히 `src/compiler/`, `src/interpreter/`)
-- [.NET Runtime](https://github.com/dotnet/runtime) (특히 `src/coreclr/jit/`)
+- [LuaJIT source code](https://github.com/LuaJIT/LuaJIT) (특히 `src/lj_trace.c`, `src/lj_asm_x86.h`) — 저장소는 구현 위치 안내이며, 이 문서가 확인한 것은 allocator/FFI 관련 일부 source·docs다.
+- [V8 source code](https://chromium.googlesource.com/v8/v8.git) (특히 `src/compiler/`, `src/interpreter/`) — Ignition operand 순서는 interpreter-generator.cc 같은 파일/commit을 특정하면 직접 근거가 된다.
+- [.NET Runtime](https://github.com/dotnet/runtime) (특히 `src/coreclr/jit/`) — 저장소 root는 JIT 구현 위치 안내이며 Tier0 복귀 규칙의 근거는 아니다.
 - [LLVM ORC JIT](https://llvm.org/docs/ORCv2.html)
-- [PyPy](https://github.com/pypy/pypy) (RPython JIT generator)
+- [PyPy](https://github.com/pypy/pypy) (RPython JIT generator) — 저장소 전체 실행·설계를 확인한 것은 아니다.
 
 ### 튜토리얼
 - Eli Bendersky, ["Adventures in JIT compilation"](https://eli.thegreenplace.net/2017/adventures-in-jit-compilation-part-1-an-interpreter/), 2017-2018 (4부작 시리즈)

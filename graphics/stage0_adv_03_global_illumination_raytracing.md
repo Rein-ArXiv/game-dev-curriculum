@@ -179,7 +179,7 @@ $$
 
 ## 8. 가속 구조: BVH
 
-광선-장면 교차를 $O(n)$에서 $O(\log n)$으로 낮추는 자료구조가 *경계 볼륨 계층(Bounding Volume Hierarchy, BVH)* 이다. 발상: 삼각형들을 *경계 상자(AABB)* 로 감싸고, 그 상자들을 더 큰 상자로 감싸 *트리* 를 만든다.
+광선-장면 교차를 모든 primitive에 대한 $O(n)$ 선형 검사에서 벗어나게 해 주는 자료구조가 *경계 볼륨 계층(Bounding Volume Hierarchy, BVH)* 이다. 발상: 삼각형들을 *경계 상자(AABB)* 로 감싸고, 그 상자들을 더 큰 상자로 감싸 *트리* 를 만든다.
 
 ```mermaid
 flowchart TB
@@ -191,7 +191,7 @@ flowchart TB
     B --> B2[삼각형 묶음]
 ```
 
-광선은 트리를 *위에서* 탐색한다 — 어떤 상자와 안 만나면 그 *하위 전체를 건너뛴다*. 광선이 왼쪽 절반 상자를 안 통과하면 거기 든 삼각형 수백만 개를 한 번에 버린다. 그래서 평균 $O(\log n)$ 검사로 교차를 찾는다. 상자-광선 교차는 삼각형보다 훨씬 싸고(슬랩 테스트), 이 계층 덕에 레이트레이싱이 현실적 비용이 된다.
+광선은 트리를 *위에서* 탐색한다 — 어떤 상자와 안 만나면 그 *하위 전체를 건너뛴다*. 광선이 왼쪽 절반 상자를 안 통과하면 거기 든 삼각형 수백만 개를 한 번에 버린다. 이때 트리의 높이 $O(\log n)$, 실제로 방문하는 노드 수, primitive 교차 시험 수는 서로 다른 값이다. 노드 bounds가 겹치거나 광선이 많은 상자와 겹치면 여러 가지를 방문해 최악에는 $O(n)$까지 갈 수 있으므로, $O(\log n)$은 일반 보장이 아니라 잘 구성된 계층에서의 평균적 경험값이다. 상자-광선 교차는 삼각형보다 훨씬 싸고(슬랩 테스트), 이 계층 덕에 레이트레이싱이 현실적 비용이 된다.
 
 현대 API·하드웨어는 BVH를 *2단* 으로 나눈다.
 
@@ -219,7 +219,7 @@ flowchart LR
 | **광선 생성(Ray Generation)** | 파이프라인 진입점. 픽셀마다 1차 광선을 쏘고(`TraceRay`) 결과를 모아 이미지에 쓴다 — 컴퓨트 디스패치와 닮았다. |
 | **최근접 히트(Closest-Hit)** | 광선이 맞은 *가장 가까운* 표면에서 셰이딩. 여기서 *재귀로 또 TraceRay*(반사·그림자·GI). |
 | **미스(Miss)** | 아무것도 안 맞았을 때. 보통 하늘/환경 맵(IBL) 반환. |
-| **any-hit** | 경로상의 *모든* 교차에서 호출(정렬 전). 알파 컷아웃 투명에 쓴다. |
+| **any-hit** | 후보 교차에 대해 호출되어 통과 여부를 판정(정렬 전). 알파 컷아웃 투명에 쓴다. opaque 플래그·컬링·이미 얻은 hit의 $t$ 범위·종료 정책에 따라 호출이 생략될 수 있고, API별 중복 호출 보장도 확인해야 한다. |
 | **교차(Intersection)** | 삼각형이 아닌 커스텀 프리미티브(구·복셀) 교차 판정. 기본은 고정 함수 삼각형. |
 
 이 구조의 핵심은 *셰이더 바인딩 테이블(SBT)* 로 "어느 물체에 맞으면 어느 히트 셰이더를 부를지"를 연결한다는 것이다 — 물체마다 다른 머티리얼(고급 머티리얼 모델)을 광선이 맞는 즉시 적용한다. 래스터의 "삼각형 → 프래그먼트 셰이더"가 여기선 "광선 히트 → 최근접 히트 셰이더"로 대응되는 셈이다.
@@ -278,7 +278,7 @@ flowchart LR
 ## 더 읽을거리
 
 - James T. Kajiya, "The Rendering Equation" (SIGGRAPH 1986) — 모든 GI 기법의 출발점.
-- Matt Pharr 외, [*Physically Based Rendering*](https://www.pbr-book.org/), Ch.13-14 — 몬테카를로 적분과 패스 트레이싱의 표준 교과서.
+- Matt Pharr, Wenzel Jakob, Greg Humphreys, [*Physically Based Rendering*, 4th Edition](https://www.pbr-book.org/4ed/contents), Ch.2·Ch.13 — 몬테카를로 적분과 표면 광 전달(패스 트레이싱)의 표준 교과서. 볼륨 광 전달을 다룰 때만 Ch.14를 연결한다.
 - [Lumen 기술 문서](https://dev.epicgames.com/documentation/en-us/unreal-engine/lumen-global-illumination-and-reflections-in-unreal-engine) — 거리장+화면 공간+RT 혼합 실시간 GI 의 실물.
 - Cyril Crassin 외, "Interactive Indirect Illumination Using Voxel Cone Tracing" (2011) — 복셀 기반 GI 의 대표 논문.
 - Peter Shirley, [*Ray Tracing in One Weekend* 시리즈](https://raytracing.github.io/) — 레이트레이서를 처음부터 구현하는 무료 표준 입문서.

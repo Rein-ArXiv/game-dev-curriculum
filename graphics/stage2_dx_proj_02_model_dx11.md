@@ -127,6 +127,12 @@ void ExtractMesh(const aiMesh* m,
                   std::vector<Vertex>& vertices,
                   std::vector<uint32_t>& indices)
 {
+    // 필수 계약: 삼각형 면과 법선을 가진 메시만 받는다.
+    // aiProcess_Triangulate 는 점·선 프리미티브를 삼각형으로 바꾸지 않는다.
+    if (m == nullptr || !m->HasPositions() || !m->HasNormals()) {
+        return;   // 프로젝트 정책: 해당 메시 제외. 상위에서 실패로 보고해도 된다.
+    }
+
     vertices.reserve(m->mNumVertices);
     for (unsigned i = 0; i < m->mNumVertices; ++i) {
         Vertex v;
@@ -161,6 +167,11 @@ void ExtractMesh(const aiMesh* m,
     indices.reserve(m->mNumFaces * 3);
     for (unsigned f = 0; f < m->mNumFaces; ++f) {
         const aiFace& face = m->mFaces[f];
+        if (face.mNumIndices != 3) continue;              // 점·선 프리미티브 제외
+        if (face.mIndices == nullptr) return;
+        for (unsigned j = 0; j < 3; ++j) {
+            if (face.mIndices[j] >= m->mNumVertices) return;   // 인덱스 범위 검증
+        }
         indices.push_back(face.mIndices[0]);
         indices.push_back(face.mIndices[1]);
         indices.push_back(face.mIndices[2]);
@@ -170,7 +181,7 @@ void ExtractMesh(const aiMesh* m,
 
 UV를 읽을 때 `m->mTextureCoords[0]`가 null인지 먼저 검사한다. Assimp는 메시당 최대 8세트의 UV를 지원하고, UV가 없는 메시는 0번 포인터가 null이다. 검사 없이 역참조하면 크래시한다. UV가 없으면 0으로 채워 두고, 텍스처 슬롯에는 뒤에서 다룰 기본 텍스처를 묶어 흰색으로 처리한다.
 
-`aiProcess_Triangulate`를 켰으므로 모든 `aiFace`의 `mNumIndices`는 3이다. 그래도 방어적으로 작성한다면 `if (face.mNumIndices != 3) continue;`를 한 줄 넣어 점·선 프리미티브가 섞여 들어온 경우를 걸러낸다. Assimp는 선분이나 점도 면으로 표현하므로, 삼각형만 그리는 파이프라인에서는 이 검사가 안전하다.
+`aiProcess_Triangulate`는 삼각형으로 만들 수 있는 면만 삼각분할하며, 점·선 프리미티브는 그대로 남긴다. 따라서 모든 `aiFace`가 3개의 인덱스를 가진다는 보장은 없고, 점·선 전용 메시에는 법선이 없을 수도 있다. 위 코드처럼 `mNumIndices != 3`인 면을 건너뛰고(`continue`) 인덱스 범위를 검증하는 것을 선택이 아닌 필수 계약으로 둔다. `HasNormals()`가 거짓인 메시는 정책에 따라 제외하거나 법선을 생성한 뒤 재시도한다. `aiProcess_SortByPType`로 프리미티브 종류를 분리해 점·선을 제거하는 방법도 있으나, 그 옵션을 실제로 설정한 경우에만 해당한다.
 
 ### Vertex Buffer / Index Buffer 생성
 
@@ -389,7 +400,7 @@ DDS(DirectDraw Surface)는 BC1·BC3·BC5·BC7 같은 블록 압축(Block Compres
 
 압축 텍스처가 단지 디스크 용량만 줄이는 것이 아니라는 점이 핵심이다. GPU가 텍스처를 샘플링할 때 읽는 메모리 대역폭도 그대로 줄어든다. 2048×2048 디퓨즈 텍스처는 RGBA8로 16MB지만 BC7로는 4MB다. 대역폭이 4분의 1이면 텍스처 페치가 메모리 대기에 막히는 시간이 줄어, 텍스처가 많은 장면에서 실제 프레임 시간이 짧아진다.
 
-노멀 맵에 BC5를 쓰는 데도 이유가 있다. 노멀 벡터는 단위 벡터라 Z를 `z = sqrt(1 - x² - y²)`로 재구성할 수 있다. 그래서 XY 두 채널만 저장하면 되고, BC5는 두 채널을 각각 8비트 정밀도로 압축한다. RGB 세 채널을 통째로 압축하는 BC1을 노멀에 쓰면 색 좌표를 함께 양자화해 법선이 거칠어진다. 채널을 분리해 압축하는 BC5가 노멀에 적합하다.
+노멀 맵에 BC5를 쓰는 데도 이유가 있다. 접선 공간 노멀을 +z 반구로 한정하면 Z를 `z = sqrt(max(0, 1 - x² - y²))`로 복원한 뒤 다시 정규화할 수 있다. `max(0, ...)`가 필요한 이유는 BC5의 양자화 오차와 필터링으로 `x² + y²`가 1을 살짝 넘을 수 있기 때문이다. 또한 XY만으로는 Z의 부호를 복원할 수 없으므로, 노멀이 +z 반구에 있다는 계약이 전제된다. 그래서 XY 두 채널만 저장하면 되고, BC5는 두 채널을 각각 8비트 정밀도로 압축한다. RGB 세 채널을 통째로 압축하는 BC1을 노멀에 쓰면 색 좌표를 함께 양자화해 법선이 거칠어진다. 채널을 분리해 압축하는 BC5가 노멀에 적합하다.
 
 ### DirectXTK의 DDS 로더
 
@@ -419,13 +430,16 @@ HRESULT hr = DirectX::CreateWICTextureFromFileEx(
     D3D11_USAGE_DEFAULT,
     D3D11_BIND_SHADER_RESOURCE,
     0, 0,
-    DirectX::WIC_LOADER_FORCE_SRGB |            // 강제 sRGB 해석
-    DirectX::WIC_LOADER_MIP_AUTOGEN,            // 런타임 밉 생성
+    DirectX::WIC_LOADER_FORCE_SRGB,             // 강제 sRGB 해석
     texture.GetAddressOf(),
     srv.GetAddressOf());
+if (FAILED(hr)) {
+    // 오류 전파 또는 명시적 fallback. 생성되지 않은 srv 를 계속 쓰지 않는다.
+    return false;
+}
 ```
 
-`device`만 넘기는 단순 버전 대신 `context`까지 넘기는 `Ex` 버전을 쓴 이유는 밉맵 자동 생성 때문이다. `WIC_LOADER_MIP_AUTOGEN`은 GPU의 `GenerateMips`를 호출해 런타임에 밉 체인을 만드는데, 이 호출은 디바이스 컨텍스트를 필요로 한다. DDS와 달리 PNG/JPG에는 밉이 들어 있지 않으므로, 밉을 쓰려면 런타임에 생성하거나 콘텐츠 파이프라인에서 미리 DDS로 구워야 한다. 밉 없는 텍스처를 멀리서 보면 픽셀이 지글거리는 앨리어싱이 생긴다.
+`device`만 넘기는 단순 버전 대신 `context`까지 넘기는 `Ex` 버전을 쓴 이유는 자동 밉 생성 때문이다. 공식 DirectXTK의 자동 밉은 별도 enum 플래그가 아니라 디바이스 컨텍스트를 받는 overload가 제공하는 기능이며, 실제 생성 가능 여부는 장치 기능과 자원 format·usage/bind 조합에 따라 달라진다. 그래서 `CreateWICTextureFromFileEx`의 HRESULT를 확인하고, 실패하면 오류를 전파하거나 명시적으로 처리하며 생성되지 않은 `srv`를 이후 코드에서 사용하지 않는다. 밉 생성이 지원되지 않는 입력이라면 콘텐츠 파이프라인에서 미리 DDS로 굽는 편이 안전하다. DDS와 달리 PNG/JPG에는 밉이 들어 있지 않으므로, 밉을 쓰려면 런타임에 생성하거나 미리 DDS로 구워야 한다. 밉 없는 텍스처를 멀리서 보면 픽셀이 지글거리는 앨리어싱이 생긴다.
 
 색 공간 플래그는 슬롯 규약과 짝지어 쓴다. 디퓨즈·이미시브에는 `WIC_LOADER_FORCE_SRGB`, 노멀·AO·스페큘러에는 `WIC_LOADER_IGNORE_SRGB`(선형 강제)를 준다. PNG 헤더의 색 공간 메타데이터를 신뢰하지 않고 명시적으로 강제하는 편이 안전하다. 메타데이터가 빠진 PNG도 흔하기 때문이다.
 
@@ -595,7 +609,7 @@ box->Draw(world, view, proj, Colors::CornflowerBlue);
 sphere->Draw(world2, view, proj, Colors::Red, texture.Get(), false);
 ```
 
-`Draw`는 내부적으로 정점·인덱스 버퍼를 만들고 BasicEffect로 그린다. 디버그 시각화나 학습용 데모에서 외부 모델을 불러오지 않고 형태를 띄울 때 편하다. 충돌체 시각화, 광원 위치 표시, 본 디버그 그리기에 자주 쓴다. 프로덕션 메시는 이 절의 앞에서 만든 직접 정점 버퍼 관리를 쓴다. `GeometricPrimitive`는 매 `Draw`마다 상태를 다시 설정하므로 대량 렌더링에는 부적합하다.
+`Draw`는 `Initialize`에서 만들어 둔 정점·인덱스 버퍼를 묶어 BasicEffect로 그린다. 버퍼 생성은 객체 생성 시점에 한 번 일어나며 `Draw` 호출마다 새로 만들지 않는다. 디버그 시각화나 학습용 데모에서 외부 모델을 불러오지 않고 형태를 띄울 때 편하다. 충돌체 시각화, 광원 위치 표시, 본 디버그 그리기에 자주 쓴다. 프로덕션 메시는 이 절의 앞에서 만든 직접 정점 버퍼 관리를 쓴다. `GeometricPrimitive`는 매 `Draw`마다 상태를 다시 설정하므로 대량 렌더링에는 부적합하다. 다만 프레임마다 `GeometricPrimitive` 객체 자체를 새로 만드는 호출자라면 버퍼 생성 비용이 발생하므로, 최적화 여부는 `Draw`의 고유 동작이 아니라 실제 호출 위치를 보고 판단한다.
 
 ### BasicEffect — 셰이더 보일러플레이트 제거
 

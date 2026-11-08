@@ -150,7 +150,7 @@ __m128 a = _mm_load_ps(ptr);       // ptr은 반드시 16바이트 정렬
 _mm_store_ps(ptr, a);
 
 // 정렬되지 않은 로드/저장
-__m128 b = _mm_loadu_ps(ptr);      // 어떤 주소든 가능
+__m128 b = _mm_loadu_ps(ptr);      // 정렬 요구는 없지만 유효한 범위여야 함
 _mm_storeu_ps(ptr, b);
 ```
 
@@ -185,6 +185,8 @@ cl /O2 /arch:AVX2 /Qvec-report:2
 
 이 플래그들은 컴파일러가 무엇을 벡터화했고, 무엇을 실패했는지 알려준다.
 
+`-march=native`로 빌드한 바이너리는 빌드 머신의 ISA를 전제하므로 다른 CPU에서는 illegal instruction이 발생할 수 있다. AVX 이상을 배포 기본값으로 쓰려면 런타임에 `CPUID`로 AVX·FMA·AVX2 비트를, 그리고 `OSXSAVE`와 `XGETBV`로 OS가 XMM/YMM 상태를 저장하는지 확인하고, ISA별 compilation unit이나 target attribute로 분기해 미지원 시 scalar fallback을 실행한다.
+
 ### 벡터화 가능한 루프
 
 ```c
@@ -196,7 +198,7 @@ void add_arrays(float* a, float* b, float* c, int n) {
 }
 ```
 
-컴파일러는 이를 대략 이렇게 변환한다.
+컴파일러는 출력 `c`가 입력 `a`, `b`와 겹치지 않음을 런타임에 확인한 경우에만 이를 대략 이렇게 변환하며, 겹치면 scalar 경로를 유지한다.
 
 ```c
 int i = 0;
@@ -228,10 +230,10 @@ for (int i = 1; i < n; i++) {
 일부 reduction은 벡터화 가능하다.
 
 ```c
-// 벡터화 가능: associative & commutative
+// 벡터화 가능: 부동소수점 덧셈은 교환법칙만 성립
 float sum = 0.0f;
 for (int i = 0; i < n; i++) {
-    sum += a[i];  // 순서를 바꿔도 됨 (부동소수점 정밀도 제외)
+    sum += a[i];  // 재결합은 -ffast-math 같은 허용이 있어야 컴파일러가 한다
 }
 ```
 
@@ -239,11 +241,15 @@ for (int i = 0; i < n; i++) {
 
 ```c
 __m256 vsum = _mm256_setzero_ps();  // 8개의 부분 합
-for (int i = 0; i < n; i += 8) {
+for (int i = 0; i + 8 <= n; i += 8) {
     vsum = _mm256_add_ps(vsum, _mm256_loadu_ps(&a[i]));
 }
 // vsum의 8개 원소를 모두 더함
 float sum = horizontal_sum(vsum);
+// 남은 원소는 scalar로 처리 (lane 폭의 배수가 아닌 n)
+for (int i = n - n % 8; i < n; ++i) {
+    sum += a[i];
+}
 ```
 
 ### 포인터 앨리어싱 (Pointer Aliasing)
@@ -315,13 +321,17 @@ for (int i = 0; i < n; i++) {
 AVX-512의 마스크 연산이 없다면, 컴파일러는 두 경로를 모두 계산하고 선택(blending)한다.
 
 ```c
-for (int i = 0; i < n; i += 8) {
+for (int i = 0; i + 8 <= n; i += 8) {
     __m256 va = _mm256_loadu_ps(&a[i]);
     __m256 mask = _mm256_cmp_ps(va, vthreshold, _CMP_GT_OQ);
     __m256 v1 = _mm256_mul_ps(va, _mm256_set1_ps(2.0f));
     __m256 v2 = _mm256_mul_ps(va, _mm256_set1_ps(0.5f));
     __m256 vc = _mm256_blendv_ps(v2, v1, mask);
     _mm256_storeu_ps(&c[i], vc);
+}
+// 남은 원소는 scalar 분기로 처리
+for (int i = n - n % 8; i < n; ++i) {
+    c[i] = (a[i] > threshold) ? a[i] * 2.0f : a[i] * 0.5f;
 }
 ```
 
@@ -332,7 +342,7 @@ for (int i = 0; i < n; i += 8) {
 ```c
 // 벡터화 어려움: stride 접근
 for (int i = 0; i < n; i++) {
-    c[i] = a[i*2] + b[i*3];  // 불규칙한 간격
+    c[i] = a[i*2] + b[i*3];  // 서로 다른 고정 stride
 }
 ```
 
@@ -342,7 +352,7 @@ for (int i = 0; i < n; i++) {
 
 앞 절의 장벽들은 대부분 컴파일러가 루프의 **의미**를 확신하지 못해 생겼다. 마지막에 본 불규칙한 stride 접근은 성격이 다르다. 의미가 명확해도 **레지스터를 채우는 데 드는 명령 수**가 이득을 먹어 버리는 경우다.
 
-벡터 레지스터 하나를 채우는 방법은 세 가지뿐이다. 연속된 메모리에서 한 번에 읽거나, 흩어진 주소에서 lane별로 모으거나, 이미 읽어 둔 레지스터들을 섞어 재배치하거나. 어느 쪽이 되는지는 필드가 메모리에 어떤 간격으로 놓여 있는지가 정한다. 구조체 배열에서 한 필드만 뽑으면 그 필드는 `sizeof(struct)` 간격으로 떨어져 있고, 필드별로 배열을 나눠 두면 4바이트 간격으로 붙어 있다.
+벡터 레지스터 하나를 채우는 방법은 세 가지가 있다. 연속된 메모리에서 한 번에 읽거나, 흩어진 주소에서 lane별로 모으거나, 이미 읽어 둔 레지스터들을 섞어 재배치하거나. 어느 쪽이 되는지는 필드가 메모리에 어떤 간격으로 놓여 있는지가 정한다. 구조체 배열에서 한 필드만 뽑으면 그 필드는 `sizeof(struct)` 간격으로 떨어져 있고, 필드별로 배열을 나눠 두면 4바이트 간격으로 붙어 있다.
 
 ### 세 가지 적재 경로의 명령 수
 
@@ -355,7 +365,7 @@ for (int i = 0; i < n; i++) {
 | scalar 조립 | scalar load 8개 + 삽입 연산 | `_mm256_set_ps`가 생성하는 형태 |
 | 전치 | load 4개 + shuffle·unpack 8개 | 4×4 블록을 한 번에 뒤집는다 |
 
-`_mm256_set_ps`는 gather 명령이 아니다. 8개의 스칼라 load와 그것을 레지스터에 끼워 넣는 연산으로 펼쳐진다.
+`_mm256_set_ps`는 gather 명령이 아니다. 보통은 8개의 스칼라 load와 그것을 레지스터에 끼워 넣는 연산으로 펼쳐지지만, 컴파일러가 연속 패턴을 인식하면 벡터 load나 shuffle로 바꾸기도 한다. 생성 코드는 대상 컴파일러·플래그에서 확인한다.
 
 ```c
 // 이 한 줄은 명령 하나가 아니다
@@ -395,7 +405,7 @@ _MM_TRANSPOSE4_PS(r0, r1, r2, r3);   // r0 = x0 x1 x2 x3
 두 배치의 절충으로 작은 고정 크기 블록 안에서만 필드를 나누는 형태가 있다.
 
 ```cpp
-struct Particle8 {
+struct alignas(32) Particle8 {
     float x[8], y[8], z[8];
     float vx[8], vy[8], vz[8];
 };
@@ -403,7 +413,7 @@ struct Particle8 {
 Particle8 blocks[125];   // 125 * 8 = 1000
 ```
 
-벡터화 관점에서 이 형태의 핵심은 블록 크기가 임의의 값이 아니라는 데 있다. **블록 폭은 벡터 lane 수의 배수여야 한다.** 8이면 AVX의 `__m256`이 블록 하나의 필드 배열을 정확히 한 번에 소비하고, 남는 원소가 없다. 블록 폭을 6이나 10으로 잡으면 블록마다 tail이 생겨 스칼라 처리가 블록 수만큼 반복된다.
+벡터화 관점에서 블록 폭은 ISA lane 수의 배수로 잡는 것이 유리하다. 8이면 AVX의 `__m256`이 블록 하나의 필드 배열을 정확히 한 번에 소비하고, 남는 원소가 없다. 블록 폭을 6이나 10으로 잡으면 블록마다 tail이 생겨 스칼라 처리가 블록 수만큼 반복된다. 다만 lane 배수는 tail을 줄이는 튜닝 선택일 뿐 AoSoA의 올바름 조건은 아니며, 더 큰 고정 블록을 여러 ISA로 나누어 처리하거나 predication을 쓰면 ISA가 바뀌어도 레이아웃을 그대로 둘 수 있다.
 
 블록 시작 주소를 정렬하면 블록 안의 각 필드 배열도 정렬된 주소에서 시작한다. 32바이트 정렬된 블록에서 `x[0]`의 주소는 블록 시작과 같고, `y[0]`은 32바이트 뒤이므로 역시 정렬되어 있다. AVX-512로 폭을 넓히려면 블록 폭을 16으로, 정렬을 64바이트로 올린다. 즉 이 배치는 **대상 ISA의 lane 수를 자료구조에 박아 넣는** 선택이며, 그 값이 바뀌면 레이아웃도 함께 바꿔야 한다는 유지 비용을 동반한다.
 
@@ -436,7 +446,7 @@ float dot_auto(const float* restrict a, const float* restrict b, int n) {
 // 컴파일: gcc -O3 -march=native -ffast-math
 ```
 
-`restrict`와 `-ffast-math`(부동소수점 재결합 허용)가 핵심이다.
+여기서 핵심은 `-ffast-math`(부동소수점 재결합 허용)다. 두 입력을 읽기만 하는 내적에서는 `restrict`가 loop-carried store dependency를 없애주지 않으며, `restrict`가 결정적인 예는 출력이 입력과 겹칠 수 있는 map 루프다.
 
 ### 버전 3: 명시적 인트린직 (AVX2)
 
@@ -445,7 +455,7 @@ float dot_avx2(const float* a, const float* b, int n) {
     __m256 vsum = _mm256_setzero_ps();  // 8개의 부분 합
 
     int i = 0;
-    for (; i + 8 <= n; i += 8) {
+    for (; n - i >= 8; i += 8) {  // i + 8은 큰 n에서 넘칠 수 있어 n - i로 비교
         __m256 va = _mm256_loadu_ps(&a[i]);
         __m256 vb = _mm256_loadu_ps(&b[i]);
         vsum = _mm256_fmadd_ps(va, vb, vsum);  // vsum += va * vb
@@ -479,7 +489,7 @@ float dot_avx2_unroll(const float* a, const float* b, int n) {
     __m256 vsum3 = _mm256_setzero_ps();
 
     int i = 0;
-    for (; i + 32 <= n; i += 32) {
+    for (; n - i >= 32; i += 32) {  // i + 32 overflow 방지를 위해 n - i로 비교
         __m256 va0 = _mm256_loadu_ps(&a[i]);
         __m256 vb0 = _mm256_loadu_ps(&b[i]);
         vsum0 = _mm256_fmadd_ps(va0, vb0, vsum0);

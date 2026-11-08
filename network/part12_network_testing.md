@@ -84,18 +84,25 @@ void SimulatedLink::Send(Packet p) {
 실제 OS 레벨 도구도 필요하다. 내부 simulator는 게임 패킷 경로만 테스트하지만, OS buffer, NIC, routing, firewall 조건은 반영하지 못한다.
 
 ```bash
+# 실험 1: 순수 netem — 독립 실행(별도 interface 또는 정리 후 시작)
+tc qdisc del dev eth0 root 2>/dev/null || true
 # Linux tc-netem: eth0 송신에 지연 80ms(지터 20ms, 상관 25%), 손실 1%, 재정렬 0.5% 주입
 tc qdisc add dev eth0 root netem delay 80ms 20ms 25% loss 1% reorder 0.5%
+tc qdisc del dev eth0 root
 
-# 대역폭 병목 재현: 1Mbps 토큰 버킷 + netem을 계층으로
+# 실험 2: 대역폭 병목 재현 — 실험 1과 별개로 실행한다.
+# TBF 아래에 netem을 붙이면 inner qdisc가 교체되어 TBF의 limit/latency가
+# 더 이상 최종 queue 한도가 아니므로 netem 자체 limit을 명시하고
+# 실제 queueing 시간을 측정한다.
+tc qdisc del dev eth0 root 2>/dev/null || true
 tc qdisc add dev eth0 root handle 1: tbf rate 1mbit burst 32768 latency 400ms
-tc qdisc add dev eth0 parent 1:1 handle 10: netem delay 50ms 10ms loss 0.5%
+tc qdisc add dev eth0 parent 1:1 handle 10: netem limit 1000 delay 50ms 10ms loss 0.5%
 
 # 정리
 tc qdisc del dev eth0 root
 ```
 
-TBF의 `burst`는 바이트 크기이므로 위의 `32768`은 32KiB 버킷이다. `32kbit`라고 쓰면 32킬로비트, 즉 약 4KiB로 해석되어 의도와 달라질 수 있다. `parent 1:1`은 TBF가 자식 qdisc를 붙이도록 제공하는 내부 클래스에 netem을 연결한다. 버킷·큐 크기와 `latency`는 테스트하려는 링크의 대역폭-지연 곱과 허용 큐잉 시간을 기준으로 정하며, 예시 숫자를 제품 프로파일로 그대로 사용하지 않는다.
+TBF의 `burst`는 바이트 크기이므로 위의 `32768`은 32KiB 버킷이다. `32kbit`라고 쓰면 32킬로비트, 즉 약 4KiB로 해석되어 의도와 달라질 수 있다. `parent 1:1`은 TBF가 자식 qdisc를 붙이도록 제공하는 내부 클래스에 netem을 연결한다. 다만 TBF 아래에 netem을 붙이면 inner qdisc가 교체되어 TBF의 `limit`/`latency`가 최종 큐 한도가 아니므로, netem의 `limit`을 별도로 정하고 실제 큐잉 시간을 측정한다. 버킷·큐 크기와 `latency`는 테스트하려는 링크의 대역폭-지연 곱과 허용 큐잉 시간을 기준으로 정하며, 예시 숫자를 제품 프로파일로 그대로 사용하지 않는다.
 
 Windows에서는 [clumsy](https://jagt.github.io/clumsy/)(WinDivert 기반 GUI)가 같은 역할을 한다 — lag/drop/throttle/duplicate/out-of-order를 실행 중에 토글할 수 있어 수동 탐색에 좋다. 콘솔 플랫폼은 각 플랫폼 SDK의 네트워크 에뮬레이션 기능을 쓴다.
 
@@ -146,9 +153,9 @@ uint64_t HashWorldState(const World& world) {
 }
 ```
 
-Tick마다 state hash를 남기면 어느 tick부터 결과가 갈라졌는지 찾을 수 있다. hash 대상은 안정적인 순서와 명시된 byte order로 직렬화해야 한다. `unordered_map` 순회를 그대로 사용하면 구현·rehash 상태에 따라 순서가 달라진다. 엄격한 결정론 검사에서 `Quantize`를 사용하면 작은 divergence를 숨기므로 canonical bit representation이나 simulation이 정의한 exact fixed-point 값을 hash한다. 허용 오차 기반 비교가 필요하면 exact hash와 별도의 diagnostic metric으로 둔다.
+Tick마다 state hash를 남기면 어느 tick부터 결과가 갈라졌는지 찾을 수 있다. hash 대상은 안정적인 순서와 명시된 byte order로 직렬화해야 한다. 같은 tick 번호라도 한쪽이 예측 입력을, 다른 쪽이 확정 입력을 사용했다면 비교가 성립하지 않으므로 양쪽이 확인한 confirmed input frontier 위에서 비교하고, object memory dump와 canonical serialization을 혼동하지 않도록 padding·container 순서·RNG 상태까지 schema로 고정한다. `unordered_map` 순회를 그대로 사용하면 구현·rehash 상태에 따라 순서가 달라진다. 엄격한 결정론 검사에서 `Quantize`를 사용하면 작은 divergence를 숨기므로 canonical bit representation이나 simulation이 정의한 exact fixed-point 값을 hash한다. 허용 오차 기반 비교가 필요하면 exact hash와 별도의 diagnostic metric으로 둔다.
 
-갈라진 tick을 찾은 다음은 *무엇이* 갈라졌는지다 — 전체 해시 하나로는 모자라므로, 시스템별 부분 해시(이동/전투/물리/AI 각각)를 계층으로 남기면 이분 탐색이 두 단계(어느 tick → 어느 시스템)로 줄어든다. 더 정밀하게는 갈라진 tick의 두 실행에서 엔티티별 상태를 직접 diff하는 도구까지 — 결정론 디버깅은 도구 투자에 정직하게 비례한다.
+갈라진 tick을 찾은 다음은 *무엇이* 갈라졌는지다 — 전체 해시 하나로는 모자라므로, 시스템별 부분 해시(이동/전투/물리/AI 각각)를 계층으로 남기면 어느 tick의 어느 시스템이 갈라졌는지로 범위를 좁힌다. 단 tick 해시의 일치 여부는 단조 술어가 아니라 `같음→다름→같음`이 가능하므로, 최초 불일치는 이분 탐색이 아니라 처음부터의 선형 비교(또는 prefix digest)로 찾는다. 더 정밀하게는 갈라진 tick의 두 실행에서 엔티티별 상태를 직접 diff하는 도구까지 — 결정론 디버깅은 도구 투자에 정직하게 비례한다.
 
 Floating point, random, 멀티스레드 작업 순서, 시간 API 사용은 재현성을 깨는 흔한 원인이다. 네트워크 테스트는 이 원인을 빨리 드러내야 한다. 흔한 범인 목록: 시뮬레이션 안의 `Now` 호출(시간은 틱에서 유도해야 한다), 전역 난수기를 시뮬레이션 밖(이펙트·UI)과 공유(스트림 분리 필요), 병렬 for의 합산 순서(부동소수점 덧셈은 비결합), 그리고 플랫폼별 수학 라이브러리 차이. CI에 "같은 입력 2회 실행 해시 일치" 테스트를 두면 결정론 회귀가 커밋 단위로 잡힌다.
 

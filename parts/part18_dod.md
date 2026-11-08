@@ -54,6 +54,7 @@ class Entity {
     Material* material;  // 또 다른 포인터 체이싱
     std::string name;    // 힙 할당
 
+public:
     virtual void update(float dt) {  // 가상 함수 오버헤드
         position += velocity * dt;
     }
@@ -219,7 +220,7 @@ Cache Line (64 bytes):
 | 캐시 라인 로드 | 약 3,750개 | 약 625개 |
 | 메모리 대역폭 효율 | 약 17% | 100% |
 
-SoA가 6배 적은 캐시 라인을 로드한다.
+SoA가 6배 적은 캐시 라인을 로드한다. 이 수치는 cache residency·시작 정렬·순회 tail·store traffic을 생략한 단일 cold read-only scan의 이상적 접근량 모델이며, 실제 시간 개선 비율은 별도로 측정한다.
 
 ### 레이아웃이 벡터 적재 방식을 정한다
 
@@ -238,7 +239,7 @@ __m256 xs2 = _mm256_loadu_ps(&particles.x[i]);
 
 두 줄의 겉모습은 비슷하지만 아래쪽만 명령 하나로 끝난다. 위쪽은 흩어진 주소에서 값을 하나씩 모아 레지스터에 끼워 넣는 작업으로 펼쳐진다. 여기서 확인할 것은 인트린직의 세부가 아니라 **같은 배치 결정이 두 계층에서 같은 방향으로 작용한다**는 사실이다. 캐시 라인을 낭비 없이 채우는 배치가 벡터 레지스터도 낭비 없이 채운다.
 
-반대 방향의 사실도 같이 알아 두어야 한다. 루프가 구조체의 모든 필드를 읽는다면 어차피 모든 바이트를 가져와야 하므로 필드별 배열의 이점이 사라진다. 레이아웃은 데이터 자체의 속성이 아니라 **그 데이터를 읽는 루프의 속성**에 따라 정해진다.
+반대 방향의 사실도 같이 알아 두어야 한다. 루프가 구조체의 모든 필드를 읽는다면 어차피 모든 바이트를 가져와야 하므로 필드별 배열의 cache-line 이점은 사라진다. 레이아웃은 데이터 자체의 속성이 아니라 **그 데이터를 읽는 루프의 속성**에 따라 정해진다.
 
 ### 하이브리드: AoSoA
 
@@ -285,11 +286,13 @@ class Entity {
 };
 ```
 
-Entity 크기는 약 256 bytes다. 하지만 update에서는 28 bytes만 필요하다. 낭비율이 89%다. 매 프레임 10,000개 엔티티를 순회하면:
+Entity 크기는 약 256 bytes지만 update는 position과 velocity 24 bytes만 읽는다. 각 원소의 접근 바이트가 한 cache line에 들어간다면, 매 프레임 10,000개 엔티티를 순회할 때 demand-load되는 양은 원소당 cache line 하나 규모다:
 
-- 필요한 데이터: 280 KB
-- 실제 로드: 2.5 MB
-- 캐시를 오염시키는 쓸모없는 데이터: 2.22 MB
+- 필요한 데이터: 240 KB
+- 실제 로드: 약 640 KB (원소당 64-byte line 하나, ABI·정렬에 따라 달라짐)
+- 그중 쓰이지 않는 데이터: 약 400 KB
+
+전체 객체 footprint 2.5 MB는 한 번에 모두 로드되는 양이 아니며, hardware prefetch와 writeback traffic은 별도로 측정한다.
 
 **최적화된 설계:**
 
@@ -452,6 +455,8 @@ struct HealthComponent {
 
 **시스템은 데이터 변환 로직:**
 
+아래 배열들은 같은 엔티티 집합을 같은 순서로 담고 길이가 같다는 전제에서만 인덱스가 대응한다. 생성·삽입·삭제는 이 불변식을 깨뜨리지 않도록 한 owner가 원자적으로 처리해야 한다.
+
 ```cpp
 class PhysicsSystem {
     std::vector<TransformComponent> transforms;
@@ -513,6 +518,14 @@ class ParticleSystem {
     size_t aliveCount = 0;
 
 public:
+    explicit ParticleSystem(size_t capacity) {
+        positions.resize(capacity);
+        velocities.resize(capacity);
+        colors.resize(capacity);
+        lifetimes.resize(capacity);
+        sizes.resize(capacity);
+    }
+
     void update(float dt) {
         size_t i = 0;
         while (i < aliveCount) {
@@ -565,6 +578,8 @@ private:
 ### SIMD 최적화
 
 SoA 덕분에 SIMD 최적화가 간단하다. 단, `std::vector<vec3>`는 성분이 12바이트 간격으로 인터리브되어 있어 `&velocities[i].y`에서 연속 8개를 로드할 수 없다. SIMD를 적용하려면 성분별로 분리된 float 배열(full SoA)이 필요하다.
+
+아래 커널은 적분 부분만 발췌한 것으로, 만료 파티클 제거·색상 갱신과 스칼라 tail 본문은 생략했다.
 
 ```cpp
 // SIMD를 위해 성분별 분리 배열로 전환
@@ -687,6 +702,8 @@ public:
     }
 };
 ```
+
+이 적분은 `ω × (Iω)` 자이로스코프 항을 생략한 단순화이며, 여기서는 배열 접근 시연이 목적이다. 실제 강체에서는 inertia의 body/world 좌표계, orientation 곱 순서, 정적 물체의 inverse mass·inertia(0) 처리와 timestep 전제를 명시해야 한다.
 
 SoA 덕분에 선형 운동과 각운동을 별도 루프로 분리할 수 있고, 각 루프 내에서 캐시 효율이 극대화되며, SIMD 벡터화도 용이하다.
 
@@ -868,16 +885,16 @@ DOD의 효과를 검증하려면 측정이 필수다.
 ```cpp
 class ScopedTimer {
     const char* name;
-    high_resolution_clock::time_point start;
+    steady_clock::time_point start;
 
 public:
     ScopedTimer(const char* n) : name(n),
-        start(high_resolution_clock::now()) {}
+        start(steady_clock::now()) {}
 
     ~ScopedTimer() {
-        auto end = high_resolution_clock::now();
+        auto end = steady_clock::now();
         auto duration = duration_cast<microseconds>(end - start);
-        printf("%s: %lld us\n", name, duration.count());
+        printf("%s: %lld us\n", name, static_cast<long long>(duration.count()));
     }
 };
 
@@ -948,7 +965,7 @@ vtune -collect memory-access ./program
 
 Data-Oriented Design은 현대 하드웨어의 특성을 최대한 활용하여 성능을 극대화하는 프로그래밍 패러다임이다. OOP의 추상화와 개념 모델링 대신, 실제 데이터의 변환과 하드웨어 특성에 집중한다.
 
-핵심은 다섯 가지로 요약된다. 코드가 아닌 데이터가 설계를 주도한다. 캐시·메모리 대역폭·SIMD를 활용한다. 대부분의 경우 SoA가 유리하다. Hot/Cold 분리로 캐시 효율을 극대화한다. 존재하지 않는 문제를 풀지 말고, 측정하고 최적화한다.
+핵심은 다섯 가지로 요약된다. 코드가 아닌 데이터가 설계를 주도한다. 캐시·메모리 대역폭·SIMD를 활용한다. 한두 필드만 순회하는 루프에서는 SoA가 유리하다. Hot/Cold 분리로 캐시 효율을 극대화한다. 존재하지 않는 문제를 풀지 말고, 측정하고 최적화한다.
 
 DOD는 도구다. 프로파일링으로 병목을 찾고, 실제 데이터를 분석하고, 측정 가능한 목표를 세운다. 복잡도와 성능 사이의 균형을 찾는 것이 진정한 엔지니어링이다.
 

@@ -1,5 +1,7 @@
 #include "ui/hud.h"
 
+#include "platform.h"
+#include "sim/kernel_dispatch.h"
 #include "ui/hud_layout.h"
 
 #include "raylib.h"
@@ -17,7 +19,8 @@ namespace {
 constexpr const char* kAllocatorOptions = "malloc;Arena;Pool;Slab";
 constexpr const char* kLayoutOptions    = "SoA;AoS;Archetype";
 constexpr const char* kContainerOptions = "vector;std::list;Intrusive";
-constexpr const char* kSimdOptions      = "Scalar;SSE;AVX2";
+// "Scalar"는 손으로 쓴 인트린식이 없는 일반 C++ 루프라는 뜻이라 "C++ Auto"로 표시한다.
+constexpr const char* kSimdOptions      = "C++ Auto;SSE;AVX2";
 constexpr const char* kEntityOptions    = "1k;10k;100k";
 
 Rectangle Rect(int x, int y, int w, int h) {
@@ -48,11 +51,12 @@ void Hud::Draw(Toggles& toggles, const FrameTimer& timer,
     DrawRectangle(0, hudY_, windowW_, hudH_, Color{20, 20, 28, 255});
     DrawLine(0, hudY_, windowW_, hudY_, Color{80, 80, 100, 255});
 
-    // 좌측 영역: 핵심 수치 (폭 280)
-    DrawStats(timer, entityCount, bench, alloc, cbench, 16, hudY_ + 12);
+    // 좌측 영역: 핵심 수치 (폭 약 300)
+    DrawStats(toggles, timer, entityCount, bench, alloc, cbench, 16, hudY_ + 10);
 
-    // 중앙 영역: 토글 패널 (폭 약 480)
-    DrawTogglePanel(toggles, 320, hudY_ + 12);
+    // 중앙 영역: 토글 패널. 열린 드롭다운이 창을 넘지 않도록 상단을 위로 올린다.
+    const int panelY = PanelOriginY(hudY_ + 12, windowH_);
+    DrawTogglePanel(toggles, 320, panelY);
 
     // 우측 영역: 프레임타임 그래프 (폭 약 460)
     const int graphX = 820;
@@ -62,37 +66,70 @@ void Hud::Draw(Toggles& toggles, const FrameTimer& timer,
     DrawFrameGraph(timer, graphX, graphY, graphW, graphH);
 }
 
-void Hud::DrawStats(const FrameTimer& timer, std::size_t entityCount,
+void Hud::DrawStats(const Toggles& toggles, const FrameTimer& timer,
+                     std::size_t entityCount,
                      const EventBenchmark& bench, const IAllocator& alloc,
                      const ContainerBenchmark& cbench,
                      int x, int y) {
-    const float cpuFps = timer.LastTotalMs() > 0.0f
-                         ? 1000.0f / timer.LastTotalMs() : 0.0f;
     const int actualFps = GetFPS();
 
-    char buf[640];
+    // 요청한 SIMD와 실제 실행 커널을 분리해 표시한다. AoS+AVX2처럼 요청이 실제
+    // 경로와 다른 경우가 HUD에서 바로 보인다.
+    const ResolvedKernel kernel =
+        ResolveKernel(toggles.layout, toggles.simd, toggles.branchless);
+
+    // 8줄로 고정한다. HUD 높이 140px, 기본 line spacing 15px 기준.
+    char buf[1024];
     std::snprintf(buf, sizeof(buf),
-                  "entities  : %zu\n"
-                  "update    : %6.3f ms   draw: %6.3f ms\n"
-                  "cpu fps   : %5.1f   actual: %5d\n"
-                  "\n"
-                  "alloc ms  : %6.3f  (%llu allocs, %llu B)\n"
-                  "live bytes: %llu   peak: %llu\n"
-                  "container : %6.3f ms  (%zu nodes, sum %.3f)",
+                  "ent %zu  simd %s>%s %s\n"
+                  "frame %6.3f  sim+sub %6.3f\n"
+                  "sim %6.3f  draw %6.3f  fps %d\n"
+                  "alloc %6.3f  %llu/%llu fail %llu\n"
+                  "live %llu peak %llu\n"
+                  "slot %llu back %llu\n"
+                  "cont %6.3f  %zu/%zu sum %.2f\n"
+                  "build %s cpu-avx2 %s fma %s",
                   entityCount,
-                  timer.LastUpdateMs(),
-                  timer.LastDrawMs(),
-                  cpuFps,
+                  SimdName(toggles.simd), SimdName(kernel.effective),
+                  KernelFallbackShortName(kernel.reason),
+                  static_cast<double>(timer.LastFrameWallMs()),
+                  static_cast<double>(timer.LastSimDrawSubmitMs()),
+                  static_cast<double>(timer.LastUpdateMs()),
+                  static_cast<double>(timer.LastDrawSubmitMs()),
                   actualFps,
-                  bench.LastFrameMs(),
-                  static_cast<unsigned long long>(alloc.FrameAllocCount()),
-                  static_cast<unsigned long long>(alloc.FrameAllocBytes()),
+                  static_cast<double>(bench.LastFrameMs()),
+                  static_cast<unsigned long long>(bench.LastFrameAllocCount()),
+                  static_cast<unsigned long long>(bench.Target()),
+                  static_cast<unsigned long long>(bench.FailedCount()),
                   static_cast<unsigned long long>(alloc.LiveBytes()),
                   static_cast<unsigned long long>(alloc.PeakBytes()),
-                  cbench.LastFrameMs(),
-                  cbench.NodeCount(),
-                  static_cast<double>(cbench.LastSum()));
+                  static_cast<unsigned long long>(alloc.SlotBytesLive()),
+                  static_cast<unsigned long long>(alloc.ReservedBacking()),
+                  static_cast<double>(cbench.LastFrameMs()),
+                  cbench.NodeCount(), cbench.RequestedCount(),
+                  static_cast<double>(cbench.LastSum()),
+#if defined(PERF_LAB_AVX2)
+                  "AVX2",
+#elif defined(PERF_LAB_X86_SIMD)
+                  "SSE",
+#else
+                  "portable",
+#endif
+                  CpuReportsAvx2() ? "y" : "n",
+                  CpuReportsFma() ? "y" : "n");
     DrawText(buf, x, y, 14, RAYWHITE);
+
+    // 무효 표본 경고: 고갈/용량 부족으로 요청량을 못 채운 결과를 시간 비교에 쓰면 안 된다.
+    // 마지막 줄(build)을 경고로 대체해 HUD 높이를 넘기지 않는다.
+    if (bench.Status() != BenchStatus::Valid || cbench.Status() != BenchStatus::Valid) {
+        char warn[160];
+        std::snprintf(warn, sizeof(warn),
+                      "WARN invalid sample alloc=%s cont=%s",
+                      BenchStatusName(bench.Status()),
+                      BenchStatusName(cbench.Status()));
+        DrawRectangle(x, y + 7 * 15, 300, 15, Color{20, 20, 28, 255});
+        DrawText(warn, x, y + 7 * 15, 14, Color{255, 120, 120, 255});
+    }
 }
 
 void Hud::DrawTogglePanel(Toggles& toggles, int x, int y) {
@@ -208,7 +245,7 @@ void Hud::DrawTogglePanelPass(Toggles& toggles, int x, int y, bool openPass) {
     }
     row2++;
 
-    // branchless 체크박스 — 활성. Scalar 경로에 한해 효과를 본다 (predication 토글).
+    // branchless 체크박스 — 활성. Scalar(C++ Auto) 경로에 한해 효과를 본다.
     // 콤보가 아니므로 열린 패스에는 그리지 않는다.
     if (!openPass) {
         bool branchless = toggles.branchless;
@@ -224,23 +261,23 @@ void Hud::DrawFrameGraph(const FrameTimer& timer, int x, int y, int w, int h) {
     DrawRectangleLines(x, y, w, h, Color{60, 60, 80, 255});
 
     // 그래프 스케일은 최근 N 프레임의 최대값 기준 (자동 줌).
-    const auto& update = timer.UpdateMs();
-    const auto& draw   = timer.DrawMs();
+    const auto& frameWall = timer.FrameWallMs();
+    const auto& draw      = timer.DrawMs();
     const std::size_t filled = timer.Filled();
     if (filled == 0) return;
 
     const auto& alloc     = timer.AllocMs();
     const auto& container = timer.ContainerMs();
 
-    // 자동 스케일: 세 라인(frame total / alloc / container)의 max 기준.
+    // 자동 스케일: 네 라인(frame wall / alloc / container)의 max 기준.
     float maxMs = 0.0f;
     for (std::size_t i = 0; i < filled; ++i) {
-        const float total = update[i] + draw[i];
-        if (total > maxMs)        maxMs = total;
+        if (frameWall[i] > maxMs) maxMs = frameWall[i];
         if (alloc[i] > maxMs)     maxMs = alloc[i];
         if (container[i] > maxMs) maxMs = container[i];
     }
-    // 최소 16.67ms 스케일 (60fps 기준선이 보이도록)
+    // 최소 16.67ms 스케일 (60fps 기준선이 보이도록). 이 기준선은 frame budget 관점이며,
+    // 작은 alloc/container 차이를 가릴 수 있다(그 해석은 숫자 요약과 함께 본다).
     if (maxMs < 16.67f) maxMs = 16.67f;
 
     // 60fps / 30fps 기준선. 패널 안에 들어올 때만 그린다.
@@ -257,14 +294,15 @@ void Hud::DrawFrameGraph(const FrameTimer& timer, int x, int y, int w, int h) {
     const std::size_t head = timer.Head();
 
     // 한 채널을 폴리라인으로 그린다. ms[idx] 값을 0..maxMs 정규화해 y 좌표로.
+    // x축은 sample index다(프레임률에 따라 실제 경과 시간 길이가 달라진다).
     auto drawSeries = [&](const std::array<float, FrameTimer::kCapacity>& series,
-                          bool addBoth, Color c) {
+                          Color c) {
         int prevX = -1;
         int prevY = 0;
         const float denom = (filled > 1) ? static_cast<float>(filled - 1) : 1.0f;
         for (std::size_t i = 0; i < filled; ++i) {
             const std::size_t idx = (head + cap - filled + i) % cap;
-            const float v = addBoth ? (update[idx] + draw[idx]) : series[idx];
+            const float v = series[idx];
             const float ratio = v / maxMs;
 
             const int px = x + (int)((float)i * w / denom);
@@ -277,11 +315,12 @@ void Hud::DrawFrameGraph(const FrameTimer& timer, int x, int y, int w, int h) {
             prevY = py;
         }
     };
+    (void)draw;
 
-    // 라인 셋. addBoth=true는 update+draw 합산을 그린다.
-    drawSeries(update,    /*addBoth=*/true,  Color{200, 220, 255, 220}); // frame total
-    drawSeries(alloc,     /*addBoth=*/false, Color{ 80, 220, 220, 200}); // alloc
-    drawSeries(container, /*addBoth=*/false, Color{255, 200,  80, 200}); // container
+    // 라인 셋. frame wall은 HUD/EndDrawing 포함, alloc/container는 벤치마크 자체 측정.
+    drawSeries(frameWall, Color{200, 220, 255, 220}); // frame wall
+    drawSeries(alloc,     Color{ 80, 220, 220, 200}); // alloc
+    drawSeries(container, Color{255, 200,  80, 200}); // container
 
     // 좌측 상단: max 스케일.
     char label[64];
@@ -289,14 +328,14 @@ void Hud::DrawFrameGraph(const FrameTimer& timer, int x, int y, int w, int h) {
     DrawText(label, x + 6, y + 4, 12, GRAY);
 
     // 우측 상단: 라인 범례.
-    const int legendX = x + w - 160;
+    const int legendX = x + w - 200;
     const int legendY = y + 4;
     DrawRectangle(legendX, legendY,     8, 8, Color{200, 220, 255, 220});
-    DrawText("frame",     legendX + 12, legendY,     10, LIGHTGRAY);
-    DrawRectangle(legendX + 50, legendY, 8, 8, Color{ 80, 220, 220, 200});
-    DrawText("alloc",     legendX + 62, legendY,     10, LIGHTGRAY);
-    DrawRectangle(legendX + 100, legendY, 8, 8, Color{255, 200,  80, 200});
-    DrawText("container", legendX + 112, legendY,    10, LIGHTGRAY);
+    DrawText("frame wall",  legendX + 12, legendY,     10, LIGHTGRAY);
+    DrawRectangle(legendX + 74, legendY, 8, 8, Color{ 80, 220, 220, 200});
+    DrawText("alloc",      legendX + 86, legendY,     10, LIGHTGRAY);
+    DrawRectangle(legendX + 124, legendY, 8, 8, Color{255, 200,  80, 200});
+    DrawText("container",  legendX + 136, legendY,    10, LIGHTGRAY);
 }
 
 }  // namespace ppl

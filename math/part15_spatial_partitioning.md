@@ -2,7 +2,7 @@
 
 SAT, GJK·EPA 같은 알고리즘은 *두 도형 사이의 충돌 한 번* 을 정밀하게 푼다. 이 글의 토픽은 *대량의 객체 중 검사할 후보를 줄이는 방법* 이다. 1만 개의 적, 5만 개의 발사체, 100만 개의 환경 콜라이더에서 모든 쌍을 검사하는 *naive O(n²)* 는 *4자리 수의 객체에서도 무너진다*.
 
-대안. *공간을 미리 쪼개 두고, 쿼리 시 관련 영역만 본다*. 이게 *공간 분할 (Spatial Partitioning)* 이다. *어디에 누가 있는가* 의 매핑을 *쿼리마다 다시 계산하지 않고* *유지된 자료구조에서 조회*. 1만 객체의 모든 unordered pair인 약 *5천만 비교가 수십 ~ 수백 비교* 로 줄어든다.
+대안. *공간을 미리 쪼개 두고, 쿼리 시 관련 영역만 본다*. 이게 *공간 분할 (Spatial Partitioning)* 이다. *어디에 누가 있는가* 의 매핑을 *쿼리마다 다시 계산하지 않고* *유지된 자료구조에서 조회*. 1만 객체의 *전쌍* 약 5천만 비교에 비해, *한 번의 범위 질의* 가 반환하는 후보 수는 *수십 ~ 수백* 으로 줄어들 수 있다. 다만 이것은 *단일 질의* 기준이고 전체 프레임 broad phase 비용은 *최종 충돌 쌍 수 + 객체 크기·밀도* 에 달렸다. 모든 객체가 한 셀에 몰리면 *전쌍 $O(n^2)$ 로 되돌아간다*. 측정 환경이 없는 수치는 예시로 본다.
 
 핵심 자료구조 네 가지.
 
@@ -106,7 +106,7 @@ flowchart LR
 | K-d Tree | $O(n \log n)$ | $O(\log n + k)$ | 약함 (재빌드 권장) |
 | BVH | $O(n \log n)$ | $O(\log n + k)$ | refit 가능 |
 
-$k$ = 쿼리가 반환하는 객체 수. 정적 씬이면 빌드 1번 + 쿼리 다수 → 빌드 비용 *상각*. 동적 씬이면 *갱신 비용* 이 결정적.
+$k$ = 쿼리가 반환하는 객체 수. 정적 씬이면 빌드 1번 + 쿼리 다수 → 빌드 비용 *상각*. 동적 씬이면 *갱신 비용* 이 결정적. 표의 복잡도는 *평균적/기대* 비용이고, 밀집 분포나 최악 분포에서는 쿼리당 $O(n)$ 또는 전체 broad phase $O(n^2)$ 까지 갈 수 있다. *단일 쿼리 비용* 과 *한 프레임의 전쌍 처리 비용* 을 같은 축에 놓고 비교하지 않는다.
 
 ### 1.5 분할 구조 vs 객체 트리
 
@@ -167,7 +167,8 @@ void Insert(UniformGrid& g, int objId, AABB aabb) {
 ### 2.3 영역 쿼리
 
 ```cpp
-std::vector<int> QueryRange(const UniformGrid& g, AABB region) {
+// 후보 ID 만 반환한다. 객체 AABB 정밀 검사는 호출자(좁은 단계) 책임.
+std::vector<int> QueryRangeCandidates(const UniformGrid& g, AABB region) {
     int x0 = std::clamp((int)std::floor((region.min.x - g.origin.x) / g.cellSize), 0, g.width  - 1);
     int y0 = std::clamp((int)std::floor((region.min.y - g.origin.y) / g.cellSize), 0, g.height - 1);
     int x1 = std::clamp((int)std::floor((region.max.x - g.origin.x) / g.cellSize), 0, g.width  - 1);
@@ -183,7 +184,7 @@ std::vector<int> QueryRange(const UniformGrid& g, AABB region) {
 }
 ```
 
-*걸치는 셀들 순회 + 그 안의 객체들 모음*. 한 객체가 여러 셀에 등록되어 있어 *중복 제거*.
+*걸치는 셀들 순회 + 그 안의 객체들 모음*. 한 객체가 여러 셀에 등록되어 있어 *중복 제거*. 이 함수는 *셀에 등록된 후보 ID* 만 돌려주며, 객체가 실제로 `region` 과 겹치는지의 정밀 검사는 반환값을 받는 쪽이 수행한다는 계약이다. 4.3절 quadtree 의 동명 함수는 객체 AABB 까지 필터링하므로 *결과 규약이 다르다* — 이름을 `QueryRangeCandidates` 로 두어 후보 반환임을 드러낸다.
 
 ### 2.4 셀 크기 결정
 
@@ -247,6 +248,10 @@ struct HashGrid {
     std::unordered_map<uint64_t, std::vector<int>> cells;
 };
 
+// 계약: cx, cy 는 32-bit 셀 좌표 범위 안이다.
+// floor → int 캐스팅 결과가 int 범위를 넘으면 정의되지 않으므로,
+// 유효 좌표·셀 크기·차원 범위를 문서화한다.
+// 더 넓은 월드는 int64 청크 + 청크 내 로컬 좌표로 키를 분리한다.
 uint64_t HashCell(int cx, int cy) {
     // 두 32-bit 정수를 한 64-bit 키로.
     // signed 를 그대로 << 32 하면 C++ 에서 UB — uint32_t 로 reinterpret 후 unsigned 연산.
@@ -260,7 +265,7 @@ void Insert(HashGrid& g, int objId, vec2 pos) {
 }
 ```
 
-월드 경계가 *무한* 이어도 동작. 셀 인덱스가 음수도 OK (*부호 있는 정수 좌표 + 해시*).
+월드 경계가 *무한* 이어도 동작. 셀 인덱스가 음수도 OK (*부호 있는 정수 좌표 + 해시*). 다만 이 키는 *32-bit 셀 좌표 두 개* 만 담으므로 표현 가능한 좌표 범위에 상한이 있다. `floor(pos / cellSize)` 의 결과가 `int` 범위를 넘으면 cast 자체가 정의되지 않으므로, 유효 좌표·셀 크기·차원 범위를 *계약으로* 문서화한다. 그보다 넓은 월드는 *int64 청크 좌표 + 청크 내 로컬 좌표* 로 키를 나누어 확장한다.
 
 ### 3.2 무한 월드와 청크
 
@@ -299,6 +304,8 @@ flowchart TD
 해시 그리드의 대표 응용 — *Smoothed Particle Hydrodynamics (SPH)* 입자 충돌. 입자가 *공간에 분산*, *이웃만 비교*.
 
 ```cpp
+// 반경이 걸치는 셀들의 후보 ID 를 반환한다.
+// 원 안 거리 필터는 포함하지 않으므로 호출자가 실제 거리를 검사한다.
 void NeighborQuery(HashGrid& g, vec2 pos, float radius, std::vector<int>& out) {
     int cMin = (int)std::floor((pos.x - radius) / g.cellSize);
     int cMax = (int)std::floor((pos.x + radius) / g.cellSize);
@@ -350,6 +357,9 @@ flowchart TD
 
 ```cpp
 void Insert(QuadNode* node, int objId, AABB obj) {
+    // 계약: obj 는 root bounds 안에 완전히 포함된다.
+    // 루트 밖 객체는 query 가 root bounds 에서 잘려 누락되므로,
+    // 삽입 전 containment 를 검사하거나 root 를 확장(또는 overflow 노드)한다.
     if (node->isLeaf) {
         node->objects.push_back(objId);
         // 객체 수가 임계값 초과 + 깊이 한도 미달이면 분할
@@ -381,6 +391,8 @@ void Insert(QuadNode* node, int objId, AABB obj) {
 ### 4.3 영역 쿼리
 
 ```cpp
+// grid 버전과 달리 후보를 객체 AABB 로 한 번 더 필터링한다.
+// (최종 형상 정밀 검사는 여전히 호출자 책임)
 void QueryRange(QuadNode* node, AABB region, std::vector<int>& out) {
     if (!Intersects(node->bounds, region)) return;
     for (int id : node->objects) {
@@ -392,7 +404,7 @@ void QueryRange(QuadNode* node, AABB region, std::vector<int>& out) {
 }
 ```
 
-*노드 박스가 쿼리 영역과 분리* 되면 *전체 가지치기* — 그 노드 아래 모든 객체 스킵. 가속의 핵심.
+*노드 박스가 쿼리 영역과 분리* 되면 *전체 가지치기* — 그 노드 아래 모든 객체 스킵. 가속의 핵심. 이 가지치기는 *모든 객체가 루트 bounds 안에 있다* 는 전제 위에서 성립한다. 루트 밖 객체를 그대로 삽입하면 루트 bounds 와의 교차 검사에서 그 객체가 잘려 질의에 나타나지 않는다.
 
 ### 4.4 Octree (3D)
 
@@ -510,9 +522,9 @@ void NearestNeighbor(KDNode* node, vec3 query, int& bestId, float& bestDistSq) {
 | 정적 객체 NN | 빠름 ($O(\log n)$ 평균) | - |
 | 균형 빌드 | $O(n \log n)$ | - |
 | 메모리 | 객체당 $O(1)$ 추가 | 트리 노드 |
-| 동적 갱신 | - | 약함 — 균형 깨짐, 재빌드 필요 |
+| 동적 갱신 | - | 약함 — 좌표 불변식 깨짐(검색 정확성), 재빌드 필요 |
 
-K-d Tree 가 *광선 트래버설* 과 *NN 쿼리* 에 우수하지만, *동적 객체 갱신* 은 약함. 객체가 *분할 평면을 넘어가면* 트리 균형이 깨져 *재빌드* 가 일반적. 정적 환경에 가까운 씬에서 활용.
+K-d Tree 가 *광선 트래버설* 과 *NN 쿼리* 에 우수하지만, *동적 객체 갱신* 은 약함. 객체가 *분할 평면을 넘어가면* 단순히 균형만 나빠지는 것이 아니라 *검색 정확성이 깨진다* — 분할면 반대편으로 이동한 점을 기존 leaf 에 두면 NN 의 far-side pruning 이 잘못된 하한을 사용해 가장 가까운 점을 놓친다. 따라서 *좌표 불변식 유지(재삽입/재빌드)가 필수* 이고, 균형은 별도의 *성능* 조건이다. 재빌드가 일반적이며 정적 환경에 가까운 씬에서 활용한다.
 
 ### 5.5 게임에서의 위치
 
@@ -546,7 +558,7 @@ struct LooseQuadNode {
 };
 ```
 
-객체가 *어느 노드에 속하는지* 를 *Loose 경계로 판정*. 객체가 자기 노드의 *Tight 영역을 벗어나도* Loose 안이면 *재삽입 안 함*.
+객체가 *어느 노드에 속하는지* 를 *Loose 경계로 판정*. 객체가 자기 노드의 *Tight 영역을 벗어나도* Loose 안이면 *재삽입 안 함*. 여기서 재삽입을 생략하는 것은 *공간 membership* 을 느슨하게 유지하는 것이지 *객체 기하(AABB) 갱신을 생략* 하는 것이 아니다. 객체의 실제 AABB 는 계속 갱신하고, 결과 정밀도는 쿼리 끝의 *최종 객체 검사* 로 확보한다.
 
 ### 6.3 동적 갱신 비용
 
@@ -555,7 +567,7 @@ struct LooseQuadNode {
 ```cpp
 void UpdateObject(LooseQuadNode*& currentNode, int objId, AABB newAABB) {
     if (Contains(currentNode->looseBounds, newAABB)) {
-        return;  // 그대로 OK — 95% 케이스
+        return;  // 그대로 OK (비율은 워크로드별 예시)
     }
     // Loose 경계 벗어남 — 재삽입
     Remove(currentNode, objId);
@@ -571,11 +583,11 @@ void UpdateObject(LooseQuadNode*& currentNode, int objId, AABB newAABB) {
 | | 엄격 Quadtree | Loose Quadtree |
 |---|---|---|
 | 메모리 | 표준 | 약간 더 (loose 경계) |
-| 쿼리 정밀도 | 정확 | 약간 헐거움 (loose 영역 검사) |
+| 쿼리 정밀도 | 정확 | 후보만 증가, 최종 객체 검사 시 정확 |
 | 동적 갱신 | 비쌈 | 빠름 |
 | 빌드 | 표준 | 표준 |
 
-쿼리 시 *loose 경계로 검사* 라 *false positive* 가 약간 늘지만, *동적 게임의 주력 선택*.
+쿼리 시 *loose 경계로 검사* 라 *false positive* 가 약간 늘지만, 등록된 객체의 *실제 AABB 를 최종 검사* 하면 정확한 쿼리 결과를 얻을 수 있다. `currentNode` 업데이트를 생략하는 것과 객체의 실 AABB 갱신을 생략하는 것은 다른 문제다. *동적 게임의 주력 선택*.
 
 ### 6.5 Loose Octree
 
@@ -654,6 +666,8 @@ FrustumResult AABBVsFrustum(AABB box, const Plane planes[6]) {
 
 n-vertex 는 *완전히 안쪽인가* 를 가른다. 최소 코너까지 양수면 상자가 그 평면 안쪽에 통째로 들어 있고, 여섯 평면 모두에서 그렇다면 `Inside` — 자식 노드는 평면 검사를 건너뛰어도 된다. 트리 가지치기에서 이 3분 판정이 2분 판정보다 훨씬 값어치가 있다.
 
+주의할 점. 이 판정에서 `Intersect` 는 *정확한 교차 증명* 이 아니라 *보수적 후보 (PotentiallyIntersecting)* 다. `Outside`/`Inside` 는 의미가 정확하지만, AABB 축이나 edge-cross 축에서 분리된 모서리 근처는 여섯 평면 검사만으로 걸러지지 않아 false positive 가 남을 수 있다. 컬링에는 이것으로 충분하지만(가시 객체를 잘못 버리지 않음), 정밀 충돌 판정이 필요하면 SAT 같은 별도 검사를 쓴다.
+
 검산해 둔다. near 평면을 $\hat{n} = (0,0,-1)$, $d = 1$ (view 공간 $z = -1$) 로 두자. 상자가 $z \in [-3, -2]$ 면 p-vertex 의 $z$ 는 $-3$ 이므로 $3 - 1 = +2$, n-vertex 의 $z$ 는 $-2$ 이므로 $2 - 1 = +1$ — 둘 다 양수라 이 평면에 대해 안쪽이다. 상자가 $z \in [-2, -0.5]$ 면 p-vertex 는 $+1$, n-vertex 는 $0.5 - 1 = -0.5$ — `Intersect`. 상자가 $z \in [-0.8, -0.2]$ 면 p-vertex 부터 $0.8 - 1 = -0.2$ 로 음수 — `Outside`, 카메라에 너무 붙어 잘린다.
 
 ### 7.3 트리 트래버설 + Frustum Culling
@@ -680,7 +694,7 @@ void RenderQuadtreeFrustum(QuadNode* node, const Plane planes[6]) {
 }
 ```
 
-*Outside 노드는 즉시 컷*. *Inside 노드는 자식 검사 스킵*. 가지치기가 *카메라 시야 밖 객체 80~90%* 를 제거.
+*Outside 노드는 즉시 컷*. *Inside 노드는 자식 검사 스킵*. 가지치기가 *카메라 시야 밖 객체 80~90%* 를 제거할 수 있다 (장면·시야 분포에 따라 다르며 이 수치는 측정 예시다).
 
 ### 7.4 Hierarchical Z-buffer 와 Occlusion Culling
 

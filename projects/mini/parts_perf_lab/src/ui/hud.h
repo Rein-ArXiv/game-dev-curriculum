@@ -31,7 +31,8 @@ public:
               const ContainerBenchmark& cbench);
 
 private:
-    void DrawStats(const FrameTimer& timer, std::size_t entityCount,
+    void DrawStats(const Toggles& toggles, const FrameTimer& timer,
+                   std::size_t entityCount,
                    const EventBenchmark& bench, const IAllocator& alloc,
                    const ContainerBenchmark& cbench,
                    int x, int y);

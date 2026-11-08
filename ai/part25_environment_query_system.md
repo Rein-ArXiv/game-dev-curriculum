@@ -60,6 +60,8 @@ struct QueryItem {
     bool        valid = true;        // filter가 false로 떨어뜨림
     const char* failReason = nullptr;
     uint64_t    navGeneration = 0;   // 비동기 결과 검증용
+    double      snapshotTime = 0.0;  // 결과가 만들어진 query 시각 — TTL 재검증
+    uint64_t    worldVersion = 0;    // 지형·문·엄폐 등 hard filter 입력 버전
 };
 
 struct QueryContext {
@@ -153,11 +155,18 @@ Grid는 가장 범용적이다. 기준점을 중심으로 정사각 격자를 �
 
 ```cpp
 std::vector<QueryItem> GenerateGrid(Vector3 center, float radius, float spacing) {
-    if (!(radius >= 0.0f) || !(spacing > 0.0f))
+    if (!std::isfinite(radius) || !std::isfinite(spacing) ||
+        !(radius >= 0.0f) || !(spacing > 0.0f))
         throw std::invalid_argument("grid radius/spacing");
+    // int 캐스팅과 (2*half+1)^2 곱셈 전에 예산을 검사한다 (T20)
+    const double halfD = std::floor(double(radius) / double(spacing));
+    const double sideD = 2.0 * halfD + 1.0;
+    if (!(sideD * sideD <= double(kMaxGridCandidates)))   // 초과/비유한 → 실패 상태(빈 결과)
+        return {};
+    int half = int(halfD);                     // 예산 안이므로 안전 범위
+    const size_t side = size_t(2) * size_t(half) + 1;
     std::vector<QueryItem> out;
-    int half = int(radius / spacing);          // 한 축의 한쪽 점 개수
-    out.reserve((2 * half + 1) * (2 * half + 1));
+    out.reserve(side * side);                  // size_t 곱
     for (int ix = -half; ix <= half; ++ix) {
         for (int iz = -half; iz <= half; ++iz) {
             float x = ix * spacing, z = iz * spacing;
@@ -189,19 +198,23 @@ Grid의 함정은 *후보 수가 반경의 제곱으로 자란다* 는 점이다
 | 20m | 1m | ~1,257 |
 | 20m | 2m | ~317 |
 
-반경 20m, 간격 1m면 후보가 1,200개를 넘는다. 여기에 시야 raycast scorer를 붙이면 한 질의에 1,200번의 raycast다 — 전투 중 매 프레임은 불가능하다. 대응은 셋이다. 간격을 넓혀 후보를 줄이거나(20m·2m → 약 317개), 관심 *방향* 으로만 부채꼴 샘플링하거나, NavMesh 폴리곤 중심을 직접 후보로 써서 빈 공간 샘플링 자체를 없애는 것이다.
+반경 20m, 간격 1m면 후보가 1,200개를 넘는다. 여기에 시야 raycast scorer를 붙이면 한 질의에 1,200번의 raycast다 — 전투 중 매 프레임은 불가능하다. 대응은 셋이다. 간격을 넓혀 후보를 줄이거나(20m·2m → 약 317개), 관심 *방향* 으로만 부채꼴 샘플링하거나, NavMesh 폴리곤 중심을 직접 후보로 써서 빈 공간 샘플링 자체를 없애는 것이다. 반경·간격은 유한성과 범위를 먼저 검증하고, 후보 예산을 넘는 입력은 거대한 `reserve`·루프 전에 실패 상태(빈 후보)로 반환한다.
 
 ### Donut generator
 
-대상을 *포위* 하거나 *일정 거리에서 공격* 하려면 격자보다 동심원이 자연스럽다. 격자는 중심 근처에 후보가 조밀하고 가장자리는 듬성한데, 공격 위치는 보통 "대상에서 적당히 떨어진 고리"에 있기 때문이다. Donut(도넛) generator는 안쪽·바깥 반경 사이를 여러 개의 동심 링으로 나누고, 각 링에 점을 균등 분포시킨다.
+대상을 *포위* 하거나 *일정 거리에서 공격* 하려면 격자보다 동심원이 자연스럽다. 격자는 간격이 일정해 *단위 면적당 후보 밀도가 균등* 하므로 관심 거리대 밖(너무 가깝거나 먼 곳)에도 후보를 낭비하는 반면, Donut(도넛)은 관심 거리대에 후보를 집중하는 설계다 — 공격 위치는 보통 "대상에서 적당히 떨어진 고리"에 있기 때문이다. Donut(도넛) generator는 안쪽·바깥 반경 사이를 여러 개의 동심 링으로 나누고, 각 링에 점을 균등 분포시킨다.
 
 ```cpp
 std::vector<QueryItem> GenerateDonut(Vector3 center, float innerR, float outerR,
                                      int rings, int pointsPerRing, float twist) {
-    if (!(innerR >= 0.0f) || outerR < innerR || rings <= 0 || pointsPerRing <= 0)
+    if (!std::isfinite(innerR) || !std::isfinite(outerR) ||
+        !(innerR >= 0.0f) || outerR < innerR || rings <= 0 || pointsPerRing <= 0)
         throw std::invalid_argument("donut parameters");
+    const size_t count = size_t(rings) * size_t(pointsPerRing);   // size_t 곱
+    if (count > kMaxDonutCandidates)          // 후보 예산 초과 → 실패 상태(빈 결과)
+        return {};
     std::vector<QueryItem> out;
-    out.reserve(rings * pointsPerRing);
+    out.reserve(count);
     for (int r = 0; r < rings; ++r) {
         // 링 반경: inner..outer 를 균등 분할 (rings==1 이면 inner 사용)
         float t = (rings == 1) ? 0.0f : float(r) / float(rings - 1);
@@ -571,16 +584,21 @@ void TickQuery(QueryJob& job, int budget) {
 비동기 query의 진짜 문제는 *결과가 늦게 온다* 는 것이다. 5프레임 전에 좋았던 위치가 지금도 좋은가? 그사이 적이 이동했고, 문이 닫혔고, 다른 NPC가 그 cover를 예약했을 수 있다. 그래서 최종 선택을 *수락하기 직전* 에 빠른 유효성 검사를 다시 돌린다. 예약 상태, 대상 생존 여부, NavMesh 세대 번호, 연결 컴포넌트 같은 상수 시간 또는 제한된 질의를 먼저 확인하고, 행동 계약상 실제 경로 존재가 꼭 필요할 때만 예산을 둔 경로 질의를 수행한다.
 
 ```cpp
-bool ValidateResult(const QueryContext& ctx, const QueryItem& item) {
-    if (ctx.target != kInvalid && !IsAlive(ctx.target)) return false;
-    if (item.navGeneration != CurrentNavGeneration()) return false;
-    if (IsReserved(item.position))                    return false;
-    if (!SameNavComponent(ctx.querierPos, item.position)) return false;
+// item 은 query 종료 시점의 snapshot 이다. 과거 QueryContext 를 다시 읽는 것은
+// 현재 hard filter 재검증이 아니다 — *현재* 맥락으로 실행 직전 제약을 다시 확인한다 (AI-061).
+bool ValidateResult(const QueryContext& current, const QueryItem& item) {
+    if (current.queryTime - item.snapshotTime > kMaxResultAge) return false; // TTL
+    if (item.worldVersion != CurrentWorldVersion())          return false;   // 지형·문·엄폐 버전
+    if (current.target != kInvalid && !IsAlive(current.target)) return false;
+    if (item.navGeneration != CurrentNavGeneration())        return false;
+    if (IsReserved(item.position))                           return false;
+    if (!SameNavComponent(current.querierPos, item.position)) return false;
+    if (!MeetsCurrentHardFilters(current, item))             return false;   // 거리/LoS 등 현재 재검사
     return true;
 }
 ```
 
-`SameNavComponent`는 연결 가능성의 빠른 필요조건이지 현재 문·동적 장애물까지 반영한 완전한 경로 증명은 아니다. 정확한 도달 가능성이 선택 계약이면 제한 시간 경로 질의를 추가한다. 검증에 실패하면 차순위 후보로 내려가고, 차순위까지 전부 실패하면 질의를 다시 실행한다.
+`snapshotTime`과 `worldVersion`은 후보 생성·질의 시작 시 채우고, `ValidateResult`는 그 값과 현재 시각·버전을 비교한다. `SameNavComponent`는 연결 가능성의 빠른 필요조건이지 현재 문·동적 장애물까지 반영한 완전한 경로 증명은 아니다. 정확한 도달 가능성이 선택 계약이면 제한 시간 경로 질의를 추가한다. 검증에 실패하면 차순위 후보로 내려가고, 차순위까지 전부 실패하면 질의를 다시 실행한다. 검증을 통과해도 최종 예약은 `IsReserved` 조회가 아니라 실제 `TryAcquire` 성공으로 확정한다.
 
 ### 캐싱과 키 설계
 

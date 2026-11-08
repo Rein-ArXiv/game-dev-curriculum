@@ -56,6 +56,8 @@ inline const char* ContainerName(Container c) {
     return "?";
 }
 
+// Scalar 경로는 손으로 쓴 인트린식이 없는 일반 C++ 루프다. 컴파일러가 자동
+// 벡터화할 수 있으므로 표시 이름은 "C++ Auto"다. enum 이름은 코드 호환을 위해 둔다.
 enum class SimdWidth : int {
     Scalar = 0,
     SSE,
@@ -64,7 +66,7 @@ enum class SimdWidth : int {
 constexpr int kSimdCount = 3;
 inline const char* SimdName(SimdWidth s) {
     switch (s) {
-        case SimdWidth::Scalar: return "Scalar";
+        case SimdWidth::Scalar: return "C++ Auto";
         case SimdWidth::SSE:    return "SSE";
         case SimdWidth::AVX2:   return "AVX2";
     }

@@ -163,13 +163,15 @@ public:
     V* find(const K& key) {
         size_t index = hash(key) & (slots.size() - 1);
 
-        // 빈 슬롯을 만날 때까지 탐색
-        while (slots[index].state != EMPTY) {
-            if (slots[index].state == OCCUPIED &&
+        // 빈 슬롯을 만나거나 capacity번 탐사하면 종료 (tombstone만 남은 경우 포함)
+        size_t probed = 0;
+        while (probed < slots.size() && slots[index].state != Slot::EMPTY) {
+            if (slots[index].state == Slot::OCCUPIED &&
                 slots[index].key == key) {
                 return &slots[index].value;
             }
             index = (index + 1) & (slots.size() - 1);  // Linear probing
+            ++probed;
         }
         return nullptr;
     }
@@ -184,12 +186,13 @@ public:
 
         // 톰스톤을 발견해도 같은 probe chain 뒤의 기존 키를 먼저 찾는다.
         size_t probed = 0;
-        while (probed < slots.size() && slots[index].state != EMPTY) {
-            if (slots[index].state == OCCUPIED && slots[index].key == key) {
+        while (probed < slots.size() && slots[index].state != Slot::EMPTY) {
+            if (slots[index].state == Slot::OCCUPIED && slots[index].key == key) {
                 slots[index].value = value;  // Update
                 return;
             }
-            if (slots[index].state == DELETED && first_deleted == slots.size()) {
+            if (slots[index].state == Slot::DELETED &&
+                first_deleted == slots.size()) {
                 first_deleted = index;
             }
             index = (index + 1) & (slots.size() - 1);
@@ -203,7 +206,7 @@ public:
         }
 
         size_t target = first_deleted != slots.size() ? first_deleted : index;
-        slots[target] = {key, value, OCCUPIED};
+        slots[target] = {key, value, Slot::OCCUPIED};
         num_elements++;
     }
 };
@@ -227,7 +230,7 @@ $\frac{1}{2}(1 + \frac{1}{(1-\alpha)^2})$다. $\alpha$가 1에 가까워질수�
 
 ## 2. std::unordered_map의 한계
 
-C++ 표준 라이브러리의 `std::unordered_map`은 대부분의 구현에서 Chaining을 사용한다. 왜 표준이 Chaining을 선택했을까? 그것은 표준이 **참조 안정성(reference stability)** 을 요구하기 때문이다.
+C++ 표준 라이브러리의 `std::unordered_map`은 대부분의 구현에서 Chaining을 사용한다. 표준이 물리적 chaining을 명령하는 것은 아니지만, 주요 구현들이 Chaining을 선택한 이유는 표준이 **참조 안정성(reference stability)** 을 요구하고 이를 노드 기반 저장으로 만족시키기 쉽기 때문이다.
 
 ```cpp
 std::unordered_map<int, std::string> map;
@@ -427,6 +430,8 @@ size_t find_slot_double(const K& key) {
 }
 ```
 
+위 helper들은 반환값의 의미가 서로 다르다. `find_slot_linear`는 못 찾으면 `NOT_FOUND`를, `find_slot_quadratic`/`find_slot_double`은 삽입 가능한 빈 인덱스를 돌려준다. 검색 결과와 삽입 위치는 별도 타입으로 구분하는 편이 안전하다. 또한 `Equal(a, b)`이면 반드시 `Hash(a) == Hash(b)`여야 하며, double hashing의 제2 해시도 패딩을 제외한 같은 정규화 값으로 계산한다.
+
 각 키가 고유한 탐색 순서를 가지므로 2차 클러스터링도 회피한다. 이론적으로 가장 좋은 분포를 제공한다.
 
 하지만 두 해시 함수 계산 비용과 비순차적 메모리 접근으로 인해, 실전에서는 Linear Probing보다 느릴 수 있다. 현대 CPU의 프리페처가 순차 접근을 매우 효율적으로 처리하기 때문이다.
@@ -540,7 +545,7 @@ Robin Hood의 진정한 힘은 PSL의 **분산**을 극적으로 줄인다는 �
 
 중요한 사실 하나를 먼저 짚는다. Linear probing에서 어떤 슬롯들이 점유되는지는 삽입 순서와 무관하게 결정되므로, **PSL의 총합(따라서 평균)은 Robin Hood를 써도 변하지 않는다**. Robin Hood가 하는 일은 그 총합을 요소들 사이에 고르게 재분배하는 것이다. 운 나쁜 소수가 매우 긴 PSL을 갖는 대신, 모두가 비슷한 PSL을 갖는다.
 
-무작위 해싱과 고정된 load factor 같은 분석 가정 아래 Robin Hood hashing의 **최대 probe distance**는 매우 천천히, 전형적으로 $\Theta(\log\log n)$ 규모로 증가하는 것으로 분석된다. 이를 PSL의 분산 자체가 $O(\log\log n)$이라고 바꿔 말하면 서로 다른 통계량을 혼동하게 된다.
+무작위 해싱과 고정된 load factor 같은 분석 가정 아래 Robin Hood hashing의 **최대 probe distance**는 매우 천천히, 전형적으로 $\Theta(\log\log n)$ 규모로 증가하는 것으로 분석된다. 이를 PSL의 분산 자체가 $O(\log\log n)$이라고 바꿔 말하면 서로 다른 통계량을 혼동하게 된다. 이 점근값은 독립적인 무작위 probing 모델의 결과이고, 본문 구현처럼 linear probing을 쓰면 같은 home bucket에 몰린 키 때문에 최대 클러스터가 $\Theta(\log n)$ 규모로 커질 수 있다. 따라서 절대 최대 거리를 이식하지 말고 분산 감소와 조기 종료 불변식으로 이해한다.
 
 실전 예제 (같은 키 집합, 같은 점유 슬롯):
 
@@ -894,7 +899,7 @@ enum ControlByte : int8_t {
 
 **SIMD 기반 검색**:
 
-제어 바이트를 16개씩 묶어서 "그룹"으로 처리하고, SSE2 명령어로 한 번에 검색한다:
+제어 바이트를 16개씩 묶어서 "그룹"으로 처리하고, SSE2 명령어로 한 번에 검색한다. 아래 클래스와 `Group`은 64비트 플랫폼에서 SSE2의 16바이트 그룹을 쓰는 개념 모델이다. 실제 Abseil은 버전별로 portable group 경로와 sentinel/wrap-around probe 규칙을 포함하므로 주소 계산과 제어 바이트 배치는 구현 소스를 기준으로 확인한다:
 
 ```cpp
 struct Group {
@@ -1224,7 +1229,7 @@ if (entity.ID == PlayerID) {
 }
 ```
 
-`constexpr`로 인해 "Player"의 해시 값이 컴파일 시간에 계산되어, 바이너리에 상수로 들어간다. 런타임 해싱 비용이 전혀 없다!
+`constexpr`로 인해 "Player"의 해시 값이 컴파일 시간에 계산되어, 바이너리에 상수로 들어간다. 런타임 해싱 비용이 전혀 없다. 다만 `operator==`가 32비트 해시만 비교하므로 서로 다른 문자열이 같은 ID로 판정될 수 있다. 빌드 시 등록 문자열 전체의 해시 충돌을 검사하거나 ID와 원문을 함께 보관해 런타임에 검증해야 한다. 또한 `constexpr` 생성자도 상수 문맥이 아니면 런타임에 호출될 수 있다.
 
 ### 스레드 안전한 구현
 
@@ -1317,7 +1322,7 @@ public:
 };
 ```
 
-이제 경로 비교가 단순 포인터 비교이다. 경로가 아무리 길어도 O(1)이다.
+이제 경로 비교가 단순 포인터 비교이다. 경로가 아무리 길어도 O(1)이다. 다만 `ThreadSafeStringPool`은 경로 인터닝만 보호한다. `textures` 맵의 find/insert와 중복 로드 검사는 동기화되지 않았고, `new Texture`의 소유자도 raw 포인터라 해제 책임이 불명확하다. 실제 리소스 매니저는 맵 접근을 mutex나 원자 핸들로 보호하고 로더를 한 번만 실행하도록 하며, 리소스 수명은 `unique_ptr` 같은 소유 타입으로 표현한다.
 
 ## 7. 구현 가이드: 실전 Robin Hood Hash Map
 
@@ -1468,20 +1473,24 @@ public:
 };
 ```
 
+이 구현은 교육용 골격이므로 다음 계약을 전제한다. `rehash`는 기존 슬롯을 옮긴 뒤 재삽입하므로 K/V의 복사·스왑이 예외를 던지면 맵이 손상될 수 있고, `insert`의 key/value가 현재 맵 내부를 가리키는 self-alias도 rehash 뒤 dangling이 된다. 또한 `erase`는 `occupied`만 false로 만들고 K/V를 소멸하지 않으므로 소멸자·자원을 가진 타입에는 쓰지 않는다. 실사용 구현은 K/V를 nothrow 타입으로 제한하거나 새 테이블을 완성한 뒤 commit하고, occupied와 객체 수명을 일치시킨 뒤 포인터·참조 무효화 규약을 명시한다.
+
 ### 최적화 포인트
 
 **1. 2의 거듭제곱 크기 강제**:
 
 ```cpp
 size_t next_power_of_two(size_t n) {
+    if (n <= 1) return 1;  // 0과 1 처리
     n--;
     n |= n >> 1;
     n |= n >> 2;
     n |= n >> 4;
     n |= n >> 8;
     n |= n >> 16;
-    n |= n >> 32;  // 64비트
+    n |= n >> 32;  // 64비트 size_t에서만 유효 (32비트라면 제거)
     n++;
+    // 최대 표현 가능한 2의 거듭제곱을 넘는 입력은 0을 반환하므로 호출자가 검사한다.
     return n;
 }
 
@@ -1495,7 +1504,7 @@ void rehash_to(size_t min_capacity) {
 
 **2. PSL 타입 선택**:
 
-대부분의 경우 `uint8_t` (최대 PSL 255)로 충분하지만, 매우 높은 로드 팩터나 나쁜 해시 함수를 사용한다면 `uint16_t`를 고려할 수 있다.
+대부분의 경우 `uint8_t` (최대 PSL 255)로 충분하지만, PSL이 타입 최대값을 넘으면 0으로 래핑되어 조기 종료 조건과 검색·삭제가 깨진다. 동일 해시에 256개 이상 키가 몰리면 낮은 load factor에서도 넘칠 수 있고, 같은 해시 함수를 쓰는 단순 grow로는 충돌이 사라지지 않는다. 따라서 작은 타입을 쓸 때는 capacity나 동일 버킷 충돌 수에 상한을 두고, 넘침 전에 더 넓은 타입·별도 성장 정책·명시적 실패 중 하나로 전환한다. `uint16_t`도 65536개에서 같은 문제가 생긴다.
 
 ```cpp
 // 작은 맵: uint8_t
@@ -1556,7 +1565,7 @@ public:
 
 ## 8. 언제 무엇을 사용할 것인가
 
-해시 맵은 다양한 선택지가 있다. 상황에 맞는 도구를 선택하는 것이 중요하다.
+해시 맵은 다양한 선택지가 있다. 상황에 맞는 도구를 선택하는 것이 중요하다. 아래 목록은 절대 성능 순위가 아니라, 각 컨테이너가 유리해지는 조건의 checklist다.
 
 ### 의사결정 트리
 
@@ -1569,12 +1578,12 @@ public:
 **Robin Hood Hashing을 사용하라** if:
 - 높은 로드 팩터가 필요하다 (메모리 절약)
 - 조회 실패가 빈번하다 (조기 종료 이점)
-- 삭제 작업이 많다 (backward shift)
+- 삭제가 잦아 tombstone 축적을 피해야 한다 (backward shift)
 - 캐시 효율이 중요하다
 - 작은~중간 크기의 key/value 타입
 
 **Abseil flat_hash_map을 사용하라** if:
-- 최고의 조회 성능이 필요하다
+- 조회가 지배적이고 key가 작다
 - SIMD를 활용할 수 있다 (SSE2/AVX2)
 - 외부 라이브러리 사용이 가능하다
 - 삭제가 드물다
@@ -1603,6 +1612,8 @@ struct IntHash {
 // Fibonacci hashing (더 나은 분포)
 struct FibonacciHash {
     size_t operator()(uint32_t key) const {
+        // 상위 비트를 쓰는 인덱스 계산과 함께 써야 한다.
+        // low-bit mask 테이블이라면 avalanche mix를 더한다.
         return key * 2654435769u;  // 2^32 / φ
     }
 };
@@ -1613,7 +1624,8 @@ struct FibonacciHash {
 // FNV-1a (빠름, 괜찮은 분포)
 struct FNV1aHash {
     size_t operator()(const std::string& str) const {
-        size_t hash = 2166136261u;
+        // 32비트 FNV-1a (64비트 버전은 64비트 offset/prime을 쓴다)
+        uint32_t hash = 2166136261u;
         for (char c : str) {
             hash ^= static_cast<uint8_t>(c);
             hash *= 16777619u;
@@ -1630,7 +1642,8 @@ struct FNV1aHash {
 ```cpp
 struct PointerHash {
     size_t operator()(void* ptr) const {
-        // 하위 3비트 제거 (정렬으로 인해 항상 0)
+        // 하위 3비트 제거 (8바이트 정렬 할당을 가정).
+        // 정렬이 보장되지 않으면 std::hash<void*> 계약을 쓴다.
         return reinterpret_cast<size_t>(ptr) >> 3;
     }
 };

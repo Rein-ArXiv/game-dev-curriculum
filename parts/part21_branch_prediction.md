@@ -2,7 +2,7 @@
 
 if문 순서가 성능을 바꿀 수 있는가?
 
-같은 로직, 같은 데이터, 단지 if문의 순서만 바꿨는데 성능이 2배 차이 난다면 믿겠는가? Intel Pentium 4는 20단계(2000년 Willamette)에서 31단계(2004년 Prescott)에 이르는 긴 파이프라인을 자랑했다. 하지만 이 긴 파이프라인은 양날의 검이었다. 분기 예측이 실패하면 31단계를 모두 비워야 했고, 이는 수십 사이클의 손실을 의미했다.
+같은 로직, 같은 데이터, 단지 if문의 순서만 바꿨는데 성능이 2배 차이 난다면 믿겠는가? Intel Pentium 4는 20단계(2000년 Willamette)에서 31단계(2004년 Prescott)에 이르는 긴 파이프라인을 자랑했다. 하지만 이 긴 파이프라인은 양날의 검이었다. 분기 예측이 실패하면 그 분기보다 젊은 추측 실행 명령들을 모두 버리고 올바른 경로를 다시 가져와야 했고, 이는 수십 사이클의 손실을 의미했다.
 
 현대 CPU는 놀라운 속도로 동작하지만, 그 속도는 "다음에 무슨 일이 일어날지 예측"할 수 있을 때만 유지된다. **Branch Prediction**(분기 예측)은 CPU가 미래를 내다보는 수정 구슬이다. 예측이 맞으면 파이프라인이 막힘없이 흐르지만, 틀리면 모든 추측 작업이 물거품이 된다.
 
@@ -211,7 +211,7 @@ if (misprediction) {
 }
 ```
 
-이 방식은 복잡한 패턴도 학습할 수 있다.
+이 방식은 복잡한 패턴도 학습할 수 있다. 여기서는 오예측일 때만 갱신하는 단순화 변형을 보였다. 실제 perceptron predictor는 예측이 맞았더라도 출력의 절댓값이 임계값 이하일 때도 학습하는 변형이 흔하며, 가중치 포화와 선형 분리의 한계가 있다.
 
 ### 예측 정확도는 장르가 아니라 분기 지점별 속성이다
 
@@ -400,8 +400,8 @@ cl /GL program.c /link /LTCG:PGINSTRUMENT
 #### 3단계: 최적화 빌드
 
 ```bash
-# GCC
-gcc -fprofile-use -O2 program.c -o program_optimized
+# GCC: 계측 빌드와 같은 출력 이름을 유지해야 profile을 찾는다
+gcc -fprofile-use -O2 program.c -o program
 
 # Clang
 llvm-profdata merge -output=default.profdata default.profraw
@@ -599,7 +599,8 @@ SIMD Branchless:
 
 ```c
 // AVX2 사용
-for (int i = 0; i < n; i += 8) {
+int i = 0;
+for (; i + 8 <= n; i += 8) {
     __m256i v = _mm256_loadu_si256((__m256i*)&data[i]);
     __m256i mask = _mm256_cmpgt_epi32(v, _mm256_setzero_si256());
     __m256i to_add = _mm256_and_si256(v, mask);
@@ -607,9 +608,15 @@ for (int i = 0; i < n; i += 8) {
     res = _mm256_add_epi32(res, to_add);
     _mm256_storeu_si256((__m256i*)&result[i], res);
 }
+// 8의 배수가 아닌 나머지는 scalar로 처리한다.
+for (; i < n; i++) {
+    if (data[i] > 0) {
+        result[i] += data[i];
+    }
+}
 ```
 
-마스크를 사용해 조건부로 값을 선택한다. 8개를 동시에 처리하면서 분기도 없다.
+마스크를 사용해 조건부로 값을 선택한다. 8개를 동시에 처리하면서 분기도 없다. 다만 `_mm256_add_epi32`는 32비트 모듈러 덧셈이므로 scalar `int` 덧셈의 signed overflow UB와 의미가 다르다. SIMD 경로를 쓰려면 입력 값 범위를 제한하거나 unsigned 모듈러 덧셈으로 해석한다.
 
 ## 7. 실전 벤치마크
 
@@ -647,7 +654,7 @@ int sum_branchless(int threshold) {
 int binary_search(int* arr, int n, int target) {
     int left = 0, right = n - 1;
     while (left <= right) {
-        int mid = (left + right) / 2;
+        int mid = left + (right - left) / 2;
         if (arr[mid] == target)
             return mid;
         else if (arr[mid] < target)  // 예측 불가능
@@ -681,20 +688,20 @@ int binary_search_branch_reduced(const int* arr, int n, int target) {
 
 ### likely/unlikely의 실전 효과
 
-Linux Kernel의 사례:
+Linux Kernel의 likely/unlikely 매크로와 그 사용 형태를 축약한 예:
 
 ```c
 // include/linux/compiler.h
 #define likely(x)   __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
 
-// fs/namei.c
+// 권한 검사 분기의 축약
 if (unlikely(!inode->i_op->permission)) {
     return -EACCES;
 }
 ```
 
-커널의 `unlikely`는 드문 오류 경로라는 정적 정보를 compiler에 주어 block 배치와 최적화 판단을 돕는다. 실제 효과는 compiler·PGO·함수 크기에 따라 달라지며 attribute 하나가 일정 비율의 개선을 보장하지 않는다.
+이 분기는 permission hook 부재만 축약한 것으로, 실제 커널은 hook이 없으면 `generic_permission()` fallback을 수행하므로 반환값이 항상 `-EACCES`는 아니다. 커널의 `unlikely`는 드문 오류 경로라는 정적 정보를 compiler에 주어 block 배치와 최적화 판단을 돕는다. 실제 효과는 compiler·PGO·함수 크기에 따라 달라지며 attribute 하나가 일정 비율의 개선을 보장하지 않는다.
 
 ## 8. 하드웨어별 차이를 다루는 법
 
@@ -814,9 +821,9 @@ for (int i = 0; i < n; i++) {
 
 NVIDIA GPU와 같은 SIMT(Single Instruction Multiple Threads) 아키텍처는 분기를 다르게 처리한다.
 
-- 모든 경로를 실행하고 마스킹
-- 분기 예측이 필요 없음
-- 대신 Divergence 비용 발생
+- warp 내 분기가 균일하면 한 경로만 실행
+- 분기가 갈리면(divergent) 활성 경로를 마스킹하며 양쪽을 순차 실행
+- 분기 예측은 필요 없지만 divergence 비용 발생
 
 CPU가 이 방향으로 갈까? 범용 워크로드에서는 분기가 필수적이다.
 

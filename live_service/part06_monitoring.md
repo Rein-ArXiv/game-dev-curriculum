@@ -155,7 +155,7 @@ SLO (Objective) : 내부 목표. "30일 기준 가용성 99.9% 이상"
 SLA (Agreement) : 외부 계약. "99.5% 미달 시 환불" — 보통 SLO보다 느슨
 ```
 
-SLI는 *측정 가능한 비율* 이어야 한다. "빠르다"가 아니라 "p99 지연 200ms 이하인 요청의 비율"처럼 분자/분모가 명확한 형태다. 게임 서비스에서 자주 쓰는 SLI는 가용성(성공 응답 비율), 지연(임계 이하 응답 비율), 그리고 *질(quality)* — 예를 들어 "매치메이킹이 60초 안에 방을 찾은 비율" 같은 도메인 지표다.
+SLI는 *측정 가능한 비율* 이어야 한다. "빠르다"가 아니라 "지연 200ms 이하인 요청 수 / 전체 요청 수"처럼 분자/분모가 명확한 형태다. 요청 기반 SLI에서는 개별 요청을 임계 이하인지로 분류하므로 `count(latency≤200ms)/total`로 쓴다. p99는 윈도우 표본의 분위수 통계량이므로 요청 비율과 섞지 않는다 — percentile 대시보드는 분포를 보여 주는 별도 지표이고, 윈도우별 p99 달성률을 SLO로 삼으려면 그 측정 단위를 따로 정의한다. 게임 서비스에서 자주 쓰는 SLI는 가용성(성공 응답 비율), 지연(임계 이하 응답 비율), 그리고 *질(quality)* — 예를 들어 "매치메이킹이 60초 안에 방을 찾은 비율" 같은 도메인 지표다.
 
 SLA를 SLO와 같게 두지 않는 것이 중요하다. SLA는 위약금이 걸린 외부 약속이고, SLO는 그보다 *엄격한 내부 경보선* 이어야 한다. SLO를 먼저 어겨야 SLA를 어기기 전에 대응할 시간이 생긴다. 게임 서비스는 명시적 SLA가 없는 경우도 많지만, 내부 SLO는 두는 편이 운영 판단을 객관화한다.
 
@@ -223,9 +223,9 @@ $$
 \Delta\text{budget}=b_{\text{actual}}\,\frac{T_{\text{detect}}}{T}=\frac{w\,b_{\text{thresh}}}{T}=f
 $$
 
-심각한 사고는 빨리 발화하지만 그동안 빨리 태우고, 약한 사고는 늦게 발화하지만 천천히 태워, 발화 시점의 누적 소비는 언제나 설계 목표 $f$(=2%)로 같다. 즉 *$f$를 고른다는 것은 "최악의 경우 한 번에 잃을 예산"을 고르는 것*이다.
+심각한 사고는 빨리 발화하지만 그동안 빨리 태우고, 약한 사고는 늦게 발화하지만 천천히 태워, 일정한 traffic/error 비율 아래에서 발화 시점의 누적 소비는 설계 목표 $f$(=2%)로 같다. 즉 *$f$를 고른다는 것은 이 조건에서 관찰창이 소모하는 budget을 고르는 것*이다. 이 값은 관찰창에서의 budget 소비이지 감지 후 완화까지의 최악 손실 상한이 아니므로, 관찰·감지·완화 시간을 분리해 각각의 소비를 따로 본다. request-based traffic이 변하면 같은 소진율도 태우는 budget 양이 달라진다.
 
-마지막으로 긴 윈도우가 왜 일시적 스파이크에 둔감한지도 정량화된다. 길이 $\delta$의 스파이크가 소진율 $b_{\text{spike}}$로 발생하면 1시간 윈도우 평균을 $b_{\text{spike}}\,\delta/w$만큼 올린다. 이것이 14.4를 넘으려면 $b_{\text{spike}}\,\delta\ge14.4\times60=864$(소진율·분)이 필요하다. 2분짜리 스파이크라면 $b_{\text{spike}}\ge432$ — 비현실적으로 극단적인 오류율이라야 오발화한다. 이것이 "오류율 1% 초과 5분 지속" 같은 단일 단기 임계가 스파이크마다 우는 것과 대비되는, 긴 윈도우의 *내장된 스파이크 면역*이다. 실무가 단기·장기 두 윈도우를 동시에 요구(AND)하는 것은 이 면역(장기 윈도우)에 더해 사고 종료 시 *빠른 리셋*(단기 윈도우)을 얻기 위함이다.
+마지막으로 긴 윈도우가 왜 일시적 스파이크에 둔감한지도 정량화된다. 길이 $\delta$의 스파이크가 소진율 $b_{\text{spike}}$로 발생하면 1시간 윈도우 평균을 $b_{\text{spike}}\,\delta/w$만큼 올린다. 이것이 14.4를 넘으려면 $b_{\text{spike}}\,\delta\ge14.4\times60=864$(소진율·분)이 필요하다. 2분짜리 스파이크라면 $b_{\text{spike}}\ge432$ — 99.9% SLO에서 오류율 $432\times0.001=43.2\%$에 해당한다. 임계가 높다는 사실만으로 이를 자동으로 오탐이라 단정할 수는 없다. 이것이 "오류율 1% 초과 5분 지속" 같은 단일 단기 임계가 스파이크마다 우는 것과 대비되는, 긴 윈도우의 *내장된 스파이크 면역*이다. 실무가 단기·장기 두 윈도우를 동시에 요구(AND)하는 것은 이 면역(장기 윈도우)에 더해 사고 종료 시 *빠른 리셋*(단기 윈도우)을 얻기 위함이다.
 
 ## 3. 알람 설계
 
@@ -287,6 +287,7 @@ sequenceDiagram
     participant A as Auth
     participant M as Matchmaking
     participant D as MatchDB
+    Note over C,D: 같은 trace_id 문자열 전달은 span parent/active context 전파와 다르며, active context는 명시해야 한다
     C->>G: 매치 요청 (trace_id 생성)
     G->>A: 토큰 검증 (trace_id 전파)
     A-->>G: OK
@@ -541,14 +542,16 @@ timeout과 재시도 가능 여부
 
 ### 스키마 진화
 
-새 필드는 이전 reader가 무시할 수 있어야 하고, 필드 의미를 바꾸거나 제거하면 버전 경계가 필요하다.
+새 필드는 이전 reader가 무시할 수 있어야 한다. 호환성은 wire compatibility / source compatibility / semantic compatibility 세 층으로 나눠 판정한다. 필드 삭제가 항상 breaking인 것은 아니다 — Protobuf binary에서 번호를 재사용하지 않고 reserved 처리한 삭제는 wire-safe이지만, 애플리케이션 필수 값이거나 해당 형식의 삭제 규칙을 위반하면 breaking이다.
 
 ```text
 필드 추가: 기본값과 optional 의미 정의
-필드 제거: 기존 consumer 사용 여부 확인
+필드 제거: wire/source/semantic 계약과 reserved/deprecated 규칙으로 판정
 단위 변경: 새 필드 또는 새 schema version 사용
 enum 추가: 알 수 없는 값 처리 정책 정의
 ```
+
+FlatBuffers는 table에서 deprecated 처리한 필드 제거와 struct 필드 변경 규칙을 따로 본다. wire 호환은 직렬화 형식이 이전 reader와 맞는지만 보고, source API·required semantics·JSON 이름 호환성은 별도 계약이다.
 
 ### 실제 의존성
 
@@ -684,9 +687,7 @@ Chaos 실험은 무작위 장애 생성이 아니라 복구 가설 검증이다.
 
 ## 더 읽을거리
 
-- Google, "Site Reliability Engineering" — SLO·에러 버짓·증상 기반 알람·포스트모텀의 원전. 무료 공개.
-- Google, "The Site Reliability Workbook" — SLO 설계와 다중 윈도우 소진율 알람의 실무 예제.
-- OpenTelemetry 공식 문서 — 트레이스·메트릭·로그 계측의 벤더 중립 표준.
-- Prometheus / Grafana 문서 — 시계열 수집·카디널리티·다운샘플링과 대시보드 구성.
-- Brendan Burns 외, 분산 시스템 운영 사례 — 페일오버·서킷브레이커·우아한 열화 패턴.
-- USENIX SREcon 발표들 — 온콜 지속 가능성, 알람 위생, 비난 없는 사고 회고의 현장 사례.
+- Google, "Site Reliability Engineering" — SLO·에러 버짓·증상 기반 알람·포스트모텀 배경. 전체 책을 정밀 대조한 것이 아니므로 세부 주장은 해당 장에 연결한다. 무료 공개.
+- Google, "The Site Reliability Workbook", "Alerting on SLOs" — SLO 설계와 다중 윈도우 소진율 알람의 실무 예제.
+- OpenTelemetry 공식 문서(traces concepts) — 트레이스·메트릭·로그 계측의 벤더 중립 표준. start span과 active context/scope 전파는 SDK별 문서를 따르며, 테일 샘플링은 100% 보존을 보장하지 않는다.
+- Prometheus storage 문서 / Grafana 대시보드 문서 — 시계열 저장·다운샘플링과 대시보드 구성. 보존 계층 수치는 특정 버전·옵션의 보장이 아니라 아키텍처 예시다.

@@ -279,12 +279,26 @@ struct JumpTable {
 std::optional<Cell> JumpFast(Cell c, int dirIdx, const JumpTable& jt, Cell goal) {
     int d = jt.dist[Index(c)][dirIdx];
     Cell delta = kDir[dirIdx];
+
+    // 대각 이동: 목표의 행/열에 닿는 중간 target jump (Game AI Pro 2 Listing 14.3)
+    if (delta.x != 0 && delta.y != 0) {
+        int dx = goal.x - c.x, dy = goal.y - c.y;
+        if (dx * delta.x > 0 && dy * delta.y > 0) {       // 목표가 이동 사분면 안
+            int n = std::min(std::abs(dx), std::abs(dy)); // 목표의 행/열 도달 거리
+            int reach = (d > 0) ? d : -d;                 // jump(양수) 또는 벽(음수)까지
+            // 벽으로 막히기 전이면(음수 d는 벽 칸 직전까지) 중간 점 반환
+            if (d > 0 ? n <= reach : n < reach) return c + delta * n;
+        }
+    }
+
     // goal이 점프 경로 위에 있으면 goal을 우선 반환 (target jump)
     if (GoalOnRay(c, delta, goal, std::abs(d))) return goal;
     if (d > 0) return c + delta * d;               // jump point 발견
     return std::nullopt;                            // 벽까지만 — 분기 없음
 }
 ```
+
+대각 방향에서는 목표의 행 또는 열에 닿는 지점 `c + delta·min(|dx|,|dy|)`을 먼저 본다. 이 지점이 사전 계산된 벽/jump 거리보다 앞에 있으면 그곳을 target jump로 반환해, 목표가 대각선 위가 아니라 행/열 방향으로 비껴 있어도 successor가 생긴다. 사전 계산 거리의 부호(양수=jump, 음수=벽)와 통로 한계를 함께 검사하며, corner cutting 정책은 전처리 테이블과 같은 규칙을 써야 한다. Listing 14.3의 대각 목표 처리 분기와 직접 대조한다.
 
 런타임에는 재귀 점프 대신 테이블 룩업으로 jump point를 얻는다. 점프 스캔을 전처리로 옮기므로 정적 맵을 반복 질의할 때 유리하다. 공개된 JPS+ 발표에는 해당 benchmark 설정에서 표준 A\*보다 100배를 넘긴 사례가 있지만, 이는 알고리즘의 보편적 배율이 아니다. 맵 구조, 쿼리 분포, A\* 기준 구현, 캐시와 전처리 메모리에 따라 이득은 달라진다.
 
@@ -358,10 +372,9 @@ $$
 
 ```mermaid
 flowchart LR
-    GP[부모의 부모 = grandparent] -.->|시야 있음| NP[새 노드 n']
-    GP --> P[부모 n]
-    P --> NP
-    NP -.->|"path2: GP→n' 직선<br/>(더 짧음)"| GP
+    GP[부모의 부모 = grandparent] --> P[부모 n]
+    P --> NP[새 노드 n']
+    GP -.->|"path2: GP→n' 직선<br/>(시야 있음, 더 짧음)"| NP
 ```
 
 ```cpp
@@ -391,24 +404,33 @@ void UpdateVertex(Node n, Node neighbor) {
 
 ### 시야 검사
 
-`LineOfSight`는 두 칸 사이에 장애물이 없는지를 검사한다. 그리드에서는 *Bresenham 직선 알고리즘* 을 변형해 두 점을 잇는 칸들을 훑으며 벽을 확인한다.
+`LineOfSight`는 두 칸 사이에 장애물이 없는지를 검사한다. 그리드에서는 셀을 하나씩 고르는 Bresenham 표본열 대신, 선분이 실제로 지나는 *모든* 셀을 훑는 supercover/DDA(Amanatides–Woo)로 벽을 확인한다. Bresenham 표본열의 통과 가능성은 실제 충돌 없는 선분과 다른 뜻이다.
 
 ```cpp
+// 셀 중심을 잇는 선분이 통과하는 셀 전체를 검사한다 (Amanatides–Woo DDA).
 bool LineOfSight(Cell a, Cell b, const Grid& g) {
-    int dx = std::abs(b.x - a.x), dy = std::abs(b.y - a.y);
-    int sx = a.x < b.x ? 1 : -1, sy = a.y < b.y ? 1 : -1;
-    int x = a.x, y = a.y, err = dx - dy;
-    while (x != b.x || y != b.y) {
-        if (!g.Walkable({x, y})) return false;     // 직선이 지나는 칸 검사
-        int e2 = 2 * err;
-        if (e2 > -dy) { err -= dy; x += sx; }
-        if (e2 <  dx) { err += dx; y += sy; }
+    float x = a.x + 0.5f, y = a.y + 0.5f;              // 셀 중심
+    const float x1 = b.x + 0.5f, y1 = b.y + 0.5f;
+    const float dx = x1 - x, dy = y1 - y;
+
+    const int   stepX = (dx > 0) - (dx < 0);
+    const int   stepY = (dy > 0) - (dy < 0);
+    const float tDeltaX = (dx != 0) ? std::abs(1.0f / dx) : INF;
+    const float tDeltaY = (dy != 0) ? std::abs(1.0f / dy) : INF;
+    float tMaxX = (dx != 0) ? (stepX > 0 ? (std::floor(x) + 1 - x) : (x - std::floor(x))) * tDeltaX : INF;
+    float tMaxY = (dy != 0) ? (stepY > 0 ? (std::floor(y) + 1 - y) : (y - std::floor(y))) * tDeltaY : INF;
+
+    int cx = a.x, cy = a.y;
+    while (cx != b.x || cy != b.y) {
+        if (!g.Walkable({cx, cy})) return false;        // 지나는 모든 셀 검사
+        if (tMaxX < tMaxY) { cx += stepX; tMaxX += tDeltaX; }
+        else               { cy += stepY; tMaxY += tDeltaY; }
     }
     return g.Walkable(b);
 }
 ```
 
-엄밀한 시야 검사는 대각으로 두 벽 모서리 사이를 통과하는 경우(코너 컷)를 정책에 맞게 추가로 막아야 한다. 위 코드는 기본형이며, 코너 컷 금지를 원하면 대각 진행 시 양옆 두 칸이 모두 통행 가능한지 함께 확인한다.
+선분이 셀 *내부*를 지나는 것과 경계·꼭짓점에 닿기만 하는 것은 정책 문제다. 경계 접촉을 통과로 볼지, 대각 꼭짓점 접촉을 금지할지, 에이전트 반경을 셀 크기에 대해 어떻게 볼지를 먼저 고정한 뒤 그 규칙을 코드에 반영한다. 위 코드는 셀 중심을 잇는 선분 기준이며, 반경을 반영하려면 셀 확장 판정이나 실제 collision sweep을 쓴다. 일반 Bresenham 표본열은 선분이 실제로 지나는 셀을 모두 검사하지 않으므로 기하학적 LoS로 쓸 수 없다.
 
 ### 후처리 평활화와의 차이
 

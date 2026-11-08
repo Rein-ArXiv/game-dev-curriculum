@@ -6,7 +6,7 @@
 
 ```mermaid
 flowchart LR
-    Build[빌드 구성<br/>Debug/Dev/Ship] --> Cond[조건부 컴파일<br/>오버헤드 0으로]
+    Build[빌드 구성<br/>Debug/Dev/Ship] -->     Cond[조건부 컴파일<br/>제거한 계측만 오버헤드 0]
     Cond --> Console[콘솔 / cvar<br/>런타임 토글]
     Console --> Draw[디버그 드로우<br/>공간 가시화]
     Draw --> Prof[프로파일러 오버레이<br/>시간 가시화]
@@ -128,21 +128,27 @@ enum class CVarFlags {
     Saved    = 1 << 2,   // 설정 파일에 저장
 };
 
+enum class CVarType { Bool, Int, Float, Enum, String };
+
 struct CVar {
     const char*  name;
-    float        value;
+    CVarType     type;        // 값의 타입 — 파서와 디스패치를 가른다
+    float        value;       // 수치형(Bool/Int/Float)의 현재 값
     float        defaultValue;
     CVarFlags    flags;
     const char*  help;
+    // Enum은 enumNames의 인덱스, String은 별도 저장소를 value 대신 쓴다
+    const char* const* enumNames = nullptr;
+    int          enumCount = 0;
 
-    CVar(const char* n, float v, float d, CVarFlags f, const char* h)
-        : name(n), value(v), defaultValue(d), flags(f), help(h) {
+    CVar(const char* n, CVarType t, float v, float d, CVarFlags f, const char* h)
+        : name(n), type(t), value(v), defaultValue(d), flags(f), help(h) {
         CVarRegistry::Get().Add(this);      // 생성 시 레지스트리에 자기 자신을 등록
     }
 };
 
 // 정적 등록 — 전역 객체 생성 시 레지스트리에 자동 추가
-static CVar cv_drawColliders { "debug.draw_colliders", 0.0f, 0.0f,
+static CVar cv_drawColliders { "debug.draw_colliders", CVarType::Bool, 0.0f, 0.0f,
                                CVarFlags::None, "충돌체 와이어프레임 표시" };
 ```
 
@@ -153,6 +159,23 @@ static CVar cv_drawColliders { "debug.draw_colliders", 0.0f, 0.0f,
 콘솔은 입력 문자열을 *명령(command)* 또는 *cvar 대입* 으로 해석한다. 첫 토큰이 등록된 명령이면 호출하고, cvar이면 값을 읽거나 쓴다.
 
 ```cpp
+#include <charconv>
+#include <cmath>
+#include <string_view>
+#include <system_error>
+
+bool TryParseFiniteFloat(std::string_view text, float& out) {
+    if (text.empty()) return false;
+    float parsed = 0;
+    const char* begin = text.data();
+    const char* end = begin + text.size();
+    const auto result = std::from_chars(begin, end, parsed);
+    if (result.ec != std::errc{} || result.ptr != end || !std::isfinite(parsed))
+        return false;
+    out = parsed;   // 실패 때는 기존 out을 변경하지 않는다
+    return true;
+}
+
 void Console::Execute(const std::string& line) {
     auto tokens = Tokenize(line);          // 공백 분리, 따옴표 처리
     if (tokens.empty()) return;
@@ -160,25 +183,33 @@ void Console::Execute(const std::string& line) {
 
     if (CVar* cv = registry.FindCVar(head)) {
         if (tokens.size() == 1) {
-            Print("%s = %g  (기본 %g)  %s", cv->name, cv->value,
-                  cv->defaultValue, cv->help);   // 값 조회
+            PrintCVar(cv);                 // 값 조회 — 타입에 맞게 출력
+        } else if (!CanWrite(cv)) {        // 중앙 권한 검사: ReadOnly·치트 잠금
+            Print("쓰기 거부: %s", cv->name);
         } else {
-            if (IsCheatLocked(cv)) { Print("치트 잠금: %s", cv->name); return; }
-            cv->value = std::stof(tokens[1]);     // 값 설정
+            std::string error;
+            if (SetCVarFromToken(cv, tokens[1], error))
+                CommitCVarValue(cv);       // 검증 성공 후 소유 스레드에서 한 번만 반영
+            else
+                Print("잘못된 값: %s (%s)", cv->name, error.c_str());
         }
     } else if (Command* cmd = registry.FindCommand(head)) {
-        cmd->Invoke(tokens);                       // 명령 실행
+        cmd->Invoke(tokens);               // log.AI verbose 같은 enum 명령은 여기서 dispatch
     } else {
         Print("알 수 없는 명령: %s", head.c_str());
     }
 }
 ```
 
+`SetCVarFromToken`은 `cv->type`에 따라 bool/int/float는 전체 토큰을 소비하는 유한값 파서로, enum은 등록된 이름 매칭으로, string은 그대로 대입으로 나눈다. `log.AI verbose` 같은 로그 레벨은 숫자 cvar이 아니라 *enum 인자를 받는 명령* 이므로 명령 디스패치에서 이름으로 처리하고, 알 수 없는 레벨 이름은 거부한다. 파싱·범위·게임 불변식 검증이 모두 성공한 뒤에만 값을 바꾸고, 동시 접근이 있으면 raw float 대입이 아니라 소유 스레드에서 commit한다.
+
 명령은 인자를 받는 함수다 — `teleport 100 0 50`, `spawn enemy_heavy 3`, `give all`. cvar은 *상태를 바꾸는 값* 이고, 명령은 *동작을 일으키는 함수* 라는 구분이 깔끔하다.
 
 ### 치트와 Shipping 잠금
 
 콘솔은 강력해서, 그대로 두면 플레이어가 무적·순간이동·아이템 복제를 켤 수 있다. 그래서 cvar에 *Cheat 플래그* 를 둔다. 치트 cvar은 싱글플레이 개발 빌드에서만 자유롭고, 멀티플레이에 접속하거나 Shipping 빌드에서는 *잠긴다*. 무적이나 시간 정지 같은 게임플레이 변경은 치트로 분류하고, 관측 전용이라도 다른 플레이어의 상태를 드러내는 드로우(적 위치·충돌체·시야·경로)는 멀티플레이에서 치트로 분류해 잠근다 — 벽 너머로 보이는 순간 그것은 ESP다. 자기 소유 객체나 렌더 통계처럼 상대 정보를 노출하지 않는 토글만 비치트로 둔다.
+
+권한은 cvar마다 흩어진 플래그 검사가 아니라 *중앙 CanRead/CanWrite* 로 집행한다 — `ReadOnly`는 쓰기를 거부하고, `Cheat`는 멀티플레이/Shipping에서 잠근다. readonly를 치트와 같은 뜻으로 취급하지 않는다. 멀티플레이에서는 클라이언트 권한만 믿지 않고 *서버 권위* 로 게임플레이 변경을 검증하며, 관측이라도 민감 정보 노출은 별도 필터로 막는다. 원격 도구가 보내는 명령도 같은 권한 경계를 공유해야 한다(8절).
 
 조건부 컴파일과의 관계도 정리된다. *오버헤드가 큰 도구* (예: 메모리 추적, 프로파일러)는 cvar 토글에 더해 `DEBUG_TOOLS_ENABLED`로 감싸 Shipping에서 코드째 빼고, *오버헤드가 작고 켜둘 일이 거의 없는* 토글만 Shipping에 cvar로 남긴다. 콘솔 자체도 Shipping에서는 보통 컴파일 제거하거나 비밀번호로 잠근다.
 
@@ -208,6 +239,7 @@ DebugDraw::Text3D(npcPos, "state: PATROL", Color::White);
 struct DebugLineVert { Vec3 pos; uint32_t color; };
 
 class DebugDrawQueue {
+    // writer(게임플레이 스레드)와 reader(렌더 스레드)의 소유 경계를 명시한다.
     std::vector<DebugLineVert> lines_;        // 선분 정점 (쌍으로)
     std::vector<DebugTextCmd>  texts_;
 public:
@@ -218,12 +250,14 @@ public:
     void Flush(Renderer& r) {
         r.DrawLineBatch(lines_);              // 프레임당 1회 드로우 콜
         for (auto& t : texts_) r.DrawText(t);
-        lines_.clear(); texts_.clear();       // 다음 프레임을 위해 비움
+        lines_.clear(); texts_.clear();       // 소비 완료 후에만 재사용
     }
 };
 ```
 
 핵심은 *배칭(batching)* 이다. 디버그 선분 수천 개를 하나하나 그리면 드로우 콜이 폭발하지만, 모두 한 정점 버퍼에 모아 *한 번의 드로우 콜* 로 그리면 오버헤드가 크게 준다. 구·원·박스 같은 도형은 내부적으로 선분 집합으로 분해해 같은 선분 배치에 합류시킨다.
+
+이 구조는 *프레임 스냅샷* 경계를 전제한다 — 모든 호출이 하나의 소유 스레드에 있으면 지금처럼 clear가 안전하다. writer와 reader가 다르면 raw vector를 그대로 넘기지 않고 복사·이중 버퍼·완료 이후 재사용 중 하나를 택한다. `DrawLineBatch`가 포인터를 비동기로 보관하는 렌더러라면 반환 전에 데이터를 소비하거나 복사해야 하고, 완료되기 전에 clear하면 안 된다.
 
 ### 지속성 — 한 프레임 대 N초
 
@@ -285,6 +319,8 @@ void UpdateAI() {
 
 `PROFILE_SCOPE`를 `DEBUG_ONLY`로 감쌌으므로 Shipping에서는 *타이머가 통째로 사라진다*. 측정 자체의 오버헤드 — `NowTicks` 호출과 기록 — 가 Development 빌드의 프레임 시간에 더해지지만, 측정 구간을 *시스템 단위의 굵은 입자* 로 두면 이 오버헤드는 무시할 수준이다. 함정은 *너무 잘게* 박는 것이다. 매 객체, 매 함수에 타이머를 박으면 측정 비용이 측정 대상을 넘어 *측정이 결과를 왜곡* 한다.
 
+`Profiler::Record`는 writer(게임 스레드)에서 호출되므로, 비동기 렌더·원격 UI가 같은 데이터를 읽으면 frame snapshot 수명을 정해야 한다. 또한 flat `Record(name, time)` 집계는 *그 이름의 합계* 만 보여준다 — 계층(부모/자식)을 복원하려면 *thread, parent/stack, begin/end* 정보도 함께 기록해야 하며, flat 항목은 합계로만 표시한다.
+
 ### 샘플링 대 트레이싱
 
 측정에는 두 철학이 있다.
@@ -316,12 +352,29 @@ flowchart TB
 프로파일러 오버레이는 두 가지를 화면에 띄운다. 하나는 *현재 프레임의 분해* (위 트리), 다른 하나는 *최근 N프레임의 프레임 시간 그래프* 다. 프레임 시간 히스토리는 *스파이크(spike)* 를 잡는 데 결정적이다 — 평균은 16ms인데 가끔 40ms로 튀는 *히치(hitch)* 는 평균값만 보면 안 보이고, 시간축 그래프의 *뾰족한 막대* 로만 드러난다.
 
 ```cpp
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <optional>
+
 struct FrameHistory {
-    static constexpr int N = 240;     // 약 4초 (60FPS 기준)
-    float times[N];                   // 링 버퍼
-    int   head = 0;
-    void Push(float ms) { times[head] = ms; head = (head + 1) % N; }
-    float Max() const { return *std::max_element(times, times + N); }
+    static constexpr std::size_t N = 240;   // 약 4초 (60FPS 기준)
+    std::array<float, N> times{};           // 링 버퍼 — 전부 0으로 초기화
+    std::size_t head = 0;
+    std::size_t count = 0;                  // 유효 샘플 수
+
+    bool Push(float milliseconds) {
+        if (!std::isfinite(milliseconds) || milliseconds < 0) return false;
+        times[head] = milliseconds;
+        head = (head + 1) % N;
+        count = std::min(count + 1, N);
+        return true;
+    }
+    std::optional<float> Max() const {          // 빈 history는 nullopt
+        if (count == 0) return std::nullopt;
+        return *std::max_element(times.begin(), times.begin() + count);
+    }
 };
 ```
 
@@ -369,25 +422,37 @@ REFLECT_END()
 void DrawInspector(void* obj, const FieldInfo* fields, int n) {
     for (int i = 0; i < n; ++i) {
         const FieldInfo& f = fields[i];
-        void* addr = (char*)obj + f.offset;       // 필드 주소 계산
+        void* addr = (char*)obj + f.offset;       // standard-layout·살아 있는 객체 전제
         switch (f.kind) {
-            case FieldInfo::Float:
-                ImGui::DragFloat(f.name, (float*)addr); break;   // 읽고 쓰기
-            case FieldInfo::Bool:
-                ImGui::Checkbox(f.name, (bool*)addr); break;
-            case FieldInfo::Vec3:
-                ImGui::DragFloat3(f.name, (float*)addr); break;
+            case FieldInfo::Float: {
+                float v; std::memcpy(&v, addr, sizeof(v));
+                if (ImGui::DragFloat(f.name, &v)) CommitChecked(f, obj, &v, sizeof(v));
+                break;
+            }
+            case FieldInfo::Bool: {
+                bool v; std::memcpy(&v, addr, sizeof(v));
+                if (ImGui::Checkbox(f.name, &v)) CommitChecked(f, obj, &v, sizeof(v));
+                break;
+            }
+            case FieldInfo::Vec3: {
+                float tmp[3];
+                GetVec3(obj, f, tmp);             // x/y/z를 값으로 복사 — float* 캐스팅 금지
+                if (ImGui::DragFloat3(f.name, tmp)) SetVec3Checked(obj, f, tmp);
+                break;
+            }
             // ...
         }
     }
 }
 ```
 
+이 코드는 필드 타입이 실제 메모리 배치·정렬과 맞고 객체가 살아 있는 standard-layout일 때만 성립한다. 그 보장이 없으면 `offsetof`·`reinterpret_cast` 대신 *필드 getter/setter* 또는 *타입별 callback* 으로 접근한다. Vec3는 `float tmp[3]`로 값을 복사해 UI에 넘기고 검증한 뒤 세 필드를 대입하는 편이 더 명확하며, 직접 쓰기가 엔진 invariant를 깨지 않는지도 함께 계약한다.
+
 ### 읽기와 쓰기의 위험
 
 인스펙터가 *쓰기* 까지 허용하면 강력하지만 위험하다. 위젯이 객체 필드를 직접 수정하면 — `Enemy::hp`를 슬라이더로 0으로 — 게임은 *코드를 거치지 않은 상태 변경* 을 겪는다. 이는 디버깅에 유용하지만, *불변식(invariant)을 깰* 수 있다. 예를 들어 `hp`를 음수로 쓰면, hp가 음수일 리 없다고 가정한 코드가 미정의 동작을 한다.
 
-해법은 *경계를 위젯에 박는* 것이다 — 슬라이더의 최소·최대를 필드 메타데이터에 함께 등록한다. 또한 쓰기 가능 인스펙터는 *치트로 분류* 해 Shipping·멀티플레이에서 잠근다. 관측(읽기)은 쓰기보다 위험이 작지만 — 상대 정보를 드러내는 관측은 2절에서 본 대로 그 자체가 치트로 분류된다 — 조작(쓰기)은 게임 결과를 직접 바꾸기 때문이다.
+해법은 *경계를 위젯에 박는* 것이다 — 슬라이더의 최소·최대를 필드 메타데이터에 함께 등록한다. 또한 쓰기 가능 인스펙터는 *치트로 분류* 해 Shipping·멀티플레이에서 잠근다. 관측(읽기)은 쓰기보다 위험이 작지만 — 상대 정보를 드러내는 관측은 2절에서 본 대로 그 자체가 치트로 분류된다 — 조작(쓰기)은 게임 결과를 직접 바꾸기 때문이다. 인스펙터의 쓰기도 cvar과 같은 중앙 `CanWrite`를 통과해야 하며, 권한 검사된 mutation command 경로에서 변경 기록·동기화·불변식 검증을 거친다.
 
 ### 선택과 계층 탐색
 
@@ -456,7 +521,7 @@ LOG("AI", Info,    "agent %d 상태 전환 PATROL→CHASE", agent.id);
 LOG("Net", Warning,"패킷 지연 %dms", latency);
 ```
 
-레벨은 *심각도* 다 — 평상시엔 Warning 이상만 출력하고, 특정 시스템을 파고들 때 그 카테고리만 Verbose로 내린다. 카테고리별 레벨을 cvar로 두면(`log.AI verbose`), *원하는 시스템의 로그만 콘솔에서 켠다*. 모든 로그를 항상 출력하면 *정작 중요한 줄이 묻히고* 디스크·콘솔 출력 자체가 프레임을 갉는다.
+레벨은 *심각도* 다 — 평상시엔 Warning 이상만 출력하고, 특정 시스템을 파고들 때 그 카테고리만 Verbose로 내린다. 카테고리별 레벨은 `log.<카테고리> <레벨>` 형태의 *enum 인자를 받는 명령* 으로 두고 이름으로 dispatch한다 — `log.AI verbose`는 숫자 파서가 아니라 등록된 `Verbose`/`Info`/`Warning`/`Error` 이름을 그대로 매칭하며, 알 수 없는 이름은 거부한다. 그래야 *원하는 시스템의 로그만 콘솔에서 켠다*. 모든 로그를 항상 출력하면 *정작 중요한 줄이 묻히고* 디스크·콘솔 출력 자체가 프레임을 갉는다.
 
 ### 로깅의 성능과 구조화
 
@@ -484,10 +549,17 @@ struct InputFrame {
 
 class ReplayRecorder {
     std::vector<InputFrame> frames_;
+    uint32_t                firstFrame_ = 0;   // 보관 구간의 시작 전역 프레임
 public:
     void Record(const InputFrame& f) { frames_.push_back(f); }
-    // 재생: 게임 입력 시스템 대신 기록된 프레임을 먹인다
-    InputFrame Playback(uint32_t frame) { return frames_[frame]; }
+    // 재생: 전역 프레임 번호를 배열 인덱스로 매핑하고 범위를 검사한다
+    bool TryPlayback(uint32_t globalFrame, InputFrame& out) const {
+        if (globalFrame < firstFrame_) return false;
+        const std::size_t index = globalFrame - firstFrame_;
+        if (index >= frames_.size()) return false;
+        out = frames_[index];
+        return true;
+    }
 };
 ```
 
@@ -514,15 +586,21 @@ flowchart LR
 class TimeTravel {
     std::deque<StateSnapshot> ring_;     // 최근 N초의 키프레임
 public:
-    void StepBack(int frames) {
-        uint32_t target = currentFrame_ - frames;
-        RestoreNearestKeyframe(target);   // 가장 가까운 이전 키프레임 복원
-        ReplayInputsTo(target);           // 거기서 target까지 입력 재생
-        paused_ = true;                   // 멈춘 채로 검사
+    bool StepBack(int frames) {
+        if (frames < 0) return false;                      // 음수를 먼저 거부
+        if (currentFrame_ < oldestRetained_ + static_cast<uint32_t>(frames))
+            return false;                                  // 보관 범위 밖
+        const uint32_t target = currentFrame_ - static_cast<uint32_t>(frames);
+        if (!RestoreNearestKeyframe(target)) return false; // 가장 가까운 이전 키프레임
+        if (!ReplayInputsTo(target)) return false;         // 키프레임~입력이 모두 남아야
+        paused_ = true;                                    // 멈춘 채로 검사
+        return true;
     }
     void StepForward() { AdvanceOneFrame(); }   // 한 프레임씩 전진
 };
 ```
+
+`frames < 0`을 먼저 거부하고, `oldestRetained <= currentFrame`과 보관된 키프레임·입력 구간이 모두 남아 있는지 확인한 뒤에만 뺀다. 음수를 큰 unsigned로 바꾼 다음 검사하거나 빼기 후 underflow를 검사하면 늦다. `frames[f]`처럼 전역 프레임 번호로 배열을 직접 인덱싱하지 않고, 전역 번호 ↔ 배열 인덱스 매핑을 따로 정의해 범위를 검사한다.
 
 이것이 "방금 그게 왜 그랬지?"에 답한다. 일반 디버깅은 버그를 *다시 일으켜야* 보지만, 타임트래블은 *이미 일어난* 버그의 직전으로 돌아가 *느린 화면* 으로 다시 본다.
 
@@ -538,20 +616,22 @@ public:
 
 ### 구조 — 장치 안 에이전트와 PC 도구
 
-원격 디버깅의 골격은 *장치 안의 에이전트* 와 *PC의 도구* 가 네트워크로 통신하는 것이다. 에이전트는 게임 안에 박혀 프로파일 데이터·로그·인스펙터 값을 *직렬화해 전송* 하고, 명령을 받아 cvar을 바꾸거나 명령을 실행한다.
+원격 디버깅의 골격은 *장치 안의 에이전트* 와 *PC의 도구* 가 네트워크로 통신하는 것이다. 에이전트는 게임 안에 박혀 프로파일 데이터·로그·인스펙터 값을 *직렬화해 전송* 하고, 명령을 받아 cvar을 바꾸거나 명령을 실행한다. 연결은 기본적으로 신뢰 경계 밖에서 오므로 *bind 주소·인증(auth)·권한 범위* 를 명시하고, 원격 명령은 로컬 콘솔과 같은 `CanWrite`·서버 권위 검사를 통과해야 한다. 수신 명령이 게임 상태를 바꾸면 대기열(queue)에 쌓아 *소유 스레드에서 순서대로 적용* 하고, 처리를 마치기 전에 반영됐다고 응답하지 않는 큐잉 정책을 둔다.
 
 ```mermaid
 sequenceDiagram
     participant Tool as PC 도구
     participant Agent as 장치 안 에이전트
     participant Game as 게임 시스템
-    Tool->>Agent: 연결 (TCP)
+    Tool->>Agent: 연결 (TCP, bind/auth)
     Agent->>Tool: 등록된 cvar·명령 목록
     Tool->>Agent: "debug.draw_colliders 1"
-    Agent->>Game: cvar 설정
+    Agent->>Agent: CanWrite·권한 검사 후 큐잉
+    Agent->>Game: 소유 스레드에서 cvar 적용
     Game-->>Agent: 프레임 프로파일 데이터
     Agent-->>Tool: 직렬화 전송
     Tool->>Tool: 플레임 그래프 갱신
+    Note over Agent,Game: 계측 writer 스레드 / 렌더 reader — snapshot 수명 경계
 ```
 
 PC 도구가 보낸 콘솔 명령은 장치의 콘솔(2절)에 그대로 먹이고, 장치가 보낸 프로파일·인스펙터 데이터는 PC에서 4·5절의 UI로 그린다. 즉 *도구의 백엔드는 장치, 프런트엔드는 PC* 다.
@@ -582,7 +662,7 @@ void RemoteAgent::Tick() {
 
 ### 크래시 회수
 
-원격 인프라의 마지막 쓸모는 *크래시 회수* 다. 장치에서 게임이 죽으면, 에이전트는 죽기 직전까지의 *로그 버퍼·마지막 인스펙터 상태·크래시 콜스택* 을 PC나 수집 서버로 보낸다. 1절의 심볼 파일과 대조하면 콜스택이 함수명으로 복원되고, 직전 로그(6절)가 *무엇이 그 크래시로 이어졌는지* 의 흐름을 보인다. 재현 빌드가 결정론적이면(7절), 직전 입력 스트림을 받아 *크래시를 PC에서 그대로 재생* 한다 — 원격 디버깅이 앞 절들의 도구를 *장치 밖으로* 연결하는 마지막 고리다.
+원격 인프라의 마지막 쓸모는 *크래시 회수* 다. 장치에서 게임이 죽으면, 에이전트는 죽기 직전까지의 *로그 버퍼·마지막 인스펙터 상태·크래시 콜스택* 을 PC나 수집 서버로 보낸다. 다만 프로세스가 손상된 뒤 *같은 프로세스 안에서 일반 코드를 다시 실행해 전송·복구하는 것은 보장되지 않는다* — 처리 가능한 reload 실패는 기존 버전을 유지하고, 치명적 크래시는 프로세스 밖 수집기(out-of-process collector)가 미리 보관한 덤프·심볼·마지막 스냅샷 경계에서 회수하며 재시작으로 복구한다. 로그 버퍼·스냅샷을 어느 시점에 디스크로 내리는지, 그리고 platform별 crash-safe 경계를 명시해야 한다. 1절의 심볼 파일과 대조하면 콜스택이 함수명으로 복원되고, 직전 로그(6절)가 *무엇이 그 크래시로 이어졌는지* 의 흐름을 보인다. 재현 빌드가 결정론적이면(7절), 직전 입력 스트림을 받아 *크래시를 PC에서 그대로 재생* 한다 — 원격 디버깅이 앞 절들의 도구를 *장치 밖으로* 연결하는 마지막 고리다.
 
 
 
@@ -592,15 +672,15 @@ void RemoteAgent::Tick() {
 
 디버그 도구의 모든 결정은 *가시성 ↔ 오버헤드* 의 줄다리기 위에 놓인다. 빌드 구성과 조건부 컴파일이 Shipping의 오버헤드를 0으로 깎고, 콘솔과 cvar이 Development 안에서 가시성을 골라 켜며, 디버그 드로우가 공간을, 프로파일러 오버레이가 시간을, 인스펙터가 값을 보이게 하고, 어서션과 로그가 가정과 흐름을 기록하며, 리플레이와 타임트래블이 재현 불가능한 버그를 붙잡고, 원격 디버깅이 이 모두를 장치 밖으로 연결한다 — 각각은 "무엇을 얼마나 보이게 하고 그 대가로 얼마를 낼지"의 선택이다.
 
-이 트레이드오프를 다루는 두 축이 일관되게 흐른다. 하나는 *컴파일 시점의 제거* 다 — `DEBUG_ONLY`로 감싼 도구는 출시본에서 흔적 없이 사라지므로, 개발 중엔 마음껏 박고 출시엔 0으로 만든다. 다른 하나는 *런타임의 선택* 이다 — cvar 토글, 디버그 드로우 지속 시간, 프로파일러 입자 크기, 인스펙터 구독, 원격 전송 범위가 모두 "지금 필요한 것만" 보이게 해 측정이 측정 대상을 왜곡하지 않게 한다. 디버그 코드는 *읽기 전용* 이라는 철칙 — 게임 상태를 바꾸지 않는다 — 이 이 모든 것의 바닥에 깔린다.
+이 트레이드오프를 다루는 두 축이 일관되게 흐른다. 하나는 *컴파일 시점의 제거* 다 — `DEBUG_ONLY`로 감싼 도구는 출시본에서 흔적 없이 사라지므로, 개발 중엔 마음껏 박고 출시엔 0으로 만든다. 다른 하나는 *런타임의 선택* 이다 — cvar 토글, 디버그 드로우 지속 시간, 프로파일러 입자 크기, 인스펙터 구독, 원격 전송 범위가 모두 "지금 필요한 것만" 보이게 해 측정이 측정 대상을 왜곡하지 않게 한다. 수동으로 요청하지 않은 passive instrumentation은 *읽기 전용* 이라는 철칙 — 자동 계측은 게임 상태를 바꾸지 않는다 — 이 이 모든 것의 바닥에 깔린다. 콘솔·인스펙터·원격 명령처럼 사용자가 명시적으로 요청하는 상태 편집은 권한 검사와 변경 기록·검증을 거치는 별도 경로다.
 
 도구가 잘 만들어지면 디버깅은 추측에서 관측으로 바뀐다. "왜 안 되지?"의 답이 코드를 다시 컴파일하기 전에, 화면의 디버그 드로우와 인스펙터와 프로파일러에 *이미 적혀 있다*. 그리고 그 도구들은 디버깅 너머로 번진다 — 리플레이는 자동 테스트와 관전이 되고, 텔레메트리는 밸런스 분석이 되며, 원격 인프라는 크래시 회수가 된다. 보이지 않는 것을 보이게 만드는 투자는 개발 내내 복리로 돌아온다.
 
 ## 더 읽을거리
 
-- Dear ImGui 저장소 — 즉시 모드 GUI로 인스펙터·디버그 패널·오버레이를 구축하는 사실상의 표준.
-- "Game Programming Patterns" (Robert Nystrom) — Service Locator·Command 패턴이 콘솔과 cvar 시스템의 구조에 닿는다.
-- Tracy Profiler 문서 — 인스트루멘테이션·샘플링·GPU 타임스탬프·원격 전송을 함께 다루는 오픈 프로파일러.
-- RenderDoc 문서 — GPU 프레임 캡처와 비동기 측정의 실제 구현 참고.
-- rr(record-and-replay 디버거) 문서와 "1500 Archers on a 28.8"(Age of Empires, GDC 2001) — 결정론·리플레이·타임트래블 디버깅의 실제 구현과 산업 사례.
-- Breakpad / Crashpad 문서 — 심볼 관리와 원격 크래시 회수 파이프라인의 오픈 구현.
+- Dear ImGui 저장소(https://github.com/ocornut/imgui) — 즉시 모드 GUI로 인스펙터·디버그 패널·오버레이를 구축하는 프레임워크. 3D 기즈모 수학·reflection 수명 관리는 엔진/별도 구현 범위다.
+- "Game Programming Patterns" (Robert Nystrom, 2014) — Command·Service Locator 장(https://github.com/munificent/game-programming-patterns/blob/master/book/command.markdown)이 콘솔·cvar 등록/디스패치 구조에 닿는다.
+- Tracy Profiler 저장소(https://github.com/wolfpld/tracy) — 인스트루멘테이션·샘플링·GPU 타임스탬프·원격 전송을 함께 다루는 오픈 프로파일러. 원문 ScopeTimer가 Tracy의 계층/멀티스레드 처리를 그대로 구현한 것은 아니다.
+- RenderDoc 캡처 annotation 문서(https://github.com/baldurk/renderdoc/blob/v1.x/docs/how/how_annotate_capture.rst) — GPU 프레임 캡처·marker 참고. 비동기 timestamp query 구현의 직접 근거는 아니다.
+- rr 프로젝트(https://rr-project.org/) — record-and-replay 시스템 디버거와 "1500 Archers on a 28.8: Network Programming in Age of Empires and Beyond"(2001, https://www.gamedeveloper.com/programming/1500-archers-on-a-28-8-network-programming-in-age-of-empires-and-beyond) — 결정론 시뮬레이션·리플레이 산업 사례. 둘은 서로 다른 접근이다.
+- Breakpad getting started(https://chromium.googlesource.com/breakpad/breakpad/+/HEAD/docs/getting_started_with_breakpad.md) / Crashpad overview design(https://chromium.googlesource.com/crashpad/crashpad/+/main/doc/overview_design.md) — 심볼 관리와 out-of-process 원격 크래시 회수 파이프라인의 오픈 구현.

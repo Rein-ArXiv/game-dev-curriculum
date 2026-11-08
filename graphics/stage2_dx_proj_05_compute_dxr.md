@@ -274,6 +274,8 @@ cmdList->ExecuteIndirect(
 
 `ExecuteIndirect`의 커맨드 시그니처는 인자 버퍼의 바이트 레이아웃이 `D3D12_DRAW_ARGUMENTS` 구조와 일치한다고 GPU에 알린다. 인스턴스 수가 GPU 측에서 결정되므로 CPU는 고정된 한 번의 호출만 발급하고, 결과적으로 100만 파티클이 0에 가까운 CPU 드로우 콜 비용으로 그려진다. 이것이 DX11에서는 자연스럽지 않던, GPU에서 자체 완결되는 워크로드의 대표 예다.
 
+이 호출이 안전하려면 컴퓨트가 쓴 인자와 데이터를 소비하기 전에 자원 상태와 가시성이 맞춰져 있어야 한다. `drawArgs`는 컴퓨트의 UAV 쓰기(`D3D12_RESOURCE_STATE_UNORDERED_ACCESS`)에서 `D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT`로, 압축된 `alive` 버퍼는 UAV 쓰기에서 정점 셰이더가 읽는 `D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE`로 전환해야 한다. 위에서 생략한 제출 헬퍼가 이 배리어와 가시성 전환을 수행한다는 계약을 전제로 하며, 같은 큐에서 디스패치와 드로우를 이어 붙이는 경로와 컴퓨트 큐에서 그래픽스 큐로 넘기는 경로를 구분해야 한다(다중 큐 경로는 큐 간 fence 핸드오프가 추가로 필요하다). helper가 이 전환을 하지 않으면 UAV 쓰기를 다 읽기 전에 소비해 잘못된 인자로 드로우하거나 데이터 경합이 난다.
+
 ### 빌보드 메시 렌더링
 
 압축된 살아 있는 입자를 각 인스턴스가 정점 4개의 쿼드로 펼쳐 카메라를 향한 빌보드로 그린다.
@@ -561,10 +563,12 @@ Hit 셰이더 안에서 `TraceRay`를 다시 부르면 반사·굴절이 재귀�
 | Ray Generation | 광선 발사, `DispatchRays`의 진입점 |
 | Miss | 광선이 어떤 지오메트리에도 맞지 않음 |
 | Closest Hit | 가장 가까운 교차점에서 한 번 |
-| Any Hit | 교차할 때마다 (투명·알파 테스트 처리) |
+| Any Hit | 후보 교차마다 (불투명이 아니거나 alpha test가 필요한 경우) |
 | Intersection | 사용자 정의 프리미티브 (구, 절차적 표면) |
 
 *Hit Group* 은 Closest Hit, Any Hit, Intersection 셋을 하나로 묶은 단위다. 광선이 어떤 인스턴스에 맞으면 그 인스턴스에 매핑된 Hit Group의 셰이더들이 실행된다. 불투명 삼각형만 다루는 가장 단순한 경우, Hit Group은 Closest Hit 하나만 담는다.
+
+Any Hit는 모든 기하학적 교차에 대해 무조건 호출되는 것이 아니다. opaque 플래그가 켜진 인스턴스는 any-hit를 건너뛰고, ray/instance culling과 이미 얻은 hit의 t 범위, 종료 정책(`RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH` 등)에 따라 호출이 생략된다. 즉 Any Hit는 허용된 non-opaque 후보 교차를 필터링하는 단계이며, 셰이더가 `IgnoreHit()`/`AcceptHitAndEndSearch()`로 결과를 확정하는 계약을 따른다. API별 중복 호출 보장도 없으므로 호출 횟수에 의존한 로직을 두지 않는다.
 
 ### Shader Binding Table의 역할
 
@@ -615,13 +619,17 @@ DXR 1.1은 `TraceRay`와 SBT의 복잡도를 통째로 우회하는 길을 연�
 [numthreads(8, 8, 1)]
 void ComputeShadowsCS(uint3 dtid : SV_DispatchThreadID) {
     float3 surfacePos = ReconstructWorldPos(dtid.xy);
-    float3 lightDir   = normalize(lightPos - surfacePos);
+    float3 toLight    = lightPos - surfacePos;
+    float  lightDist  = length(toLight);
+    float3 lightDir   = toLight / lightDist;
 
     RayDesc shadowRay;
     shadowRay.Origin    = surfacePos + lightDir * 0.001;   // self-shadow 방지
     shadowRay.Direction = lightDir;
     shadowRay.TMin = 0.0;
-    shadowRay.TMax = length(lightPos - surfacePos);
+    // origin 을 lightDir 방향으로 0.001 옮겼으므로 TMax 도 그만큼 줄여,
+    // 광원 뒤의 블로커를 그림자로 잘못 판정하지 않게 한다.
+    shadowRay.TMax = max(lightDist - 0.001, 0.0);
 
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;
     q.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, shadowRay);

@@ -75,7 +75,7 @@ public:
 
 ### Lock-Free 구현 (SPSC 전용)
 
-다음 구현은 **단일 생산자 / 단일 소비자(SPSC)** 전용이다. 생산자가 한 명이라 head를 단독으로 갱신할 수 있고, 소비자도 마찬가지로 tail을 단독으로 갱신할 수 있다는 가정에서 락 없이 안전하다. 다중 생산자나 다중 소비자(MPMC) 환경에서는 head/tail 예약을 위한 별도의 CAS 루프가 필요하며, 그렇지 않으면 같은 슬롯에 두 producer가 동시에 쓰는 race가 발생한다. MPMC가 필요하면 moodycamel/concurrentqueue 같은 검증된 구현을 쓰거나 Vyukov MPMC 큐를 별도로 작성해야 한다.
+다음 구현은 **단일 생산자 / 단일 소비자(SPSC)** 전용이다. 생산자가 한 명이라 head를 단독으로 갱신할 수 있고, 소비자도 마찬가지로 tail을 단독으로 갱신할 수 있다는 가정에서 락 없이 안전하다. 다중 생산자나 다중 소비자(MPMC) 환경에서는 head/tail 예약을 위한 별도의 CAS 루프가 필요하며, 그렇지 않으면 같은 슬롯에 두 producer가 동시에 쓰는 race가 발생한다. MPMC가 필요하면 moodycamel/concurrentqueue 같은 검증된 구현을 쓰거나 Vyukov MPMC 큐를 별도로 작성해야 한다. 또한 이 구현이 lock-free인 것은 `std::atomic<size_t>`가 lock-free이고 T의 복사·대입이 예외를 던지거나 블록되지 않는다는 전제에서다. `is_always_lock_free`로 확인하고 실시간 경로에는 nothrow·비차단 T를 쓴다.
 
 ```cpp
 template<typename T, size_t Size>
@@ -167,7 +167,7 @@ public:
 };
 ```
 
-`Size`가 템플릿 상수이고 2의 거듭제곱임을 컴파일러가 알면 `% Size`도 같은 마스크로 최적화될 수 있다. 따라서 수동 치환의 고정 성능 이득을 기대하기보다 power-of-two라는 불변식을 명시하고 생성된 코드를 확인하는 데 의미가 있다.
+`OptimizedRingBuffer`는 원자 연산을 쓰지 않는 단일 스레드 버전이다. `Size`가 템플릿 상수이고 2의 거듭제곱임을 컴파일러가 알면 `% Size`도 같은 마스크로 최적화될 수 있다. 따라서 수동 치환의 고정 성능 이득을 기대하기보다 power-of-two라는 불변식을 명시하고 생성된 코드를 확인하는 데 의미가 있다.
 
 ### 실전 응용: 오디오 버퍼
 
@@ -199,6 +199,8 @@ public:
     }
 };
 ```
+
+위 예제는 좌우 채널을 각각의 큐로 보내므로 한쪽 push나 pop만 실패하면 두 채널의 시점이 어긋난다. 실제로는 `struct StereoFrame { float left, right; }` 하나를 단일 SPSC 큐로 전송하고, 가득 찼을 때 drop·block·overwrite 중 무엇을 할지와 비었을 때 silence·repeat 정책을 명시하는 편이 안전하다.
 
 오디오 시스템에서는 버퍼 언더런이 발생하면 끊김이나 잡음이 생길 수 있다. 버퍼를 키우면 scheduler jitter에 강해지지만 입력부터 출력까지의 latency가 늘어난다. 필요한 frame 수와 callback block 수는 오디오 API, 장치, 장르의 반응성 요구와 최악 실행 시간을 측정해 정한다.
 
@@ -277,7 +279,9 @@ public:
         // 다른 배열의 포인터를 빼는 것 자체가 UB이므로 소속을 정수로 먼저 확인한다.
         const uintptr_t base = reinterpret_cast<uintptr_t>(objects.data());
         const uintptr_t addr = reinterpret_cast<uintptr_t>(obj);
-        if (addr < base || addr >= base + sizeof(T) * PoolSize) {
+        // 범위와 슬롯 경계(정렬)를 함께 확인한다.
+        if (addr < base || addr >= base + sizeof(T) * PoolSize ||
+            (addr - base) % sizeof(T) != 0) {
             // 이 풀의 객체가 아니다
             return;
         }
@@ -302,20 +306,20 @@ public:
 
 여기서 핵심은 **placement new**이다. 이미 할당된 메모리에 생성자만 호출하므로, 힙 할당 오버헤드가 발생하지 않는다.
 
-한 가지 주의점이 있다. `std::array<T, N>`은 풀 생성 시점에 모든 요소를 이미 생성하므로, 첫 `acquire`에서 살아있는 객체 위에 placement new를 하는 셈이 된다. 비자명한 소멸자를 가진 타입에서는 엄밀하지 않으므로, 정석은 `alignas(T) std::byte storage[N * sizeof(T)]` 같은 원시 버퍼를 두고 생성/소멸을 풀이 전담하는 것이다.
+한 가지 주의점이 있다. `std::array<T, N>`은 풀 생성 시점에 모든 요소를 이미 생성하므로, 첫 `acquire`에서 살아있는 객체 위에 placement new를 하는 셈이 된다. 이때 이전 객체의 자원은 소멸되지 않고, `release` 뒤 풀 소멸 시 같은 슬롯을 다시 소멸하는 이중 소멸이 될 수 있으며, `acquire`의 T 생성자가 예외를 던지면 `freeCount`와 `inUse`가 복구되지 않는다. 따라서 이 예제는 trivially destructible 타입에만 적용하고, 정석은 `alignas(T) std::byte storage[N * sizeof(T)]` 같은 원시 버퍼를 두고 생성/소멸을 풀이 전담하는 것이다.
 
 ### RAII 스타일 핸들
 
 매번 수동으로 `release`를 호출하는 것은 실수하기 쉽다. RAII 패턴을 적용하여 자동으로 반환되도록 만들 수 있다:
 
 ```cpp
-template<typename T>
+template<typename T, size_t PoolSize>
 class PoolHandle {
-    ObjectPool<T>* pool;
+    ObjectPool<T, PoolSize>* pool;
     T* object;
 
 public:
-    PoolHandle(ObjectPool<T>* p, T* obj) : pool(p), object(obj) {}
+    PoolHandle(ObjectPool<T, PoolSize>* p, T* obj) : pool(p), object(obj) {}
 
     ~PoolHandle() {
         if (object) pool->release(object);
@@ -347,7 +351,8 @@ public:
 };
 
 // 사용 예시: Pool에는 acquireHandle()이 없으므로 획득한 포인터를 감싼다.
-PoolHandle<Particle> particleHandle(&pool, pool.acquire());
+ObjectPool<Particle, 10000> pool;
+PoolHandle<Particle, 10000> particleHandle(&pool, pool.acquire());
 if (particleHandle.valid()) {
     particleHandle->position = {0, 0, 0};
     particleHandle->velocity = {1, 2, 3};
@@ -395,6 +400,7 @@ public:
             }
         }
 
+        p->reset();  // 재활용 슬롯을 포함해 모든 필드를 초기화한다.
         p->position = position;
         p->velocity = velocity;
         p->lifetime = lifetime;
@@ -605,6 +611,8 @@ public:
 };
 ```
 
+이 구현은 `entity < NULL_INDEX`(즉 `UINT32_MAX` 미만)를 전제로 한다. `entity == UINT32_MAX`이면 `entity + 1`이 0으로 래핑해 sparse 배열을 잘못 확장한다. 또한 `components.push_back`이 예외를 던지면 dense와 components 길이가 어긋나므로 T는 nothrow 타입으로 제한하거나 예외 시 dense 갱신을 되돌려야 한다. `forEach` 안에서 add/remove 같은 구조 변경을 호출하면 안 된다.
+
 ### 왜 Sparse Set이 빠른가?
 
 Sparse Set의 성능 비결은 **데이터 지역성**에 있다. 순회할 때는 dense 배열만 접근하므로:
@@ -813,6 +821,8 @@ public:
 };
 ```
 
+`insert`는 `slot.occupied = true` 이후 data/indices push가 실패하면 슬롯과 배열이 어긋나므로, T를 nothrow 이동 가능 타입으로 제한하거나 예외 시 되돌리는 단계화가 필요하다. `Key`의 기본값(index=0, generation=0)은 슬롯 0의 최초 키와 충돌하므로 무효 키가 필요하면 별도 sentinel을 둔다. 모든 인덱스는 `uint32_t` 범위 안에 있어야 한다.
+
 ### 실전 활용 예시
 
 ```cpp
@@ -924,7 +934,7 @@ Archetype 청크는 컴포넌트마다 별도 배열을 두고 같은 인덱스�
 
 $$\text{capacity} = \left\lfloor \frac{16{,}384}{32} \right\rfloor = 512$$
 
-512개 엔티티가 한 청크에 들어간다. 청크 크기를 고정하고 용량을 역산하는 이유는, 컴포넌트 조합이 무엇이든 **청크 하나를 순회하는 동안 만지는 총 바이트가 일정하게 유지**되기 때문이다. 조합이 무거우면 엔티티 수가 줄고, 가벼우면 늘어난다. 순회 단위를 캐시 용량에 맞춰 고정하려는 설계다.
+512개 엔티티가 한 청크에 들어간다. 이 512는 엔티티 ID·청크 헤더·컴포넌트별 정렬 패딩을 제외한 payload 기준 상한이다. 청크 크기를 고정하고 용량을 역산하는 이유는, 컴포넌트 조합이 무엇이든 **청크 하나를 순회하는 동안 만지는 총 바이트가 일정하게 유지**되기 때문이다. 조합이 무거우면 엔티티 수가 줄고, 가벼우면 늘어난다. 순회 단위를 캐시 용량에 맞춰 고정하려는 설계다.
 
 **둘째, 컴포넌트 추가·삭제는 archetype 이동이 된다.** 엔티티의 컴포넌트 조합이 바뀌면 그 엔티티는 다른 archetype에 속하게 되므로, 가지고 있던 모든 컴포넌트를 새 청크로 복사하고 원래 자리는 마지막 엔티티로 메워야 한다.
 
@@ -1059,6 +1069,8 @@ private:
 };
 ```
 
+`create`는 같은 컴포넌트 타입이 두 번 들어오면 같은 column에 두 번 push되어 `entities` 길이와 어긋나므로, 컴포넌트 타입이 고유한지 compile-time으로 검사해야 한다. 컴포넌트 배열 생성·삽입 중 예외가 나면 일부 column만 길어지므로 모든 column 길이를 entity 수와 맞추는 transaction으로 처리한다. `query` 콜백 안에서 구조 변경은 즉시 하지 말고 command buffer로 미룬다. 이 구현은 컴포넌트별 `std::vector`로 archetype grouping만 보여 줄 뿐, 고정 16KB chunk allocator와 청크 헤더·오프셋은 구현하지 않는다.
+
 ### Unity DOTS의 실제 구현
 
 Unity DOTS는 Archetype ECS의 대표적인 산업 구현이다:
@@ -1135,7 +1147,9 @@ for (Chunk& chunk : archetype.chunks) {
 | Archetype ECS | O(1)* | O(n)** | O(1) | O(n) | 매우 높음 | 높음 (청크 메타데이터) |
 
 \* 동일 Archetype 내에서
-\*\* Archetype 변경 시 모든 컴포넌트 이동 필요
+\*\* Archetype 변경 시 이동하는 컴포넌트 바이트 수 n에 비례
+
+표의 삽입·삭제 차수는 위 표기대로이며, 아래의 10만 같은 엔티티 수 경계는 보편값이 아니라 조합 수·질의/변경 비율·ID 공간에 따라 달라지는 출발점이다.
 
 ### 언제 무엇을 사용할 것인가?
 

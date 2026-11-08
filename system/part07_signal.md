@@ -207,15 +207,34 @@ IEEE-754 부동소수점 나눗셈은 기본 환경에서 infinity와 상태 fla
 - `alarm` 함수로 설정한 타이머가 만료될 때 발생한다
 
 ```c
+volatile sig_atomic_t alarm_fired = 0;
+
 void alarm_handler(int sig) {
     static const char msg[] = "Time's up!\n";
     write(STDOUT_FILENO, msg, sizeof(msg) - 1);
+    alarm_fired = 1;
 }
 
 int main() {
-    signal(SIGALRM, alarm_handler);
+    struct sigaction sa = {0};
+    sigset_t block, old;
+
+    /* 대상 시그널을 먼저 차단해 handler 실행과 대기 사이의 창을 없앤다 */
+    sigemptyset(&block);
+    sigaddset(&block, SIGALRM);
+    sigprocmask(SIG_BLOCK, &block, &old);
+
+    sa.sa_handler = alarm_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGALRM, &sa, NULL);
+
     alarm(5);  // 5초 후 SIGALRM 발생
-    pause();   // 시그널 대기
+
+    /* 대기 mask에서 SIGALRM을 해제한 채 원자적으로 기다리고, 깨어나면 조건을 재검사한다 */
+    while (!alarm_fired)
+        sigsuspend(&old);
+
+    sigprocmask(SIG_SETMASK, &old, NULL);
 }
 ```
 
@@ -226,22 +245,42 @@ int main() {
 - `wait`/`waitpid`와 함께 사용된다
 
 ```c
+volatile sig_atomic_t child_changed = 0;
+
 void sigchld_handler(int sig) {
     int saved_errno = errno;
     int status;
     while (waitpid(-1, &status, WNOHANG) > 0)
         ;  // 서식화와 로깅은 메인 루프에 별도 통지해서 수행
+    child_changed = 1;
     errno = saved_errno;
 }
 
 int main() {
-    signal(SIGCHLD, sigchld_handler);
+    struct sigaction sa = {0};
+    sigset_t block, old;
+
+    /* fork 이전에 SIGCHLD를 차단해, 자식이 먼저 종료해도 대기에서 놓치지 않게 한다 */
+    sigemptyset(&block);
+    sigaddset(&block, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &block, &old);
+
+    sa.sa_handler = sigchld_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGCHLD, &sa, NULL);
+
     if (fork() == 0) {
         _exit(0);  // 자식 종료 -> 부모에게 SIGCHLD
     }
-    pause();
+
+    while (!child_changed)   // 이미 통지됐으면 즉시 통과
+        sigsuspend(&old);    // 그 사이 도착한 시그널도 놓치지 않는다
+
+    sigprocmask(SIG_SETMASK, &old, NULL);
 }
 ```
+
+`pause()`로 조건을 기다리면 시그널이 `pause()` 호출 전에 처리됐을 때 lost-wakeup이 생긴다 — 위처럼 대상 시그널을 먼저 차단하고 조건을 검사한 뒤 `sigsuspend`로 원자적으로 기다리면 그 창이 사라진다.
 
 #### 사용자 정의 시그널
 
@@ -326,7 +365,10 @@ kill(-5678, SIGTERM);   // 프로세스 그룹 5678의 모든 프로세스에게
 ```c
 // 자식 프로세스 종료
 pid_t child_pid = fork();
-if (child_pid == 0) {
+if (child_pid < 0) {
+    perror("fork");   // pid<0을 그대로 kill(-1, ...)로 넘기지 않는다
+    return 1;
+} else if (child_pid == 0) {
     // 자식: 무한 루프
     while (1) sleep(1);
 } else {
@@ -540,6 +582,8 @@ int main() {
     while (1) pause();
 }
 ```
+
+`pause()`는 이미 처리된 시그널을 다시 통지하지 않는다. 인터럽트로 깨어나 조건을 확인하는 대기라면 위 SIGCHLD/SIGALRM 예처럼 대상 시그널을 차단한 뒤 `sigsuspend`로 기다려 lost-wakeup을 피한다. 이 예는 사용자 입력으로 SIGINT가 비교적 늦게 오는 대화형 데모라 `pause()`로도 동작한다.
 
 ### sa_flags: 핸들러 동작 제어
 
@@ -1228,19 +1272,34 @@ int pthread_kill(pthread_t thread, int sig);
 
 ```c
 pthread_t worker_tid;
+volatile sig_atomic_t stop_requested = 0;
+
+void usr1_handler(int sig) {
+    stop_requested = 1;
+}
 
 void *worker(void *arg) {
-    while (1) {
+    /* 이 thread는 SIGUSR1을 차단하지 않으므로 handler를 실행할 수 있다. */
+    while (!stop_requested) {
         work();
     }
+    return NULL;
 }
 
 int main() {
+    struct sigaction sa = {0};
+
+    /* process-wide disposition을 thread 생성 전에 등록한다.
+       등록하지 않으면 SIGUSR1의 기본 동작이 프로세스 전체를 종료한다. */
+    sa.sa_handler = usr1_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGUSR1, &sa, NULL);
+
     pthread_create(&worker_tid, NULL, worker, NULL);
 
     sleep(5);
 
-    // 워커 스레드에게만 SIGUSR1 전송
+    /* 대상 thread가 SIGUSR1을 차단하지 않았는지 mask 계약을 확인한 뒤 보낸다. */
     pthread_kill(worker_tid, SIGUSR1);
 
     pthread_join(worker_tid, NULL);
@@ -1744,7 +1803,7 @@ Job-control shell은 `fork`, `setpgid`, `tcsetpgrp`, `waitpid` 사이의 경합�
 - POSIX.1-2024 Base Specifications, Signal Concepts — https://pubs.opengroup.org/onlinepubs/9799919799/
 - POSIX.1-2017 Base Specifications, Signal Concepts — https://pubs.opengroup.org/onlinepubs/9699919799/
 - 커널 소스: `kernel/signal.c`, `arch/x86/kernel/signal.c`, `include/linux/sched/signal.h`
-- W. Richard Stevens, *Advanced Programming in the UNIX Environment*, 3rd ed., Chapter 10
+- W. Richard Stevens, Stephen A. Rago, *Advanced Programming in the UNIX Environment*, 3rd ed., Chapter 10
 - Michael Kerrisk, *The Linux Programming Interface*, Chapter 20-22
 - Intel 64 and IA-32 Architectures Software Developer's Manual, Volume 3A
 - Linux man pages: `signal(7)`, `signal-safety(7)`, `sigaction(2)`, `sigprocmask(2)`, `pthread_sigmask(3)`

@@ -6,12 +6,12 @@
 
 ```mermaid
 flowchart LR
-    Clip[애니 클립<br/>압축 키프레임/곡선] --> Sample[샘플링<br/>로컬 포즈]
+    Clip[애니 클립<br/>압축 키프레임/곡선] --> Sample[샘플링<br/>로컬 TRS 포즈]
     Sample --> Blend[블렌드 트리<br/>레이어·마스크·additive]
     Blend --> SM[상태 머신<br/>전환·블렌드타임]
     SM --> IK[IK·루트모션<br/>환경 보정]
-    IK --> Pose[글로벌 포즈<br/>본 행렬 팔레트]
-    Pose --> Skin[스키닝<br/>CPU/GPU]
+    IK --> Pose[글로벌 TRS 포즈<br/>부모 누적]
+    Pose --> Skin[스키닝<br/>TRS→본 행렬, CPU/GPU]
     Skin --> Out[렌더 메시]
 ```
 
@@ -78,6 +78,8 @@ void ComputeGlobalPose(const Skeleton& skel, const Pose& local, Pose& global) {
 }
 ```
 
+로컬 포즈를 TRS로 저장하는 것과 *합성된 글로벌 포즈*를 TRS로 저장하는 것은 다른 문제다. 부모의 비균일 스케일과 자식 회전을 합성하면 결과에 shear가 생겨 더 이상 하나의 TRS로 표현되지 않는다. 따라서 로컬은 TRS로 두더라도 글로벌은 Mat4/3×4(affine)로 합성하거나, 계층 비균일 스케일을 금지하고 import 검증에서 거부해야 한다. `Combine`이 단순 TRS 곱셈이면 후자의 제약을 코드 계약으로 명시한다.
+
 부모가 자식보다 항상 앞에 오도록 본 인덱스를 위상 정렬해 두는 것이 관건이다. 그러면 글로벌 포즈 합성이 재귀 없는 단일 선형 패스가 되고 `parentIndex[i] < i`가 성립한다. 다만 한 스켈레톤 내부에는 부모→자식 의존성이 있으므로 단순한 본별 병렬 루프는 불가능하다. 보통 캐릭터 간 병렬성을 먼저 쓰고, 매우 큰 스켈레톤에서만 깊이 레벨별 배리어나 독립 서브트리를 고려한다.
 
 ### 스키닝 — 본 포즈를 정점으로
@@ -101,7 +103,7 @@ Vec3 SkinVertex(const Vertex& v) {
 }
 ```
 
-여기서 *역바인드 포즈(inverse bind pose)* 는 정점을 바인드 자세 기준 본 로컬 공간으로 보내는 고정 행렬이다. 스키닝 행렬 = 글로벌 포즈 × 역바인드이므로, 본이 바인드 자세 그대로면 스키닝 행렬은 단위 행렬이 되어 정점이 제자리에 남는다.
+여기서 *역바인드 포즈(inverse bind pose)* 는 정점을 바인드 자세 기준 본 로컬 공간으로 보내는 고정 행렬이다. 스키닝 행렬 = 글로벌 포즈 × 역바인드이므로, 본이 바인드 자세 그대로면 스키닝 행렬은 단위 행렬이 되어 정점이 제자리에 남는다. 이를 성립시키려면 공간 계약을 고정해야 한다: `global.bones`가 mesh-local 기준이면 `skinMatrix`도 mesh-local이므로 이후 렌더에서 model 행렬을 *한 번만* 곱한다(월드 변환을 두 번 곱하지 않는다). `inverseBind`는 바인드 자세의 글로벌→본 로컬 역변환이고, 정점 가중치 합은 1, joint index는 유효 범위여야 한다. bind pose에서 원래 정점이 복원되는지 테스트로 확인하고, 법선·접선은 위치의 w=1 변환 경로와 구분해 처리한다.
 
 ### CPU 스키닝 대 GPU 스키닝
 
@@ -114,7 +116,7 @@ Vec3 SkinVertex(const Vertex& v) {
 | 결과 재사용 | 변형된 정점을 CPU가 읽을 수 있음 | GPU 안에만 존재 |
 | 적합 | 물리 충돌용 메시, 소수 캐릭터 | 다수 캐릭터 렌더링(표준) |
 
-현대 엔진의 렌더 경로는 거의 *GPU 스키닝* 이다. CPU는 본 *행렬 팔레트(bone palette)* 만 만들어 상수 버퍼로 올리고, 정점 셰이더가 정점마다 가중 합을 수행한다. 정점당 비용이 GPU 수천 코어로 분산되므로 캐릭터 수가 늘어도 CPU 프레임 시간은 거의 변하지 않는다.
+현대 엔진의 렌더 경로는 거의 *GPU 스키닝* 이다. CPU는 본 *행렬 팔레트(bone palette)* 만 만들어 상수 버퍼로 올리고, 정점 셰이더가 정점마다 가중 합을 수행한다. 정점당 비용이 GPU 수천 코어로 분산되므로 CPU의 *정점별 스키닝 항*은 크게 줄어든다. 다만 채널 샘플링·블렌딩·글로벌 포즈 합성과 본 팔레트 업로드·제출 비용은 남으므로, 캐릭터 수가 늘면 CPU 프레임 시간도 증가한다.
 
 그럼에도 *CPU 스키닝이 필요한 경우* 가 있다. 변형된 메시로 *충돌·레이캐스트* 를 해야 하거나(피격 판정), 클로스·헤어 물리가 스키닝된 위치를 입력으로 받아야 할 때다. 이때는 *충돌용 저폴리 메시만 CPU 스키닝* 하고, 렌더용 고폴리 메시는 GPU 스키닝으로 분리하는 것이 표준이다. 본 팔레트는 한 번만 계산하면 양쪽이 공유한다.
 
@@ -132,7 +134,7 @@ struct PoseSoA {
 };
 ```
 
-SoA 또는 고정 폭 AoSoA에서는 여러 본의 쿼터니언 성분을 SIMD 레인에 배치해 내적, 부호 정렬, 정규화와 근사 보간을 함께 처리할 수 있다. 삼각함수를 쓰는 정확한 SLERP는 단순 사칙연산만큼 자동 벡터화되지는 않으므로, 런타임 코덱은 NLerp나 다항 근사와 레이아웃을 함께 설계한다. 단일 본을 임의 접근하는 IK에는 AoS가 편할 수 있으며, 레이아웃 변환 비용이 이득보다 작은지도 측정해야 한다.
+위 `PoseSoA`는 *필드별* 분리(translation 배열, rotation 배열, scale 배열)이지, 여러 본의 x/y/z를 같은 SIMD 레인에 담는 *lane별* 배열이 아니다. 여러 본의 쿼터니언 성분을 SIMD 레인에 배치해 내적, 부호 정렬, 정규화와 근사 보간을 함께 처리하려면 AoSoA로 재배치하거나 transpose/gather, lane packing이 필요하다. 삼각함수를 쓰는 정확한 SLERP는 단순 사칙연산만큼 자동 벡터화되지는 않으므로, 런타임 코덱은 NLerp나 다항 근사와 레이아웃을 함께 설계한다. 단일 본을 임의 접근하는 IK에는 AoS가 편할 수 있으며, 레이아웃 변환 비용이 이득보다 작은지도 측정해야 한다.
 
 ## 2. 애니메이션 압축
 
@@ -244,18 +246,28 @@ float MaxJointPositionError(const Clip& orig, const Clip& compressed,
 
 ### 블렌딩은 포즈 사이의 보간이다
 
-캐릭터가 걷다가 뛰기로 *부드럽게 전환* 하려면 두 클립의 포즈를 섞어야 한다. *블렌딩(blending)* 은 두 포즈를 가중치 $\alpha$ 로 보간한다. 위치·스케일은 선형 보간이지만, *회전은 SLERP* 여야 한다.
+캐릭터가 걷다가 뛰기로 *부드럽게 전환* 하려면 두 클립의 포즈를 섞어야 한다. *블렌딩(blending)* 은 두 포즈를 가중치 $\alpha$ 로 보간한다. 위치·스케일은 선형 보간이지만, 회전은 *정규화된 쿼터니언 위에서* 보간해야 한다. *SLERP*는 등속 호를 주고, 정규화를 동반한 *NLerp*도 같은 호 위의 유효한 근사다 — 반면 행렬 원소를 직접 선형 보간하면 비직교 행렬이 나와 메시가 뒤틀린다.
 
 ```cpp
-// 두 포즈 블렌딩: 위치/스케일은 Lerp, 회전은 SLERP
-void BlendPose(const Pose& a, const Pose& b, float alpha, Pose& out) {
+// 두 포즈 블렌딩: 위치/스케일은 Lerp, 회전은 SLERP.
+// 계약: a.bones, b.bones, out.bones의 크기가 모두 같고 out은 호출자가 미리 할당한다.
+//       alpha는 유한한 [0,1], 두 회전은 단위 쿼터니언. 정확한 in-place(out==a 또는 out==b)는
+//       허용하지만 부분 겹침은 허용하지 않는다. 빈 출력은 자동 resize하지 않고 거절한다.
+bool BlendPose(const Pose& a, const Pose& b, float alpha, Pose& out) {
+    if (a.bones.size() != b.bones.size() ||
+        a.bones.size() != out.bones.size() ||
+        !std::isfinite(alpha) || alpha < 0.0f || alpha > 1.0f)
+        return false;                        // 쓰기 전에 크기·alpha 검증
     for (int i = 0; i < a.bones.size(); ++i) {
         out.bones[i].translation = Lerp(a.bones[i].translation, b.bones[i].translation, alpha);
         out.bones[i].scale       = Lerp(a.bones[i].scale,       b.bones[i].scale,       alpha);
         out.bones[i].rotation    = Slerp(a.bones[i].rotation,   b.bones[i].rotation,    alpha);
     }
+    return true;
 }
 ```
+
+출력 Pose는 호출자가 스켈레톤 크기로 미리 할당하며(예: pose arena), 빈 vector를 자동으로 resize하지 않는다 — 실시간 블렌드 경로의 암묵적 힙 할당을 피하기 위해서다. 함수는 크기·alpha 검증에 실패하면 쓰기 전에 false를 반환한다.
 
 회전을 *행렬 또는 쿼터니언 성분 단위 선형 보간(NLerp)* 으로 하면 빠르지만, 큰 각도에서는 *각속도가 일정하지 않아* 중간이 끌리듯 보인다. SLERP는 구면 위 등속 보간이라 정확하지만 삼각함수가 비싸다. 실무 절충은 *작은 각도는 NLerp + 정규화, 큰 각도만 SLERP* 다 — 대부분의 인접 프레임 블렌드는 각도가 작아 NLerp로 충분하다.
 
@@ -304,7 +316,7 @@ Quaternion SlerpSafe(Quaternion a, Quaternion b, float t) {
 }
 ```
 
-`0.9995`는 수치적으로 안전한 폴백을 설명하기 위한 예시이지 품질의 보편 경계가 아니다. 이 값이면 쿼터니언 구면각은 약 1.81°보다 작고 물리적 상대 회전각은 약 3.62°보다 작다. 부호 정렬을 빠뜨리면 같은 자세를 나타내는 $q$와 $-q$ 사이를 먼 호로 보간할 수 있고, 퇴화 폴백을 빠뜨리면 $\sin\theta$ 분모가 0에 가까워져 수치 오차가 커진다.
+`0.9995`는 수치적으로 안전한 폴백을 설명하기 위한 예시이지 품질의 보편 경계가 아니다. 이 값이면 쿼터니언 구면각은 약 1.81°보다 작고 물리적 상대 회전각은 약 3.62°보다 작다. d>0.9995는 *품질/비용 임계값*일 뿐 오차가 0이라는 보장이 아니며, 폴백 구간에서도 두 결과가 비트 단위로 같다는 등식은 아니다. 부호 정렬을 빠뜨리면 같은 자세를 나타내는 $q$와 $-q$ 사이를 먼 호로 보간할 수 있고, 퇴화 폴백을 빠뜨리면 $\sin\theta$ 분모가 0에 가까워져 수치 오차가 커진다.
 
 ### 블렌드 스페이스 — 파라미터로 포즈를 찾기
 
@@ -320,10 +332,10 @@ flowchart TB
     W1 --> Out[합성 포즈]
     W2 --> Out
     R1 --> Out
-    R2 --> Out
+    R2 --> Out; S -.-> Note15[삼각분할이면 세 점 barycentric<br/>사각격자면 네 점 bilinear<br/>가중치 계산·결과가 다름]
 ```
 
-2D 블렌드 스페이스는 파라미터 좌표를 둘러싼 *삼각형(또는 인접 4점)* 의 클립만 가중 합한다 — 전체 클립을 다 섞지 않는다. 가중치는 *무게중심 좌표(barycentric)* 로 구한다. 이 "필요한 소수만 블렌드"가 비용을 잡는 첫 단계다(아래 비용 절).
+2D 블렌드 스페이스는 파라미터 좌표를 둘러싼 *소수의 클립*만 가중 합한다 — 전체 클립을 다 섞지 않는다. 삼각분할을 쓴다면 세 점의 클립을 *무게중심 좌표(barycentric)* 로, 사각 격자라면 인접 네 점을 *bilinear* 가중으로 섞는다 — 두 정책은 가중치 계산과 결과가 다르다. 파라미터가 hull 밖이면 경계로 clamp(투영)하거나 extrapolate하는 정책을 정한다. 이 "필요한 소수만 블렌드"가 비용을 잡는 첫 단계다(아래 비용 절).
 
 ### 레이어와 additive 애니메이션
 
@@ -342,6 +354,9 @@ void ApplyAdditive(Pose& base, const Pose& additive, const Pose& refPose, float 
         base.bones[i].rotation = Normalize(base.bones[i].rotation * weighted);
         base.bones[i].translation += weight * (additive.bones[i].translation
                                               - refPose.bones[i].translation);
+        // 계약: refScale != 0 이고 addScale/refScale > 0 (로그의 정의역). SafeDivide는
+        // 0 나눗셈을 막을 뿐 음수 비율의 Log를 유효하게 만들지 못한다. 미러링(부호 반전)
+        // 스케일은 이 로그 보간으로 표현할 수 없으므로 별도 불연속 정책으로 처리하거나 클립을 거부한다.
         Vec3 scaleRatio = SafeDivide(additive.bones[i].scale, refPose.bones[i].scale);
         base.bones[i].scale *= Exp(weight * Log(scaleRatio));
     }
@@ -360,14 +375,20 @@ additive의 힘은 *조합 폭발 방지* 다. 걷기·뛰기·웅크리기 × �
 struct BlendMask {
     std::vector<float> boneWeight;   // 본 수만큼. 상체 1, 하체 0
 };
-// 마스크 적용: 본마다 다른 alpha로 블렌드
-void MaskedBlend(const Pose& lower, const Pose& upper, const BlendMask& m, Pose& out) {
-    for (int i = 0; i < out.bones.size(); ++i)
+// 마스크 적용: 본마다 다른 alpha로 블렌드.
+// 계약: lower/upper/mask/out의 본 개수가 모두 같고 out은 미리 할당되어 있다.
+bool MaskedBlend(const Pose& lower, const Pose& upper, const BlendMask& m, Pose& out) {
+    if (lower.bones.size() != upper.bones.size() ||
+        lower.bones.size() != m.boneWeight.size() ||
+        lower.bones.size() != out.bones.size())
+        return false;                        // 빈 출력을 조용히 통과시키지 않는다
+    for (int i = 0; i < lower.bones.size(); ++i)
         BlendBone(lower.bones[i], upper.bones[i], m.boneWeight[i], out.bones[i]);
+    return true;
 }
 ```
 
-마스크의 함정은 *경계 본* 이다. 상체(가중 1)와 하체(가중 0) 사이의 허리 본이 갑자기 0→1로 끊기면 *몸이 꺾여 보인다*. 그래서 마스크는 경계에서 *부드럽게 감쇠* 시켜야 한다 — 허리를 따라 0.2, 0.5, 0.8로 점진 가중을 준다.
+마스크의 함정은 *경계 본* 이다. 상체(가중 1)와 하체(가중 0) 사이의 허리 본이 갑자기 0→1로 끊기면 *몸이 꺾여 보인다*. 그래서 마스크는 경계에서 *부드럽게 감쇠* 시켜야 한다 — 허리를 따라 0.2, 0.5, 0.8로 점진 가중을 준다. 모든 포즈 연산은 스켈레톤 크기의 뷰(입력·마스크·출력 본 개수 일치)를 공통 계약으로 삼고 성공 여부를 반환해, 빈 출력이 조용히 통과하는 경로를 없앤다.
 
 ### 블렌드 트리와 비용
 
@@ -467,9 +488,13 @@ next.SetStartTime(next.TimeAtMarkerPhase(p));
 // Two-Bone IK: 어깨(root)-팔꿈치(mid)-손목(end)을 target에 닿게 무릎/팔꿈치 각도를 푼다.
 void TwoBoneIK(Vec3 root, Vec3& mid, Vec3& end, Vec3 target, Vec3 poleVec,
                float upperLen, float lowerLen) {
-    float targetDist = std::clamp(Distance(root, target),
-                                  std::abs(upperLen - lowerLen) + 1e-4f,
-                                  upperLen + lowerLen - 1e-4f);   // 도달 불가 클램프
+    // 계약: upperLen > 0, lowerLen > 0, 유한 입력. margin은 스켈레톤 단위와 본 길이에
+    // 비례시킨다 — 고정 1e-4는 짧은 본에서 lower > upper를 만들어 clamp를 무효화한다.
+    const float margin = 1e-4f * std::max({upperLen, lowerLen, 1.0f});
+    const float lo = std::abs(upperLen - lowerLen) + margin;
+    const float hi = upperLen + lowerLen - margin;
+    if (hi <= lo) return;                    // feasible 구간이 비면 풀지 않는다
+    float targetDist = std::clamp(Distance(root, target), lo, hi);   // 도달 불가 클램프
     // 코사인 법칙으로 팔꿈치 각도를 구한다.
     float cosElbow = (upperLen*upperLen + lowerLen*lowerLen - targetDist*targetDist)
                      / (2 * upperLen * lowerLen);
@@ -492,7 +517,7 @@ flowchart TB
     H --> T[IK 타깃 = 지면 높이]
     T --> IK[Two-Bone IK로 무릎 풀기]
     IK --> N[발바닥을 지면 법선에 정렬]
-    A --> Hip[골반 높이 = 낮은 발에 맞춰 하강]
+    A --> Hip[골반 높이 = 낮은 발에 맞춰 하강]; Hip -.-> FootIKNote[발-IK의 한 정책 예시<br/>모든 IK의 보편해법 아님]
 ```
 
 여기서 *골반 보정* 을 빠뜨리면 안 된다. 한 발이 계단 위, 다른 발이 아래에 있을 때 두 발을 다 지면에 붙이려면 다리가 늘어나야 하는데, 다리는 못 늘어난다. 그래서 *골반을 낮은 발에 맞춰 내려* 양 다리가 모두 닿을 수 있게 한다. 발 접지의 자연스러움은 *발 IK + 골반 하강 + 발바닥 정렬* 세 가지가 함께 동작할 때 나온다.
@@ -508,7 +533,8 @@ flowchart TB
 // 발 접지: 발이 땅을 디딘 구간에서만 ikWeight를 올린다.
 float ikWeight = footPlantedCurve.Eval(normalizedTime);   // swing 구간엔 0
 Pose final;
-BlendPose(animPose, ikPose, ikWeight, final);
+final.bones.resize(animPose.bones.size());   // 출력을 스켈레톤 크기로 미리 할당
+BlendPose(animPose, ikPose, ikWeight, final);   // 크기/alpha 검증 실패 시 false
 ```
 
 ## 6. 루트 모션과 이동
@@ -552,7 +578,7 @@ void ApplyRootMotion(Character& c, const RootMotionDelta& d) {
 }
 ```
 
-루트 델타는 단순 위치 차와 회전 차를 따로 빼는 것이 아니라 이전 루트 변환의 역과 현재 변환을 합성해 구한다. 그래야 회전하는 루트의 로컬 이동이 올바른 좌표계에 남는다. 루프 클립은 끝에서 처음으로 되감을 때 경계를 클립 끝까지의 델타와 처음부터의 델타로 나눠 합성한다. 충돌로 실제 이동이 잘렸다면 시각 루트와 캡슐의 오차를 별도로 보정해야 한다.
+루트 델타는 단순 위치 차와 회전 차를 따로 빼는 것이 아니라 이전 루트 변환의 역과 현재 변환을 합성해 구한다. 그래야 회전하는 루트의 로컬 이동이 올바른 좌표계에 남는다. 루프 클립은 끝에서 처음으로 되감을 때 경계를 클립 끝까지의 델타와 처음부터의 델타로 나눠 합성한다. 충돌로 실제 이동이 잘렸다면 시각 루트와 캡슐의 오차를 별도로 보정해야 한다. 추출한 루트 이동은 actor/캡슐에 적용하는 동시에 시각 메시 포즈에서는 같은 루트 translation·rotation을 제거해(예: `LockRoot` 또는 in-place 고정) 이동이 중복되지 않게 한다. 충돌로 거절된 delta는 시각 루트의 잔여 이동으로 남길지 다음 프레임으로 이월할지 정책을 명시하고, 어느 쪽이든 시각 루트와 캡슐의 오차를 별도로 보정한다.
 
 ### 회전 분리와 내비·네트워크
 
@@ -611,7 +637,7 @@ flowchart TB
     J1 --> Sync[배리어: 모든 포즈 완료]
     J2 --> Sync
     J3 --> Sync
-    Sync --> Skin[본 팔레트 업로드 → GPU 스키닝]
+    Sync --> Skin[본 팔레트 업로드 → GPU 스키닝]; Skin -.-> SkinNote[캐릭터별 평가 잡·배리어 비용은 남음<br/>GPU 스키닝이 CPU 비용을 캐릭터 수와 무관하게 만들지는 않음]
 ```
 
 병렬화의 함정은 공유 상태다. 읽기 전용 클립 데이터·스켈레톤은 공유할 수 있지만 결과 포즈와 임시 디코드 버퍼는 작업별로 분리해야 한다. 애니메이션 이벤트, IK 타깃, 루트 모션을 다른 시스템이 소비한다면 단일 프레임 끝 배리어보다 더 세분된 작업 의존 그래프가 필요할 수 있다. 잡이 너무 잘면 스케줄링 오버헤드가 평가 비용을 넘으므로, 캐릭터 수와 클립 복잡도에 따라 묶음 크기를 프로파일링한다.
@@ -650,10 +676,13 @@ struct AnimProfile {
 
 ```cpp
 // 조기 종료: 가중치가 0에 가까우면 평가 자체를 생략한다.
-void EvalBlendNode(const BlendNode& n, Pose& out) {
-    if (n.weight < 1e-4f) return;                 // 기여하지 않는(가중치 ~0) 가지 → 건너뜀
-    if (n.mask && n.mask->AllZero()) return;      // 마스크 전부 0 → 건너뜀
-    // ... 실제 평가
+// 계약: out은 독립 반환 pose가 아니라 호출자가 이미 정의한 누산기(accumulator)다.
+// 기여가 없으면 out을 건드리지 않고 false를 반환해 호출자가 stale 출력과 구분하게 한다.
+bool EvalBlendNode(const BlendNode& n, Pose& out) {
+    if (n.weight < 1e-4f) return false;           // 기여하지 않는(가중치 ~0) 가지 → 건너뜀
+    if (n.mask && n.mask->AllZero()) return false; // 마스크 전부 0 → 건너뜀
+    AccumulateInto(n, out);                        // ... 실제 평가(누산)
+    return true;
 }
 ```
 

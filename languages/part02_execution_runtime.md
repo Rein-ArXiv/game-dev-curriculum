@@ -75,12 +75,23 @@ VM의 핵심 상태는 명령 포인터, 값 스택, 호출 프레임, 전역 �
 for (;;) {
     Op op = ReadOp(ip);
     switch (op) {
-    case Op::Add: Push(Pop() + Pop()); break;
-    case Op::JumpIfFalse: if (!Peek().Truthy()) ip = ReadTarget(ip); break;
+    case Op::Add: {
+        Value rhs = Pop();
+        Value lhs = Pop();
+        Push(lhs + rhs);
+        break;
+    }
+    case Op::JumpIfFalse: {
+        auto target = ReadTarget(ip);  // true/false와 무관하게 operand 소비
+        if (!Peek().Truthy()) ip = target;
+        break;
+    }
     case Op::Return: return Pop();
     }
 }
 ```
+
+위 코드에서 `ReadOp`는 opcode만 전진시키고 `ReadTarget`이 operand를 소비한다고 가정한다. `ReadOp`가 instruction 전체를 선해독하는 구현이라면 `ReadTarget`은 이미 해독된 operand를 조회하는 규약이며, 어느 쪽이든 조건과 무관하게 operand를 소비하는 규약이 정의되어야 한다.
 
 바이트코드 검증기는 실행 전에 잘못된 점프 대상, 상수 인덱스, 스택 언더플로 가능성을 차단해야 한다. 외부에서 로드하는 바이트코드는 신뢰할 수 없는 입력이다.
 
@@ -175,7 +186,7 @@ struct Value {
 };
 ```
 
-이 구조는 명확하지만 값 하나가 커진다. NaN-boxing, pointer tagging, 압축 포인터 같은 기법은 값 크기와 캐시 효율을 개선하지만, 플랫폼의 포인터 정렬, 부동소수점 NaN 표현, 주소 공간 크기에 의존한다. 값 표현은 최적화 기법이기 전에 ABI다. 저장 파일, 네이티브 바인딩, 디버거, 바이트코드 상수 풀은 모두 같은 값 레이아웃을 전제로 한다.
+이 구조는 명확하지만 값 하나가 커진다. NaN-boxing, pointer tagging, 압축 포인터 같은 기법은 값 크기와 캐시 효율을 개선하지만, 플랫폼의 포인터 정렬, 부동소수점 NaN 표현, 주소 공간 크기에 의존한다. 값 표현은 최적화 기법이기 전에 ABI다. 다만 여기서 말하는 layout 결합은 같은 프로세스에서 실행 중인 in-memory 값, 네이티브 바인딩, 디버거, 바이트코드 상수 풀이 같은 ABI를 공유한다는 뜻이다. 바이트코드 파일 형식과 저장 파일(disk) 스키마는 별개의 versioned 표현이며, 논리 값을 명시적으로 encode/decode하는 경계를 둔다.
 
 GC는 모든 살아 있는 객체를 루트에서 찾아야 한다. 루트는 전역 변수만이 아니다.
 
@@ -285,7 +296,7 @@ GC 처리량, 평균 정지, p99 정지, 최대 정지를 따로 측정해야 �
 | 네이티브 핸들 | 직접 저장 금지 | 엔진 자원 수명과 연결됨 |
 | 난수 시드 | 가능 | 결정적 재현에 필요 |
 
-안정적인 저장은 ID와 스키마를 기준으로 한다. 객체 참조는 포인터가 아니라 엔티티 ID나 스크립트 객체 ID로 저장하고, 로드 시 현재 런타임 객체로 다시 연결한다. 필드는 이름 또는 안정된 필드 ID로 기록하며, 누락된 필드의 기본값과 제거된 필드의 무시 규칙을 둔다. 바이트코드 캐시는 언어 버전, 컴파일 옵션, 표준 라이브러리 버전, 호스트 바인딩 버전을 키에 포함해야 한다.
+안정적인 저장은 ID와 스키마를 기준으로 한다. 객체 참조는 포인터가 아니라 엔티티 ID나 스크립트 객체 ID로 저장하고, 로드 시 현재 런타임 객체로 다시 연결한다. 필드는 이름 또는 안정된 필드 ID로 기록하며, 누락된 필드의 기본값과 제거된 필드의 무시 규칙을 둔다. 바이트코드 캐시는 언어 버전, 컴파일 옵션, 표준 라이브러리 버전, 호스트 바인딩 버전을 키에 포함해야 한다. 저장 파일 스키마는 native Value layout과 같은 바이트 표현일 필요가 없다. in-memory ABI, 바이트코드 파일 형식, persistence schema를 각각 다른 계약으로 두고, 로드/저장 경계에서 명시적으로 변환·검증한다.
 
 핫 리로드와 세이브 로드는 같은 문제의 두 형태다. 실행 중인 상태를 새 코드 의미에 맞춰 이주시켜야 한다. 함수 본문은 바뀌었지만 중단된 코루틴의 명령 포인터가 옛 바이트코드 오프셋을 가리키면 재개할 수 없다. 따라서 중단 가능한 스크립트는 안정된 await 지점, 상태 머신 ID, 지역 변수 스키마를 따로 보관해야 한다.
 
@@ -313,6 +324,6 @@ binding version     = exposed native API hash
 - Roberto Ierusalimschy, Luiz Henrique de Figueiredo, Waldemar Celes, "The Implementation of Lua 5.0" (Journal of Universal Computer Science, 2005) — 레지스터 VM과 open/closed upvalue 클로저 구현의 산업 사례.
 - Richard Jones, Antony Hosking, Eliot Moss, *The Garbage Collection Handbook*, 2nd ed. (2023) — 참조 카운팅·추적형·세대별·동시 수집의 종합 참고서.
 - C. J. Cheney, "A Nonrecursive List Compacting Algorithm" (CACM 1970) — semispace copying GC(Fenichel & Yochelson, CACM 1969)를 비재귀 너비 우선 복사로 만든 원전.
-- David Ungar, "Generation Scavenging: A Non-Disruptive High Performance Storage Reclamation Algorithm" (1984) — 세대별 GC의 초기 실용 구현(세대 개념의 원전은 Lieberman & Hewitt, CACM 26(6), 1983).
+- David Ungar, ["Generation Scavenging: A Non-Disruptive High Performance Storage Reclamation Algorithm"](https://dl.acm.org/doi/10.1145/800020.808261) (1984) — 세대별 GC의 초기 실용 구현(세대 개념의 원전은 Lieberman & Hewitt, CACM 26(6), 1983).
 - Ana Lúcia de Moura, Roberto Ierusalimschy, "Revisiting Coroutines" (TOPLAS 2009) — 코루틴의 표현력과 구현 방식 분류.
 - Mark S. Miller, *Robust Composition: Towards a Unified Approach to Access Control and Concurrency Control* (PhD thesis, 2006) — object-capability 기반 샌드박스의 이론적 토대.

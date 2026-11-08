@@ -155,7 +155,9 @@ void UpdateNPC(NPC& npc, float dt) {
     State s = SenseWorld(npc);                             // 인지
 
     bool stale = npc.inferenceTimer >= interval;
-    bool changed = StateDelta(s, npc.lastInferState) > kEps;  // 상태가 충분히 변함
+    // 캐시 유효성을 먼저 확인한 뒤에만 이전 상태를 읽는다 (첫 호출 보호)
+    bool changed = npc.hasCachedAction &&
+                   StateDelta(s, npc.lastInferState) > kEps;  // 상태가 충분히 변함
     if (!npc.hasCachedAction || (stale && changed)) {
         npc.cachedAction   = npc.policy.Infer(s);          // 신경망 추론 (비용 큼)
         npc.hasCachedAction = true;
@@ -165,6 +167,8 @@ void UpdateNPC(NPC& npc, float dt) {
     ExecuteAction(npc, npc.cachedAction, dt);              // 캐시된 결정 실행 (매 프레임)
 }
 ```
+
+캐시가 유효하려면 key에 시간·이벤트·모델 버전과 필요한 recurrent hidden state가 함께 들어가야 한다. `stale && changed`는 최대 유효시간을 보장하는 정책이 아니라 추론 생략 조건일 뿐이므로, 즉시성이 필요한 이벤트는 별도로 캐시를 무효화한다. 캐시가 없을 때 `lastInferState`를 읽지 않는 것도 이 계약의 일부다.
 
 ### LOD 간격의 정량 효과
 
@@ -420,7 +424,7 @@ $$
 여기서 세 가지가 따라온다.
 
 - *왜 하필 $T^2$인가.* 보정 없는 KD 기울기는 고온에서 $1/T^2$로 줄지만, 정답 교차엔트로피 항은 $T=1$ 경로(코드의 `ps1=Softmax(zs,1)`)라 크기가 $O(1)$로 유지된다. 보정이 없으면 $T$를 올릴수록 증류 신호만 조용히 꺼지고 CE가 지배한다. $T^2$는 두 기울기를 같은 자릿수로 맞춰, 가중치 $\lambda$가 온도와 무관하게 같은 의미를 갖게 한다.
-- *고온이 버리는 것.* 극한이 *분포* 정합이 아니라 *중심화 로짓* 정합이라는 점은, 매우 높은 $T$가 teacher의 절대 스케일을 버리고 로짓의 상대 구조만 남긴다는 뜻이다. $T$는 큰 로짓에 집중하는 영역과 전체 로짓 차이를 펴서 보는 영역 사이의 손잡이이며, teacher calibration과 student 용량에 맞춰 검증 집합에서 탐색해야 한다.
+- *고온이 버리는 것.* 극한이 *분포* 정합이 아니라 *중심화 로짓* 정합이라는 점은, 매우 높은 $T$에서 공통 가산 오프셋에는 불변이고, 상대 logit 크기(차이)는 학습 신호로 남는다는 뜻이다. $T$는 큰 로짓에 집중하는 영역과 전체 로짓 차이를 펴서 보는 영역 사이의 손잡이이며, teacher calibration과 student 용량에 맞춰 검증 집합에서 탐색해야 한다.
 - *시프트 불변성.* 극한이 $\bar z,\bar v$를 빼고 나타나는 것은 소프트맥스가 로짓에 상수를 더해도 불변이기 때문이다(모든 로짓에 $c$를 더해도 $q$ 불변, 수치로 $5.6\times10^{-17}$). 따라서 절대 로짓이 아니라 로짓 *차이* 만 학습 신호다.
 
 경계 조건. 코드의 `Softmax`는 반드시 최댓값 차감으로 안정화해야 한다 — $T<1$이고 로짓이 크면 $z/T$가 커져 `exp`가 오버플로하고, 반대로 $T$가 매우 크면 $p_i$가 균등에 가까워 차이 $\sim 1/T$가 단정밀도 정밀도 아래로 묻힌다. 또한 $T^2$ 보정은 KD 항에만 붙고 CE 항에는 붙지 않는다(코드의 `lossKD`만 `T*T`를 곱함). 이 보정을 빠뜨린 채 온도만 올리면, 의도와 달리 증류 가중치를 낮추는 것과 같아진다.
@@ -520,7 +524,9 @@ hybrid의 핵심 안전장치는 신경망 출력을 *룰로 감싸는* 가드�
 // 신경망 잎: 조준 미세 보정을 NN이 내고, 룰 가드가 범위를 강제
 float ComputeAimAngle(const NPC& npc, const Target& tgt) {
     float baseAngle = AngleTo(npc.pos, tgt.pos);        // 룰: 기본 조준
-    float nnDelta   = npc.aimNet.Infer(BuildAimInput(npc, tgt));  // NN: 미세 보정
+    auto  in        = BuildAimInput(npc, tgt);
+    float nnDelta   = AllFinite(in) ? npc.aimNet.Infer(in) : 0.0f;  // 입력 finite 검사
+    if (!std::isfinite(nnDelta)) nnDelta = 0.0f;        // 출력 비유한 → 보정 없이 룰값
 
     // 안전 가드: 보정량을 합리적 범위로 클램프
     nnDelta = std::clamp(nnDelta, -kMaxAimDelta, kMaxAimDelta);
@@ -566,7 +572,7 @@ flowchart LR
 - *ONNX(Open Neural Network Exchange)*: 프레임워크 독립적 모델 그래프 형식. 신경망을 연산자(Conv, Gemm, Relu 등)의 방향성 그래프로 표현한다. PyTorch/TF 모델을 ONNX로 내보내면 다양한 런타임에서 실행 가능하다. 사실상 모델 교환 표준이다.
 - *ONNX Runtime(ORT)*: ONNX 모델을 실행하는 크로스 플랫폼 런타임. CPU·GPU·다양한 하드웨어 백엔드를 실행 제공자(execution provider) 추상화로 지원한다.
 - *TensorRT*: NVIDIA GPU에 특화된 고성능 추론 엔진. 그래프 최적화·양자화·커널 융합·자동 튜닝을 제공한다. 지원되는 PC·서버·임베디드 플랫폼에서 사용할 수 있으며, 콘솔은 해당 플랫폼 SDK와 런타임 지원 여부를 별도로 확인해야 한다.
-- *플랫폼별 런타임*: 콘솔의 전용 추론 가속기, 모바일의 Core ML(Apple)·NNAPI(Android)는 각자의 런타임을 쓴다. 게임 엔진 측에서는 Unity Sentis(구 Barracuda)처럼 엔진에 내장된 추론기를 쓰기도 한다.
+- *플랫폼별 런타임*: 콘솔의 전용 추론 가속기, 모바일의 Core ML(Apple)·NNAPI(Android)는 각자의 런타임을 쓴다. 다만 NNAPI는 Android 15부터 deprecated이므로 신규 도입 시에는 대상 런타임이 실제로 지원하는 backend를 확인해야 하고, NNAPI는 구버전 Android/엔진의 역사적 구현 사례로 한정해 읽는다. 게임 엔진 측에서는 Unity Sentis(구 Barracuda)처럼 엔진에 내장된 추론기를 쓰기도 한다.
 
 ### 런타임이 하는 그래프 최적화
 
@@ -597,7 +603,7 @@ struct PolicyRuntime {
 
 ### 런타임 선택은 플랫폼이 정한다
 
-런타임 선택의 핵심 고려는 *타깃 플랫폼* 이다. 게임은 여러 플랫폼(PC·콘솔·모바일)에 동시 출시되고, 각 플랫폼의 하드웨어가 다르다. 일반적 전략은 *ONNX 같은 표준 형식으로 모델을 하나 두고, 플랫폼마다 최적 런타임으로 실행* 하는 것이다 — PC의 NVIDIA GPU에서는 TensorRT, CPU 폴백에는 ORT, 모바일에는 NNAPI/Core ML.
+런타임 선택의 핵심 고려는 *타깃 플랫폼* 이다. 게임은 여러 플랫폼(PC·콘솔·모바일)에 동시 출시되고, 각 플랫폼의 하드웨어가 다르다. 일반적 전략은 *ONNX 같은 표준 형식으로 모델을 하나 두고, 플랫폼마다 최적 런타임으로 실행* 하는 것이다 — PC의 NVIDIA GPU에서는 TensorRT, CPU 폴백에는 ORT, 모바일에는 Core ML(그리고 구버전 Android 한정 NNAPI).
 
 플랫폼마다 다른 런타임은 결정성 계약을 어렵게 한다. 같은 ONNX 모델이라도 GPU와 CPU kernel의 부동소수점 누적 순서, operator fusion과 양자화 경로가 달라 경계값 근처의 행동 선택이 달라질 수 있다. bitwise 재현성이 필요하면 동일한 연산 경로와 수치 규약을 고정하고, 그렇지 않으면 추론 결과를 lockstep 상태에서 제외하거나 authoritative 결과를 동기화한다.
 
@@ -743,12 +749,16 @@ fx FixedDot(const fx* w, const fx* x, int n) {
 
 ```cpp
 Action SafeInfer(const NPC& npc, const State& s) {
+    if (!AllFinite(s.features) || !ValidDims(s.features))
+        return RuleFallback(npc, s);          // 입력 비유한/차원 불일치 → 폴백
     Logits out = npc.policy.Forward(s);       // 디코딩 전 로짓
+    if (!AllFinite(out)) return RuleFallback(npc, s);  // 비유한 로짓 → 폴백
     float conf = MaxSoftmax(out);             // 출력 신뢰도
-    bool ood = conf < kConfThreshold || OutOfTrainRange(s);
-    if (ood) return RuleFallback(npc, s);     // OOD면 결정적 룰로 폴백
+    bool ood = !std::isfinite(conf) || conf < kConfThreshold || OutOfTrainRange(s);
+    if (ood) return RuleFallback(npc, s);     // OOD·비유한 신뢰도면 결정적 룰로 폴백
     return DecodeAction(out);
 }
+// RuleFallback은 no-fire를 포함한 검증된 행동 집합에서 고른다.
 ```
 
 - *광범위 자동 테스트*: 학습 정책을 다양한 상황에서 자동 플레이테스트해 이상 행동을 출시 전에 발견한다. RL 봇을 QA 도구로 쓰는 것과 연결된다 — 학습 에이전트가 게임을 수만 판 자동으로 돌려 OOD 상황과 크래시를 캐낸다.

@@ -53,12 +53,13 @@ float (32-bit) 의 *machine epsilon* ≈ $1.19 \times 10^{-7}$. 한 연산의 �
 
 알고리즘 자체의 *근사*. 무한 급수를 *유한 항* 까지만 계산. Taylor 시리즈, Newton's method 의 한정된 반복, 시뮬레이션의 dt 단위 시간 분할.
 
-예: $\sin(x) \approx x - x^3/6 + x^5/120 -...$ 을 *5 항까지만*. 무시한 *나머지 항* 이 truncation error.
+예: $\sin(x) \approx x - x^3/6 + x^5/120$ 는 항이 셋뿐이지만 최고차가 $x^5$ 인 *5차 근사* 다. 이어지는 항을 잘라낸 *나머지 항* 이 truncation error이고, 7차 도함수가 $\cos$ 로 유계이므로 잔차는 $|R| \le |x|^7/7!$ 로 한정된다.
 
 ```cpp
+// |x| <= 0.3 에서만 쓴다. 더 넓은 입력은 range reduction 후에 넣는다.
 float SinApprox(float x) {
     float x2 = x * x;
-    return x * (1 - x2 / 6 * (1 - x2 / 20));   // 5항 근사
+    return x * (1 - x2 / 6 * (1 - x2 / 20));   // x - x^3/6 + x^5/120 (5차 근사)
 }
 ```
 
@@ -111,7 +112,7 @@ $$
 
 두 수 $a = 1.234567$, $b = 1.234566$. 차 $a - b = 0.000001$.
 
-float 정밀도가 *7 자리 정도*. $a, b$ 자체는 정확. 차이 결과 *0.000001* 의 *유효 자리수* 가 *1 자리만 보장* (다른 자리는 부동소수점 표현 한계).
+float 정밀도가 *7 자리 정도*. 십진 표기를 float 로 저장하는 순간 $a, b$ 에는 각각 상대 오차 $\sim u$ 가 이미 들어 있다. 그런데 뺄셈 자체는 2.4 대로 반올림 없이 정확하다. 문제는 이 상쇄가 *입력의 표현 오차* 에 대한 조건수를 키운다는 것이다 — $|a|/\lvert a-b\rvert \sim 10^6$ 배 증폭되어 차이 결과 *0.000001* 의 *유효 자리수* 가 *1 자리만 보장* 된다.
 
 ```mermaid
 flowchart LR
@@ -188,7 +189,7 @@ float v = d * 60.0f;           // 0.1171875 m/s — 참값 0.06 m/s. 약 95% 오
 
 - `(a - b) / c` — 속도·기울기·중심 차분. 죽은 자리가 나눗셈으로 증폭된다. 위 예의 95% 가 그 결과다.
 - `std::fabs(a - b) < eps` — eps 가 그 크기대의 ULP 보다 가늘면 판정을 eps 가 아니라 격자가 내린다 (2.5).
-- `(a - b) * k` — 차를 다시 곱하면 상대 오차도 함께 곱해진다.
+- `(a - b) * k` — 절대 오차는 $|k|$ 배가 되지만 정확한 상수 $k$ 를 곱하는 한 상대 오차는 그대로다. 다만 추가 반올림, 특히 overflow·underflow 가 끼면 그때는 다시 커진다.
 
 대응은 비교 형태가 아니라 *큰 오프셋이 더해지기 전에 빼는 것* 이다. 좌표는 국소 원점 기준으로, 시간은 시작 시각이 아니라 직전 프레임 기준으로 두면 차가 큰 값 위에 얹히지 않는다. 그것이 불가능한 구간만 `double` 로 올려 차를 만든다.
 
@@ -224,18 +225,40 @@ $b^2 \gg 4ac$ 이면 *판별식이 b² 와 거의 같음* — 한 해가 *catast
 대안: *Vieta's formulas* 활용. 한 해 $x_1$ 을 안정적으로 풀고, 다른 해 $x_2 = c / (a x_1)$.
 
 ```cpp
-void SolveQuadratic(float a, float b, float c, float& x1, float& x2) {
-    float disc = b * b - 4 * a * c;
-    if (disc < 0) { x1 = x2 = NAN; return; }
+// 해의 개수를 반환한다. 2: 서로 다른 두 실근, 1: 중근, 0: 실근 없음,
+// -1: 항등식(모든 x 가 해), -2: 불능(해 없음) — 선형 퇴화 a=0 분기.
+int SolveQuadratic(float a, float b, float c, float& x1, float& x2) {
+    // 유한 계수만 받는다. inf/NaN 은 호출부 계약 위반이다.
+    if (!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(c)) return -2;
+
+    float scale = std::max({std::fabs(a), std::fabs(b), std::fabs(c)});
+    if (scale == 0.0f) { x1 = x2 = 0.0f; return -1; }   // 0 = 0 항등식
+
+    // 스케일링은 계수 overflow 를 줄이는 보강이지, 계수가 극단으로 갈 때
+    // exact discriminant 부호 판별을 보장하지는 않는다.
+    a /= scale; b /= scale; c /= scale;
+
+    if (a == 0.0f) {                       // 선형 b x + c = 0
+        if (b == 0.0f) return (c == 0.0f) ? -1 : -2;
+        x1 = x2 = -c / b;
+        return 1;
+    }
+    float disc = b * b - 4.0f * a * c;
+    if (disc < 0.0f) return 0;
+    if (disc == 0.0f) {                    // 중근: q = 0 이 되어 c/q 가 NaN 이 된다
+        x1 = x2 = -b / (2.0f * a);
+        return 1;
+    }
     float sqrtD = std::sqrt(disc);
     // 부호로 catastrophic cancellation 회피
-    float q = (b > 0) ? -0.5f * (b + sqrtD) : -0.5f * (b - sqrtD);
+    float q = -0.5f * (b + std::copysign(sqrtD, b));
     x1 = q / a;
-    x2 = c / q;
+    x2 = c / q;                            // disc > 0 이므로 q != 0
+    return 2;
 }
 ```
 
-*Numerical Recipes* 의 표준 형태. Ray-sphere 교차도 이 패턴 활용 권장.
+*Numerical Recipes* 의 표준 형태다. $b^2 \gg 4ac$ 에서 큰 쪽 근을 $\lvert q\rvert$ 로 골라 $x_1=c/q$ 로 다른 근을 얻으므로 두 근이 모두 안정적이고, 중근은 $q$ 가 0 이 되기 전에 분기해 NaN 을 막는다. $a=0$ 선형 입력은 별도 분기로 처리하며, 계수 크기 차이가 극단일 때 $disc=0$ 접선 판정은 스케일링으로도 부호가 흔들릴 수 있어 정확한 tangent 판정이 필요한 호출부는 추가 정책을 둔다. Ray-sphere 교차도 이 패턴을 활용한다.
 
 ## 3. Kahan Summation
 
@@ -299,7 +322,7 @@ flowchart TD
 
 - **파티클 위치 누적**: *수만 프레임 동안 같은 파티클* 의 누적 위치.
 - **시뮬레이션 평균**: 평균 계산용 누적.
-- **Triangle area 합 (mesh volume)**: 메쉬의 *signed volume* 합 (Stokes' theorem).
+- **삼각형 면적 합 / 메쉬 부피**: 면적 합의 차원은 길이² 라 부피가 아니다. 부피가 필요하면 일관된 winding 의 폐메시에서 각 삼각형의 원점 기준 signed tetrahedron 부피 $\frac{1}{6}\,\vec a\cdot(\vec b\times\vec c)$ 를 합한다. 부호가 섞여 상쇄되므로 Kahan 누적이 특히 유용하다.
 - **Energy/momentum 추적**: 물리 시뮬레이션의 *보존 양 추적*.
 
 ### 3.6 Kahan 가 항상 필요한가
@@ -353,7 +376,7 @@ struct WorldPosition {
 
 문제: *GPU 와의 인터페이스*. Vulkan/DirectX 가 *float 4 vec* 표준. CPU 에서 double, GPU 전송 시 *float 캐스팅*. 그 캐스팅 단계에서 정밀도 손실.
 
-또한 *물리 엔진* (Bullet, PhysX) 도 *float 기반*. double 으로 바꾸면 *전체 시스템 재설계*.
+또한 *물리 엔진* 은 기본 구성이 float 다. Bullet 은 `BT_USE_DOUBLE_PRECISION` 빌드 옵션으로 double 로 구성할 수 있지만, 그 경우도 저장 형식·플러그인 호환·성능을 따로 검토해야 하므로 전체 시스템 재설계에 준하는 비용이 든다.
 
 ### 4.4 32-bit + 청크
 
@@ -375,7 +398,7 @@ struct ChunkedPosition {
 
 ### 4.6 GPU 측의 정밀도
 
-CPU 가 *어떻게 처리하든* GPU 는 *float 32-bit*. 큰 좌표가 GPU 에 전송되면 *셰이더 안에서 폭발 손실*.
+CPU 가 *어떻게 처리하든* 그래픽스 파이프라인의 정점·텍스처 저장 형식은 대개 32-bit float 다. GPU 에도 FP64 연산 경로가 있지만 장치·연산 종류별 처리량이 FP32 보다 훨씬 낮고 저장 형식이 double 로 바뀌는 것도 아니다. 큰 좌표가 float 로 전송되면 *셰이더 안에서 폭발 손실*.
 
 해결: *GPU 에 전송하기 전 좌표를 카메라 기준으로 보정*. *World - Camera* 또는 *World - PivotChunk*. 이게 floating origin 의 *부수 효과*.
 
@@ -660,13 +683,18 @@ vec3 normDir = dir / length(dir);   // a == b 면 NaN
 대응: *길이 검사 + 폴백*.
 
 ```cpp
-vec3 SafeNormalize(vec3 v, vec3 fallback) {
-    float len = length(v);
-    return (len > 1e-6f) ? v / len : fallback;
+// 계약: 유한 입력, 단위 벡터 fallback. 0 벡터와 비유한 입력을 숨기지 않는다.
+bool SafeNormalize(vec3 v, vec3 fallback, vec3& out) {
+    if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z)) return false;
+    float m = std::max({std::fabs(v.x), std::fabs(v.y), std::fabs(v.z)});
+    if (!(m > 0.0f)) { out = fallback; return false; }   // 0 벡터 = fallback
+    vec3 s = v / m;              // 최대 성분으로 나눠 큰 유한 벡터의 dot overflow 방지
+    out = s / length(s);
+    return true;
 }
 ```
 
-게임 코드의 *모든 normalize* 가 이 가드를 가져야 *수십만 프레임 후* 도 안정.
+`SafeNormalize` 하나가 모든 입력을 해결하는 만능 해법은 아니다. 작은 norm 만 검사하면 큰 유한 벡터의 `length` 가 dot overflow 로 inf 가 될 수 있으므로, 최대 성분으로 스케일한 뒤 정규화하고 유한성을 먼저 검증한다. 0·비정상 입력은 fallback 으로 접되 실패 상태를 호출부에 알리고, fallback 자체도 단위성·의미를 계약으로 정한다. 정규화 전제로 0 을 배제하는 API 선택도 가능하다. 게임 코드의 *모든 normalize* 가 이 계약을 지켜야 *수십만 프레임 후* 도 안정.
 
 ## 8. 수치 안정성 체크리스트
 

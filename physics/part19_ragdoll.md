@@ -153,7 +153,7 @@ struct Bone {
 
 ### 2.3 인체 비례
 
-다음은 성인 인체측정 자료를 둥글게 합친 시작점이다. 자료 집단과 분절 정의에 따라 값이 달라진다.
+다음은 인체 비례를 흉내 낸 게임 튜닝 시작값이다. 실제 측정 자료의 집단과 분절 정의에 따라 값이 크게 달라진다.
 
 | 부위 | 비율 |
 |---|---|
@@ -162,7 +162,7 @@ struct Bone {
 | 팔 (upper + lower + hand) | 5% 각 = 10% 양팔 |
 | 다리 (thigh + calf + foot) | 16% 각 = 32% 양다리 |
 
-총 100% (Winter 의 인체측정 표준 데이터 근사). 게임의 *어색한 비율 (큰 머리 hero)* 는 *디자인적 조정*.
+합계 100% 로 정규화한 게임 튜닝 예시다. 특정 Winter 판본·표·모집단을 인용한 측정값이 아니며, 양쪽 팔다리 합계인지 한쪽인지와 body grouping 정의에 따라 비율이 달라진다. 게임의 *어색한 비율 (큰 머리 hero)* 는 *디자인적 조정*.
 
 ### 2.4 관성 텐서
 
@@ -180,6 +180,8 @@ mat3 ComputeCapsuleInertia(float mass, float radius, float halfLength) {
 ```
 
 각 본의 *로컬 관성 텐서* — world 에선 *회전 변환*.
+
+이 대각 관성은 shape local 장축이 $Z$ 라는 규약을 쓴다. 본/캡슐 로컬축(예: Y-up)과 다르면 body 관성은 $I_{body} = R I_{shape} R^T$ 로 회전해 넣고, collider 중심이 body COM과 다르면 평행축 정리를 적용한다. `halfLength`는 반높이이고 전체 길이는 $2\,\text{halfLength}$ 다.
 
 ### 2.5 invMass = 0 (kinematic) 모드
 
@@ -269,7 +271,7 @@ struct HingeJoint {
 joint.motorEnabled = false;
 ```
 
-살아있는 캐릭터의 active ragdoll (R&D 영역) 은 *모터로 자세 유지* — 죽은 ragdoll 과 다른 시스템.
+살아있는 캐릭터의 active ragdoll은 passive simulation(모터 없이 환경에만 반응), target-pose tracking(모터로 목표 자세 추종), locomotion control(보행·균형 제어)을 구분하는 별도 제어 시스템이며, 죽은 ragdoll과 목표가 다르다. 도입 여부는 목표 자세 추종의 정확도, 접촉 반응, 제어 안정성과 계측·튜닝 예산을 기준으로 정한다.
 
 ### 3.7 active ragdoll (참고)
 
@@ -302,6 +304,8 @@ if (angle > coneHalfAngle) {
     // 제약 발동 — boneB 를 cone 안으로 끌어당김
 }
 ```
+
+limit 계산은 joint-local frame에서 정의한다. 두 body의 world 회전을 joint frame으로 옮겨 상대 회전 $q_{rel} = q_a^{-1} q_b$ 를 만들고, twist 축을 명시한 뒤 swing과 twist로 분해한다. 입력은 (rest frame, twist axis, 상대 회전)이고 출력은 (swing 각, twist 각, 위반 벡터)다. twist가 ±180° 부근이면 분해가 특이해지므로 quaternion 부호($q$ 와 $-q$)를 정규화하고, 특이점 근처의 부호·실패 규약(예: twist를 한계로 clamp하고 경고)을 정한다. 상세 분해는 전용 수학 문서에 위임하며, 이 문서의 limit 코드를 완성된 swing–twist 분해로 간주하지 않는다.
 
 ### 4.2 hinge angle limit
 
@@ -396,6 +400,8 @@ bool ShouldCollide(const Bone& a, const Bone& b) {
 }
 ```
 
+이 group mask는 한 ragdoll 내부의 self-collision 제어용이다. 서로 다른 캐릭터의 같은 부위(예: 두 ragdoll의 LArm)까지 막지 않도록, world collision layer(캐릭터 vs 환경 vs 다른 캐릭터)와 한 ragdoll 내부의 body-pair 예외를 분리한다. self-exclusion은 전역 group 이름이 아니라 ragdoll instance ID + body index, 또는 연결 joint의 고유 body pair로 지정하고, 인스턴스마다 고유 mask를 부여한다.
+
 ### 5.3 표준 그룹
 
 | 그룹 | 본 |
@@ -458,6 +464,8 @@ void TransitionToRagdoll(Character& c, vec3 hitImpulse,
     c.bones[hitBone].body.AddImpulseAtPoint(hitImpulse, hitPoint);
 }
 ```
+
+위 대입은 bone pivot과 body COM이 일치한다는 계약에서만 유효하다. collider/COM offset이 있으면 bone→body bind transform을 데이터로 두고 위치·자세·속도 전달에 함께 적용한다. 회전 중 COM 속도는 $\vec{v}_{COM} = \vec{v}_{bone} + \vec{\omega}\times\vec{r}$ 로 계산하며, offset이 있는 경우 위 직접 대입은 반례가 된다.
 
 ### 6.2 부드러운 blend
 

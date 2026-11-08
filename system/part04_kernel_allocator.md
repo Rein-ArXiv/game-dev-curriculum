@@ -75,7 +75,8 @@ struct zone {
 **해제 과정:**
 ```c
 // mm/page_alloc.c 간소화 버전
-static inline void __free_one_page(struct page *page, unsigned int order) {
+static inline void __free_one_page(struct page *page, unsigned int order,
+                                   int migratetype) {
     unsigned long buddy_pfn = page_pfn ^ (1 << order);
     struct page *buddy = page + (buddy_pfn - page_pfn);
 
@@ -83,9 +84,10 @@ static inline void __free_one_page(struct page *page, unsigned int order) {
         // buddy도 free 상태면 병합
         list_del(&buddy->lru);
         page += (buddy_pfn & page_pfn) - page_pfn;  // 병합 블록의 시작(하위 버디)으로 이동
-        __free_one_page(page, order + 1);  // 재귀적 병합
+        __free_one_page(page, order + 1, migratetype);  // 재귀적 병합
     } else {
-        list_add(&page->lru, &zone->free_area[order].free_list);
+        // free_list는 migratetype별 배열이므로 해당 head를 선택한다
+        list_add(&page->lru, &zone->free_area[order].free_list[migratetype]);
     }
 }
 ```
@@ -223,6 +225,8 @@ void *kmem_cache_alloc(struct kmem_cache *s, gfp_t gfpflags) {
  - `/sys/kernel/slab/` 통해 실시간 모니터링
 
 SLUB의 fast path는 현재 CPU의 freelist에서 객체를 꺼낼 수 있을 때 짧다. 디버그 옵션, freelist hardening, NUMA 정책, 캐시 refill 여부에 따라 경로가 달라지므로 SLAB과 SLUB의 비용을 고정 사이클이나 보편적 2배 차이로 표현할 수 없다. 비교할 때는 같은 커널 설정에서 `perf`, ftrace와 slab 통계를 이용해 fast/slow path 비중을 분리한다.
+
+여기서 per-CPU freelist를 무보호로 읽고 갱신하는 fast path는 실행 문맥 계약을 전제로 한다. CPU migration이나 IRQ/slow path가 같은 per-CPU slot을 동시에 만지면 단순 pop/push는 깨진다. 최신 SLUB은 `slub_get_cpu_ptr()`(`get_cpu_ptr`)로 선점을 막거나 `migrate_disable()`로 CPU를 고정한 뒤 fast path를 실행하고, slow path는 `local_lock_irqsave(&s->cpu_slab->lock, ...)`와 `c->tid` transaction id 기반 cmpxchg로 갱신을 직렬화한다. 위 축약 모형이 어떤 CPU pinning/IRQ·선점 비활성/원자 연산을 가정하는지 명시해야 한다.
 
 ## 4. kmalloc vs vmalloc vs kmem_cache
 
@@ -602,12 +606,15 @@ static unsigned long shrink_memcg(struct mem_cgroup *memcg) {
 echo "1" > /sys/fs/cgroup/my_container/memory.oom.group
 # → cgroup 전체 종료 (단일 프로세스만 죽이지 않음)
 
-# 통계 확인
+# 메모리 사용 통계
 cat /sys/fs/cgroup/my_container/memory.stat
 # anon 1048576           # 익명 메모리
 # file 524288            # 파일 캐시
 # kernel_stack 16384     # 커널 스택
 # slab 65536             # slab 캐시
+
+# OOM 이벤트 카운터 (해당 cgroup과 하위 계층; .local은 자기 계층만)
+cat /sys/fs/cgroup/my_container/memory.events
 # oom_kill 3             # OOM 발생 횟수
 ```
 
@@ -644,9 +651,11 @@ cat /sys/kernel/debug/slab/my_cache/alloc_traces
 ```bash
 $ numastat
                            node0           node1
-numa_hit              10000000          100000  # node1 거의 안 씀
-numa_foreign            100000        10000000  # 대부분 원격 접근
+numa_hit              10000000          100000  # 요청한 node에서 할당됨
+numa_foreign            100000        10000000  # 이 node가 선호였지만 다른 node에 할당됨
 ```
+
+`numa_foreign`은 CPU가 원격 메모리에 접근한 횟수가 아니다. 할당 정책이 선호한 node와 실제 page가 할당된 node가 어긋난 횟수를 세는 allocation policy 통계다. page를 할당만 하고 한 번도 접근하지 않아도 오를 수 있으므로, 실제 remote access는 PMU·hardware counter나 별도 NUMA latency/bandwidth 관측과 구분한다.
 
 **해결:**
 ```bash

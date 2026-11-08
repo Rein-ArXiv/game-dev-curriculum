@@ -53,7 +53,7 @@ void matmul_naive(double* C, double* A, double* B, int n) {
 
 ```c
 // 블록 크기 B를 명시적으로 지정
-#define BLOCK_SIZE 64  // L1 캐시에 맞춤
+#define BLOCK_SIZE 64  // 캐시 레벨·행렬 크기에 따라 조정하는 튜닝 예시값
 
 void matmul_blocked(double* C, double* A, double* B, int n) {
     for (int ii = 0; ii < n; ii += BLOCK_SIZE) {
@@ -88,6 +88,8 @@ Cache-oblivious 알고리즘은 다음 두 가지 전제에서 출발한다.
 캐시 라인: B bytes
 Tall cache: M = Ω(B²)
 ```
+
+이후 원소 수 `n`을 다루는 분석에서는 `B`를 한 line에 들어가는 원소 수(`B_bytes / sizeof(T)`)로, `M`도 같은 원소 단위로 맞춰 읽는다. 바이트 단위와 원소 단위를 섞으면 상수 `sizeof(T)`를 빠뜨리게 된다.
 
 이 가정 하에서, 재귀를 충분히 깊게 하면 작업 세트(working set)가 캐시에 완전히 들어간다. 그 순간부터 캐시 미스가 급격히 줄어든다.
 
@@ -187,7 +189,7 @@ Ideal cache 모델 (캐시 크기 M, 라인 크기 B)에서:
 
 ### 재귀 분할
 
-C = A × B를 계산할 때, 행렬을 2x2 블록으로 분할한다.
+C += A × B를 누적 계산할 때, 행렬을 2x2 블록으로 분할한다. A, B, C는 서로 겹치지 않아야 한다.
 
 ```text
 [ C11  C12 ]   [ A11  A12 ]   [ B11  B12 ]
@@ -206,8 +208,9 @@ C22 = A21×B12 + A22×B22
 void matmul_rec(double* C, double* A, double* B, int n,
                 int rowC, int colC, int rowA, int colA,
                 int rowB, int colB, int N) {
-    if (n <= 64) {
-        // Base case: 작은 블록은 naive 곱셈
+    if (n <= 64 || (n % 2) != 0) {
+        // Base case: 작은 블록 또는 홀수 크기는 naive 곱셈.
+        // 홀수 n은 n/2로 정확히 나눌 수 없어 마지막 행/열이 누락되므로 직접 계산한다.
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < n; j++) {
                 double sum = 0.0;
@@ -245,6 +248,14 @@ void matmul_rec(double* C, double* A, double* B, int n,
         matmul_rec(C, A, B, half, rowC+half, colC+half,
                    rowA+half, colA+half, rowB+half, colB+half, N);
     }
+}
+
+// matmul_rec는 C에 누적하므로 진입 전에 C를 0으로 초기화한다.
+void matmul_oblivious(double* C, double* A, double* B, int n) {
+    for (int i = 0; i < n * n; ++i) {
+        C[i] = 0.0;
+    }
+    matmul_rec(C, A, B, n, 0, 0, 0, 0, 0, 0, n);
 }
 ```
 
@@ -390,20 +401,20 @@ B-tree는 디스크 I/O 최적화를 위해 설계되었지만, 캐시에도 적
 
 ### 전통적 B-Tree의 문제
 
-B-tree의 노드 크기는 디스크 블록 크기(4KB)에 맞춰 고정된다.
+B-tree의 노드 크기는 디스크 블록·페이지·캐시 목표에 맞추어 fanout을 선택하며 4KB로 고정된 것이 아니다. 아래는 키를 256개 둔 한 가지 구성일 뿐이고, `sizeof(BTreeNode)`는 이식성 있는 고정값이 아니다.
 
 ```c
-#define B 256  // 노드당 최대 키 개수
+#define MAX_KEYS 256  // 노드당 최대 키 개수 (예시 fanout)
 
 struct BTreeNode {
-    int keys[B];
-    BTreeNode* children[B+1];
+    int keys[MAX_KEYS];
+    BTreeNode* children[MAX_KEYS + 1];
     int num_keys;
     bool is_leaf;
 };
 ```
 
-문제는 메모리 계층이 다양함(L1, L2, L3, 메모리, 디스크)에도 하나의 B로는 모든 레벨을 최적화할 수 없다는 점이다.
+문제는 메모리 계층이 다양함(L1, L2, L3, 메모리, 디스크)에도 하나의 fanout으로는 모든 레벨을 최적화할 수 없다는 점이다.
 
 ### 높이를 재귀적으로 자른다
 
@@ -535,9 +546,9 @@ block transfer로 comparison sorting의 점근적 I/O 하한을 달성한다. �
 - **임베디드 시스템**: 캐시 크기가 다양한 플랫폼 타겟팅
 - **라이브러리**: 범용 수학 라이브러리 (BLAS 대안)
 
-**피해야 할 경우:**
-- **단일 플랫폼**: 캐시 크기를 알고 있고 튜닝 가능
-- **극한 성능**: 상수 계수가 중요 (게임, HFT)
+**신중해야 할 경우:**
+- **단일 플랫폼**: 캐시 크기를 알고 있고 tuned aware 구현이 더 단순할 때
+- **극한 성능**: 상수 계수가 중요할 때 (게임, HFT). 다만 재귀·tuned·hybrid는 측정으로 고른다
 - **간단한 연산**: 벡터 덧셈 같은 단순 작업
 - **SIMD 중심**: Cache-oblivious는 SIMD와 조합이 까다로움
 
@@ -569,7 +580,7 @@ Linux `perf`로 실제 캐시 미스를 측정한다.
 # L1 데이터 캐시 미스
 perf stat -e L1-dcache-load-misses,L1-dcache-loads ./program
 
-# L2, L3 캐시 미스
+# 마지막 레벨(LLC) 캐시 미스 (L2/L3는 별도 PMU event로 구분)
 perf stat -e LLC-load-misses,LLC-loads ./program
 ```
 
@@ -615,7 +626,7 @@ for (int i = 0; i < 100; i++) {
 }
 ```
 
-warm-cache와 cold-cache는 다른 질문이다. cold 결과가 필요하면 반복 사이에 입력보다 큰 eviction buffer를 접근하거나 별도 프로세스로 실행하고 그 절차를 기록한다.
+warm-cache와 cold-cache는 다른 질문이다. cold 결과가 필요하면 반복 사이에 대상 캐시보다 큰 eviction buffer를 접근하고(입력 크기가 아니라 대상 cache 용량 기준), buffer 크기·접근량·초기화 위치를 기록한다. 별도 프로세스로 실행하는 것만으로 target cache가 cold라는 보장은 없으므로 절차와 가정을 함께 남긴다.
 
 **TLB 효과:**
 
@@ -743,7 +754,7 @@ GPU에서는 workgroup 크기와 shared-memory tile을 launch configuration에 �
 
 Cache-oblivious 알고리즘은 "하드웨어를 모르면서도 최적화한다"는 역설을 현실로 만들었다. 재귀적 분할이라는 단순한 아이디어가, 다층 캐시 계층에서 자동으로 작동하는 알고리즘을 가능케 한다.
 
-핵심 통찰은 네 가지다. 재귀가 캐시를 본다(문제를 쪼개다 보면 어느 순간 캐시에 맞는다). 모든 레벨에서 최적이다(L1, L2, L3, 메모리 모두에서 동시에 효율적). 이식성의 승리(같은 코드가 ARM, x86, RISC-V에서 작동). 이론과 실전의 간극(점근적 최적이지만 상수 계수는 도전 과제).
+핵심 통찰은 네 가지다. 재귀가 캐시를 본다(문제를 쪼개다 보면 어느 순간 캐시에 맞는다). 모델 가정 아래 여러 레벨에서 점근 I/O가 최적이다(L1, L2, L3, 메모리에 같은 분할 논리가 적용되며, 실제 적중은 별도로 측정한다). 이식성의 승리(같은 코드가 ARM, x86, RISC-V에서 작동). 이론과 실전의 간극(점근적 최적이지만 상수 계수는 도전 과제).
 
 실전 조언으로는 캐시 미스를 실제로 측정하고 비교하기, cache-oblivious 구조와 cache-aware base case의 하이브리드 사용, 프로파일 주도로 병목을 찾고 선택적 적용, `perf`/VTune으로 캐시 동작 분석이 있다.
 

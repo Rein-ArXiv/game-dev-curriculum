@@ -376,8 +376,8 @@ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
     // FPU 상태 전환. 실제 정책과 함수는 커널 버전·아키텍처에 따라 다르다.
     fpu__switch(prev, next);
 
-    // FS/GS 베이스, TLS 슬롯 적재
-    load_seg_legacy(prev->tls_array, prev->gsindex, prev->fsindex);
+    // FS/GS 베이스, TLS 슬롯 적재 (전환 대상인 next의 값을 적재)
+    load_seg_legacy(next->tls_array, next->gsindex, next->fsindex);
 
     // 스택 포인터 전환 (인라인 어셈블리는 별도 함수에서 수행)
 
@@ -568,6 +568,8 @@ flowchart TB
     SOCK --> CORE[코어 도메인]
     CORE --> SMT[SMT 하이퍼스레딩 도메인]
 ```
+
+위 도메인 계층은 예시다. 모든 장비가 NUMA→socket→core→SMT의 일대일 구조를 갖는 것은 아니며 실제 계층은 토폴로지에 따라 달라진다.
 
 2-소켓 시스템에서 각 소켓에 4코어 8 하이퍼스레드라면 도메인은 다음과 같이 구성된다.
 
@@ -809,10 +811,22 @@ Linux 3.14에서 추가된 SCHED_DEADLINE은 EDF를 구현한다.
 ```c
 struct sched_attr {
     u32 size;
-    u32 sched_policy;     // SCHED_DEADLINE
+    u32 sched_policy;
+    u64 sched_flags;
+
+    /* SCHED_NORMAL, SCHED_BATCH */
+    s32 sched_nice;
+    /* SCHED_FIFO, SCHED_RR */
+    u32 sched_priority;
+
+    /* SCHED_DEADLINE (nsec) */
     u64 sched_runtime;    // 주기당 필요한 CPU 시간 (ns)
     u64 sched_deadline;   // 상대적 마감 시간 (ns)
     u64 sched_period;     // 주기 (ns)
+
+    /* SCHED_FLAG_UTIL_CLAMP */
+    u32 sched_util_min;
+    u32 sched_util_max;
 };
 
 // 10ms마다 2ms의 CPU 필요, 5ms 이내 완료
@@ -897,7 +911,9 @@ static struct task_struct *pick_next_task_dl(struct rq *rq)
 static void update_curr_dl(struct rq *rq)
 {
     struct task_struct *curr = rq->curr;
-    u64 delta_exec = rq_clock_task(rq) - curr->se.exec_start;
+    u64 now = rq_clock_task(rq);
+    u64 delta_exec = now - curr->se.exec_start;
+    curr->se.exec_start = now;  // 다음 호출이 같은 구간을 중복 차감하지 않도록 갱신
 
     curr->dl.runtime -= delta_exec;
 
@@ -1081,8 +1097,9 @@ Linux 5.14부터 burst를 허용한다.
 # cgroup v1
 echo 200000 > cpu.cfs_burst_us
 
-# cgroup v2
-echo 200000 > cpu.max.burst
+# cgroup v2: burst는 cpu.max의 quota(MAX) 이내여야 한다
+cat cpu.max
+echo 10000 > cpu.max.burst
 ```
 
 burst는 장기 quota를 늘리지 않으면서 일시적으로 quota를 넘는 실행을 허용하는 상한이다. 사용하지 않은 runtime과 burst credit의 정확한 회계는 커널 구현을 따르며, 값을 키우면 짧은 spike의 throttling을 줄이는 대신 같은 CPU를 공유하는 다른 cgroup의 지연을 늘릴 수 있다.

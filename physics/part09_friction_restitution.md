@@ -2,7 +2,7 @@
 
 *normal impulse* 가 *침투 방향 (법선)* 응답을 처리. 충돌 응답이 완성됐는가? 거의 — *접선 (tangential)* 방향이 남았다.
 
-두 표면이 충돌할 때 *법선만 응답* 하면 *어떤 방향으로든 자유롭게 미끄러짐*. 현실에서는 *마찰* 이 그 미끄러짐을 막는다. 게임에서 *경사면에 멈춘 박스* + *지면 위에서 점차 정지하는 공* 모두 마찰 덕분.
+두 표면이 충돌할 때 *법선만 응답* 하면 *어떤 방향으로든 자유롭게 미끄러짐*. 현실에서는 *마찰* 이 그 미끄러짐을 막는다. 게임에서 *경사면에 멈춘 박스* 는 접촉점의 상대 접선 속도가 0으로 유지되는 특수한 경우이고, *지면 위에서 점차 정지하는 공* 은 접촉 마찰 외에 rolling resistance·접촉 변형·감쇠도 함께 작용한다.
 
 또 *회복 계수 (restitution)* 의 디테일 — 게임의 *resting contact (쌓인 박스)* 가 *영원히 진동* 하지 않으려면 *임계값 아래는 비탄성* 처리가 필요.
 
@@ -51,8 +51,8 @@ $$
 
 ### 1.2 두 모드
 
-*정지 (static)* 상태:
-- 마찰력이 *외력의 접선 성분을 정확히 상쇄* — 객체 *움직임 없음*.
+*정지 (static)* 상태 — 접촉점의 상대 접선 속도 $v_{contact,t}=0$ 을 유지:
+- 마찰력이 접선 상대 속도를 0으로 되돌리는 데 필요한 값을 제공한다. 강체 COM이 정지한다는 뜻은 아니다 (순수 구름이나 가속하는 컨베이어 위에서도 정마찰이 작용한다).
 - 한도 $\mu_s F_n$ 이내 모든 값 가능.
 
 *미끄러짐 (kinetic / dynamic)* 상태:
@@ -61,9 +61,9 @@ $$
 
 ```mermaid
 flowchart LR
-    Force[접선 외력] -->|< μ_s F_n| Static[정지 — 마찰이 정확히 상쇄]
+    Force[접선 외력] -->|< μ_s F_n| Static[접촉점 상대 접선 정지<br/>물체 COM 정지 아님]
     Force -->|> μ_s F_n| Kinetic[미끄러짐 시작]
-    Kinetic -->|마찰 = μ_d F_n| Direction[속도 반대 방향]
+    Kinetic -->|마찰 = μ_d F_n| Direction[접촉점 상대 속도 반대 방향]
 ```
 
 ### 1.3 마찰 계수
@@ -81,7 +81,7 @@ flowchart LR
 
 ### 1.4 마찰의 미시적 기원
 
-거시 모델 (μ × N) 은 *경험적*. 미시적으로는 *표면의 미세 요철 + 분자간 힘* 의 결과. 정확한 미시 모델은 *너무 복잡* — 게임은 Coulomb 으로 충분.
+거시 모델 (μ × N) 은 *경험적*. 미시적으로는 *표면의 미세 요철 + 분자간 힘* 의 결과. 정확한 미시 모델은 *너무 복잡* — 게임은 Coulomb 으로 충분. 이상적 순수 구름은 Coulomb 정마찰만으로 저절로 멈추지 않으며, 구르는 공의 감속은 rolling resistance·접촉 변형·감쇠 같은 별도 효과로 설명한다.
 
 ### 1.5 게임의 무자비한 단순화
 
@@ -97,8 +97,8 @@ flowchart LR
 
 ### 2.1 두 한도
 
-- *정마찰 한도* $\mu_s F_n$: 객체가 *정지 상태* 일 때 마찰의 *최대 크기*.
-- *동마찰 한도* $\mu_d F_n$: 객체가 *미끄러질 때* 마찰의 *정확한 크기*.
+- *정마찰 한도* $\mu_s F_n$: 접촉점의 상대 접선 속도가 0인 상태에서 마찰이 제공할 수 있는 *최대 크기*.
+- *동마찰 한도* $\mu_d F_n$: 접촉점이 미끄러질 때 마찰의 *정확한 크기*.
 
 일반적으로 $\mu_s > \mu_d$ — *처음 미끄러뜨리기 어려운데 일단 미끄러지면 쉬워짐*.
 
@@ -106,9 +106,9 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    Stop[정지] -->|외력 < μ_s F_n| Stop
-    Stop -->|외력 ≥ μ_s F_n| Move[미끄러짐]
-    Move -->|상대속도 0 + 외력 < μ_s F_n| Stop
+    Stop[접촉점 상대 접선 정지] -->|외력 < μ_s F_n| Stop
+    Stop -->|외력 ≥ μ_s F_n| Move[접촉점 미끄러짐]
+    Move -->|접촉점 상대속도 0 + 외력 < μ_s F_n| Stop
     Move -->|미끄러짐 지속| Move
 ```
 
@@ -183,7 +183,7 @@ j_t = \frac{-\vec{v}_{rel} \cdot \hat{t}}
  + \hat{t} \cdot (\mathbf{I}_B^{-1} (\vec{r}_B \times \hat{t}) \times \vec{r}_B)}
 $$
 
-정확한 답: $\vec{v}_{rel,t}$ 를 *완전히 0 으로 만드는* 임펄스.
+2D 는 접선이 한 축뿐이라 이 스칼라 식이 접선 상대 속도를 *정확히* 제거한다. 3D 에서는 이 식이 $\hat{t}$ 축에 대한 투영만 0으로 만든다는 점에 주의한다. 비중심 접촉이나 비등방 관성에서는 contact-space effective mass 가 두 접선 축을 결합하므로, $\vec{v}_{rel,t}$ 전체를 0으로 만들려면 두 접선 축의 2×2 tangential block $\mathbf{K}_{tt} = J_t \mathbf{M}^{-1} J_t^T$ 를 풀거나 두 축을 반복 갱신한다. 단일 축 스칼라식은 한 번의 투영으로 현재 축 성분만 제거한다.
 
 ### 3.3 Coulomb 클램프
 
@@ -200,7 +200,7 @@ float jt = -dot(vRel, t) / denom;     // 무한 가정
 jt = std::clamp(jt, -mu * jn, mu * jn);
 ```
 
-클램프 안 — *완전 정지* (정마찰 한도 안). 클램프 끝 — *미끄러짐* (동마찰 한도).
+클램프 안 — 해당 축의 미끄럼 정지 (정마찰 한도 안). 클램프 끝 — *미끄러짐* (동마찰 한도).
 
 ### 3.4 적용
 
@@ -271,7 +271,7 @@ jt1 = std::clamp(jt1, -mu * jn, mu * jn);
 jt2 = std::clamp(jt2, -mu * jn, mu * jn);
 ```
 
-*제약 두 개 → cone 의 외접 사각형* — 실제 cone 보다 *약간 큰* 영역 허용. 마찰이 *대각선 방향* (45°) 으로 약간 *과도* — 시각 차이 미미.
+*제약 두 개 → cone 의 외접 사각형* — 실제 cone 보다 큰 영역을 허용한다. 대각선 방향에서 최대 접선 크기가 $\sqrt{2}\,\mu j_n$ 까지 커져 원형 cone 한도보다 약 41.4% 크다. 따라서 두 접선 basis 방향에 따라 경사면 임계각이나 미끄러짐이 달라질 수 있다. 허용 가능 여부는 수치가 아니라 장면 테스트로 판단한다.
 
 ### 4.4 8 변 다각뿔
 
@@ -283,15 +283,19 @@ Bullet 에는 8 변 옵션이 없다 — 기본은 접촉당 마찰 방향 1 개
 
 2D 는 *접선이 한 방향만* — pyramid 가 *선분 (1D)*. cone 도 같음. *2D 에서는 cone vs pyramid 구분 없음*.
 
-대부분 게임이 2D 거나 *3D 단순 마찰* 이라 pyramid 가 표준.
+실시간 엔진은 구현이 단순한 pyramid를 자주 쓴다. 다만 근사 크기와 basis 의존성을 위에서처럼 명시하고, 정확도가 중요한 장면에서는 8변 근사나 cone solver와 비교한다.
 
 ### 4.6 접촉점 다수의 마찰
 
-3D 의 한 면 접촉 — *4 ~ 8 접촉점*. 각 점에 *독립 마찰 임펄스* 적용.
+3D 의 한 면 접촉 — *4 ~ 8 접촉점*. 각 점에 *독립 마찰 임펄스* 를 적용한다.
 
-문제: 각 점이 *독립으로 cone clamp* 하면 *과제약*. *접촉 패치 전체의 마찰* 이 *한 cone* 안이어야 일관.
+먼저 원인을 분리한다. 공통 법선과 μ를 갖는 접촉에서 각 점이 진짜 원뿔 $\|j_{t,i}\| \le \mu j_{n,i}$ 를 만족하면 삼각 부등식으로 $\|\sum_i j_{t,i}\| \le \sum_i \|j_{t,i}\| \le \mu \sum_i j_{n,i}$ 이다. 즉 *접촉점 수 자체* 는 총 접선력이 Coulomb 한도를 넘는 원인이 아니다. 실제로 문제가 되는 것은 다음이다.
 
-PhysX 의 *Patch friction* — 접촉 패치를 *한 마찰 단위* 로. 더 안정.
+- *Pyramid 근사 오차*: 4.3 절의 독립 2축 clamp는 한 점만 있어도 대각선에서 $\sqrt{2}$ 배까지 허용하므로, 접촉점 수와 무관한 근사 오차다.
+- *접촉 패치의 모멘트와 압력 분포*: 점별 임펄스의 합뿐 아니라 분포가 만드는 회전 마찰 모멘트가 별도로 작용한다.
+- *중복·유한 반복 제약*: 같은 강체 쌍의 여러 행이 서로 결합되어, 수렴 전에는 합력이 잠정적으로 어긋날 수 있다.
+
+PhysX 의 *Patch friction* 은 접촉 패치를 *한 마찰 단위* 로 묶는 다른 집계·근사 모델이다. 단순히 다점 Coulomb의 모순을 없애는 정답이라기보다 patch 생성·correlation 정책에 따라 안정성과 비용이 달라지는 선택지다.
 
 ## 5. 회복 계수 재방문
 
@@ -337,9 +341,12 @@ Box2D 는 *최대*. 직관: *어느 한 재질이 탄성적이면 그쪽 우세*
 
 3 개 이상 강체가 *같은 step* 에 충돌. 각 페어가 *완전한 e* 로 응답하면 *에너지 증가* 가능 (수치 오류).
 
-해결: 다중 접촉 / 스택 상황에서는 *e 를 줄이거나 threshold 를 강하게 적용* 한다. 에너지 증가를 막기 위한 경험적 감쇠다.
+먼저 solver 수준의 원인을 본다. 충돌 사건마다 solver가 *impact 직전 상대 속도 snapshot* 과 *rebound target* 을 고정하고, 반복 후 실제 속도가 그 목표를 넘지 않는지 에너지 회귀를 측정한다.
+
+그 위에서 아래와 같은 *명시적 gameplay heuristic* 을 별도 옵션으로 둘 수 있다. 다만 `contactCount` 는 같은 접촉면을 몇 점으로 표현하느냐에 따라 달라지므로, manifold reduction 방식이 반발 계수에 영향을 준다. 재질 물성 모델이 아니라 접촉점 수 표기에 결합된 감쇠라는 점을 문서화한다.
 
 ```cpp
+// 명시적 gameplay 감쇠 heuristic — 재질 e 가 아니라 manifold 표현에 의존
 float effectiveE = e * (1.0f - 0.1f * contactCount);
 effectiveE = std::max(effectiveE, 0.0f);
 ```
@@ -461,17 +468,18 @@ flowchart LR
     Below[외력 < μ_s F_n] -->|정지| Below
     Below -->|외력 ↑ 약간| Above[외력 > μ_s F_n]
     Above -->|미끄러짐 시작| Drop[μ_d F_n 으로 마찰 줄어듦]
-    Drop -->|순간 가속| Stop[다시 정지]
+    Drop -->|순간 가속| Stop[다시 정지<br/>구동·탄성·외력 변화 필요]
     Stop --> Below
+    Note[일정한 초과 구동력만으로는<br/>저절로 반복되지 않음] -.-> Stop
 ```
 
 $\mu_s=\mu_d$로 단순화하면 상태 전환 불연속은 줄지만 정지 유지와 sliding 재질의 차이도 사라진다. hysteresis, regularized friction curve, cone/patch solve도 선택지다.
 
 ### 7.3 마찰 임펄스의 충돌
 
-다중 접촉점이 *같은 강체 쌍* 에서 발생. 각 점이 *독립 마찰 임펄스* 적용 → *과제약*. *총 마찰력* 이 *Coulomb 한도 초과* 가능.
+다중 접촉점이 *같은 강체 쌍* 에서 발생하면 각 점의 임펄스가 회전 성분을 통해 서로 영향을 준다. 4.6 절에서 본 것처럼 같은 법선·μ의 점별 cone을 정확히 지킨다면 점 수 자체가 총 한도를 넘기지는 않는다. 실무에서 남는 것은 pyramid 근사 오차, 접촉 패치의 모멘트, 중복 제약의 유한 반복 불일치다.
 
-해결: PhysX 의 *patch friction* — 접촉 패치를 *한 마찰 단위* 로. 또는 매 점 마찰을 *축약* (전체 normal impulse 합의 μ 한도).
+해결: PhysX 의 *patch friction* — 접촉 패치를 *한 마찰 단위* 로 묶는 집계 모델. 또는 매 점 마찰을 *축약* 해 전체 normal impulse 합의 μ 한도를 적용하는 근사.
 
 ### 7.4 빠른 객체의 마찰 부족
 
@@ -531,7 +539,7 @@ flowchart LR
     Tang --> Friction[friction impulse + Coulomb clamp]
     Normal --> Total[velocity 갱신]
     Friction --> Total
-    Total --> Iter[반복 (sequential impulse)]
+    Total --> Iter["반복 (sequential impulse)"]
 ```
 
 모든 엔진의 공통 흐름.
@@ -542,7 +550,7 @@ flowchart LR
 - *마찰 0.1*: 비누 — 천천히 멈춤.
 - *마찰 0.5*: 일반 표면 — 자연스러운 멈춤.
 - *마찰 1.0*: 고무 / 콘크리트 — 빨리 멈춤 + 회전 제한.
-- *마찰 > 1.0*: 비현실 (점착) — 게임 효과로만.
+- *마찰 > 1.0*: μ는 무차원 비율이라 수학적으로 1 이하로 제한되지 않는다. 큰 μ를 쓸 때는 solver 수렴과 조작감을 확인하고, 재질 물성표로 제시하려면 실험 조건과 출처를 별도로 붙인다.
 
 마찰이 *플레이 감각* 의 큰 부분. 캐릭터 컨트롤러의 *지면 마찰* 이 게임 *느낌* 을 결정.
 
@@ -558,7 +566,7 @@ flowchart LR
 1. **Coulomb 마찰** — $|F_t| \le \mu F_n$ 의 부등식 모델과 이산 임펄스 근사.
 2. **정마찰 vs 동마찰** — μ_s ≥ μ_d. 게임은 단일 값 단순화 일반.
 3. **Tangential impulse** — normal impulse 와 같은 식, 방향만 접선. Coulomb 클램프.
-4. **3D Cone vs Pyramid** — 정확한 cone vs 선형 pyramid 근사. 게임은 pyramid.
+4. **3D Cone vs Pyramid** — 정확한 cone vs 선형 pyramid 근사. 실시간 엔진은 주로 pyramid 근사를 쓴다.
 5. **회복 계수 재방문** — 합성·threshold·다중 충돌 감쇠.
 6. **Resting contact jitter** — velocity threshold + sleep + slop 의 결합.
 7. **마찰 함정** — 정-동 전이, 다중 접촉점 과제약, 빠른 객체 등.
@@ -573,6 +581,6 @@ flowchart LR
 - PhysX SDK Guide, "Rigid Body Dynamics" (friction patch 서술) — patch friction 산업 구현.
 - Bullet 소스 (`btSequentialImpulseConstraintSolver.cpp`, `btContactSolverInfo.h`) — 마찰 방향 1개/2개 옵션 (`SOLVER_USE_2_FRICTION_DIRECTIONS`) 의 구현.
 - Brian Mirtich, *Impulse-based Dynamic Simulation* (PhD 1996) — 마찰의 임펄스 모델.
-- Ian Millington, *Game Physics Engine Development*, Ch. 14 — 마찰 통합.
+- Ian Millington, *Game Physics Engine Development* (2nd ed.), Ch. 15 (특히 15.3~15.5) — 마찰 통합. 법선 임펄스와 충돌 좌표계는 Ch. 14 Collision Resolution을 선행으로 본다.
 - Stewart, Trinkle, "An Implicit Time-Stepping Scheme for Rigid Body Dynamics with Inelastic Collisions and Coulomb Friction" (1996) — 마찰 시간 적분의 학술 표준.
 - Box2D v2.4 소스 (`b2_contact_solver.cpp`) — 산업 reference.

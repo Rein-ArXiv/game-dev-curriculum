@@ -55,6 +55,8 @@ Step(world, dt);
 
 물리 솔버가 *모든 것* 처리. 외부 force (폭발, 다른 강체 충돌) 자연 응답.
 
+force-only 는 dynamic 캐릭터의 한 구현일 뿐이다. 속도 목표 servo 나 각축 잠금, 추가 impulse 를 쓰는 dynamic 컨트롤러도 있다. pose 소유권은 솔버에 있지만, 어떤 DOF 를 갱신하고 어떤 입력을 목표 속도로 줄지는 controller 설계가 정한다.
+
 문제:
 
 - *반응 지연*: force 가 가속도 → 속도 → 위치. 입력 시점과 이동 시작 시점이 다름.
@@ -88,13 +90,13 @@ character.position = MoveAndSlide(character.position,
 
 ### 1.3 게임의 표준 선택
 
-대부분 게임이 *Kinematic*. 캐릭터의 *제어감* 이 *물리적 정확성* 보다 우선.
+게임에서 흔한 선택지는 *Kinematic* 이다. 캐릭터의 *제어감* 이 *물리적 정확성* 보다 우선하는 경우가 많기 때문이다.
 
 물리 응답이 필요한 케이스 — *ragdoll death*, *환경 상호작용* — 은 *kinematic / dynamic 동적 전환*. 평소엔 kinematic, 죽으면 dynamic ragdoll.
 
 ### 1.4 Hybrid 접근
 
-일부 게임은 *kinematic + force 부분 적용*. 예: *Mario Galaxy* — 평소 kinematic, 특수 상황 (강풍, 폭발) 에만 외력 적용.
+일부 컨트롤러는 *kinematic 이동 + 부분적 외력* 을 섞는다. 평소에는 직접 위치를 조작하고, 강풍·폭발 같은 특수 상황에서만 외력을 적용한다.
 
 직접 위치 조작이 *주*, 외력은 *옵션*. 결정론 + 제어감 + 부자연 회피.
 
@@ -208,7 +210,9 @@ SweepHit SweepCapsule(UprightCapsule cap, vec3 dir, float maxDist,
 
 직립 캡슐은 이동 중 회전하지 않으므로 이 질의는 *순수 병진* 캐스트다. 회전을 포함한 연속 검출보다 값싸고, 결과가 요청 방향과 거리만으로 결정된다.
 
-이 질의가 필요한 이유는 프레임 시간으로 계산된다. 한 step 의 이동량이 *벽 두께 + 이동 방향에서 잰 캡슐 폭* 보다 작으면 이산 검사만으로도 충돌을 반드시 한 번은 본다. 반지름 0.3m 캡슐 (수평 폭 0.6m) 과 두께 0.2m 벽이면 그 한계는 0.8m 이고, 10m/s 로 움직이는 캐릭터에서는 0.08s — 12.5Hz 다. 정상 프레임에는 여유가 5배 가까이 있지만 로딩 히치 한 번이면 넘어간다. 캐릭터가 속도 때문이 아니라 프레임 히치 때문에 벽을 뚫는다는 뜻이고, 8.3절이 큰 hitch 를 필수 회귀 장면에 두는 근거이기도 하다.
+이 질의가 필요한 이유를 *정지한 무한 slab 를 수직으로 횡단하는 1D 구간 모형* 으로 계산해 보자. 이 모형에서 한 step 의 이동량이 *벽 두께 + 이동 방향에서 잰 캡슐 폭* 보다 작으면 이산 검사만으로도 충돌을 한 번은 본다. 반지름 0.3m 캡슐 (수평 폭 0.6m) 과 두께 0.2m 벽이면 그 한계는 0.8m 이고, 10m/s 로 움직이는 캐릭터에서는 0.08s — 12.5Hz 다. 정상 프레임에는 여유가 5배 가까이 있지만 로딩 히치 한 번이면 넘어간다.
+
+이 0.8m/12.5Hz 는 보장이 아니라 경험적 안전율이다. 유한 삼각형의 모서리 스침, 움직이는 장애물, 대각 경로, 접촉 허용오차에는 그대로 적용되지 않는다. 벽을 뚫는 원인도 프레임 히치뿐 아니라 높은 속도와 작은 feature 다. 그래서 이산 검사를 이 수치에 의존시키지 않고 일반 sweep 을 도입하며, 8.3절이 큰 hitch 를 필수 회귀 장면에 둔다.
 
 ## 3. Move-and-slide 알고리즘
 
@@ -262,7 +266,7 @@ vec3 MoveAndSlide(UprightCapsule cap, vec3 displacement, const World& world) {
 
 `kSkin` 만큼 충돌점에서 *떨어뜨려 정지*. 정확히 닿게 정지하면 *다음 step 의 충돌 검사* 가 *이미 침투* 상태로 시작 — 부정확.
 
-skin 으로 *분리 상태를 유지하려고* 한다. 다음 step 의 충돌 검사 신뢰성이 올라간다.
+skin 으로 *분리 상태를 유지하려고* 한다. 다음 step 의 충돌 검사 신뢰성이 올라간다. 여기서 `kSkin` 은 *이동 방향을 따라* 충돌점 앞에서 멈추게 하는 여유이지, 표면 법선 방향의 고정 gap 을 보장하지 않는다. 아래 다중 벽 예제는 단일 평면 projection 을 반복하는 2D/간소화 모형이다. 3D 일반화에서는 누적된 접촉 평면들과 두 평면이 만드는 교선(crease) 방향을 함께 다뤄야 한다.
 
 ### 3.4 다중 벽 case
 
@@ -275,6 +279,7 @@ flowchart LR
     Slide1 --> Hit2[벽 2 부딪힘]
     Hit2 --> Slide2[벽 2 따라 미끄러짐 = 0]
     Slide2 --> Stop[정지]
+    Note[2D corner 예시<br/>3D 는 crease 이동 별도 설명] -.-> InCorner
 ```
 
 4 회 iteration 으로 *대부분 케이스 처리*. 더 복잡한 case 는 *iter 늘림* 또는 *벽 사이 stuck 감지*.
@@ -408,6 +413,8 @@ bool IsWalkable(vec3 groundNormal,
 
 한도는 이동 능력과 레벨 collision mesh의 경사 설계로 정한다. walkable 판정에는 접촉 normal의 노이즈와 edge에서 섞인 normal도 고려해 hysteresis나 stable ground probe를 둘 수 있다.
 
+`IsWalkable` 은 *지원면이 있는가(hasSupport)*, *걸을 수 있는 지면인가(walkableGround)*, *너무 가파른 접촉인가(steepContact)* 를 한 값으로 뭉치지 않는다. 지지 여부는 접촉·거리로, walkable 여부는 normal 각도로 따로 판정한다. `IsWalkable` 자체는 판정일 뿐이라, 가파른 면에 수평 변위를 투영하면 캡슐이 위로 올라간다(60° 경사에서 수평 입력 (1,0)이 (0.25, 0.43)이 된다). 따라서 `MoveAndSlide` 는 unwalkable normal 을 만나면 그 면을 따라 위로 오르는 투영을 막고, 벽처럼 수평으로 미끄러지게 하거나 상향 이동을 억제한다. 중력에 의한 하향 활강은 별도 허용한다.
+
 ### 5.2 경사면에서의 이동
 
 평지에서는 *수평 desired velocity*. 경사면에서는 *경사를 따라*.
@@ -416,17 +423,22 @@ bool IsWalkable(vec3 groundNormal,
 if (onGround) {
     // 입력의 수평 성분만 사용 (수직 분리)
     vec3 horizInput = vec3{inputDir.x, 0, inputDir.z};
-    // 지면 평면에 투영
-    vec3 alongGround = horizInput - dot(horizInput, groundNormal) * groundNormal;
-    if (length_squared(alongGround) > 1e-8f) {
-        desiredVel = normalize(alongGround) * moveSpeed;
+    if (IsWalkable(groundNormal)) {
+        // 지면 평면에 투영
+        vec3 alongGround = horizInput - dot(horizInput, groundNormal) * groundNormal;
+        if (length_squared(alongGround) > 1e-8f) {
+            desiredVel = normalize(alongGround) * moveSpeed;
+        } else {
+            desiredVel = vec3{0, 0, 0};
+        }
     } else {
-        desiredVel = vec3{0, 0, 0};
+        // 가파른 면은 오르지 못하게 수평 변위만 남긴다. 하향 활강은 5.5절에서 따로 더한다.
+        desiredVel = horizInput * moveSpeed;
     }
 }
 ```
 
-경사면을 따라 *수평 같은 속도* 로 이동. 자연 동작.
+이 코드는 *지면 평면을 따르는 속력* 을 `moveSpeed` 로 일정하게 유지한다. 오르막에서 수평 성분 속력은 $\cos\theta$ 만큼 줄어든다. 수평 속력을 보존하려면 다른 스케일을 써야 한다. 또 `normalize(alongGround)` 는 입력 크기를 지우므로 `inputDir` 이 단위 방향인지 아날로그 크기를 포함하는지 계약을 명시해야 한다.
 
 ### 5.3 Ground snap
 
@@ -529,7 +541,7 @@ overlap 질의 비용은 캐릭터 수뿐 아니라 broad phase 후보 수, 겹�
 
 ### 6.5 sweep with skin
 
-push out 없이 *sweep 자체 skin* 으로 해결.
+*정상 이동* 은 sweep/slide 가 담당하고, 초기 겹침만 push out 으로 분리한다.
 
 ```cpp
 SweepHit hit = SweepCapsule(cap, dir, dist + kSkin, world);
@@ -538,7 +550,7 @@ if (hit.hit) {
 }
 ```
 
-매 sweep 가 *skin 만큼 안전* — push out 거의 불필요. 대부분 산업 컨트롤러가 이 패턴.
+매 sweep 가 *skin 만큼 안전* 하므로 정상 이동 경로에서는 push out 이 거의 필요 없다. 그러나 sweep+skin 만으로 모든 경우가 해결되지는 않는다. spawn·teleport·움직이는 플랫폼처럼 시작 자세가 이미 겹친 경우에는 sweep 이 진전할 지점을 찾지 못하므로 6.1절의 초기 overlap 복구가 별도로 필요하다. 산업 컨트롤러도 두 경로를 함께 둔다.
 
 ### 6.6 kinematic 플랫폼 처리
 
@@ -574,6 +586,8 @@ struct CharacterState {
     vec3  horizVelocity;   // y = 0
     float verticalVelocity;
     bool  onGround;
+    float coyoteTimer = 0.0f;   // 프레임을 넘겨 유지
+    float jumpBuffer  = 0.0f;   // 프레임을 넘겨 유지
 };
 ```
 
@@ -645,23 +659,22 @@ if (jumpReleased && state.verticalVelocity > 0) {
 - *Wall jump*: 벽 닿은 상태에서 점프 — 반대 방향으로 튕김.
 
 ```cpp
-// Coyote
-float coyoteTimer = 0;
-if (state.onGround) coyoteTimer = kCoyoteTime;
-else coyoteTimer -= dt;
-bool canJump = state.onGround || coyoteTimer > 0;
+// timer 는 CharacterState 의 멤버다. per-frame 본문에 두면 매 frame 0 으로 리셋된다.
+if (state.onGround) state.coyoteTimer = kCoyoteTime;
+else state.coyoteTimer -= dt;
+bool canJump = state.onGround || state.coyoteTimer > 0;
 
-// Jump buffer
-float jumpBuffer = 0;
-if (jumpPressed) jumpBuffer = kJumpBufferTime;
-else jumpBuffer -= dt;
-if (canJump && jumpBuffer > 0) {
-    Jump();
-    jumpBuffer = 0;
+if (jumpPressed) state.jumpBuffer = kJumpBufferTime;
+else state.jumpBuffer -= dt;
+if (canJump && state.jumpBuffer > 0) {
+    Jump();                    // 성공 시 내부에서 coyote/buffer 를 소비한다
+    state.coyoteTimer = 0;
+    state.jumpBuffer = 0;
 }
+// 착지 시 coyote 를 복구하고, 같은 tick 의 ground 판정과 jump/snap 순서를 고정한다.
 ```
 
-작은 코드지만 *체감 platformer 품질* 결정.
+`coyoteTimer` 와 `jumpBuffer` 는 프레임을 넘겨 살아 있어야 한다. `Jump()` 가 성공하면 coyote 와 buffer 를 즉시 소비해 짧은 시간 안의 재입력으로 추가 점프가 나가지 않게 하고, 착지 시 coyote 를 복구한다. 같은 tick 안에서는 ground 상태를 갱신한 뒤 jump/snap 을 결정하는 순서를 고정한다.
 
 ## 8. 이동 상태 계약과 검증
 

@@ -320,7 +320,7 @@ queue->ExecuteCommandLists(_countof(lists), lists);
 
 ### Fence — GPU 진행 추적
 
-Fence는 GPU 측에 사는 64비트 단조 증가 카운터다. CPU는 `GetCompletedValue`로 현재 값을 읽거나, 특정 값에 도달했을 때 Win32 이벤트가 시그널되도록 등록해 둘 수 있다. GPU는 큐에 제출된 `Signal` 명령에 도달하면 펜스 값을 지정한 값으로 올린다.
+Fence는 GPU 측에 사는 64비트 카운터다. API가 값의 단조 증가를 보장하는 것이 아니라, 이 예제가 제출마다 `++fenceValue`로 증가 값을 발급해 단조 증가 타임라인을 유지한다. 여러 큐나 CPU가 같은 fence를 signal하면 signal 순서와 값 역행을 애플리케이션이 설계해야 하므로, 그런 경우에는 큐별 fence를 두거나 명시적 handoff 계약을 붙인다. CPU는 `GetCompletedValue`로 현재 값을 읽거나, 특정 값에 도달했을 때 Win32 이벤트가 시그널되도록 등록해 둘 수 있다. GPU는 큐에 제출된 `Signal` 명령에 도달하면 펜스 값을 지정한 값으로 올린다.
 
 ```cpp
 ComPtr<ID3D12Fence> fence;
@@ -556,7 +556,7 @@ device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pso));
 
 cached blob은 구현 전용 데이터다. 같은 adapter·driver 조건에서 재사용하고 `CreateGraphicsPipelineState` 실패 시 캐시 없이 재시도할 경로를 둔다. 캐시 제공이 모든 컴파일과 검증 생략을 보장하지 않는다.
 
-캐시는 드라이버 버전·GPU 모델·셰이더 코드에 묶인다. 이 중 하나라도 바뀌면 캐시가 무효가 되어 자동으로 다시 컴파일되고 캐시가 갱신된다. 그래픽 드라이버를 업데이트한 직후 게임 첫 실행에서 셰이더 컴파일 진행 막대가 다시 뜨는 것이 바로 이 캐시 무효화 때문이다.
+캐시는 드라이버 버전·GPU 모델·셰이더 코드에 묶인다. 이 중 하나라도 바뀌면 캐시가 무효가 된다. 무효 캐시를 넘긴 `CreateGraphicsPipelineState`가 실패했을 때 API가 알아서 재컴파일하는 것이 아니라, 애플리케이션이 HRESULT를 확인해 `CachedPSO`를 비우고 캐시 없이 다시 생성해야 한다. 그래픽 드라이버를 업데이트한 직후 게임 첫 실행에서 셰이더 컴파일 진행 막대가 다시 뜨는 것이 바로 이 캐시 무효화 때문이다.
 
 
 ---
@@ -574,4 +574,4 @@ cached blob은 구현 전용 데이터다. 같은 adapter·driver 조건에서 �
 - Microsoft Learn, [Direct3D 12 Programming Guide](https://learn.microsoft.com/en-us/windows/win32/direct3d12/directx-12-programming-guide) — 명령 리스트·배리어·디스크립터 힙의 공식 가이드.
 - [DirectX-Specs](https://microsoft.github.io/DirectX-Specs/) — Enhanced Barriers 등 최신 기능의 명세 원문.
 - [DirectX Graphics Samples: D3D12HelloWorld](https://github.com/microsoft/DirectX-Graphics-Samples) — 본문 구조와 같은 최소 예제들.
-- MJP(Matt Pettineo) 의 D3D12 시리즈 — <https://therealmjp.github.io/posts/> — 바인딩·배리어의 깊은 실무 해설.
+- MJP(Matt Pettineo) 의 D3D12 시리즈 — <https://therealmjp.github.io/posts/> — 시리즈 홈이므로 특정 게시물을 지정하지 않은 채 바인딩·배리어의 직접 근거로 삼지 않고, 실무 해설을 찾아보는 추가 읽을거리로만 둔다.

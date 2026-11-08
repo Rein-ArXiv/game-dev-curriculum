@@ -230,7 +230,7 @@ MeshData ProcessMesh(const aiMesh* mesh, const aiScene* scene,
 
 `mTextureCoords`가 8채널까지 있는 이유는 라이트맵 UV, 디테일 텍스처 UV, 멀티 텍스처용 보조 UV 세트가 필요한 경우 때문이다. 대부분의 게임 메시는 채널 0 하나만 쓰고, 라이트맵을 베이크하는 엔진이 채널 1을 추가로 쓰는 정도다. 학습용 구현은 채널 0만 다룬다.
 
-인덱스 추출은 면(face)을 펼치는 단계다. `aiProcess_Triangulate`를 켰으므로 모든 면은 정확히 3개의 정점 인덱스를 가진다.
+인덱스 추출은 면(face)을 펼치는 단계다. `aiProcess_Triangulate`를 켜면 삼각형 면은 3개의 정점 인덱스를 가지지만, 점·선 프리미티브는 그대로 남으므로 아래처럼 삼각형 면만 골라 담는다.
 
 ```cpp
 out.indices.reserve(static_cast<size_t>(mesh->mNumFaces) * 3);
@@ -339,7 +339,7 @@ std::vector<Texture> LoadMaterialTextures(const aiMaterial* mat,
 }
 ```
 
-`TextureCache`는 같은 경로의 텍스처를 두 번 로드하지 않도록 막는 `std::unordered_map<std::string, GLuint>`다. 한 모델의 여러 메시가 같은 텍스처를 공유하는 경우가 흔하고, 캐시 없이 메시마다 다시 로드하면 디스크 I/O와 VRAM이 그만큼 낭비된다. 4K RGBA8 디퓨즈 텍스처 한 장은 기본 레벨만 64MiB(`4096 × 4096 × 4B`), 전체 밉 체인까지 약 85MiB를 차지하므로 중복 로드를 막는 dedup은 단순하지만 효과가 크다.
+`TextureCache`는 같은 경로의 텍스처를 두 번 로드하지 않도록 막는 `std::unordered_map<std::string, GLuint>`다. 한 모델의 여러 메시가 같은 텍스처를 공유하는 경우가 흔하고, 캐시 없이 메시마다 다시 로드하면 디스크 I/O와 VRAM이 그만큼 낭비된다. 같은 경로라도 색 텍스처(sRGB로 읽어야 함)와 데이터 텍스처(선형으로 읽어야 함)는 내부 포맷이 달라야 하므로, 캐시 키에 색공간 역할을 포함해 구분한다. 4K RGBA8 디퓨즈 텍스처 한 장은 기본 레벨만 64MiB(`4096 × 4096 × 4B`), 전체 밉 체인까지 약 85MiB를 차지하므로 중복 로드를 막는 dedup은 단순하지만 효과가 크다.
 
 `modelDir`은 모델 파일이 있는 디렉토리다. Assimp가 반환하는 텍스처 경로는 모델 파일 기준 상대 경로이거나, 때로는 디자이너의 작업 머신 절대 경로가 그대로 박혀 있기도 하다. 후자라면 경로의 파일명만 떼어 `modelDir`과 결합하는 보정이 필요하다. 윈도우에서 만든 모델은 경로 구분자가 백슬래시일 수 있어 정방향 슬래시로 정규화하는 처리도 흔히 들어간다.
 
@@ -355,12 +355,21 @@ GLuint LoadTextureFromDisk(const std::string& path) {
         fprintf(stderr, "텍스처 로드 실패: %s\n", path.c_str());
         return 0;
     }
-    GLenum fmt = (ch == 4) ? GL_RGBA : (ch == 3) ? GL_RGB : GL_RED;
+    // 2채널 gray+alpha의 alpha를 다음 픽셀 밝기처럼 읽지 않도록
+    // 채널 수에 맞는 sized internalFormat/format 쌍을 고른다.
+    GLenum fmt = (ch == 4) ? GL_RGBA
+               : (ch == 3) ? GL_RGB
+               : (ch == 2) ? GL_RG
+               :             GL_RED;   // ch == 1
+    GLenum internalFmt = (ch == 4) ? GL_RGBA8
+                       : (ch == 3) ? GL_RGB8
+                       : (ch == 2) ? GL_RG8
+                       :             GL_R8;
 
     GLuint tex;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, fmt, w, h, 0, fmt, GL_UNSIGNED_BYTE, data);
+    glTexImage2D(GL_TEXTURE_2D, 0, internalFmt, w, h, 0, fmt, GL_UNSIGNED_BYTE, data);
     glGenerateMipmap(GL_TEXTURE_2D);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
@@ -374,9 +383,9 @@ GLuint LoadTextureFromDisk(const std::string& path) {
 
 stb_image는 단일 헤더 라이브러리로 PNG, JPG, TGA, BMP 같은 일반 포맷을 외부 의존성 없이 읽는다. 게임 전용 압축 포맷인 KTX2, DDS, Basis Universal은 별도 라이브러리(libktx 등)가 필요하다.
 
-세 가지 함정이 있다. 첫째, 행 정렬이다. OpenGL의 기본 `GL_UNPACK_ALIGNMENT`는 4라서, 폭이 4의 배수가 아닌 `GL_RGB`(3바이트) 텍스처는 행마다 어긋나 비스듬히 일그러진다. 폭이 임의인 텍스처를 다룰 때는 `glPixelStorei(GL_UNPACK_ALIGNMENT, 1)`을 호출하거나 4채널로 강제 로드한다. 둘째, 상하 반전이다. stb_image는 이미지의 첫 행을 위쪽으로 읽지만 OpenGL 텍스처 좌표의 원점은 아래쪽이라, 텍스처가 위아래로 뒤집혀 보일 수 있다. `stbi_set_flip_vertically_on_load(true)`로 로드 시 뒤집거나, 앞에서 본 `aiProcess_FlipUVs`로 UV 쪽을 뒤집는다. 두 가지를 동시에 켜면 두 번 뒤집혀 원래대로 돌아오므로 하나만 켠다. 셋째, 채널 수다. 회색조 PNG는 `ch == 1`이라 `GL_RED`로 들어가는데, 이를 디퓨즈 셰이더에서 `.rgb`로 샘플하면 빨강 채널만 읽혀 빨간 끼가 도는 결과가 나온다.
+세 가지 함정이 있다. 첫째, 행 정렬이다. OpenGL의 기본 `GL_UNPACK_ALIGNMENT`는 4라서, 폭이 4의 배수가 아닌 `GL_RGB`(3바이트) 텍스처는 행마다 어긋나 비스듬히 일그러진다. 폭이 임의인 텍스처를 다룰 때는 `glPixelStorei(GL_UNPACK_ALIGNMENT, 1)`을 호출하거나 4채널로 강제 로드한다. 둘째, 상하 반전이다. stb_image는 이미지의 첫 행을 위쪽으로 읽지만 OpenGL 텍스처 좌표의 원점은 아래쪽이라, 텍스처가 위아래로 뒤집혀 보일 수 있다. `stbi_set_flip_vertically_on_load(true)`로 로드 시 뒤집거나, 앞에서 본 `aiProcess_FlipUVs`로 UV 쪽을 뒤집는다. 두 가지를 동시에 켜면 두 번 뒤집혀 원래대로 돌아오므로 하나만 켠다. 셋째, 채널 수다. 회색조 PNG는 `ch == 1`이라 `GL_RED`/`GL_R8`로 들어가는데, 이를 디퓨즈 셰이더에서 `.rgb`로 샘플하면 빨강 채널만 읽혀 빨간 끼가 도는 결과가 나온다. 특히 2채널 gray+alpha(`ch == 2`)를 채널 수 그대로 `GL_RED`로 올리면 2바이트/픽셀 데이터를 1채널로 해석해 alpha를 다음 픽셀의 밝기처럼 읽고 행 배치까지 어긋난다(`GL_UNPACK_ALIGNMENT=1`로도 해결되지 않는다). 위 코드처럼 채널 수에 맞는 `GL_RG8`/`GL_RG` 쌍을 쓰거나, gray+alpha를 RGBA로 강제 변환해 통일한다.
 
-`glTexImage2D`의 세 번째 인자(internalFormat)와 일곱 번째 인자(format)가 위 코드에서는 같은 `fmt`다. 두 값이 같으면 디스크의 바이트를 그대로 저장한다는 뜻이다. 하지만 알베도/디퓨즈 텍스처는 보통 sRGB 공간으로 저장되어 있어, 셰이딩 계산을 선형 공간에서 하려면 internalFormat을 `GL_SRGB8` 또는 `GL_SRGB8_ALPHA8`로 지정해 GPU가 샘플 시 자동으로 선형으로 변환하도록 해야 한다. 반대로 노멀 맵·러프니스·메탈릭 같은 데이터 텍스처는 색이 아니라 수치이므로 선형(`GL_RGB8`, `GL_RGBA8`)으로 둬야 한다. 색 텍스처에 노멀 맵을 sRGB로 잘못 넣으면 라이팅이 미묘하게 틀어진다. 감마와 sRGB의 정확한 처리는 셰이딩 단계에서 본격적으로 다루므로, 지금은 텍스처 종류에 따라 internalFormat이 달라진다는 점만 토대로 깔아 둔다.
+`glTexImage2D`의 세 번째 인자(internalFormat)와 일곱 번째 인자(format)를 위 코드에서는 채널 수에 맞춰 짝지어 넘긴다(예: 4채널이면 `GL_RGBA8`/`GL_RGBA`). 이렇게 채널 구성이 일치하면 드라이버가 디스크의 바이트를 변환 없이 저장한다는 뜻이다. 하지만 알베도/디퓨즈 텍스처는 보통 sRGB 공간으로 저장되어 있어, 셰이딩 계산을 선형 공간에서 하려면 internalFormat을 `GL_SRGB8` 또는 `GL_SRGB8_ALPHA8`로 지정해 GPU가 샘플 시 자동으로 선형으로 변환하도록 해야 한다. 반대로 노멀 맵·러프니스·메탈릭 같은 데이터 텍스처는 색이 아니라 수치이므로 선형(`GL_RGB8`, `GL_RGBA8`)으로 둬야 한다. 색 텍스처에 노멀 맵을 sRGB로 잘못 넣으면 라이팅이 미묘하게 틀어진다. 감마와 sRGB의 정확한 처리는 셰이딩 단계에서 본격적으로 다루므로, 지금은 텍스처 종류에 따라 internalFormat이 달라진다는 점만 토대로 깔아 둔다.
 
 ### 셰이더 측 샘플러 바인딩
 

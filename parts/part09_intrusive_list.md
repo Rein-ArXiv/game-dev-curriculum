@@ -4,7 +4,7 @@
 
 이 글은 `std::list`의 구조적 비용을 측정 가능한 단위로 분해한 뒤, intrusive list가 무엇을 어떻게 바꾸는지를 본다. `container_of` 매크로 같은 핵심 기법, Linux 커널의 `list.h`와 Doom 3의 `idLinkList` 같은 실제 사례, 그리고 현대적 대안인 `plf::colony`(C++26 `std::hive`)까지 다룬다.
 
-마지막에는 `std::list`, intrusive list, `plf::colony`, `std::vector`를 동일한 워크로드에서 비교한 결과를 두고 컨테이너 선택의 트레이드오프를 정리한다.
+마지막에는 `std::list`, intrusive list, `plf::colony`, `std::vector`를 비교할 때 확인해야 할 워크로드별 트레이드오프와 컨테이너 선택 기준을 정리한다.
 
 
 ---
@@ -157,6 +157,7 @@ Intrusive List의 가장 큰 장점은 컨테이너 조작 시 힙 할당이 전
 // 게임 엔티티 풀 사전 할당
 GameObject entities[MAX_ENTITIES];  // 단 한 번의 할당
 
+// member hook을 템플릿에서 쓰려면 필드가 public이거나 friend 접근이 허용되어야 한다.
 IntrusiveList<GameObject, &GameObject::updateListNode> activeEntities;
 
 // 리스트 추가 시 힙 할당 ZERO
@@ -204,12 +205,15 @@ call [rcx]            ; virtual function call
 명령어 1개 감소 + 메모리 접근 1회 감소
 ```
 
+이 비교는 iterator가 별도 owner 필드 없이 객체 주소를 복원하는 base/member-offset hook을 가정한다. owner 포인터를 hook에 저장하는 구현(아래 실전 예제)은 `node->owner` 로드 한 번과 hook당 8바이트가 추가되므로, 위 역참조 횟수와 메모리 계산에서 그 비용을 따로 센다.
+
 ### 다중 리스트 멤버십
 
-하나의 객체가 여러 리스트에 동시에 소속될 수 있는 것은 Intrusive List만의 강력한 기능이다:
+`std::list<T*>`도 같은 객체 포인터를 여러 리스트에 넣을 수 있다. Intrusive List의 차이는 각 소속마다 외부 노드를 새로 할당하지 않고 객체 내부 hook으로 연결해 할당과 관리 비용을 줄인다는 점이다:
 
 ```cpp
 class Entity {
+    // 예시를 위해 hook 필드가 public이거나 friend 접근이 허용된다고 가정한다.
     // 하나의 객체가 여러 리스트에 동시 소속
     ListNode spatialGridNode;   // 공간 분할 그리드용
     ListNode updateNode;        // 업데이트 리스트용
@@ -596,7 +600,7 @@ typedef bi::list<
 > GameObjectList;
 ```
 
-고급 기능으로는 auto-unlink hooks가 있다:
+고급 기능으로는 auto-unlink hooks가 있다. auto-unlink hook은 상수 시간 `size()`와 양립하지 않으므로, 이를 쓰는 리스트는 `constant_time_size<false>`로 선언해야 한다:
 
 ```cpp
 class GameObject : public bi::list_base_hook<
@@ -606,7 +610,12 @@ class GameObject : public bi::list_base_hook<
         // 자동으로 리스트에서 제거됨
     }
 };
+
+// auto_unlink와 constant_time_size<true>는 함께 쓸 수 없다.
+bi::list<GameObject, bi::constant_time_size<false>> entities;
 ```
+
+일반 hook을 쓰는 목록은 destructor가 hook을 따라가므로, 연결된 객체는 unlink되거나 목록의 `clear()`가 실행될 때까지 살아 있어야 한다.
 
 intrusive와 non-intrusive 컨테이너를 비교할 때는 객체 저장 비용, link 수, allocator를 같은 경계로 계산해야 한다. intrusive hook은 별도 노드 allocation을 없애지만 hook 필드를 모든 객체가 항상 부담한다. 객체가 여러 리스트에 속하면 hook도 여러 개 필요하다.
 
@@ -614,7 +623,7 @@ intrusive와 non-intrusive 컨테이너를 비교할 때는 객체 저장 비용
 
 Intrusive List는 강력하지만 침투적(intrusive)이다. 데이터 구조를 수정해야 하고, 하나의 객체가 하나의 특정 리스트에만 속할 수 있다는 제약이 있다(여러 리스트에 속하려면 여러 링크 노드가 필요).
 
-`plf::colony`(C++26 `std::hive`)는 다른 접근 방식을 취한다: 포인터 안정성과 빠른 순회를 모두 제공하되, 침투적이지 않다.
+`plf::colony`(C++26 `std::hive`)는 다른 접근 방식을 취한다: 포인터 안정성과 빠른 순회를 모두 제공하되, 침투적이지 않다. `std::hive`는 C++26 표준이고 라이브러리 구현과 `plf::colony`의 API·버전이 완전히 같지는 않을 수 있으므로 사용하는 버전과 기능 검사 방법을 명시한다. 또한 이 컨테이너는 하나의 타입만 저장하므로, 아래 `colony<Entity>`에 `Bullet`을 넣는 예제는 `Entity` 생성자를 통과하거나 슬라이싱을 감수해야 한다.
 
 ### 버킷과 스킵필드
 
@@ -693,9 +702,10 @@ public:
 
 ```cpp
 std::vector<GameObject> entities;
+entities.emplace_back();        // 먼저 요소를 넣고
 GameObject* player = &entities[0];
 
-entities.push_back(newEntity);  // 재할당 발생
+entities.reserve(entities.capacity() + 1);  // 재할당 발생
 player->Update();  // dangling pointer
 ```
 
@@ -897,7 +907,8 @@ public:
         return sentinel.next == &sentinel;
     }
 
-    // Iterator
+    // Iterator: range-for에 필요한 최소 기능만 제공한다.
+    // 기본 생성자와 후위 ++/--가 없어 std::bidirectional_iterator concept은 만족하지 않는다.
     class iterator {
         Node* current;
 

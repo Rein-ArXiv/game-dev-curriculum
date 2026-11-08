@@ -249,7 +249,7 @@ $ ls -i
 1234567 report_link.txt
 ```
 
-두 이름은 같은 inode를 가리킨다. 실제로는 하나의 파일이다. inode의 `i_links_count`가 2가 된다. 한 이름을 삭제해도 `i_links_count`가 1로 줄어들 뿐, inode는 남아있다. 0이 되면 그때 실제로 삭제된다.
+두 이름은 같은 inode를 가리킨다. 실제로는 하나의 파일이다. inode의 `i_links_count`가 2가 된다. 한 이름을 삭제해도 `i_links_count`가 1로 줄어들 뿐, inode는 남아있다. 마지막 이름을 지워 `i_links_count`가 0이 되어도, 그 inode를 참조하는 열린 fd나 mmap이 남아 있으면 파일 객체와 데이터는 즉시 회수되지 않는다. 실제 데이터 회수는 마지막 참조가 해제된 뒤에 일어난다.
 
 심볼릭 링크는 다른 파일의 경로를 저장하는 특별한 파일이다.
 
@@ -566,14 +566,20 @@ wait(NULL);
 `dup2(oldfd, newfd)`는 파일 디스크립터를 복제한다.
 
 ```c
-int fd = open("output.txt", O_WRONLY | O_CREAT, 0644);
-dup2(fd, STDOUT_FILENO);
-close(fd);
+// 기존 파일을 새 출력으로 대체하려면 O_TRUNC가 필요하다
+int fd = open("output.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+if (fd >= 0) {
+    if (fd != STDOUT_FILENO) {
+        dup2(fd, STDOUT_FILENO);
+        close(fd);  // dup2가 복제한 별도 fd만 닫는다
+    }
+    // fd == STDOUT_FILENO이면 dup2는 no-op이고 close는 대상을 닫으므로 생략한다
 
-printf("This goes to output.txt\n");
+    printf("This goes to output.txt\n");
+}
 ```
 
-`dup2(fd, 1)`은 fd 1(stdout)이 `fd`와 같은 `file` 객체를 가리키게 한다. 이제 `printf`는 파일에 쓴다.
+`dup2(fd, 1)`은 fd 1(stdout)이 `fd`와 같은 `file` 객체를 가리키게 한다. 이제 `printf`는 파일에 쓴다. `open`이 원래 stdout과 같은 fd 1을 반환하면 `dup2(1, 1)`는 no-op이고 `close(1)`은 새 stdout을 닫아 버리므로, `fd == STDOUT_FILENO`일 때는 닫지 않는다. 또한 `O_CREAT`만으로는 기존 파일 뒤쪽의 옛 내용이 지워지지 않으므로, 셸 `>`처럼 대체하려면 `O_TRUNC`를 추가한다.
 
 셸의 리다이렉션 `>`도 다음 절차로 구현된다.
 

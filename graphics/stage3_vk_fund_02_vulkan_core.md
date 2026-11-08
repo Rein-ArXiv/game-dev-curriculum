@@ -80,7 +80,7 @@ if (r != VK_SUCCESS) { /* 오류 처리 */ }
 
 ### 반환 코드와 검증
 
-Vulkan은 대부분의 오류를 즉시 수정해 주지 않는다. 함수는 `VkResult`를 돌려주는데, `VK_SUCCESS`(0) 외에 `VK_ERROR_OUT_OF_DEVICE_MEMORY`, `VK_ERROR_DEVICE_LOST`, swapchain 관련 `VK_SUBOPTIMAL_KHR`/`VK_ERROR_OUT_OF_DATE_KHR` 등이 있다. 양수는 부분 성공, 음수는 오류라는 관례가 있다.
+Vulkan은 대부분의 오류를 즉시 수정해 주지 않는다. 함수는 `VkResult`를 돌려주는데, `VK_SUCCESS`(0) 외에 `VK_ERROR_OUT_OF_DEVICE_MEMORY`, `VK_ERROR_DEVICE_LOST`, swapchain 관련 `VK_SUBOPTIMAL_KHR`/`VK_ERROR_OUT_OF_DATE_KHR` 등이 있다. `VkResult`는 단순히 부호로 성공과 실패를 나눌 수 없다. `VK_SUCCESS`(0)와 `VK_SUBOPTIMAL_KHR`(양수)는 사용 가능한 결과지만, `VK_TIMEOUT`·`VK_NOT_READY`(양수)는 성공이 아니며 음수는 오류다. 특히 `vkAcquireNextImageKHR`는 `VK_SUCCESS`/`VK_SUBOPTIMAL_KHR`에서만 image index를 유효한 것으로 보아 이후 제출과 fence reset을 진행해야 한다. `VK_TIMEOUT`/`VK_NOT_READY`는 재시도, `VK_ERROR_OUT_OF_DATE_KHR`는 swapchain 재생성, 그 밖의 음수는 오류 경로로 분기한다.
 
 validation layer를 켜면 잘못된 usage, layout, lifetime, synchronization 문제를 메시지로 알려준다. 가령 GPU가 사용 중인 버퍼를 파괴하면 validation이 "Cannot call vkDestroyBuffer on VkBuffer that is currently in use"라고 지적한다. 개발 중에는 validation layer를 기본으로 켜고, 릴리스 빌드에서만 끄는 패턴이 일반적이다. layer는 디스패치 오버헤드와 추가 추적 비용 때문에 프레임 시간을 수 배까지 늘릴 수 있으므로 성능 측정은 layer를 끈 빌드에서 한다.
 
@@ -290,6 +290,7 @@ sequenceDiagram
     CPU->>Queue: vkQueueSubmit(command buffer)
     CPU->>Swapchain: vkQueuePresentKHR
     Queue-->>Swapchain: render finished semaphore
+    Note over Queue,Swapchain: fence(graphics 완료)와 present의 wait 소비 완료는 다른 수명
 ```
 
 `vkAcquireNextImageKHR`는 다음에 그릴 image의 인덱스를 돌려주고, 그 image가 표시 가능해지면 신호할 semaphore를 받는다. 윈도우 크기가 바뀌거나 surface가 invalid 상태가 되면 acquire나 present가 `VK_ERROR_OUT_OF_DATE_KHR`를 돌려주는데, 이때 swapchain을 다시 만들어야 한다. `VK_SUBOPTIMAL_KHR`는 표시는 되지만 최적이 아니라는 신호로, 다음 프레임에 재생성하면 된다.
@@ -367,6 +368,8 @@ vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
 VkResult r = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
                                    imageAvailable, VK_NULL_HANDLE, &imageIndex);
 if (r == VK_ERROR_OUT_OF_DATE_KHR) { RecreateSwapchain(); return; }
+if (r == VK_TIMEOUT || r == VK_NOT_READY) { return; }        // 유효한 image index가 아니다
+if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { /* 오류 처리 */ return; }
 
 vkResetFences(device, 1, &inFlightFence);   // submit이 확정된 뒤에 reset
 
@@ -390,7 +393,7 @@ vkQueuePresentKHR(presentQueue, &presentInfo);
 
 ### Frames in flight
 
-성능을 위해 보통 2~3개 프레임을 동시에 진행(frames in flight)시킨다. CPU가 프레임 N+1을 기록하는 동안 GPU가 프레임 N을 처리한다. 이때 semaphore와 fence, command buffer를 프레임 수만큼 복제해 돌려 써야 한다. 같은 semaphore를 두 프레임이 동시에 쓰면 신호와 대기가 꼬여 검증 오류나 교착이 생긴다. frames in flight 수가 많을수록 처리량은 늘지만 입력 지연도 늘어나는 트레이드오프가 있다.
+성능을 위해 보통 2~3개 프레임을 동시에 진행(frames in flight)시킨다. CPU가 프레임 N+1을 기록하는 동안 GPU가 프레임 N을 처리한다. 이때 semaphore와 fence, command buffer를 프레임 수만큼 복제해 돌려 써야 한다. 같은 semaphore를 두 프레임이 동시에 쓰면 신호와 대기가 꼬여 검증 오류나 교착이 생긴다. frames in flight 수가 많을수록 처리량은 늘지만 입력 지연도 늘어나는 트레이드오프가 있다. 다만 재사용 기준이 되는 단위는 자원마다 다르다. command buffer, acquire semaphore(`imageAvailable`), submission fence는 *frame index* 슬롯에 묶이지만, present에 넘기는 `renderFinished` semaphore는 *swapchain image index*에 묶어야 한다. GPU submit fence가 완료됐다는 사실은 presentation이 그 binary semaphore의 wait를 이미 소비했다는 증거가 아니다. 아직 present가 기다리는 `renderFinished`를 다음 프레임에서 다시 signal하면 그 wait가 깨질 수 있다. 그래서 `renderFinished`는 swapchain image마다 별도로 두고, 그 image를 다시 acquire했을 때만 재사용한다. acquire가 image를 얻지 못한 결과(`OUT_OF_DATE`/`TIMEOUT`/`NOT_READY`)에서는 image를 소비하지 않았으므로 submission fence를 reset하지 않고 빠져나온다.
 
 ### Pipeline Barrier와 Layout 전이
 
@@ -520,15 +523,17 @@ void DrawFrame() {
                                        imageAvailable[frame],
                                        VK_NULL_HANDLE, &idx);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) { RecreateSwapchain(); return; }
+    if (r == VK_TIMEOUT || r == VK_NOT_READY) { return; }   // idx는 유효하지 않다
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { return; }
 
     vkResetFences(device, 1, &inFlight[frame]);
     vkResetCommandBuffer(cmd[frame], 0);
     RecordCommands(cmd[frame], idx);   // begin renderpass, bind, draw, end
 
-    // submit: imageAvailable 대기, renderFinished 신호, inFlight 발화
+    // submit: imageAvailable[frame] 대기, renderFinished[idx] 신호, inFlight[frame] 발화
     vkQueueSubmit(graphicsQueue, 1, &submit, inFlight[frame]);
 
-    // present: renderFinished 대기
+    // present: renderFinished[idx] 대기
     r = vkQueuePresentKHR(presentQueue, &presentInfo);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR)
         RecreateSwapchain();
@@ -537,7 +542,7 @@ void DrawFrame() {
 }
 ```
 
-`vkResetFences`를 acquire 결과를 확인한 *뒤에* 부르는 순서가 중요하다. acquire가 `OUT_OF_DATE`로 일찍 반환하면 submit을 건너뛰는데, 그 전에 fence를 reset해 버리면 어떤 작업도 그 fence를 다시 신호하지 않아 다음 프레임의 `vkWaitForFences`가 영원히 막힌다.
+`vkResetFences`를 acquire 결과를 확인한 *뒤에* 부르는 순서가 중요하다. acquire가 `OUT_OF_DATE`로 일찍 반환하면 submit을 건너뛰는데, 그 전에 fence를 reset해 버리면 어떤 작업도 그 fence를 다시 신호하지 않아 다음 프레임의 `vkWaitForFences`가 영원히 막힌다. `VK_TIMEOUT`/`VK_NOT_READY`도 image를 얻지 못한 결과이므로 같은 이유로 fence를 reset하지 않고 빠져나온다. `VK_SUCCESS`/`VK_SUBOPTIMAL_KHR`일 때만 실제 image를 사용하고 그 시점에 fence를 reset한다.
 
 첫 삼각형이 화면에 나오면 Vulkan의 핵심 뼈대는 이미 통과한 상태다. 이후 모델, 텍스처, 깊이, MSAA, PBR, 컴퓨트는 이 객체 그래프 위에 자원 종류와 동기화 규칙을 추가하는 방식으로 확장된다.
 

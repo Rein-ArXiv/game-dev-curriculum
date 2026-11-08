@@ -394,7 +394,7 @@ void UpdateFrameCB(const FrameCB& cb) {
 
 `D3D11_MAP_WRITE_DISCARD`는 현재 백킹 메모리를 버리고 새 페이지를 할당받게 한다. GPU가 아직 이전 프레임의 상수 버퍼를 읽는 중이어도 CPU는 새 페이지에 쓰므로 충돌이 없다. 드라이버는 내부적으로 같은 버퍼에 대한 여러 페이지를 *링 버퍼* 처럼 돌려쓰며, GPU가 다 읽은 페이지를 재활용한다. 이 *DYNAMIC + DISCARD* 조합이 매 프레임 갱신되는 작은 버퍼의 표준 패턴이다.
 
-대안인 `D3D11_MAP_WRITE_NO_OVERWRITE`는 페이지를 새로 잡지 않고, 이미 쓴 영역과 겹치지 않는 부분만 추가로 쓴다. 한 프레임에 여러 객체의 데이터를 큰 버퍼에 차곡차곡 쌓는 *서브 할당(sub-allocation)* 패턴에 쓴다. 잘못 쓰면 GPU가 읽는 중인 영역을 덮어쓰므로 NO_OVERWRITE는 약속(겹치지 않음)을 지킬 때만 안전하다.
+대안인 `D3D11_MAP_WRITE_NO_OVERWRITE`는 페이지를 새로 잡지 않고, 이미 쓴 영역과 겹치지 않는 부분만 추가로 쓴다. 다만 상수 버퍼에 대한 NO_OVERWRITE 매핑은 D3D11.1 런타임의 선택 기능(`D3D11_FEATURE_D3D11_OPTIONS::MapNoOverwriteOnDynamicConstantBuffer`)이라 모든 기본 D3D11 환경에서 보장되지 않는다. `CheckFeatureSupport`로 지원 여부를 확인해 분기하고, 미지원이면 DISCARD와 링 버퍼를 쓰거나 여러 상수 버퍼로 나누는 전략을 택한다. 지원되는 환경에서는 한 프레임에 여러 객체의 데이터를 큰 버퍼에 차곡차곡 쌓는 *서브 할당(sub-allocation)* 패턴에 쓸 수 있다. 잘못 쓰면 GPU가 읽는 중인 영역을 덮어쓰므로 NO_OVERWRITE는 약속(겹치지 않음)을 지킬 때만 안전하다.
 
 `DEFAULT` 버퍼를 갱신할 때 쓰는 `UpdateSubresource`도 있지만, 매 프레임 갱신에는 Map/DISCARD가 더 적합하다. `UpdateSubresource`는 내부 임시 복사가 한 번 더 일어날 수 있어 자주 갱신하는 작은 버퍼에는 비효율적이다.
 

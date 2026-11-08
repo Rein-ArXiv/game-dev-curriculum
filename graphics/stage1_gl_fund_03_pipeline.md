@@ -393,6 +393,10 @@ GLuint LinkProgram(GLuint vs, GLuint fs) {
         char log[1024];
         glGetProgramInfoLog(program, sizeof(log), nullptr, log);
         std::fprintf(stderr, "Program link error: %s\n", log);
+        glDetachShader(program, vs);
+        glDetachShader(program, fs);
+        glDeleteProgram(program);
+        return 0;   // 컴파일 헬퍼와 같은 실패 규약(0)
     }
 
     glDetachShader(program, vs);
@@ -414,7 +418,7 @@ GLuint LinkProgram(GLuint vs, GLuint fs) {
 | Tess Evaluation | 그래픽 (선택, 4.0+) | 테셀레이션 좌표 | 새 정점 위치 |
 | Geometry | 그래픽 (선택) | 프리미티브 | 0개 이상의 새 프리미티브 |
 | Fragment | 그래픽 (필수) | varying, uniform, `gl_FragCoord` | 컬러 첨부 |
-| Compute | *별도 경로* (4.3+) | UBO/SSBO/이미지 | UBO/SSBO/이미지 |
+| Compute | *별도 경로* (4.3+) | UBO/SSBO/이미지 | SSBO/이미지 |
 
 이 글은 정점 + 프래그먼트만 사용한다.
 
@@ -593,8 +597,9 @@ glBufferData(GL_UNIFORM_BUFFER, sizeof(CameraUBO), nullptr, GL_DYNAMIC_DRAW);
 GLuint blockIndex = glGetUniformBlockIndex(program, "Camera");
 if (blockIndex == GL_INVALID_INDEX) {
     std::fprintf(stderr, "Uniform block 'Camera' not found\n");
+} else {
+    glUniformBlockBinding(program, blockIndex, 0);
 }
-glUniformBlockBinding(program, blockIndex, 0);
 
 // 같은 바인딩 포인트 0에 UBO를 묶는다
 glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo);
@@ -883,8 +888,9 @@ GLuint blockIndex = glGetUniformBlockIndex(program, "Camera");
 if (blockIndex == GL_INVALID_INDEX) {
     std::fprintf(stderr, "Uniform block 'Camera' not found in program\n");
     // 셰이더가 블록을 사용하지 않거나 이름이 어긋난 경우
+} else {
+    glUniformBlockBinding(program, blockIndex, 0);
 }
-glUniformBlockBinding(program, blockIndex, 0);
 
 // UBO를 binding 0에 묶기
 glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo);

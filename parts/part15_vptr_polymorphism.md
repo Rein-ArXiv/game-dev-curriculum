@@ -40,7 +40,7 @@ Animal* a = new Dog();
 a->speak();  // 출력: "..." - 왜 Dog::speak()가 아닌가?
 ```
 
-비가상 함수는 컴파일 타임에 호출 대상이 결정된다. 컴파일러는 `a`의 타입(`Animal*`)만 보고, `Animal::speak`로의 직접 호출 코드를 생성한다. 실제 객체가 `Dog`라는 사실은 런타임에만 알 수 있는 정보이므로 무시된다.
+비가상 함수는 컴파일 타임에 정적 타입으로 호출 대상이 결정된다. 여기서는 컴파일러가 `new Dog()`까지 볼 수 있지만, 비가상 호출은 언어 규칙상 `Animal*`의 멤버로 바인딩되므로 `Animal::speak` 직접 호출 코드를 생성한다. 동적 타입을 모르기 때문이 아니라 정적 바인딩 규칙 때문이며, 정보가 있으면 컴파일러는 가상 호출도 직접화(devirtualization)할 수 있다.
 
 ```cpp
 class Animal {
@@ -182,7 +182,7 @@ C++ 표준은 vptr의 존재, 위치, 이름을 명시하지 않는다. 표준�
 - 가상 함수 호출은 실제 객체의 타입에 따라 결정되어야 한다.
 - `dynamic_cast`와 `typeid`가 작동해야 한다.
 
-다만 모든 주요 컴파일러(GCC, Clang, MSVC, ICC)가 vtable/vptr 메커니즘을 사용한다. 다른 방법으로 구현하는 것이 사실상 불가능하기 때문이다.
+다만 모든 주요 컴파일러(GCC, Clang, MSVC, ICC)가 vptr 기반 vtable 메커니즘을 사용한다. 위의 “클래스당 vtable 하나, 객체당 vptr 하나”는 단일 비가상 상속에서의 기본 모형이고, 다중 상속에서는 ABI가 기반별 secondary vtable, 생성 중 construction vtable, VTT 같은 추가 표를 만들 수 있다. 표준은 동작만 요구하므로 다른 dispatch 표현이 원리적으로 불가능한 것은 아니다.
 
 ## 3. 가상 함수 호출은 왜 느린가
 
@@ -224,7 +224,7 @@ call_foo_direct(Base*):
     jmp     Base::foo()             ; 직접 점프 (1 명령어)
 ```
 
-개념적인 차이는 직접 호출의 대상이 명령어에 들어 있는 반면, 가상 호출은 객체에서 vptr과 함수 주소를 읽어 간접 호출한다는 점이다. 실제 명령어 수와 메모리 접근 수는 ABI, 최적화, 인라이닝, 레지스터에 남은 값에 따라 달라진다. 컴파일러가 동적 타입을 증명하면 가상 호출도 devirtualization과 인라이닝으로 사라질 수 있다.
+위 두 어셈블리는 차이를 보이기 위한 개념 ASM이다. 본문처럼 인라인 정의된 빈 `foo`는 `-O2`에서 호출 자체가 제거되거나 `ret`만 남을 수 있으므로, 실제 출력은 noinline·별도 TU 같은 조건과 컴파일러 버전을 명시해 확인한다. 개념적인 차이는 직접 호출의 대상이 명령어에 들어 있는 반면, 가상 호출은 객체에서 vptr과 함수 주소를 읽어 간접 호출한다는 점이다. 실제 명령어 수와 메모리 접근 수는 ABI, 최적화, 인라이닝, 레지스터에 남은 값에 따라 달라진다. 컴파일러가 동적 타입을 증명하면 가상 호출도 devirtualization과 인라이닝으로 사라질 수 있다.
 
 ### 하드웨어 관점: 간접 분기의 비용
 
@@ -513,7 +513,7 @@ flowchart TB
 
 ### type_info의 위치
 
-`typeid`와 `dynamic_cast`는 RTTI(Run-Time Type Information)를 필요로 한다. 이 정보는 vtable 앞에 있다.
+`typeid`와 `dynamic_cast`는 RTTI(Run-Time Type Information)를 필요로 한다. 이 정보는 vtable 앞에 있다. 다만 동적 탐색이 필요한 것은 다형 객체에 대한 `typeid`, `dynamic_cast`, 예외 매칭처럼 동적 타입에 의존하는 연산이다. 비다형 타입의 `typeid`, 정적 타입이 확정된 upcast나 멤버 접근은 컴파일 타임에 해석되므로 런타임 RTTI를 요구하지 않는다.
 
 Itanium C++ ABI 명세:
 
@@ -718,7 +718,7 @@ obj->vtable->AddRef(obj);
 - ABI 안정성(컴파일러 독립).
 - 명시적 제어.
 
-Windows API는 이 패턴으로 DirectX, COM 등을 구현한다.
+Windows API는 이 패턴으로 DirectX, COM 등을 구현한다. 다만 위 구조는 COM ABI의 개념적 모형이다. 실제 COM 경계에서는 호출 규약(`STDMETHODCALLTYPE`; 32비트 Windows에서 `__stdcall`), IID와 `QueryInterface`/`AddRef`/`Release` 계약, 어느 모듈이 객체를 파괴하는지의 소유권 규칙이 함께 필요하며, 할당자·예외·STL 타입을 경계 너머로 교환하지 않는다.
 
 ### Case 4: 데이터 지향 설계 (타입별 배열)
 
@@ -837,6 +837,8 @@ b->f();  // 크래시
  extern "C" DLLEXPORT IBase* CreateBase();
  ```
 
+ 다만 팩토리의 이름과 호출 규약만 C 경계가 되고, 반환된 `IBase`의 vtable 배치·소멸자·this 조정은 여전히 C++ ABI에 의존한다. 따라서 툴체인과 ABI 설정이 호환되는 범위에서만 유효하고, ABI가 다른 경계는 불투명 C 핸들과 함수 집합(또는 명시적 COM ABI)으로 정의해야 한다.
+
 ## 9. 디버깅: vtable을 보는 방법
 
 ### 컴파일러 플래그
@@ -892,6 +894,8 @@ void print_vtable(void* obj, int num_entries = 5) {
 }
 ```
 
+이 덤프는 특정 ABI에서 vtable 포인터를 읽는 플랫폼 종속 디버깅 트릭이며, 슬롯 개수나 함수 포인터를 `void*`로 다루는 방식은 보장되지 않는다. 우선 debugger나 compiler의 vtable dump를 사용하고, 런타임 덤프는 유효한 객체의 알려진 슬롯 수에만 한정한다.
+
 ### vptr 손상 감지
 
 메모리 손상이나 use-after-free는 종종 vptr을 파괴한다.
@@ -911,7 +915,7 @@ public:
 };
 ```
 
-AddressSanitizer는 use-after-free나 buffer overflow처럼 vptr을 망가뜨린 **메모리 오류**를 탐지할 수 있지만, vptr의 동적 타입 계약 자체를 검사하는 sanitizer는 아니다. Clang/GCC의 UBSan `vptr` 검사는 잘못된 downcast와 멤버 호출 등 vptr 기반 타입 오류를 추가로 진단한다.
+`vptr_guard_`는 인접 메모리 손상 일부를 검출하는 canary일 뿐 vptr 자체의 유효성을 검증하지는 않으며, 죽은 객체의 메서드 호출을 정의된 동작으로 만들지 않는다. AddressSanitizer는 use-after-free나 buffer overflow처럼 vptr을 망가뜨린 **메모리 오류**를 탐지할 수 있지만, vptr의 동적 타입 계약 자체를 검사하는 sanitizer는 아니다. Clang/GCC의 UBSan `vptr` 검사는 잘못된 downcast와 멤버 호출 등 vptr 기반 타입 오류를 추가로 진단한다.
 
 ```bash
 clang++ -fsanitize=address,undefined,vptr -g program.cpp

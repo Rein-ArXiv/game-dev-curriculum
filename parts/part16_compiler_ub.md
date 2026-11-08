@@ -1,6 +1,6 @@
 ## 들어가며
 
-"컴파일러는 코드가 UB를 포함하지 않는다고 가정한다." 이 문장은 단순한 안내가 아니다. Undefined Behavior(UB)는 "정의되지 않은 동작"이 아니라, 컴파일러에게 "이 코드 경로는 절대 실행되지 않는다"고 선언하는 것과 같다. 컴파일러는 이 정보를 이용해 직관을 뛰어넘는 최적화를 수행한다.
+"컴파일러는 코드가 UB를 포함하지 않는다고 가정한다." 이 문장은 단순한 안내가 아니다. Undefined Behavior(UB)는 표준이 어떤 요구사항도 두지 않는 영역이며, 컴파일러는 정의된 실행만 보존하면 된다는 전제 아래 "UB를 포함하는 경로는 도달하지 않는다"는 추론에 이를 활용할 수 있다. 이때 컴파일러가 모든 UB 경로를 알고 있거나 진단할 의무가 있는 것은 아니다. 컴파일러는 이 추론을 이용해 직관을 뛰어넘는 최적화를 수행한다.
 
 UB가 과거로 거슬러 올라가 null check를 제거하고, 무한 루프를 단 몇 줄로 압축하며, 멀쩡히 보이는 코드를 완전히 삭제하는 메커니즘을 살펴본다. 그다음 시야를 파일 하나에서 번역 단위 여러 개로 넓힌다. 한 파일 안에서는 성립하던 계약이 번역 단위 경계에서 어떻게 깨지는지, 그리고 그 위반을 검출하는 빌드를 어떻게 구성하는지까지 연결한다.
 
@@ -299,6 +299,8 @@ ISO C11 Annex J.2 "Undefined behavior"에 나열된 항목(약 200개 중 일부
 | MSVC | 보수적 | 일부 UB를 implementation-defined로 처리 |
 | ICC (Intel) | 매우 공격적 | 벡터화와 결합 시 예측 불가 |
 
+이 순위는 컴파일러 버전, 최적화 수준, 대상 코드에 따라 달라지므로 고정된 근거로 쓰지 않는다. UB 최적화 여부는 현상별 어셈블리와 그 빌드 조건으로 확인한다.
+
 ## 5. Strict Aliasing
 
 ### Strict Aliasing Rule이란
@@ -311,7 +313,7 @@ C99 표준 6.5/7:
 > - ... (an aggregate or union type that includes one of the aforementioned types ...),
 > - **a character type.**"
 
-간단히 말해, 다른 타입의 포인터로 같은 메모리를 접근하면 UB다. 다만 마지막 항목 "a character type"이 결정적이다. 문자 타입을 통한 접근은 언제나 허용되며, 이것이 뒤에서 다룰 바이트 단위 직렬화의 근거가 된다.
+간단히 말해, 다른 타입의 포인터로 같은 메모리를 접근하면 UB다. 다만 마지막 항목 "a character type"이 결정적이다. 문자 타입을 통한 접근은 언제나 허용되며, 이것이 뒤에서 다룰 바이트 단위 직렬화의 근거가 된다. 위 인용과 아래 예제는 C(C99/C11) 기준이다. C++20에는 대응하는 [basic.lval]과 객체 수명 규칙이 있고 문자 타입은 `char`, `unsigned char`, `std::byte`에 해당한다. union punning 허용 여부, `uint8_t`와 `unsigned char`의 동일성, `memcpy`의 `sizeof` 전제는 언어·표준 버전별로 다르므로 각 예제가 어느 언어의 것인지 구분해 읽는다.
 
 ### 허용되는 경우
 
@@ -356,7 +358,9 @@ float* p = (float*)&x;
 
 ```c
 // 합법: 문자 타입을 통한 바이트 접근은 strict aliasing 예외
-uint32_t to_be_bytes(uint32_t x) {
+// 아래는 호스트 객체 표현의 바이트를 big-endian 정수로 해석한다.
+// little-endian에서는 바이트스왑이, big-endian에서는 원값이 된다.
+uint32_t load_be32(uint32_t x) {
     uint8_t* bytes = (uint8_t*)&x;   // OK (uint8_t == unsigned char)
     return ((uint32_t)bytes[0] << 24) |
            ((uint32_t)bytes[1] << 16) |
@@ -454,12 +458,13 @@ for (int i = 0; i < N; i++) {
 
 ```c
 // 최적화 후 (개념적)
-for (int i = 0; i < N; i += 4) {  // Unroll
+for (int i = 0; i + 3 < N; i += 4) {  // 4개 묶음이 범위 안일 때만 Unroll
     array[i]   = i * 2;
     array[i+1] = (i+1) * 2;
     array[i+2] = (i+2) * 2;
     array[i+3] = (i+3) * 2;
 }
+// 남은 원소는 tail 루프에서 처리
 ```
 
 루프 언롤 자체는 각 반복의 연산 순서를 보존해 signed·unsigned 어느 의미에서도 가능하다. signed overflow가 없다는 가정이 특히 유용한 곳은 induction variable 확대, 식의 대수적 단순화, 루프 종료와 반복 횟수 증명이다. unsigned wrap은 정의되어 있으므로 컴파일러가 그 modular arithmetic 의미를 보존해야 하지만, 그것만으로 언롤이 금지되지는 않는다.
@@ -526,7 +531,7 @@ UBSan은 하나의 검사기가 아니라 여러 검사의 묶음이다. 이 글
 | 배열 범위 초과 | `bounds` | 크기를 컴파일 시점에 아는 경우만 |
 | **Strict aliasing 위반** | 없음 | **검출하지 못한다** |
 
-마지막 줄이 중요하다. 타입 기반 앨리어싱 규칙 위반은 런타임에 관찰 가능한 사건이 아니다. `float*`로 `int` 객체를 읽는 순간에 잘못된 값이 나오는 것이 아니라, 컴파일러가 두 접근이 겹치지 않는다고 가정해 순서를 바꾸거나 로드를 없앤 **결과**로 값이 어긋난다. 그 가정은 UBSan이 검사할 대상이 아니라 최적화기의 전제다. 이 종류의 UB는 `-fno-strict-aliasing`으로 전제 자체를 끄거나, `memcpy`·`union`으로 규칙을 지키는 코드로 바꾸는 것 외에 방법이 없다.
+마지막 줄이 중요하다. 타입 기반 앨리어싱 규칙 위반은 런타임에 관찰 가능한 사건이 아니다. `float*`로 `int` 객체를 읽는 순간에 잘못된 값이 나오는 것이 아니라, 컴파일러가 두 접근이 겹치지 않는다고 가정해 순서를 바꾸거나 로드를 없앤 **결과**로 값이 어긋난다. 그 가정은 UBSan이 검사할 대상이 아니라 최적화기의 전제다. 이 종류의 UB는 `-fno-strict-aliasing`으로 전제 자체를 끄거나, `memcpy`·`union`으로 규칙을 지키는 코드로 바꾸는 것이 일반적인 대응이다. 다만 타입 메타데이터를 추적하는 실험적 Clang TypeSanitizer(`-fsanitize=type`)는 이 위반 일부를 검출할 수 있으므로, 사용하는 Clang 버전의 지원 여부와 별도 빌드 필요성을 확인한다.
 
 ### 최적화 수준에 따라 결과가 달라진다
 
@@ -557,7 +562,7 @@ UBSan이 검사하는 것은 **연산 하나가 표준 계약을 어기는지**�
 | 주소 계측 + 초기화 계측 | 불가능. 같은 shadow 영역을 요구한다 |
 | UBSan + 스레드 계측 | 가능하지만 실행 시간이 크게 늘어난다 |
 
-UB 검출만 놓고 보면 UBSan은 다른 계측과 충돌하지 않으므로, 어떤 변형 빌드를 돌리든 함께 켜 두는 것이 이득이다.
+UB 검출만 놓고 보면 UBSan은 다른 계측과 충돌하지 않는 편이므로, 지원 플랫폼과 vptr 등 세부 검사 조합 조건을 확인한 뒤 가능한 변형 빌드에 함께 켜 두는 것이 이득이다.
 
 ## 8. 방어적 프로그래밍
 
@@ -681,8 +686,10 @@ C++의 빌드 단위는 **번역 단위**(`translation unit`, TU)다. `#include`
 
 이 모델 위에 **One Definition Rule**(ODR)이 얹혀 있다.
 
-- 각 함수, 변수, 타입은 프로그램 전체에서 정확히 하나의 정의를 가진다(`inline`, 템플릿, `inline` 변수 등은 예외).
-- 같은 이름의 정의가 두 TU에서 다르면 UB다. 컴파일러는 이를 잡지 못하고, 링커도 보통 발견하지 못한다.
+- 함수와 변수는 프로그램 전체에서 하나의 정의를 가진다. `inline` 함수·변수와 템플릿은 예외다.
+- 클래스·enum·템플릿 같은 타입은 여러 TU에 같은 토큰과 동일한 이름 lookup·linkage 조건을 만족하는 정의가 있으면 중복 정의가 허용된다.
+- 같은 철자의 이름이라도 internal linkage나 다른 namespace에 속하면 서로 다른 실체다.
+- 이 조건을 어기면 대개 ill-formed, no diagnostic required이며, 컴파일러와 링커가 보통 발견하지 못한다.
 
 ODR 위반의 흔한 형태:
 
@@ -733,7 +740,7 @@ ODR 위반은 이 글에서 다룬 다른 UB와 검출 가능성이 다르다.
 | 런타임 검사 | 못 잡는다. 어긋난 레이아웃으로 읽고 쓰는 것 자체가 정상 접근으로 보인다 |
 | LTO | 부분적으로 잡는다. 전체 프로그램의 타입 정보를 한자리에 모으기 때문이다 |
 
-마지막 줄이 유일한 실용적 방어다. 링크 시점 최적화를 켜면 컴파일러가 모든 TU의 타입 정보를 함께 보게 되고, GCC의 `-Wodr` 같은 경고가 어긋난 정의를 보고할 수 있다. 완전하지는 않지만, 그 외에는 관측 수단이 없다는 점에서 켜 둘 가치가 있다.
+마지막 줄은 가장 넓게 쓰는 방어다. 링크 시점 최적화를 켜면 컴파일러가 모든 TU의 타입 정보를 함께 보게 되고, GCC의 `-Wodr` 같은 경고가 어긋난 정의를 보고할 수 있다. 모든 위반을 잡지는 못하지만, 링커의 duplicate symbol 오류나 ASan의 global ODR 검사 같은 보조 수단도 일부만 검출하므로 켜 둘 가치가 있다.
 
 ```bash
 # 모든 TU를 같은 플래그로 컴파일하고, LTO에서 타입 불일치를 본다
@@ -783,7 +790,7 @@ flowchart LR
     UBCheck --> Gate[병합 게이트]
 ```
 
-변형이 갈라지는 지점은 플래그 집합 하나다. 그 아래는 각각 완전히 별개의 객체 파일 집합이며, 섞이는 순간 ODR 위반이 된다. UB는 무작위로 보이는 증상을 만들기 때문에, 증상을 만난 뒤 한 번 디버깅하는 것보다 변경마다 검출 변형을 통과시키는 쪽이 비용이 훨씬 적다.
+변형이 갈라지는 지점은 플래그 집합 하나다. 플래그가 다르다고 항상 정의가 바뀌는 것은 아니지만, `-DNDEBUG`·구조체 패킹·표준 라이브러리 디버그 매크로·sanitizer 계측처럼 inline 정의나 레이아웃을 바꾸는 옵션이 갈리면 ODR 위반이 생긴다. 그래서 검출 변형은 일반 빌드와 별도 디렉토리에서 같은 플래그로 처음부터 끝까지 빌드한다. UB는 무작위로 보이는 증상을 만들기 때문에, 증상을 만난 뒤 한 번 디버깅하는 것보다 변경마다 검출 변형을 통과시키는 쪽이 비용이 훨씬 적다.
 
 
 ---
@@ -806,7 +813,7 @@ John Regehr의 표현을 빌리면, UB는 시간 기계와 같다. 컴파일러�
 ## 더 읽을거리
 
 - [ISO/IEC 9899:2011 - C11 Standard](https://www.iso.org/standard/57853.html) - Annex J.2 "Undefined behavior"
-- [ISO/IEC 14882:2020 - C++20 Standard](https://www.iso.org/standard/79358.html) - Annex C "Undefined behavior"
+- [ISO/IEC 14882:2020 - C++20 Standard (N4861)](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/n4861.pdf) - [defns.undefined], [intro.execution], [intro.races], [expr] (Annex C는 Compatibility다)
 - [Clang UndefinedBehaviorSanitizer Documentation](https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html)
 - [AddressSanitizer Algorithm](https://github.com/google/sanitizers/wiki/AddressSanitizerAlgorithm)
 - Chris Lattner, ["What Every C Programmer Should Know About Undefined Behavior"](https://blog.llvm.org/2011/05/what-every-c-programmer-should-know.html), LLVM Blog, 2011

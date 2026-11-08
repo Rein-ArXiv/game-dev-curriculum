@@ -97,8 +97,10 @@ CRITICAL_SECTION cs;
 // 기본 초기화
 InitializeCriticalSection(&cs);
 
-// 워크로드 측정으로 근거가 있을 때만 명시적으로 설정
-InitializeCriticalSectionAndSpinCount(&cs, measured_spin_count);
+// 스핀 카운트는 초기화 뒤에 별도로 설정한다.
+// (InitializeCriticalSectionAndSpinCount를 쓸 때는 InitializeCriticalSection을
+//  먼저 호출하지 않는다. 이미 초기화한 CS를 다시 초기화하면 UB다.)
+SetCriticalSectionSpinCount(&cs, measured_spin_count);
 ```
 
 단일 프로세서에서는 소유자가 동시에 실행될 수 없으므로 스핀 이득이 없다. 멀티프로세서에서도 보편적인 권장 횟수는 없다. CPU 주파수와 `_mm_pause` 처리량, 임계 구역 분포, oversubscription 여부가 모두 손익분기점을 바꾼다.
@@ -120,7 +122,7 @@ LeaveCriticalSection(&cs);
 
 ## 2. Lock-free 프로그래밍 개요
 
-락을 사용하지 않고 스레드 안전성을 확보하는 방법이 Lock-free 프로그래밍이다. 여기서는 핵심 개념만 짚는다.
+락을 쓰지 않는 알고리즘을 넓게 비차단(non-blocking)이라 부르고, 그중 진행 보장 수준에 따라 wait-free, lock-free, obstruction-free로 나뉜다. 여기서는 핵심 개념만 짚는다.
 
 ### 진행 보장 수준
 
@@ -252,11 +254,13 @@ void SharedPtr_Destroy(SharedPtr* sp) {
     LONG newStrongRefs = InterlockedDecrement(&sp->control->strongRefs);
 
     if (newStrongRefs == 0) {
-        // 마지막 shared_ptr → 객체 삭제
+        // 마지막 shared_ptr → 소유 객체를 삭제한다.
+        // aliasing constructor에서는 sp->ptr가 subobject를 가리킬 수 있으므로
+        // 해제 대상은 항상 control->object다.
         if (sp->control->deleter)
-            sp->control->deleter(sp->ptr);
+            sp->control->deleter(sp->control->object);
         else
-            free(sp->ptr);
+            free(sp->control->object);
 
         // weak_ptr도 없으면 제어 블록 삭제
         LONG newWeakRefs = InterlockedDecrement(&sp->control->weakRefs);
@@ -304,7 +308,9 @@ SharedPtr SharedPtr_Lock(const WeakPtr* weak) {
         return result;
 
     while (1) {
-        LONG oldRefs = weak->control->strongRefs;
+        // Interlocked 읽기로 strong ref 수를 원자적으로 얻는다.
+        LONG oldRefs = InterlockedCompareExchange(
+            &weak->control->strongRefs, 0, 0);
 
         // 이미 0이면 실패
         if (oldRefs == 0)
@@ -373,7 +379,7 @@ void Consumer() {
 }
 ```
 
-기대는 Consumer가 42를 출력하는 것이지만, 실제로는 0이 출력될 수 있다.
+기대는 Consumer가 42를 출력하는 것이지만, 실제로는 0이 출력될 수 있다. 비원자 `ready`와 `data`를 동기화 없이 여러 스레드가 읽고 쓰는 이 코드는 그 자체로 C++ 데이터 레이스이므로 프로그램 전체가 UB이고, 어떤 출력이 나올지는 보장되지 않는다. 아래 시나리오는 하드웨어·컴파일러가 허용하는 순서의 예시일 뿐이며, x86의 TSO는 Store-Store 재배치를 허용하지 않으므로 시나리오 2는 weaker 모델을 포함한 일반적 예시다.
 
 **시나리오 1: 컴파일러 재배치**
 
@@ -515,7 +521,8 @@ void Increment() {
 
 // 10개 스레드가 각각 1000번 증가
 // 결과: 10000 보장 (원자성)
-// 하지만 중간 값은 어떤 순서로든 보일 수 있음
+// 각 증가는 원자적이지만 다른 원자 연산·일반 메모리와의 순서는 보장되지 않음.
+// 최종 10000은 increment가 끝난 스레드를 join한 뒤 읽는다는 전제다.
 ```
 
 사용 사례는 단순 카운터, 통계다.
@@ -631,6 +638,8 @@ Widget& GetInstance() {
 ```
 
 ### Memory Ordering 선택 가이드
+
+이 글의 `ready` 플래그 예제는 한 번만 게시되는 one-shot publication이다. 같은 슬롯을 반복 생산·소비하려면 세대·시퀀스 번호를 포함한 handshake가, 제거된 객체의 회수에는 Hazard Pointer나 epoch 같은 별도 기법이 필요하다.
 
 | 시나리오 | 권장 Ordering | 이유 |
 |---------|---------------|------|

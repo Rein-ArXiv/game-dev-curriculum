@@ -131,10 +131,12 @@ flowchart LR
 ```cpp
 class PhysicsWorld {
 public:
+    virtual ~PhysicsWorld() = default;          // owning base pointer 로 삭제할 때 필수
     virtual BodyHandle CreateBox(const vec3& size, float mass) = 0;
     virtual void       Destroy(BodyHandle h) = 0;
     virtual void       Step(float dt) = 0;
     virtual Transform  GetTransform(BodyHandle h) const = 0;
+    virtual void       SetTransform(BodyHandle h, const Transform& t) = 0;
     virtual void       SetVelocity(BodyHandle h, vec3 v) = 0;
     // ...
 };
@@ -144,7 +146,7 @@ class CustomWorld   : public PhysicsWorld { ... };
 class JoltWorld     : public PhysicsWorld { ... };
 ```
 
-인터페이스는 제품 타입의 누출을 줄이지만 백엔드 교체를 자동으로 싸게 만들지는 않는다. contact manifold, shape cooking, joint semantics, query ordering과 determinism 계약이 다르기 때문이다. 공통 interface에는 게임이 실제로 의존하는 최소 의미만 두고, 지원하지 않는 기능과 오차 차이를 backend conformance test로 드러낸다.
+owning base pointer로 삭제하는 계약이면 가상 소멸자를 인터페이스 최소 부분에 포함하고, 비소유 인터페이스라면 소유 팩토리/파괴 함수를 명시한다. 인터페이스는 제품 타입의 누출을 줄이지만 백엔드 교체를 자동으로 싸게 만들지는 않는다. contact manifold, shape cooking, joint semantics, query ordering과 determinism 계약이 다르기 때문이다. 공통 interface에는 게임이 실제로 의존하는 최소 의미만 두고, 지원하지 않는 기능과 오차 차이를 backend conformance test로 드러낸다.
 
 ### 3.3 ECS 통합
 
@@ -179,6 +181,7 @@ EntityHandle SpawnEnemy(World& w, vec3 pos) {
     auto e = w.CreateEntity();
     w.Add<TransformComponent>(e, pos);
     BodyHandle bh = physicsWorld.CreateBox({1, 1, 1}, 1.0f);
+    physicsWorld.SetTransform(bh, Transform{pos, quat::Identity()});  // 생성 body의 초기 COM 위치
     w.Add<RigidBodyComponent>(e, bh);
     return e;
 }
@@ -189,6 +192,8 @@ void DespawnEnemy(World& w, EntityHandle e) {
     pendingEntityDestroy.push_back(e);
 }
 ```
+
+동적 body를 생성할 때 spawn 위치는 ECS Transform에만 두지 말고 body의 초기 COM transform으로도 전달해야 한다. 이후 physics→transform 동기화가 ECS를 body 위치로 덮어쓰기 때문이다. ECS transform과 body COM origin이 다르면 offset 변환을 적용한다.
 
 물리 callback이나 병렬 step 도중 즉시 삭제하지 않고 안전한 동기화 지점에서 명령을 적용한다. `BodyHandle`과 `EntityHandle`은 index 재사용 뒤 stale reference가 살아나지 않도록 generation을 포함한다.
 
@@ -270,6 +275,8 @@ BodyState Interpolate(const BodyState& prev, const BodyState& cur, float alpha) 
 
 각 본 / 객체의 *이전 step 상태 + 현재 step 상태* 의 *Lerp* — 부드러운 렌더.
 
+각 body는 이전 step 상태와 현재 step 상태를 함께 보관한다. 생성·teleport·강제 순간 이동 시에는 previous=current 로 맞춰 잘못된 보간(제자리 미끄러짐)을 막는다. pause 중에는 step을 돌리지 않으므로 alpha를 진행시키지 않고, 4.5의 clamp/discard 정책으로 버린 시간은 보간 기준 시간에도 반영하지 않는다. render alpha는 accumulator와 kPhysicsDt로만 정의하며, debt-retain 정책으로 바꾸면 별도 alpha 규약이 필요하다.
+
 ### 4.4 Extrapolation (대안)
 
 이전 상태 + 현재 속도 *× alpha* 로 *예측 위치*. 보간보다 *latency 작음* — 입력 반응 빠름.
@@ -308,16 +315,19 @@ if (stepCount == kMaxStepsPerFrame && accumulator >= kPhysicsDt) {
 
 ### 4.6 게임 시간 vs 실시간
 
-게임 시간 = *시뮬 시간*. 실시간 = *실제 경과*. 두 시간이 같을 필요는 없다.
+게임 시간 = *시뮬 시간*. 실시간 = *실제 경과*. 두 시간이 같을 필요는 없다. solver의 fixed step $h$ 는 그대로 두고, render frame에서 누적기에 더하는 scaled elapsed time만 바꾼다.
 
-- *slow motion / time dilation*: 시뮬 dt 줄임 → 게임이 *느리게*. 실시간은 그대로.
-- *fast forward*: 시뮬 dt 늘림 → 게임이 *빠르게*.
-- *pause*: 시뮬 step 안 함.
+- *slow motion / time dilation*: scaled elapsed time을 줄임 → 같은 $h$ 로 도는 tick 수가 줄어 게임이 *느리게* 진행. 실시간은 그대로.
+- *fast forward*: scaled elapsed time을 늘림 → tick 수가 늘어 게임이 *빠르게*.
+- *pause*: 시뮬 step 안 함 (누적기에도 더하지 않음).
 
 ```cpp
-float timeScale = 1.0f;  // 0.5 = slow, 2.0 = fast
-accumulator += frameDt * timeScale;
+float timeScale = 1.0f;                 // 0.5 = slow, 2.0 = fast
+float scaledDt  = frameDt * timeScale;  // solver step h 를 바꾸는 값이 아니다
+accumulator += scaledDt;
 ```
+
+timeScale을 낮추면 tick이 0회인 frame이 늘고, 그 사이는 보간 alpha가 채운다. $h$ 자체를 timeScale로 바꾸는 정책과는 구분한다.
 
 ### 4.7 카메라 / 입력의 처리
 
@@ -394,6 +404,8 @@ RaycastHit Raycast(vec3 from, vec3 to) {
 
 질의 비용은 broad-phase 방문 노드, 후보 shape와 narrow-phase 형식에 따라 달라진다. 평균 시간과 함께 방문 노드 수·후보 수·상위 percentile을 측정한다.
 
+fixed loop에서 한 frame의 physics tick 수는 0회일 수도 여러 회일 수도 있다. 입력을 frame 단위 ApplyForce/ApplyImpulse로 직접 적용하면 한 tick도 안 도는 frame에서 impulse가 유실되거나, 여러 tick 도는 frame에서 반복 적용되고, 지속 force는 step 시작의 누적기 초기화 뒤 사라진다. 입력을 tick-stamped command로 저장하고 one-shot impulse는 정확히 한 tick에서 소비하며 held force는 매 tick 재적용한다. pause·timeScale·rollback에서 command의 소유자와 유효 범위도 함께 정한다.
+
 ### 5.6 게임 시뮬 단계의 순서
 
 매 frame 권장 순서:
@@ -426,10 +438,10 @@ flowchart TD
 ### 6.2 결정론 깨뜨리는 요인
 
 - **부동소수점 의 결합법칙 위반**: `(a + b) + c ≠ a + (b + c)`. 컴파일러가 *재정렬* 가능.
-- **멀티스레드 의 비결정 순서**: 입자 처리 순서가 *thread 마다 다름*.
+- **멀티스레드 의 비고정 작업 순서**: 입자·제약 처리 순서가 run 마다 달라지면 깨진다. 고정 분할·정렬·환원 순서를 쓰면 멀티스레드도 결정적일 수 있다.
 - **하드웨어 의존**: x86 vs ARM 의 *부동소수 결과 다름*.
 - **컴파일러 옵션**: `-ffast-math` 가 *결합법칙 깸*.
-- **시간 의존 (실시간 dt)**: 가변 dt 가 *결정론 깸*.
+- **시간 의존 (wall-clock dt)**: 외부 시계에서 직접 얻은 가변 dt가 frame 분기와 반올림을 바꿔 재현을 어렵게 한다. 가변 dt 자체가 아니라 재현 불가능한 시계 의존이 문제다.
 
 ### 6.3 보장 방법
 
@@ -438,6 +450,7 @@ flowchart TD
 - **컴파일러 옵션** — `-fno-fast-math` 또는 *strict floating-point*.
 - **fixed point (정수)** — 부동소수 대신 *고정소수점*. 동일 구현 안의 결정성을 크게 높임. 비용은 일부.
 - **공식 결정 모드** — 엔진의 deterministic mode.
+- **재현 계약** — 입력 trace, RNG seed, ID 부여, 처리 순서, 컴파일러·FP 환경을 체크리스트로 고정한다. fixed dt만으로 결정성이 보장되지는 않는다.
 
 ### 6.4 결정성의 범위
 
@@ -512,6 +525,8 @@ std::vector<std::vector<int>> FindIslands(const ContactList& contacts) {
 
 매 frame 비용 = *contact 수* 의 union-find — 빠름.
 
+구성 알고리즘은 Part11의 island 구현 하나로 위임하고, Part20은 서로 다른 island가 읽기 전용 static ground를 참조할 수 있다는 점과 job scheduling만 다룬다. static ground를 동적 body와 같은 island로 합치면 서로 독립인 동적 집합들이 한 island로 묶여 병렬성과 독립 sleep을 잃을 수 있다.
+
 ### 7.3 thread 분배
 
 island 별 *worker thread* 에 분배. *큰 island* 가 한 thread 의 *병목*.
@@ -536,14 +551,21 @@ island는 solve 단계에서 독립이지만, broad phase pair 생성, contact �
 island 내 *모든 body가 정지* → island 전체 *sleep*. 적분과 solver 비용은 줄지만 broad-phase proxy 유지, wake-up 검사와 메모리 비용은 남는다.
 
 ```cpp
-bool IslandIsSleeping(const Island& isl) {
+bool IsInstantaneouslySlow(const Island& isl) {
     for (auto& body : isl.bodies) {
         if (LengthSq(body.linearVel) > kSleepThreshold ||
             LengthSq(body.angularVel) > kSleepThreshold) return false;
     }
     return true;
 }
+
+bool CanEnterSleep(const Island& isl) {
+    // 순간 속도만이 아니라 누적 quiet time, 외력·접촉·활성 이웃과 wake 규약을 함께 본다.
+    return IsInstantaneouslySlow(isl) && isl.quietTime > kSleepTime;
+}
 ```
+
+순간 선속도·각속도만 낮다고 sleep시키면 포물선 꼭대기의 물체처럼 다음 tick에 다시 움직일 body도 멈출 수 있다. Part03의 누적 quiet time, 외력·접촉·활성 이웃 조건과 wake 규약을 그대로 호출하고, sleep 진입은 별도 state machine에서 결정한다.
 
 월드의 *대부분 객체가 정지 상태* — sleep 으로 *큰 절감*.
 
@@ -644,12 +666,29 @@ struct PhysicsSnapshot {
 };
 std::deque<PhysicsSnapshot> history;  // 최근 N frame
 
-void RewindToFrame(int n) {
-    auto& snap = history[n];
+// index 는 저장소 인덱스다 (절대 frame 번호가 아니다).
+bool RewindToHistoryIndex(size_t index) {
+    if (index >= history.size()) return false;   // 보관 범위 밖
+    auto& snap = history[index];
     RestoreBodies(snap);
     ShowVisualization(snap);
+    return true;
+}
+
+// 절대 frame 번호로 되감으려면 history 에서 frameNo 를 검색한다.
+bool RewindToFrameNumber(int frameNo) {
+    for (auto& snap : history) {
+        if (snap.frameNo == frameNo) {
+            RestoreBodies(snap);
+            ShowVisualization(snap);
+            return true;
+        }
+    }
+    return false;
 }
 ```
+
+history는 deque/ring이라 앞이 잘려 나가면 저장 인덱스와 절대 frame 번호가 어긋난다. 두 함수를 분리하거나 frameNo→snapshot 검색을 제공하고, 보관 범위를 벗어난 번호에는 실패를 반환한다.
 
 물리 버그 *재현 + 디버깅* 의 강력한 도구.
 

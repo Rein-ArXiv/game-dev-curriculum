@@ -17,8 +17,12 @@ ArenaAllocator::~ArenaAllocator() {
 }
 
 void* ArenaAllocator::Allocate(std::size_t size, std::size_t alignment) {
-    if (!buffer_ || size == 0) return nullptr;
-    if (!IsValidAlignment(alignment)) return nullptr;
+    // 공통 계약: 0바이트 요청은 no-op(nullptr)이고 어떤 카운터도 바꾸지 않는다.
+    if (size == 0) return nullptr;
+    if (!buffer_ || !IsValidAlignment(alignment)) {
+        RecordFailure();
+        return nullptr;
+    }
 
     // 현재 head 주소를 정렬에 맞춰 올림한다.
     const std::uintptr_t base    = reinterpret_cast<std::uintptr_t>(buffer_);
@@ -29,6 +33,7 @@ void* ArenaAllocator::Allocate(std::size_t size, std::size_t alignment) {
     // 버퍼 한도 검사. 한 번 넘기면 nullptr 반환 (assert는 측정 흐름을 깨므로 피한다).
     const std::size_t remaining = capacity_ - used_;
     if (padding > remaining || size > remaining - padding) {
+        RecordFailure();  // 논리 사용량은 그대로, 실패 횟수만 증가
         return nullptr;
     }
 

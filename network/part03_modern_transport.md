@@ -105,7 +105,7 @@ ACK ranges: [108,108], [104,105], [100,102]
 
 ### RTT 표본
 
-새로 ACK된 packet 가운데 ack-eliciting packet이 하나 이상 있을 때, ACK된 가장 큰 packet(largest acknowledged)의 송신 시각으로 latest RTT를 얻는다.
+RTT 표본은 두 조건을 모두 만족할 때만 만든다 — ACK frame의 largest acknowledged가 *새로* ACK된 번호여야 하고, 그 ACK로 새로 확인된 패킷들 중 ack-eliciting이 하나 이상 있어야 한다. 둘은 서로를 대체하지 않으며, 이미 ACK했던 largest PN을 반복 표본으로 쓰면 안 된다. 이때 latest RTT의 송신 시각은 largest acknowledged의 송신 시각이다(largest 자체가 ack-eliciting일 필요는 없다).
 
 $$
 \operatorname{latestRTT}=t_{\text{ackReceived}}-t_{\text{sent}}
@@ -127,12 +127,16 @@ $$
 +\frac18\operatorname{adjustedRTT}
 $$
 
+위 순서는 RFC 6298 계열처럼 편차 갱신에 갱신 전 `smoothedRTT`를 쓰는 변형이다. RFC 9002에 인쇄된 순서는 `smoothedRTT`를 먼저 갱신한 뒤 그 값으로 variance 표본을 계산하며, 같은 입력에서 두 식은 다른 값을 낸다. 따라서 순서를 자동으로 바꾸지 않고, 어떤 RFC 판본·errata·실제 library 구현을 따르는지 먼저 정한 뒤 그 규약에 맞춰 고정한다 — "TCP와 QUIC에서 완전히 동일하다"는 귀속만으로는 순서를 확정할 수 없다.
+
 ### 손실 판정
 
-packet threshold와 time threshold를 함께 사용한다.
+packet threshold와 time threshold를 함께 사용한다. 둘 모두 해당 packet number space에서 아직 ACK되지 않은(in-flight) packet에 적용되고, 공통으로 "그 packet보다 뒤에 전송한 packet이 ACK되었다"는 조건이 필요하다.
 
-- 번호가 threshold(기본 3) 이상 앞선 packet이 ACK되었으면 이전 packet을 손실로 판정
-- RTT에 비례한 시간이 지났으면 손실로 판정
+- packet threshold: 같은 공간에서 번호가 threshold(기본 3) 이상 앞선 packet이 ACK되었으면 이전 packet을 손실로 판정
+- time threshold: 같은 공간에서 그 packet보다 뒤에 전송한 packet이 ACK되었고, 그 packet의 전송 시각으로부터 RTT에 비례한 loss_delay가 지났으면 손실로 판정
+
+즉 time threshold는 전송 후 timeout만으로 발동하지 않는다 — ACK가 전혀 없으면 번호·시간 threshold 어느 쪽도 packet을 손실로 만들지 않는다.
 
 재정렬이 심한 경로에서 너무 작은 threshold는 불필요한 재전송을 만든다. 너무 큰 threshold는 recovery를 늦춘다.
 
@@ -147,7 +151,7 @@ $$
 +\operatorname{maxAckDelay}
 $$
 
-연속 PTO에서 timer를 지수적으로 늘려 네트워크를 더 압박하지 않는다. PTO는 모든 outstanding packet을 즉시 손실 처리하는 timer와 다르다.
+연속 PTO에서 timer를 지수적으로 늘려 네트워크를 더 압박하지 않는다. PTO가 만료되어 ack-eliciting probe를 보내는 것과 outstanding packet을 lost로 선언하는 것은 다르다 — probe는 새 번호로 보내고, probe나 뒤 packet에 대한 ACK가 돌아온 뒤에야 packet threshold·time threshold로 손실을 판정한다. PTO 하나로 모든 outstanding packet을 즉시 손실 처리하지 않는다.
 
 ### 응용 RTT와 transport RTT
 
@@ -179,19 +183,19 @@ stream 8: [0..500 complete]          -> 응용 전달 가능
 
 ### 두 단계 flow control
 
-수신자는 connection 전체 `MAX_DATA`와 각 stream의 `MAX_STREAM_DATA` credit를 알린다.
+수신자는 connection 전체 `MAX_DATA`와 각 stream의 `MAX_STREAM_DATA` credit를 알린다. 여기서 사용량은 실제로 도착한 payload byte의 합이 아니라, 각 stream이 어디까지 도달했는지 — 최고 수신 end offset 또는 reset/종료 시의 final size — 로 회계한다.
 
 $$
-\sum_s \operatorname{receivedBytes}_s
+\sum_s \operatorname{highestOffset}_s
 \le \operatorname{connectionCredit}
 $$
 
 $$
-\operatorname{receivedBytes}_s
+\operatorname{highestOffset}_s
 \le \operatorname{streamCredit}_s
 $$
 
-수신 응용이 데이터를 읽지 않아 credit를 갱신하지 않으면 송신자는 막힌다. “네트워크가 느리다”가 아니라 소비자가 backpressure를 건 상태다.
+따라서 `offset=1023, length=1`인 STREAM은 새 byte가 $1$개뿐이어도 그 stream이 소모한 flow-control 범위는 $1024$다. 중간에 hole이 있어도 최고 offset 기준으로 세고, 재전송·중복 수신 byte를 다시 가산하지 않는다. 수신 응용이 데이터를 읽지 않아 credit를 갱신하지 않으면 송신자는 막힌다. “네트워크가 느리다”가 아니라 소비자가 backpressure를 건 상태다.
 
 ### Stream 수명
 
@@ -331,16 +335,18 @@ QUIC도 공유 네트워크에서 혼잡을 유발할 책임이 있다. UDP 위�
 송신 가능량은 대략 congestion window와 bytes in flight의 차이다.
 
 $$
-B_{\text{send}}\le
+B_{\text{congestion}}\le
 \operatorname{cwnd}-\operatorname{bytesInFlight}
 $$
 
-flow-control credit가 더 작으면 그 값이 실제 상한이 된다.
+STREAM frame은 여기에 stream·connection flow-control credit까지 추가로 지켜야 한다.
 
 $$
-B_{\text{actual}}\le
+B_{\text{stream}}\le
 \min(B_{\text{congestion}},B_{\text{flow}})
 $$
+
+그러나 이 min은 STREAM에만 적용되는 상한이다. QUIC DATAGRAM은 stream/connection flow-control limit에 포함되지 않으므로, 모든 frame에 하나의 `min(cwnd, flowCredit)`을 공통 송신 예산으로 쓰면 STREAM credit이 $0$일 때 DATAGRAM까지 막힌다. DATAGRAM에는 congestion·pacing 공통 예산에 더해 peer가 광고한 최대 크기, API queue·size·expiry 한도를 별도로 적용한다.
 
 ### Pacing
 
@@ -369,15 +375,15 @@ QUIC은 Initial datagram에 최소 1200바이트 규칙을 사용하고 endpoint
 
 | API | 기반 | 신뢰·순서 | 상대 구조 |
 |---|---|---|---|
-| WebSocket | TCP + TLS | 하나의 신뢰·순서 byte stream | client-server |
+| WebSocket | TCP (+ TLS, wss) | 신뢰·순서 message delivery; 연결 전체 HoL | client-server |
 | WebRTC DataChannel | SCTP + DTLS + ICE/UDP | channel별 ordered·reliability 설정 | peer 또는 server |
-| WebTransport | HTTP/3/QUIC 계열 | stream + datagram | client-server |
+| WebTransport | HTTP/3/QUIC 계열 | HTTP/3 위의 stream + datagram mapping | client-server |
 
 지원 여부는 브라우저·플랫폼·배포 시점에 따라 달라질 수 있으므로 런타임 capability detection과 실제 target matrix로 확인한다.
 
 ### WebSocket
 
-API가 단순하고 폭넓게 배포되어 있다. TCP stream 위이므로 한 손실 구멍의 HoL과 연결 전체 순서 의미를 가진다. 로비, 채팅, 턴제, 낮은 빈도의 control에는 충분할 수 있다.
+API가 단순하고 폭넓게 배포되어 있다. 하부는 TCP byte stream이지만 WebSocket 자체는 frame fragmentation을 재조립한 data message 단위 의미를 제공한다. 연결 전체의 ordered delivery와 한 손실 구멍의 HoL을 가진다. 로비, 채팅, 턴제, 낮은 빈도의 control에는 충분할 수 있다.
 
 ### WebRTC DataChannel
 
@@ -385,7 +391,7 @@ unordered와 제한된 retransmission을 설정할 수 있어 실시간 의미�
 
 ### WebTransport
 
-신뢰 stream과 datagram을 하나의 client-server session에 제공한다. 브라우저의 보안·origin·certificate 정책과 server implementation을 함께 충족해야 한다. native QUIC library API와 WebTransport API는 같은 추상화가 아니므로 공통 message layer 아래 adapter를 둔다.
+신뢰 stream과 datagram을 하나의 client-server session에 제공한다 — 이는 HTTP/3/QUIC 기능의 브라우저 mapping이다(W3C WebTransport 스냅샷 2026-07-30 기준). 브라우저의 보안·origin·certificate 정책과 server implementation을 함께 충족해야 한다. native QUIC library API와 WebTransport API는 같은 추상화가 아니므로 공통 message layer 아래 adapter를 둔다.
 
 ```cpp
 class GameTransport {

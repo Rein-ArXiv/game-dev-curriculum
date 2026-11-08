@@ -38,6 +38,11 @@ public:
     std::size_t ClassInUse(std::size_t classIdx) const;
     std::size_t ClassCapacity(std::size_t classIdx) const;
 
+    // 모든 class pool의 backing/점유 byte 합. RSS가 아니고, class별 여유 불균형은
+    // 이 합만으로 보이지 않는다.
+    std::size_t ReservedBacking() const override;
+    std::size_t SlotBytesLive()   const override;
+
 private:
     // 요청 크기에 맞는 클래스 인덱스. size > 가장 큰 클래스면 kClassCount 반환.
     static std::size_t SizeToClass(std::size_t size);

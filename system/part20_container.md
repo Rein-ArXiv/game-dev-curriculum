@@ -203,7 +203,7 @@ struct mnt_namespace {
 | 기능 | chroot | pivot_root |
 |------|--------|------------|
 | 격리 성질 | pathname root만 변경하며 열린 fd·mount 권한을 별도로 통제해야 함 | mount namespace의 root mount를 교체하지만 그 자체만으로 완전한 보안 경계는 아님 |
-| 이전 루트 | 여전히 접근 가능 | 완전히 제거 |
+| 이전 루트 | 여전히 접근 가능 | 새 root로 교체되고 이전 root는 지정 경로에 남아 분리 대상이 됨(데이터 삭제가 아님) |
 | 사용 | 개발 환경 | 프로덕션 컨테이너 |
 
 **pivot_root 사용:**
@@ -226,7 +226,7 @@ int setup_rootfs(const char *new_root) {
     mkdir(".old_root", 0700);
     syscall(SYS_pivot_root, ".", ".old_root");
 
-    // 5. 이전 루트 언마운트
+    // 5. 이전 루트를 mount 분리(데이터 삭제가 아님)
     chdir("/");
     umount2("/.old_root", MNT_DETACH);
     rmdir("/.old_root");
@@ -234,6 +234,8 @@ int setup_rootfs(const char *new_root) {
     return 0;
 }
 ```
+
+`pivot_root`는 root mount의 역할을 교체하고 이전 root를 지정한 경로로 옮기는 연산이지, 옛 filesystem의 내용을 삭제하는 연산이 아니다. 뒤의 `umount2(..., MNT_DETACH)`도 mount를 분리할 뿐이다.
 
 ### Network Namespace
 
@@ -483,17 +485,17 @@ Namespace만으로는 자원 사용량을 제한할 수 없다.
 
 **Cgroup v1:**
 ```bash
-# CPU 사용률 50% 제한
+# CPU 0.5개에 해당하는 시간 예산 제한
 echo 50000 > /sys/fs/cgroup/cpu/mycontainer/cpu.cfs_quota_us
 echo 100000 > /sys/fs/cgroup/cpu/mycontainer/cpu.cfs_period_us
-# 50000/100000 = 50%
+# quota/period=0.5 → 전체 장비의 50%가 아니라 aggregate로 CPU 0.5개에 해당
 ```
 
 **Cgroup v2:**
 ```bash
-# CPU 사용률 50% 제한
+# CPU 0.5개에 해당하는 시간 예산 제한
 echo "50000 100000" > /sys/fs/cgroup/mycontainer/cpu.max
-# <quota> <period>
+# <quota> <period>; quota/period가 CPU 개수에 해당하는 시간 예산
 ```
 
 **Docker 예시:**
@@ -596,15 +598,16 @@ echo "8:0 100" > /sys/fs/cgroup/mycontainer/io.weight
 **Fork bomb 방어:**
 
 ```bash
-# 최대 프로세스 수 제한
+# 최대 task 수 제한(thread도 각각 하나로 센다)
 echo 100 > /sys/fs/cgroup/mycontainer/pids.max
 
-# 현재 프로세스 수
+# 현재 task 수
 cat /sys/fs/cgroup/mycontainer/pids.current
 ```
 
 **Docker:**
 ```bash
+# thread를 포함한 task/TID 수 기준
 docker run --pids-limit 100 ubuntu
 ```
 
@@ -779,10 +782,12 @@ Image B: [Ubuntu] → [apt update] ──┘
 
 과거 `devicemapper` driver는 dm-thin snapshot을 이용한 **블록 단위 CoW**였다. CoW가 없었던 것이 아니며, Docker Engine 25.0에서 driver 자체가 제거되었다. AUFS도 현재의 기본 선택지로 다루지 않는다.
 
-**overlay2가 기본인 이유:**
+**graph driver 기반 Engine에서 overlay2가 기본이던 이유:**
 - 커널 메인라인 지원
 - 높은 성능
 - 안정성
+
+Engine 29.0 이상의 fresh installation은 기본 backend가 containerd image store이고, 기존 upgrade 설치는 legacy graph driver를 유지할 수 있다. graph driver의 overlay2와 containerd snapshotter의 overlayfs는 서로 다른 backend다.
 
 ## 5. Docker의 내부 동작
 
@@ -818,7 +823,7 @@ Image B: [Ubuntu] → [apt update] ──┘
 $ docker pull nginx
 ```
 
-레이어별로 다운로드, `/var/lib/docker/overlay2/`에 저장.
+레이어별로 다운로드해 저장한다. overlay2 graph driver를 쓰면 `/var/lib/docker/overlay2/`에 저장되지만, Engine 버전과 fresh/upgrade 조건에 따라 backend가 달라진다.
 
 **2. 컨테이너 생성:**
 ```bash
@@ -1032,20 +1037,28 @@ int child_func(void *arg) {
     char *rootfs = (char *)arg;
 
     // 1. Hostname 설정
-    sethostname("container", 9);
+    if (sethostname("container", 9) == -1)
+        return -1;
 
-    // 2. rootfs 변경
-    chroot(rootfs);
-    chdir("/");
+    // 2. mount namespace의 전파를 private로 (호스트로 역전파 차단)
+    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == -1)
+        return -1;
 
-    // 3. /proc 마운트
-    mount("proc", "/proc", "proc", 0, NULL);
+    // 3. rootfs 변경
+    if (chroot(rootfs) == -1)
+        return -1;
+    if (chdir("/") == -1)
+        return -1;
 
-    // 4. 셸 실행
+    // 4. /proc 마운트
+    if (mount("proc", "/proc", "proc", 0, NULL) == -1)
+        return -1;
+
+    // 5. 셸 실행
     char *argv[] = {"/bin/sh", NULL};
     execv(argv[0], argv);
 
-    return 0;
+    return -1;
 }
 
 int main(int argc, char *argv[]) {
@@ -1099,27 +1112,40 @@ sudo ./minicontainer rootfs
 #include <fcntl.h>
 #include <string.h>
 
-void setup_cgroup(pid_t pid) {
+int setup_cgroup(pid_t pid) {
     char path[256];
     char buf[32];
 
     // Cgroup 디렉토리 생성
-    mkdir("/sys/fs/cgroup/minicontainer", 0755);
+    if (mkdir("/sys/fs/cgroup/minicontainer", 0755) == -1)
+        return -1;
 
     // Memory 제한 (512MB)
     snprintf(path, sizeof(path),
              "/sys/fs/cgroup/minicontainer/memory.max");
     int fd = open(path, O_WRONLY);
-    write(fd, "536870912", 9);
+    if (fd == -1)
+        return -1;
+    if (write(fd, "536870912", 9) < 0) {
+        close(fd);
+        return -1;
+    }
     close(fd);
 
     // PID 추가
     snprintf(path, sizeof(path),
              "/sys/fs/cgroup/minicontainer/cgroup.procs");
     fd = open(path, O_WRONLY);
+    if (fd == -1)
+        return -1;
     snprintf(buf, sizeof(buf), "%d", pid);
-    write(fd, buf, strlen(buf));
+    if (write(fd, buf, strlen(buf)) < 0) {
+        close(fd);
+        return -1;
+    }
     close(fd);
+
+    return 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -1131,7 +1157,13 @@ int main(int argc, char *argv[]) {
     pid_t pid = clone(child_main, child_stack + STACK_SIZE, clone_flags, &child_args);
 
     // 자식은 gate에서 읽으며 execve 전에 대기한다.
-    setup_cgroup(pid);
+    if (setup_cgroup(pid) == -1) {
+        // 필수 격리/제한 설정 실패 → gate를 열지 않는다(fail-closed).
+        close(gate[0]);
+        close(gate[1]);
+        waitpid(pid, NULL, 0);
+        return 1;
+    }
     write(gate[1], "x", 1);  // cgroup attach가 끝난 뒤 실행 허용
     close(gate[0]);
     close(gate[1]);
@@ -1153,31 +1185,39 @@ int main(int argc, char *argv[]) {
 #include <sys/socket.h>
 #include <linux/if.h>
 
-void setup_network(pid_t pid) {
+int setup_network(pid_t pid) {
     char cmd[256];
 
     // veth pair 생성
-    system("ip link add veth0 type veth peer name veth1");
+    if (system("ip link add veth0 type veth peer name veth1") != 0)
+        return -1;
 
     // veth1을 컨테이너 netns로
     // ip link set ... netns 인자는 PID 또는 등록된 netns 이름을 받는다.
     // /proc/<pid>/ns/net 경로 자체를 직접 넘기는 형태는 표준 사용법이 아니다.
     snprintf(cmd, sizeof(cmd),
              "ip link set veth1 netns %d", pid);
-    system(cmd);
+    if (system(cmd) != 0)
+        return -1;
 
     // 호스트 측 설정
-    system("ip addr add 10.0.0.1/24 dev veth0");
-    system("ip link set veth0 up");
+    if (system("ip addr add 10.0.0.1/24 dev veth0") != 0)
+        return -1;
+    if (system("ip link set veth0 up") != 0)
+        return -1;
 
     // 컨테이너 측 설정 (netns 내부에서)
     snprintf(cmd, sizeof(cmd),
              "nsenter -t %d -n ip addr add 10.0.0.2/24 dev veth1", pid);
-    system(cmd);
+    if (system(cmd) != 0)
+        return -1;
 
     snprintf(cmd, sizeof(cmd),
              "nsenter -t %d -n ip link set veth1 up", pid);
-    system(cmd);
+    if (system(cmd) != 0)
+        return -1;
+
+    return 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -1192,8 +1232,13 @@ int main(int argc, char *argv[]) {
     struct ChildArgs child_args = {.start_gate = gate[0]};
     pid_t pid = clone(child_main, child_stack + STACK_SIZE, flags | SIGCHLD, &child_args);
 
-    setup_cgroup(pid);
-    setup_network(pid);
+    if (setup_cgroup(pid) == -1 || setup_network(pid) == -1) {
+        // 필수 격리/제한 설정 실패 → gate를 열지 않는다(fail-closed).
+        close(gate[0]);
+        close(gate[1]);
+        waitpid(pid, NULL, 0);
+        return 1;
+    }
 
     // cgroup과 veth/netns 구성이 끝난 뒤에만 자식의 execve를 허용한다.
     write(gate[1], "x", 1);
@@ -1209,7 +1254,7 @@ int main(int argc, char *argv[]) {
 ### OverlayFS 적용
 
 ```c
-void setup_overlay(const char *lower, const char *container_id) {
+int setup_overlay(const char *lower, const char *container_id) {
     char upper[256], work[256], merged[256];
     char mount_opts[512];
 
@@ -1218,23 +1263,31 @@ void setup_overlay(const char *lower, const char *container_id) {
     snprintf(work, sizeof(work), "/var/lib/container/%s/work", container_id);
     snprintf(merged, sizeof(merged), "/var/lib/container/%s/merged", container_id);
 
-    mkdir(upper, 0755);
-    mkdir(work, 0755);
-    mkdir(merged, 0755);
+    if (mkdir(upper, 0755) == -1)
+        return -1;
+    if (mkdir(work, 0755) == -1)
+        return -1;
+    if (mkdir(merged, 0755) == -1)
+        return -1;
 
     // OverlayFS 마운트
     snprintf(mount_opts, sizeof(mount_opts),
              "lowerdir=%s,upperdir=%s,workdir=%s",
              lower, upper, work);
 
-    mount("overlay", merged, "overlay", 0, mount_opts);
+    if (mount("overlay", merged, "overlay", 0, mount_opts) == -1)
+        return -1;
 
     // chroot 대신 merged 사용
-    chroot(merged);
+    if (chroot(merged) == -1)
+        return -1;
+
+    return 0;
 }
 
 int child_func(void *arg) {
-    setup_overlay("/var/lib/images/ubuntu", "container1");
+    if (setup_overlay("/var/lib/images/ubuntu", "container1") == -1)
+        return -1;
 
     // ... (나머지 코드)
 }
@@ -1262,11 +1315,11 @@ Docker의 핵심은 이 기술을 이미지·배포·네트워크·볼륨 관리
 
 ## 더 읽을거리
 
-- [Linux Kernel Documentation: Namespaces](https://www.kernel.org/doc/html/latest/admin-guide/namespaces/index.html)
+- [Linux Kernel Documentation: Namespaces (개괄 인덱스, 추가 읽을거리)](https://www.kernel.org/doc/html/latest/admin-guide/namespaces/index.html) — 개별 계약은 namespaces(7)·unshare(2)·clone(2) 참조
 - [Linux Kernel Documentation: Cgroups](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html)
 - [OCI Runtime Specification](https://github.com/opencontainers/runtime-spec)
-- [Docker Documentation](https://docs.docker.com/)
-- 커널 소스: `kernel/nsproxy.c`, `kernel/pid_namespace.c`, `kernel/cgroup/`, `fs/overlayfs/`, `net/core/net_namespace.c`
+- [Docker Documentation (홈페이지, 추가 읽을거리)](https://docs.docker.com/)
+- Linux v5.15 커널 소스: `kernel/nsproxy.c`(`copy_namespaces`), `kernel/pid_namespace.c`, `kernel/cgroup/`, `fs/overlayfs/`, `net/core/net_namespace.c`
 - Michael Kerrisk, *The Linux Programming Interface*, No Starch Press, 2010
 - Liz Rice, *Container Security*, O'Reilly Media, 2020
 - Marko Lukša, *Kubernetes in Action*, Manning, 2017

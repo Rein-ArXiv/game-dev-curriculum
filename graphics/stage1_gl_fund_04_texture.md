@@ -262,7 +262,7 @@ glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h,
                 GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 ```
 
-한 번 호출되면 이 텍스처의 *크기와 포맷이 고정* 된다. 이후 변경 시도는 `GL_INVALID_OPERATION` 오류를 낸다. 드라이버 입장에서는 메모리 배치를 한 번에 결정할 수 있어 *최적화 여지가 더 많다*. 또한 `glTexStorage2D`는 텍스처를 *즉시 완전(complete)* 상태로 만든다 — base/max level이 명시한 mipLevels에 맞춰 자동 설정되므로, 밉맵을 안 채워도 완전성 위반으로 까맣게 나오는 사고가 줄어든다.
+한 번 호출되면 이 텍스처의 *크기와 포맷이 고정* 된다. 이후 변경 시도는 `GL_INVALID_OPERATION` 오류를 낸다. 드라이버 입장에서는 메모리 배치를 한 번에 결정할 수 있어 *최적화 여지가 더 많다*. 또한 `glTexStorage2D`는 필요한 mip 레벨 스토리지를 한 번에 할당해 텍스처를 *즉시 완전(complete)* 상태로 만든다. immutable allocation이 level 수를 고정하므로 그 범위를 넘는 mip 접근은 허용되지 않는다. 다만 `GL_TEXTURE_BASE_LEVEL`/`GL_TEXTURE_MAX_LEVEL` *상태값* 이 자동으로 바뀌는 것은 아니다(기본 0/1000 그대로이며 별도로 설정한다). 고정된 immutable level 수가 실제 사용 가능한 mip 범위를 제한하므로, 밉맵을 안 채워도 범위 밖으로 샘플링되어 완전성 위반으로 까맣게 나오는 사고가 줄어든다.
 
 mipLevels는 보통 $\lfloor\log_2(\max(W,H))\rfloor + 1$로 계산한다.
 
@@ -432,7 +432,7 @@ mag filter에 `GL_LINEAR_MIPMAP_LINEAR` 같은 밉맵 모드를 넣으면 `GL_IN
 
 ### 비용 비교
 
-| 모드 | 텍셀 페치 / 픽셀 |
+| 모드 | 개념적 샘플/탭 수 (모형) |
 |---|---:|
 | Nearest | 1 |
 | Bilinear | 4 |
@@ -440,7 +440,7 @@ mag filter에 `GL_LINEAR_MIPMAP_LINEAR` 같은 밉맵 모드를 넣으면 `GL_IN
 | Anisotropic 4× | 최대 16 (2 × 8) |
 | Anisotropic 16× | 최대 64 |
 
-현대 GPU의 TMU(Texture Mapping Unit)는 bilinear까지 *클럭당 한 번* 처리한다(고정 함수 하드웨어). Trilinear는 두 클럭, 더 높은 이방성은 그 비율만큼 비싸진다. 다만 8비트 포맷에 한정된 이야기다. `GL_RGBA16F`/`GL_RGBA32F` 같은 *부동소수점 포맷의 bilinear* 는 일부 GPU에서 절반 속도이고, `GL_RGBA32F`의 하드웨어 선형 필터링은 아예 지원되지 않는 구현도 있다. HDR 텍스처를 부드럽게 읽으려면 포맷별 필터 지원을 확인한다.
+위 수치는 알고리즘상 탭 수를 단순화한 *개념적 비용 모형* 이며, 실제 TMU 처리량·fetch 횟수·wall time은 GPU·드라이버·포맷·캐시 상태에 따라 다르다. 8비트 포맷의 bilinear를 한 클럭에 처리한다는 식의 고정 배율은 특정 하드웨어에 한정된 설명이므로, 실제 비용은 대상 GPU에서 sampler 관련 성능 카운터로 측정한다. 특히 `GL_RGBA16F`/`GL_RGBA32F` 같은 *부동소수점 포맷의 bilinear* 는 일부 GPU에서 절반 속도이고, `GL_RGBA32F`의 하드웨어 선형 필터링은 아예 지원되지 않는 구현도 있다. HDR 텍스처를 부드럽게 읽으려면 포맷별 필터 지원을 확인한다.
 
 ### 픽셀 아트와 UI
 
@@ -618,7 +618,7 @@ glfwWindowHint(GLFW_SRGB_CAPABLE, GL_TRUE);  // 컨텍스트 생성 시
 glEnable(GL_FRAMEBUFFER_SRGB);  // sRGB 변환 활성화
 ```
 
-이걸 켜면 *프레임버퍼가 sRGB 포맷일 때만* 자동 변환이 적용된다. 기본 프레임버퍼의 픽셀 포맷도 GLFW 힌트만으로는 충분하지 않고 드라이버·컴포지터가 실제 sRGB 포맷을 잡아 줘야 한다. 디버그 콜백으로 `GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING`을 조회해 `GL_SRGB`인지 확인하는 절차를 권한다. FBO에 직접 그릴 때도 그 FBO의 첨부가 sRGB 포맷(`GL_SRGB8_ALPHA8` RT)이면 같은 변환이 일어난다.
+이걸 켜면 *프레임버퍼가 sRGB 포맷일 때만* 자동 변환이 적용된다. 기본 프레임버퍼의 픽셀 포맷도 GLFW 힌트만으로는 충분하지 않고 드라이버·컴포지터가 실제 sRGB 포맷을 잡아 줘야 한다. KHR_debug 콜백 안에서는 GL/window-system 함수를 호출하지 말고, 콜백 밖의 일반 코드 흐름에서 `GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING`을 조회해 `GL_SRGB`인지 확인하는 절차를 권한다. 콜백에는 메시지 문자열·메타데이터 복사와 스레드 안전 로그 기록만 둔다. FBO에 직접 그릴 때도 그 FBO의 첨부가 sRGB 포맷(`GL_SRGB8_ALPHA8` RT)이면 같은 변환이 일어난다.
 
 확인 코드는 다음과 같다.
 
@@ -894,7 +894,7 @@ glDeleteSamplers(1, &sampler);
 세 가지 트레이드오프가 이 글의 핵심이다.
 
 1. **텍스처 객체 vs 샘플러 객체**: 같은 이미지를 여러 방식으로 읽을 수 있게 분리한 모델이다. 두 모델을 한 코드 베이스에 섞지 말고 샘플러 객체로 통일한다. 우선순위는 항상 샘플러 객체가 텍스처 객체의 상태를 덮어쓴다.
-2. **sRGB 변환 위치**: 입력(`GL_SRGB8_ALPHA8` 자동 변환), 셰이더 안(`pow`), 출력(`GL_FRAMEBUFFER_SRGB`) 셋 중 *어디서 한 번* 변환할지를 정하고 일관되게 따른다. 둘 이상 적용하면 색이 어긋난다.
+2. **sRGB 변환 위치**: 입력 디코드와 출력 인코드는 서로 다른 두 경계다. 색 입력은 필요한 sRGB 디코드를 한 번(`GL_SRGB8_ALPHA8` 자동 또는 셰이더 `pow`), 최종 표시 출력은 sRGB 인코드를 한 번(`GL_FRAMEBUFFER_SRGB` 자동 또는 셰이더 `pow`) 수행한다. 같은 경계에서 수동/자동을 중복 적용하면 색이 어긋나므로 각 경계마다 하나만 쓴다.
 3. **압축 포맷 선택**: 디퓨즈에 BC7, 노멀에 BC5, HDR 환경맵에 BC6H, 모바일에 ASTC 식의 데이터별 적합한 포맷을 고른다. 잘못된 선택은 메모리·대역폭·품질 어느 한쪽을 손해 본다.
 
 텍스처는 셰이더가 읽는 sampled image일 수도 있고 프레임버퍼가 쓰는 render target일 수도 있다. 같은 이미지의 읽기와 쓰기를 한 패스에서 무심코 겹치면 feedback loop가 되어 결과가 정의되지 않거나 API별 제약을 위반한다. Pass 경계, attachment와 barrier로 생산자·소비자 순서를 명시해야 한다.

@@ -119,6 +119,8 @@ Player deserialize_player(const uint8_t* data, size_t& offset) {
 
 이제 제대로 작동한다. 하지만 코드가 길고 실수하기 쉽다. 가변 길이 데이터를 다룰 때마다 등장하는 length-prefix 패턴이 여기서도 그대로 나타난다.
 
+이 예는 호출자가 `data`가 필요한 길이 이상이고 각 필드가 유효함을 미리 검증했다는 전제에 기댄다. 프로덕션 decoder는 버퍼 길이(`std::span` 등)를 함께 받아 각 `memcpy` 전에 `offset + n <= size`를 검사하고, 잘린 입력·큰 `len`·offset 합 overflow를 오류로 반환하며 소비한 offset을 되돌리는 정책을 정한다. float32와 byte order도 wire format에 명시한다.
+
 ## 2. 텍스트 vs 바이너리: 트레이드오프
 
 ### JSON: 인간 친화적 접근
@@ -142,7 +144,7 @@ Player deserialize_player(const uint8_t* data, size_t& offset) {
 **단점:**
 - 크기: 위 2-space/LF 예제는 71바이트, 예시 바이너리는 25바이트. 텍스트 formatting에 따라 달라짐
 - 파싱 비용: 문자열을 숫자로 변환 필요
-- 메모리 할당: 키 이름마다 문자열 객체 생성
+- 메모리 할당: DOM 파서는 키 이름마다 문자열 객체를 만들지만, SAX·on-demand 파서는 그렇지 않다
 - 타입 모호성: 정수 vs 실수 구분 없음
 
 ### 바이너리: 성능 최적화
@@ -178,8 +180,8 @@ Unreal 스타일 액터 데이터를 예로 들면 payload에는 고정 크기 �
 ```cpp
 // 1000개 액터 직렬화
 struct Actor {
-    FVector Location;      // 12바이트
-    FRotator Rotation;     // 12바이트
+    FVector3f Location;    // float32 3개 = 12바이트 (UE5 기본 FVector는 double 기반)
+    FRotator3f Rotation;   // float32 3개 = 12바이트
     FName Name;            // 크기·표현은 엔진 버전과 빌드에 의존
     TArray<UObject*> Refs; // 가변
 };
@@ -226,6 +228,8 @@ uint32_t ntohl(uint32_t net) {
     return htonl(net);  // 대칭 연산
 }
 ```
+
+이 스케치는 `__BYTE_ORDER__`를 정의하는 GCC/Clang 전용이다. MSVC에는 이 매크로와 `__builtin_bswap32`가 없으므로 `htonl`/`ntohl`은 플랫폼 헤더(Windows `winsock2.h`, POSIX `arpa/inet.h`)가 제공하는 선언을 쓰고, 직접 구현하려면 C++20 `std::endian`으로 분기한 뒤 미지원 타깃을 `#error`로 거부하며 시스템 함수와 같은 이름을 정의하지 않는다.
 
 GCC/Clang의 `__builtin_bswap32`는 단일 CPU 명령어로 컴파일된다:
 
@@ -368,6 +372,8 @@ message Player {
 2A = varint 인코딩된 42
 ```
 
+여기서 태그는 필드 번호와 와이어 타입을 함께 담고, 실제 길이 필드는 와이어 타입 2(length-delimited)에만 붙는다. 와이어 타입 0(varint)·1(64비트)·5(32비트)는 태그만으로 크기가 정해진다. 음수 `int32`/`int64`는 부호 확장 때문에 항상 10바이트가 되므로 음수가 가능한 값은 `sint32`/`sint64`의 ZigZag 인코딩을 쓴다.
+
 ### Varint 인코딩
 
 작은 정수를 효율적으로 저장:
@@ -381,19 +387,28 @@ void encode_varint(uint64_t value, std::vector<uint8_t>& out) {
     out.push_back(value & 0x7F);  // 마지막 바이트
 }
 
-uint64_t decode_varint(const uint8_t* data, size_t& offset) {
+bool decode_varint(const uint8_t* data, size_t size, size_t& offset,
+                   uint64_t& out) {
     uint64_t result = 0;
-    int shift = 0;
+    size_t cur = offset;  // 실패하면 offset을 소비하지 않는다
 
-    while (true) {
-        uint8_t byte = data[offset++];
-        result |= (uint64_t)(byte & 0x7F) << shift;
+    for (int i = 0; i < 10; ++i) {            // uint64는 최대 10바이트
+        if (cur >= size) return false;        // 잘린 입력
+        uint8_t byte = data[cur++];
 
-        if ((byte & 0x80) == 0) break;  // continuation 비트 없음
-        shift += 7;
+        // 10번째 바이트에는 7비트가 아니라 1비트만 남는다
+        if (i == 9 && byte > 1) return false;
+
+        result |= (uint64_t)(byte & 0x7F) << (7 * i);
+
+        if ((byte & 0x80) == 0) {
+            offset = cur;  // 성공했을 때만 전진
+            out = result;
+            return true;
+        }
     }
 
-    return result;
+    return false;  // 10바이트를 넘겨도 종료 비트가 없음
 }
 ```
 
@@ -496,7 +511,7 @@ const Player* player = GetPlayer(data.data());
 std::cout << player->name()->c_str();  // data 내부 포인터!
 ```
 
-접근 과정은 객체 그래프를 별도 heap 객체로 전부 재구성하지 않고 buffer 내부 offset을 따라가는 방식이다. 그래도 buffer 검증, root offset 해석, bounds/alignment 확인과 각 필드 접근의 간접 offset 계산은 남는다.
+접근 과정은 객체 그래프를 별도 heap 객체로 전부 재구성하지 않고 buffer 내부 offset을 따라가는 방식이다. 그래도 buffer 검증, root offset 해석, bounds/alignment 확인과 각 필드 접근의 간접 offset 계산은 남는다. Verifier를 통과했더라도 `name`처럼 required가 아닌 필드는 생략되어 null일 수 있으므로, `name()->c_str()`을 역참조하기 전에 필드 존재와 default 적용 여부를 따로 확인해야 한다.
 
 **메모리 구조 비교:**
 
@@ -620,6 +635,8 @@ munmap(addr, sb.st_size);
 close(fd);
 ```
 
+이 스케치는 `open`/`fstat`/`mmap`이 성공했고 `sb.st_size`가 `capnp::word` 크기의 배수이며 메시지가 unpacked framed 형식이라는 전제를 생략한다. 실제 코드는 각 호출의 반환값과 파일 크기·정렬을 검사하고, 실패 시 fd와 매핑을 RAII로 정리하며 reader에 traversal·nesting 한도를 둔다.
+
 **전통적 읽기:**
 
 ```text
@@ -692,7 +709,7 @@ struct PlayerV2 {
 
 구버전 코드가 신버전 데이터를 읽을 수 있는가?
 
-**수제 바이너리 (불가능):**
+**수제 바이너리 (명시적 진화 규약이 없으면 불가능):**
 
 ```cpp
 // V1 코드
@@ -703,6 +720,8 @@ memcpy(&p.x, data + offset, 4); offset += 4;
 // → V1 코드는 이를 무시하고 읽음
 // → 하지만 파일 끝 체크 실패 가능
 ```
+
+수제 포맷도 필드 길이·태그·버전과 unknown 필드 skip 규약을 정의하면 모르는 필드를 건너뛸 수 있다. 전방 호환을 막는 것은 형식 자체가 아니라 진화 규약의 유무다. 그래서 field number 재사용 금지, 이진 형식과 JSON 이름의 호환, required/default 변경의 영향을 함께 정한다.
 
 **Protocol Buffers (가능):**
 
@@ -722,7 +741,9 @@ TLV 구조 덕분에 알 수 없는 필드를 안전하게 건너뛸 수 있다:
 
 ```cpp
 while (offset < data.size()) {
-    uint32_t tag = decode_varint(data, offset);
+    uint64_t tag = 0;
+    if (!decode_varint(data, data.size(), offset, tag)) break;
+
     int field_number = tag >> 3;
     int wire_type = tag & 0x7;
 
@@ -842,6 +863,8 @@ void UMyObject::Serialize(FArchive& Ar) {
 }
 ```
 
+위 `FArchive` 인터페이스는 개념도다. 실제 엔진의 `FArchive`는 템플릿 `operator<<`와 파생 아카이브로 구성되고, 버전 태그·압축·에셋 참조는 아카이브 종류와 호출 경로가 나눠 맡으므로 이름만으로 자동 보장되지 않는다. `UObject::Serialize`를 재정의할 때는 대상 버전에 맞게 `Super::Serialize(Ar)` 호출 여부를 확인한다.
+
 **바이너리 포맷:**
 - 엔디안 변환 자동 (플랫폼별)
 - 버전 태그 포함 (`Ver` 필드)
@@ -903,17 +926,18 @@ GameObject:
 - 각 Lump는 독립적 데이터 블록 (버텍스, 엔티티, 가시성 등)
 
 ```cpp
-struct BSPHeader {
-    int32_t magic;  // 'VBSP'
-    int32_t version;
-    BSPLump lumps[64];
-};
-
+// 레이아웃 발췌: 실제 VBSP는 이 뒤에 mapRevision 등 추가 필드가 온다.
 struct BSPLump {
     int32_t fileOffset;
     int32_t fileLength;
     int32_t version;
     char fourCC[4];
+};
+
+struct BSPHeader {
+    int32_t magic;  // 'VBSP'
+    int32_t version;
+    BSPLump lumps[64];
 };
 ```
 
@@ -966,10 +990,12 @@ struct MovementPacket {
 float x = 123.456f;
 
 // int16 고정소수점 (2바이트): ±327.67 범위, 0.01 정밀도
-int16_t x_fixed = (int16_t)(x * 100);
+// 유한성과 범위를 확인한 뒤 반올림해 저장한다 (정책에 따라 reject 또는 clamp)
+bool encodable = std::isfinite(x) && std::abs(x) <= 327.67f;
+int16_t x_fixed = encodable ? (int16_t)std::lround(x * 100.0f) : 0;
 
 // 복원
-float x_restored = x_fixed / 100.0f;
+float x_restored = x_fixed / 100.0f;  // 최대 오차 0.005
 ```
 
 게임 월드는 대부분 ±300 단위 내이고, 센티미터 정밀도면 충분하다.
@@ -997,6 +1023,8 @@ struct StateDelta {
 ```
 
 총 3바이트 (원래 18바이트의 약 17%)
+
+이 절약은 송수신자가 같은 기준 상태(baseline)를 공유할 때만 성립한다. UDP 손실·재정렬 뒤에는 잘못된 baseline에 delta를 적용하지 않도록 baseline ID·sequence와 acknowledgment를 두고, 어긋나면 full snapshot으로 다시 맞춘다. 패킷 헤더와 MTU 비용도 함께 계산한다.
 
 ### 세이브 파일: 안정성이 생명
 
@@ -1103,30 +1131,40 @@ bool decode_player_only(std::span<const uint8_t> file, Player& player) {
         checked_add(kHeaderBytes, checked_mul(count, kChunkHeaderBytes));
     if (table_end > file.size()) return false;
 
+    // 먼저 표 전체를 검증한다: offset + size overflow, 순서 위반·중첩,
+    // 중복 Player 청크, 파일 밖 참조와 압축 폭탄을 거부한다.
+    uint64_t prev_end = table_end;
+    uint32_t player_index = UINT32_MAX;
     for (uint32_t i = 0; i < count; ++i) {
         const ChunkHeader ch = decode_chunk_header_le(
             file.subspan(kHeaderBytes + i * kChunkHeaderBytes,
                          kChunkHeaderBytes));
 
-        // offset + size overflow, 겹침, 파일 밖 참조와 압축 폭탄을 거부한다.
-        if (ch.offset < table_end) return false;
+        if (ch.offset < prev_end) return false;  // 겹치거나 순서가 어긋남
         const uint64_t end = checked_add(ch.offset, ch.compressed_size);
         if (end > file.size()) return false;
+        prev_end = end;
 
         if (ch.type == CHUNK_PLAYER) {
+            if (player_index != UINT32_MAX) return false;  // Player 청크 중복
             if (ch.uncompressed_size > kMaxPlayerBytes) return false;
-            auto compressed = file.subspan(ch.offset, ch.compressed_size);
-            auto data = lz4_decompress_exact(compressed,
-                                             ch.uncompressed_size);
-            if (!data) return false;
-            return decode_player_strict(*data, version, player);
+            player_index = i;
         }
     }
-    return false;
+
+    // 검증된 표에서 플레이어 청크만 골라 decode한다.
+    if (player_index == UINT32_MAX) return false;
+    const ChunkHeader ch = decode_chunk_header_le(
+        file.subspan(kHeaderBytes + player_index * kChunkHeaderBytes,
+                     kChunkHeaderBytes));
+    auto compressed = file.subspan(ch.offset, ch.compressed_size);
+    auto data = lz4_decompress_exact(compressed, ch.uncompressed_size);
+    if (!data) return false;
+    return decode_player_strict(*data, version, player);
 }
 ```
 
-`decode_player_strict`도 문자열 길이, 배열 개수, enum 범위, 부동소수점 유한성, 필수 필드와 trailing bytes를 검증해야 한다. 체크섬이 맞는다는 사실은 입력이 의미적으로 유효하거나 안전하다는 뜻이 아니다. 청크 테이블만 읽어 원하는 payload 범위를 가져오면 월드 전체를 역직렬화하지 않고 플레이어 상태를 복원할 수 있다.
+`decode_player_strict`도 문자열 길이, 배열 개수, enum 범위, 부동소수점 유한성, 필수 필드와 trailing bytes를 검증해야 한다. 체크섬이 맞는다는 사실은 입력이 의미적으로 유효하거나 안전하다는 뜻이 아니다. 다만 위 코드는 전체 파일 CRC를 먼저 계산하므로 모든 바이트를 읽는다. 이것은 월드 전체를 역직렬화하지 않는 **부분 역직렬화**이지 일부만 읽는 **부분 I/O**가 아니다. I/O까지 줄이려면 header/table checksum과 청크별 checksum을 두고 필요한 범위만 읽는 설계로 나눈다.
 
 ### 체크섬: 데이터 무결성
 

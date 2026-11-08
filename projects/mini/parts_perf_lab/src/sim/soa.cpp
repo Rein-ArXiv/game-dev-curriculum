@@ -2,6 +2,8 @@
 // 화면 출력(Draw)은 soa_draw.cpp에 있고, 테스트 타깃은 그 TU를 컴파일하지 않는다.
 #include "sim/soa.h"
 
+#include "sim/kernel_dispatch.h"
+
 #include <algorithm>
 #include <random>
 
@@ -9,8 +11,9 @@ namespace ppl {
 
 void SoASimulation::Init(std::size_t entityCount, int viewportW, int viewportH) {
     count_ = entityCount;
-    viewportW_ = viewportW;
-    viewportH_ = viewportH;
+    // 좌표 계약: 0 <= x <= W-1, 0 <= y <= H-1. Init과 Update가 같은 상한을 쓴다.
+    viewportW_ = SanitizeViewport(viewportW);
+    viewportH_ = SanitizeViewport(viewportH);
 
     posX_.resize(count_);
     posY_.resize(count_);
@@ -18,8 +21,8 @@ void SoASimulation::Init(std::size_t entityCount, int viewportW, int viewportH) 
     velY_.resize(count_);
 
     std::mt19937 rng(0xC0FFEEu);
-    std::uniform_real_distribution<float> distX(0.0f, static_cast<float>(viewportW_));
-    std::uniform_real_distribution<float> distY(0.0f, static_cast<float>(viewportH_));
+    std::uniform_real_distribution<float> distX(0.0f, static_cast<float>(viewportW_ - 1));
+    std::uniform_real_distribution<float> distY(0.0f, static_cast<float>(viewportH_ - 1));
     std::uniform_real_distribution<float> distV(-120.0f, 120.0f);
 
     for (std::size_t i = 0; i < count_; ++i) {
@@ -31,24 +34,28 @@ void SoASimulation::Init(std::size_t entityCount, int viewportW, int viewportH) 
 }
 
 void SoASimulation::Update(float dt, SimdWidth simd, bool branchless) {
-    switch (simd) {
+    // 요청과 실제 실행 커널을 한 곳(ResolveKernel)에서 판정해 HUD·dispatch가 같은
+    // 값을 쓴다. 비-x86·AVX2 미빌드는 여기서 SSE/Scalar로 폴백한다.
+    const ResolvedKernel k = ResolveKernel(Layout::SoA, simd, branchless);
+    const float safeDt = SanitizeDt(dt);
+    switch (k.effective) {
         case SimdWidth::Scalar:
-            UpdateScalar(dt, branchless);
+            UpdateScalar(safeDt, k.branchlessApplied);
             break;
         case SimdWidth::SSE:
 #if defined(PERF_LAB_X86_SIMD)
-            UpdateSSE(dt);                    // SIMD는 이미 마스크 처리, branchless 무관
+            UpdateSSE(safeDt);   // SIMD는 이미 마스크 처리, branchless 무관
 #else
-            UpdateScalar(dt, branchless);     // 비-x86 플랫폼은 scalar로 폴백
+            UpdateScalar(safeDt, k.branchlessApplied);
 #endif
             break;
         case SimdWidth::AVX2:
 #if defined(PERF_LAB_X86_SIMD) && defined(PERF_LAB_AVX2)
-            UpdateAVX2(dt);
+            UpdateAVX2(safeDt);
 #elif defined(PERF_LAB_X86_SIMD)
-            UpdateSSE(dt);
+            UpdateSSE(safeDt);
 #else
-            UpdateScalar(dt, branchless);
+            UpdateScalar(safeDt, k.branchlessApplied);
 #endif
             break;
     }
@@ -172,7 +179,8 @@ void SoASimulation::UpdateAVX2(float dt) {
     const __m256 wMax = _mm256_set1_ps(w - 1.0f);
     const __m256 hMax = _mm256_set1_ps(h - 1.0f);
 
-    // 8개 float씩. SSE 대비 두 배 처리 폭 + FMA 활용.
+    // 8개 float씩. 처리 폭은 SSE의 두 배지만, FMA 사용 여부는 빌드 옵션
+    // (PERF_LAB_FMA)에 따라 달라지므로 폭과 FMA를 같은 축으로 묶지 않는다.
     std::size_t i = 0;
     for (; i + 8 <= count_; i += 8) {
         __m256 px = _mm256_loadu_ps(&posX_[i]);
@@ -180,8 +188,14 @@ void SoASimulation::UpdateAVX2(float dt) {
         __m256 vx = _mm256_loadu_ps(&velX_[i]);
         __m256 vy = _mm256_loadu_ps(&velY_[i]);
 
+#if defined(PERF_LAB_FMA)
         px = _mm256_fmadd_ps(vx, dtv, px);
         py = _mm256_fmadd_ps(vy, dtv, py);
+#else
+        // FMA 없이 분리 곱셈·덧셈. 반올림 지점이 달라 FMA 경로와 비트가 다를 수 있다.
+        px = _mm256_add_ps(px, _mm256_mul_ps(vx, dtv));
+        py = _mm256_add_ps(py, _mm256_mul_ps(vy, dtv));
+#endif
 
         const __m256 mX = _mm256_or_ps(_mm256_cmp_ps(px, zero, _CMP_LT_OQ),
                                         _mm256_cmp_ps(px, wMax, _CMP_GT_OQ));

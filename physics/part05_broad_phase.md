@@ -9,7 +9,7 @@ N 개 강체의 *모든 쌍* 을 검사하면 *naive $O(N^2)$*. 100 개 강체 =
 ```mermaid
 flowchart LR
     All[모든 쌍 N×N/2] --> Broad[Broad Phase<br/>AABB / 공간 분할]
-    Broad -->|후보 ~1%| Narrow[Narrow Phase<br/>SAT / GJK / 정밀 검사]
+    Broad -->|"후보 ~1% (예시 조건·보편 비율 아님)"| Narrow[Narrow Phase<br/>SAT / GJK / 정밀 검사]
     Narrow --> Resolve[충돌 응답]
 ```
 
@@ -213,16 +213,21 @@ struct Endpoint {
     bool  isMin;
 };
 
+// 같은 좌표에서는 min 을 max 보다 먼저, 그다음 bodyId 로 결정적으로 정렬한다.
+struct LessEndpoint {
+    bool operator()(const Endpoint& a, const Endpoint& b) const {
+        if (a.value != b.value) return a.value < b.value;
+        if (a.isMin != b.isMin) return a.isMin;   // 같은 좌표면 min 먼저 — 경계 접촉을 overlap 으로 본다
+        return a.bodyId < b.bodyId;
+    }
+};
+
 std::vector<Endpoint> endpointsX;
 // 모든 AABB 에 대해 min·max endpoint 2개씩 push
-std::sort(endpointsX.begin(), endpointsX.end(),
-           [](auto& a, auto& b) {
-               if (a.value != b.value) return a.value < b.value;
-               return a.isMin && !b.isMin;   // 같은 좌표면 min 먼저 — 경계 접촉을 overlap 으로 본다
-           });
+std::sort(endpointsX.begin(), endpointsX.end(), LessEndpoint{});
 ```
 
-$O(N \log N)$. 한 번만.
+$O(N \log N)$. 한 번만. 이 comparator 를 갱신의 insertion sort 에도 동일하게 사용한다.
 
 ### 3.3 매 step 갱신
 
@@ -231,20 +236,20 @@ void UpdateSweep(std::vector<Endpoint>& list, int bodyId, float newValue, bool i
     // 해당 bodyId 의 endpoint 찾기
     int idx = FindEndpoint(list, bodyId, isMin);
     list[idx].value = newValue;
-    // 정렬 유지를 위해 swap (insertion sort)
-    while (idx > 0 && list[idx].value < list[idx - 1].value) {
+    // 정렬 유지를 위해 swap (insertion sort) — 최초 sort 와 같은 comparator 사용
+    while (idx > 0 && LessEndpoint{}(list[idx], list[idx - 1])) {
         std::swap(list[idx], list[idx - 1]);
         --idx;
-        // swap 시 충돌 후보 추가/제거 가능
+        // swap 시 endpoint index 색인과 충돌 후보 추가/제거도 함께 갱신
     }
-    while (idx < list.size() - 1 && list[idx].value > list[idx + 1].value) {
+    while (idx < list.size() - 1 && LessEndpoint{}(list[idx + 1], list[idx])) {
         std::swap(list[idx], list[idx + 1]);
         ++idx;
     }
 }
 ```
 
-객체가 *조금 이동* 하면 *작은 수의 swap* 만. 한 step 전체 (swap 갱신 + sweep 페어 추출) 비용이 평균 $O(N + K)$ — $K$ 는 추출된 겹침 쌍 수 (6.1절의 기호 규약).
+객체가 *조금 이동* 하면 *작은 수의 swap* 만. 목표 알고리즘의 평균 비용은 한 step 전체 (swap 갱신 + sweep 페어 추출) $O(N + K)$ — $K$ 는 추출된 겹침 쌍 수 (6.1절의 기호 규약). 다만 이는 구현의 보장이 아니라 가정이다. 축별 후보 수 $K_x, K_y$, 실제 endpoint inversion 수, endpoint 색인이 $O(1)$ 이라는 전제가 함께 성립해야 한다. 한 축만 대량으로 겹치면 최종 $K$ 가 작아도 중간 후보 집합 생성은 $\Theta(N^2)$ 까지 커질 수 있다.
 
 ### 3.4 겹침 추출
 
@@ -352,8 +357,9 @@ std::vector<std::pair<int, int>> SpatialHashPairs(
 ### 4.4 한계
 
 - *균일 크기 가정*: 객체 크기 분포가 *균일해야* 효율적. 큰 객체 + 작은 객체가 섞이면 셀 크기 선택 어려움.
-- *희박 분포의 메모리 낭비*: 빈 셀이 많으면 해시 테이블 오버헤드.
-- *해시 충돌*: 흔하진 않지만 같은 해시 버킷에 다른 셀이 떨어지는 함정.
+- *희박 분포의 메모리 비용*: dense grid 는 빈 셀도 모두 할당하므로 희박 분포에서 비용이 커진다. 반면 sparse hash map 은 등록된 셀만 저장하므로 빈 공간 자체보다 사용 중인 셀당 엔트리·버킷 오버헤드가 비용이다.
+- *해시 충돌*: 서로 다른 셀 키가 같은 해시 버킷에 떨어질 수 있다. 이는 컨테이너의 키 동등성 검사로 구별되므로 곧바로 잘못된 pair 를 만들지 않는다. 좌표를 정수 키로 접었을 때의 실제 키 충돌은 별도 검증이 필요하다.
+- *inactive 셀 팽창*: 비워진 셀을 지우지 않으면 해시 테이블이 역사적으로 커질 수 있으므로 갱신·정리 규약을 둔다.
 
 ### 4.5 변형
 
@@ -541,6 +547,8 @@ DBVT 가 *이론 복잡도는 좋지만* 캐시 미스 빈도가 *상대적* 으
 
 fat AABB 안에 머문 proxy는 재삽입하지 않고, 실제 AABB가 fat bounds를 벗어난 proxy만 이동 목록에 넣는다. pair 갱신도 이동 목록에서 시작하면 매 step 전체 객체를 다시 query하지 않아도 된다. fat margin이 크면 update는 줄지만 false positive가 늘어난다.
 
+이동 proxy만 질의하는 구현에서는 새 후보 쌍 추가와 기존 후보 쌍의 narrow phase 재검사를 구분해야 한다. 두 물체가 fat AABB 경계 안에서 새로 겹쳐도 새 query가 없으면 접촉을 놓치므로, fat overlap pair를 유지하며 매 step 재평가한다. proxy 삭제·필터 변경·shape revision·teleport에서는 관련 pair를 무효화하고, `ComputePairs`가 전체 현재 쌍을 반환하는지 신규 delta만 반환하는지 API 계약을 고정한다.
+
 ### 7.3 다중 규모 분리
 
 크기 차이가 큰 객체를 하나의 uniform grid에 넣으면 큰 객체가 많은 셀을 차지하거나 작은 객체가 과밀 셀에 몰린다. 크기 계층별 grid, loose hierarchy, 별도 giant-object 목록을 두고 cross-group pair를 생성할 수 있다. 혼합 구조의 가치는 제품 이름이 아니라 각 집합의 update/query 분포가 다를 때 생긴다.
@@ -609,13 +617,13 @@ for (auto& [a, b] : pairs) {
 
 | 신호 | 의미 |
 |---|---|
-| 페어 수 | 4 알고리즘 모두 같아야 함 (정확성 검증) |
+| 페어 수 | 정책을 맞춘 뒤의 보조 지표 (exact 이면 집합 비교, conservative 이면 포함 관계) |
 | ComputePairs 시간 | 알고리즘별 비용 차이 |
 | 갱신 시간 (per frame) | 동적 객체 비용 |
 | 메모리 | 자료구조 크기 |
 | 페어 false positive 비율 | 후보 / 실제 충돌 비율 |
 
-페어 수가 다르면 *알고리즘 중 하나가 정확성 버그* — 디버깅의 핵심 신호.
+`ComputePairs`의 결과를 exact overlap set 또는 conservative superset 중 하나로 선언한다. exact라면 정규화한 unordered body pair 집합을 brute force와 비교하고, conservative라면 reference set $\subseteq$ candidate set을 검증한다. 정책을 맞춘 뒤에는 페어 수를 보조 지표로만 쓴다. 같은 크기의 서로 다른 집합은 누락을 숨기므로 개수 일치만으로 정확성을 판정하지 않는다.
 
 ### 8.4 좋은 추상화의 디자인
 
@@ -663,8 +671,8 @@ Broad phase 의 출력은 *후보 쌍* 이다. 이 후보 쌍은 정밀 충돌 �
 - Christer Ericson, *Real-Time Collision Detection*, Ch. 6~7 — BVH 와 공간 분할 (uniform grid·sort-and-sweep) 의 종합 정리.
 - Erin Catto, "Dynamic Bounding Volume Hierarchies" (GDC 2019) — Box2D 의 DBVT 설계 디테일.
 - Bullet Physics manual, "Broadphase Collision Detection" — Bullet 의 두 broad phase 비교.
-- Box2D 소스 (`b2DynamicTree.cpp`, `b2BroadPhase.cpp`) — 산업 reference 구현.
-- Bullet 소스 (`btAxisSweep3.cpp`, `btDbvtBroadphase.cpp`) — SAP 와 DBVT 비교 가능한 두 구현.
-- Karras, "Maximizing Parallelism in the Construction of BVHs, Octrees, and k-d Trees" (HPG 2012) — GPU broad phase 빌드.
-- Tomas Akenine-Möller et al., *Real-Time Rendering*, Ch. 19 — frustum culling 의 broad phase 와의 공통점.
-- Erwin Coumans, "Continuous Collision Detection and Physics" (2005 draft) — Bullet 의 conservative advancement 기반 CCD.
+- Box2D v2.3 소스 (`b2DynamicTree.cpp`, `b2BroadPhase.cpp`) — 산업 reference 구현.
+- Bullet 소스 (SAP 계열 `btAxisSweep3Internal.h`, DBVT 계열 `btDbvtBroadphase.cpp`) — SAP 와 DBVT 비교 가능한 두 구현.
+- Karras, "Maximizing Parallelism in the Construction of BVHs, Octrees, and k-d Trees" (HPG 2012) — GPU 병렬 BVH·octree 구성 확장 읽기. 본문의 SAP/DBVT 구현과 직접 대응하지 않는다.
+- Tomas Akenine-Möller et al., *Real-Time Rendering*, 4판, Ch. 19 — frustum culling 의 broad phase 와의 공통점.
+- Erwin Coumans, "Continuous Collision Detection and Physics" (2005 draft) — Bullet 의 narrow-phase conservative advancement 기반 CCD. broad phase 배치와 직접 대응하지 않는 참고.

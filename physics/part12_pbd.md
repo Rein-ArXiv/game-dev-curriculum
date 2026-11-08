@@ -101,7 +101,10 @@ struct Particle {
 void PBD_Step(World& world, float dt) {
     // 1. Predict — 외력으로 예측 위치
     for (auto& p : world.particles) {
-        if (p.invMass <= 0) continue;
+        // 고정/kinematic 입자도 제약이 predicted 를 읽으므로 매 step 먼저 동기화한다.
+        // (kinematic anchor 는 단순 position 복사 대신 target pose/anchor velocity 계약이 필요하다.)
+        p.predicted = p.position;
+        if (p.invMass <= 0) continue;               // 힘 적분만 생략
         p.velocity += gravity * dt;                 // gravity 는 가속도
         p.predicted = p.position + dt * p.velocity;
     }
@@ -162,7 +165,7 @@ p.position = p.predicted;
 
 ### 2.5 흐름의 함의
 
-- *적분기 종류 무관* — predict 단계만 차이.
+- *적분기와 일관된 위치·속도 규약 필요* — predict 단계 적분기를 임의로 바꿀 수 없다. 속도를 `velocity = (predicted - position) / dt` 로 재구성하므로, exact constant-acceleration predictor $x^* = x + h v + \tfrac{1}{2}h^2 a$ 를 그대로 넣으면 $\Delta v = \tfrac{1}{2}h a$ 가 되어 가속도가 절반만 반영된다. 적분기가 반환한 $v_{pred}$ 를 유지하고 제약 보정 $\Delta x / h$ 를 더하는 등 위치·속도 갱신 규약을 함께 바꾼다. Verlet 계열도 상태 정의부터 맞춘다.
 - *제약 수가 많아도* project 단계가 모두 처리.
 - *iteration 수* 가 *stiffness 결정* — 많이 반복할수록 단단.
 
@@ -216,11 +219,17 @@ struct DistanceConstraint {
         Particle& b = particles[p2];
         vec3 d = a.predicted - b.predicted;
         float L = length(d);
-        if (L < 1e-8f) return;
+        vec3 n;
+        if (L < 1e-8f) {
+            // restLength>0 인데 두 입자가 겹친 경우 — 결정적 대체축으로 분리한다.
+            n = vec3{1, 0, 0};
+            L = 0.0f;
+        } else {
+            n = d / L;
+        }
         float invSum = a.invMass + b.invMass;
         if (invSum <= 0) return;
 
-        vec3 n = d / L;
         float diff = L - restLength;
         vec3 correction = n * (diff / invSum) * stiffness;
 
@@ -304,10 +313,16 @@ struct ParticleCollisionConstraint {
         vec3 d = a.predicted - b.predicted;
         float L = length(d);
         if (L >= minDist) return;        // 분리됨 — 보정 안 함
-        if (L < 1e-8f) return;
+        vec3 n;
+        if (L < 1e-8f) {
+            // minDist>0 인데 겹친 경우 — 결정적 대체축으로 분리한다.
+            n = vec3{1, 0, 0};
+            L = 0.0f;
+        } else {
+            n = d / L;
+        }
         float invSum = a.invMass + b.invMass;
         if (invSum <= 0) return;
-        vec3 n = d / L;
         vec3 correction = n * ((L - minDist) / invSum);
         a.predicted -= correction * a.invMass;
         b.predicted += correction * b.invMass;
@@ -315,7 +330,7 @@ struct ParticleCollisionConstraint {
 };
 ```
 
-거리 제약의 *one-sided 버전* (멀어지는 건 OK).
+거리 제약의 *one-sided 버전* (멀어지는 건 OK). 거리·충돌 제약 모두 `L ≈ 0` 에서 조기 반환하면 양의 `restLength`/`minDist` 를 해소하지 못하므로, 초기 겹침을 금지하거나 위처럼 결정적 대체축을 제공한다. 고정·동적 입자의 weight 합이 0인 경우(`invSum <= 0`)는 제약을 비활성화한다.
 
 ### 4.4 환경 충돌
 
@@ -374,8 +389,9 @@ stiffness 가 *제약 보정의 비율*. 1 = 한 project 로 완전 만족, 0 = 
 ```mermaid
 flowchart LR
     Soft[stiffness 0.5, iter 1] --> Result1[보정 50%]
-    Soft2[stiffness 0.5, iter 4] --> Result2[보정 ~94% (1 - 0.5⁴)]
-    Soft3[stiffness 0.5, iter 10] --> Result3[보정 ~99.9% (1 - 0.5¹⁰)]
+    Soft2[stiffness 0.5, iter 4] --> Result2["보정 ~94% (1 - 0.5⁴)"]
+    Soft3[stiffness 0.5, iter 10] --> Result3["보정 ~99.9% (1 - 0.5¹⁰)"]
+    Scope[고립된 선형/거리 제약 예시 한정<br/>결합 제약 전체의 보편 수렴식 아님] -.-> Soft
 ```
 
 iter ↑ → 효과 stiffness ↑. 게임의 *iteration 옵션* 변경이 *시각 효과 자동 변경* — 사용자가 *iter 와 stiffness 를 함께 튜닝* 해야.
@@ -416,7 +432,15 @@ eXtended PBD (Macklin, Müller, Chentanez, 2016). compliance 로 timestep / iter
 
 XPBD는 PBD의 무차원 stiffness slider 대신 compliance $\alpha$를 사용한다. 적절히 scale된 거리 제약에서는 물리 강성의 역수로 해석할 수 있지만, 임의의 제약 함수를 상수배하면 $\alpha$의 수치도 함께 바뀌므로 `1 / PBD stiffness`로 단순 치환할 수는 없다.
 
-$\alpha$ 의 *단위가 명확* — 제약 에너지 $E = \frac{1}{2} \alpha^{-1} C^2$ 에서 $\alpha$ 는 강성의 역수. 거리 제약 ($C$ 가 길이) 이면 $[\alpha] = \text{m/N}$, 즉 spring 강성 $k$ [N/m] 의 역수. 물리적 의미 있음. 일관된 튜닝.
+$\alpha$ 의 *단위는 제약 함수에 따라 다르다* — 제약 에너지 $E = \frac{1}{2} \alpha^{-1} C^2$ 에서 $\alpha$ 는 강성의 역수이고 $[C]$ 에 의존한다. 거리 제약에서 $[\alpha] = \text{m/N}$ (spring 강성 $k$ [N/m] 의 역수) 인 것은 맞지만, 이 값을 모든 제약에 일반화하면 안 된다. 위치 기반 $\lambda$ 의 일반 단위는 $[\lambda] = \text{kg}\cdot\text{m}^2 / [C]$ 이다.
+
+| 제약 | $C$ 단위 | compliance $[\alpha]$ | 누적 $[\lambda]$ |
+|---|---|---|---|
+| 거리 | m | m/N | kg·m |
+| 각도 | rad (무차원) | 1/(N·m) | kg·m² |
+| 부피 | m³ | m⁵/N | kg/m (kg·m²/m³) |
+
+위치 기반 $\lambda$ 는 일반화 힘 $J^T\lambda / \Delta t^2$, 임펄스 $J^T\lambda / \Delta t$ 로 해석해야 하며, scalar $\lambda/\Delta t$ 를 곧바로 3D impulse 로 쓰지 않는다.
 
 ### 6.2 도출
 
@@ -431,7 +455,7 @@ $$
 
 여기서 $\tilde{\alpha} = \alpha / \Delta t^2$. 두 식을 연립해 $\lambda$ 와 $\vec{x}^{n+1}$ 동시 풀이.
 
-이 $\lambda$ 는 $\Delta t^2$ 를 흡수한 값이라 $[\lambda] = \text{kg} \cdot \text{m}$ 이며, sequential impulse 의 임펄스 $\lambda$ (단위 $\text{N} \cdot \text{s}$) 와 다르다. 임펄스로 환산하려면 $\lambda / \Delta t$ 를 쓴다.
+이 $\lambda$ 는 $\Delta t^2$ 를 흡수한 값이라 제약 단위에 따라 $[\lambda]$ 가 달라진다. 거리 제약($C$가 길이)에서는 $\text{kg} \cdot \text{m}$ 이며, sequential impulse 의 임펄스 $\lambda$ (단위 $\text{N} \cdot \text{s}$) 와 다르다. 임펄스로 환산하려면 일반적으로 $J^T\lambda / \Delta t$ 를 쓴다.
 
 ### 6.3 lambda 갱신
 
@@ -550,14 +574,18 @@ XPBD 의 *compliance 항* 은 $\alpha / \Delta t^2$ 로 들어간다. 작은 sub
 
 ### 7.5 충돌 검사와 substepping
 
-각 sub-step 마다 *충돌 검사 재실행* 가능. 빠른 객체의 *터널링* 자연 회피.
+각 sub-step 마다 *충돌 검사 재실행* 할 수 있다. substep은 이동 거리를 줄여 discrete overlap을 잡기 쉽게 만들 뿐, 빠른 작은 물체의 비관통을 단독으로 보장하지 않는다.
 
 ```cpp
 for (int s = 0; s < kSubSteps; ++s) {
+    // 현재 위치의 discrete overlap 뿐 아니라 swept bounds/segment query,
+    // 또는 predicted 위치의 접촉을 생성·재생성한다.
     DetectCollisions(world);
     PBD_Substep(world, kSubDt);
 }
 ```
+
+Predict 이전에 현재 위치의 overlap만 만들면 이번 substep에서 새로 생기는 접촉을 놓친다. 보장 범위 밖은 CCD(continuous collision detection)로 연결한다.
 
 비용: *충돌 검사 N 배*. broad phase 캐싱으로 일부 절감.
 

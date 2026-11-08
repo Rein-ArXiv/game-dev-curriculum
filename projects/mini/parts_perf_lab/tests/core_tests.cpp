@@ -15,6 +15,7 @@
 #include "measure/event_benchmark.h"
 #include "measure/frame_timer.h"
 #include "sim/isimulation.h"
+#include "sim/kernel_dispatch.h"
 #include "ui/hud_layout.h"
 #include "ui/toggles.h"
 
@@ -25,6 +26,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -79,25 +81,33 @@ void TestFrameTimerWindow() {
     ppl::FrameTimer timer;
     CHECK(timer.Head() == 0);
     CHECK(timer.Filled() == 0);
-    CHECK(timer.LastTotalMs() == 0.0f);
+    CHECK(timer.LastSimDrawSubmitMs() == 0.0f);
 
     // steady_clock 은 뒤로 가지 않으므로 한 쌍의 Begin/End 는 음이 아닌 ms 를 남긴다.
+    timer.BeginFrame();
+    timer.EndFrame();
     timer.BeginUpdate();
     timer.EndUpdate();
     timer.BeginDraw();
     timer.EndDraw();
+    CHECK(timer.LastFrameWallMs() >= 0.0f);
     CHECK(timer.LastUpdateMs() >= 0.0f);
-    CHECK(timer.LastDrawMs() >= 0.0f);
-    // LastTotalMs 는 두 값을 더해 돌려주는 파생 값이라 이 등식은 항상 참이다.
+    CHECK(timer.LastDrawSubmitMs() >= 0.0f);
+    // LastSimDrawSubmitMs 는 두 값을 더해 돌려주는 파생 값이라 이 등식은 항상 참이다.
     // 구간이 어긋났는지가 아니라 합산 경로가 바뀌지 않았는지만 고정한다.
-    CHECK(timer.LastTotalMs() == timer.LastUpdateMs() + timer.LastDrawMs());
+    CHECK(timer.LastSimDrawSubmitMs() ==
+          timer.LastUpdateMs() + timer.LastDrawSubmitMs());
+    // frame wall 은 sim+draw-submit 보다 크거나 같아야 한다(HUD/EndDrawing을 포함).
+    CHECK(timer.LastFrameWallMs() >= timer.LastSimDrawSubmitMs());
 
     // CommitFrame 은 현재 값을 head 자리에 쓰고 head 를 한 칸 민다.
+    const float committedFrame  = timer.LastFrameWallMs();
     const float committedUpdate = timer.LastUpdateMs();
-    const float committedDraw   = timer.LastDrawMs();
+    const float committedDraw   = timer.LastDrawSubmitMs();
     timer.CommitFrame();
     CHECK(timer.Head() == 1);
     CHECK(timer.Filled() == 1);
+    CHECK(timer.FrameWallMs()[0] == committedFrame);
     CHECK(timer.UpdateMs()[0] == committedUpdate);
     CHECK(timer.DrawMs()[0] == committedDraw);
 
@@ -310,20 +320,25 @@ void TestContainerEquivalence() {
 
         bench.Shutdown();
         CHECK_AT(bench.NodeCount() == 0, label);
+        CHECK_AT(bench.LastSum() == 0.0f, label);
+        CHECK_AT(bench.Status() == ppl::BenchStatus::Skipped, label);
     }
 
     // intrusive 경로에 allocator를 주지 않으면 노드를 하나도 만들 수 없다.
     ppl::ContainerBenchmark orphan;
     orphan.Init(ppl::Container::IntrusiveList, nullptr, kNodes);
     CHECK(orphan.NodeCount() == 0);
+    CHECK(orphan.Status() == ppl::BenchStatus::Skipped);
     orphan.RunFrame();
     CHECK(orphan.LastSum() == 0.0f);
 
-    // 풀이 요청보다 작으면 노드 수가 풀 용량에서 멈춘다.
+    // 풀이 요청보다 작으면 노드 수가 풀 용량에서 멈추고, 비교 무효로 표시된다.
     ppl::PoolAllocator tiny(sizeof(Node), alignof(Node), 64);
     ppl::ContainerBenchmark starved;
     starved.Init(ppl::Container::IntrusiveList, &tiny, kNodes);
     CHECK(starved.NodeCount() == 64);
+    CHECK(starved.RequestedCount() == kNodes);
+    CHECK(starved.Status() == ppl::BenchStatus::InvalidCapacity);
     CHECK(tiny.InUse() == 64);
     starved.Shutdown();
     CHECK(tiny.InUse() == 0);
@@ -385,6 +400,10 @@ void TestEventBenchmarkContract() {
     starved.RunFrame(&starvedPool);
     CHECK(starved.LastFrameAllocCount() == 64);
     CHECK(starved.LastFrameAllocBytes() == 64 * kNodeSize);
+    // 요청량을 못 채웠으니 더 빠른 결과로 순위화하면 안 된다.
+    CHECK(starved.Status() == ppl::BenchStatus::InvalidCapacity);
+    CHECK(starved.AttemptedCount() == 65);
+    CHECK(starved.FailedCount() == 1);
     CHECK(starvedPool.LiveBytes() == 0);
     CHECK(starvedPool.InUse() == 0);
 
@@ -394,6 +413,215 @@ void TestEventBenchmarkContract() {
     idle.RunFrame(nullptr);
     CHECK(idle.LastFrameAllocCount() == 0);
     CHECK(idle.LastFrameAllocBytes() == 0);
+    CHECK(idle.Status() == ppl::BenchStatus::Skipped);
+}
+
+// F01/F24: 생성자 입력 거부와 0바이트·실패 카운터·공간 회계 계약.
+void TestAllocatorContractGuards() {
+    // Pool 생성자: 잘못된 입력을 조용히 보정하지 않고 예외로 거부한다.
+    bool threw = false;
+    try { ppl::PoolAllocator bad(0, 8, 4); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try { ppl::PoolAllocator bad(8, 3, 4); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try { ppl::PoolAllocator bad(8, 8, 0); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+    // 정렬 올림·용량 곱셈 overflow는 length_error(실측 ASan heap-overflow의 원인).
+    threw = false;
+    try { ppl::PoolAllocator bad(std::numeric_limits<std::size_t>::max(), 8, 1); }
+    catch (const std::length_error&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try {
+        ppl::PoolAllocator bad(16, 8, std::numeric_limits<std::size_t>::max() / 16 + 2);
+    } catch (const std::length_error&) { threw = true; }
+    CHECK(threw);
+
+    // Allocate(0)은 모든 backend에서 nullptr이고 어떤 카운터도 바꾸지 않는다.
+    ppl::MallocAllocator m;
+    ppl::ArenaAllocator a(256);
+    ppl::PoolAllocator pool(32, 8, 4);
+    ppl::SlabAllocator slab(4);
+    ppl::IAllocator* all[] = {&m, &a, &pool, &slab};
+    for (ppl::IAllocator* x : all) {
+        const auto ac = x->AllocCount();
+        const auto fc = x->FailureCount();
+        const auto lv = x->LiveBytes();
+        CHECK(x->Allocate(0, 8) == nullptr);
+        CHECK(x->AllocCount() == ac);
+        CHECK(x->FailureCount() == fc);
+        CHECK(x->LiveBytes() == lv);
+    }
+
+    // 실패는 FailureCount만 올리고 live는 그대로다.
+    const auto live = m.LiveBytes();
+    const auto fail = m.FailureCount();
+    CHECK(m.Allocate(8, 3) == nullptr);
+    CHECK(m.FailureCount() == fail + 1);
+    CHECK(m.LiveBytes() == live);
+
+    // 공간 회계: 24B 요청은 Slab 32B class. requested(live)와 slot bytes는 다르다.
+    ppl::SlabAllocator s2(4);
+    CHECK(s2.ReservedBacking() ==
+          4 * (16 + 32 + 64 + 128 + 256 + 512 + 1024 + 2048));
+    void* p24 = s2.Allocate(24, 8);
+    CHECK(p24 != nullptr);
+    CHECK(s2.LiveBytes() == 24);       // requested
+    CHECK(s2.SlotBytesLive() == 32);   // 32B class stride
+    s2.Deallocate(p24, 24);
+    CHECK(s2.SlotBytesLive() == 0);
+    CHECK(s2.LiveBytes() == 0);
+
+    ppl::PoolAllocator p3(24, 8, 10);
+    CHECK(p3.ReservedBacking() == 24 * 10);
+}
+
+// F25: Owns는 슬롯 시작 주소이면서 현재 할당된 포인터만 소유로 인정한다.
+void TestPoolOwnership() {
+    ppl::PoolAllocator pool(32, 8, 4);
+    void* a = pool.Allocate(16, 8);
+    void* b = pool.Allocate(16, 8);
+    CHECK(pool.Owns(a));
+    CHECK(pool.Owns(b));
+    CHECK(!pool.Owns(nullptr));
+    // interior 포인터는 슬롯 시작이 아니다.
+    CHECK(!pool.Owns(static_cast<std::uint8_t*>(a) + 1));
+    pool.Deallocate(a, 16);
+    CHECK(!pool.Owns(a));  // 이미 반환된 포인터는 소유가 아니다
+    CHECK(pool.Owns(b));
+}
+
+// F27/F29: 벤치마크 상태와 마지막 결과 초기화.
+void TestBenchmarkStatusAndReset() {
+    ppl::MallocAllocator m;
+    ppl::EventBenchmark e;
+
+    e.Init(0);
+    e.RunFrame(&m);
+    CHECK(e.Status() == ppl::BenchStatus::Skipped);
+    CHECK(e.LastFrameAllocCount() == 0);
+
+    e.Init(100);
+    e.RunFrame(&m);
+    CHECK(e.Status() == ppl::BenchStatus::Valid);
+    CHECK(e.AttemptedCount() == 100);
+    CHECK(e.FailedCount() == 0);
+
+    // target=0으로 되돌린 뒤 직전 결과가 남지 않는다.
+    e.Init(0);
+    e.RunFrame(&m);
+    CHECK(e.LastFrameAllocCount() == 0);
+    CHECK(e.Status() == ppl::BenchStatus::Skipped);
+
+    // 용량 부족은 더 빠른 결과가 아니라 비교 무효다.
+    ppl::PoolAllocator tiny(ppl::EventBenchmark::kNodeSize,
+                            ppl::EventBenchmark::kNodeAlign, 8);
+    ppl::EventBenchmark e2;
+    e2.Init(100);
+    e2.RunFrame(&tiny);
+    CHECK(e2.Status() == ppl::BenchStatus::InvalidCapacity);
+    CHECK(e2.LastFrameAllocCount() == 8);
+    CHECK(e2.FailedCount() == 1);
+
+    // ContainerBenchmark: Shutdown/Init이 마지막 값을 비운다.
+    ppl::ContainerBenchmark c;
+    c.Init(ppl::Container::Vector, nullptr, 10);
+    c.RunFrame();
+    CHECK(c.Status() == ppl::BenchStatus::Valid);
+    CHECK(c.RequestedCount() == 10);
+    c.Shutdown();
+    CHECK(c.LastSum() == 0.0f);
+    CHECK(c.LastFrameMs() == 0.0f);
+    CHECK(c.NodeCount() == 0);
+    CHECK(c.Status() == ppl::BenchStatus::Skipped);
+
+    // intrusive + allocator 없음 -> 노드를 못 만들어 Skipped.
+    ppl::ContainerBenchmark c2;
+    c2.Init(ppl::Container::IntrusiveList, nullptr, 10);
+    CHECK(c2.Status() == ppl::BenchStatus::Skipped);
+    CHECK(c2.NodeCount() == 0);
+}
+
+// F09: 요청 SIMD와 실제 실행 커널의 판정.
+void TestKernelResolution() {
+    using ppl::KernelFallback;
+
+    // AoS는 이 lab에 수동 SIMD가 없다.
+    const auto aosAvx = ppl::ResolveKernel(ppl::Layout::AoS, ppl::SimdWidth::AVX2, true);
+    CHECK(aosAvx.effective == ppl::SimdWidth::Scalar);
+    CHECK(aosAvx.reason == KernelFallback::LayoutHasNoSimd);
+    CHECK(aosAvx.branchlessApplied);  // scalar 경로에는 predication이 걸린다
+    const auto aosScalar = ppl::ResolveKernel(ppl::Layout::AoS, ppl::SimdWidth::Scalar, false);
+    CHECK(aosScalar.reason == KernelFallback::None);
+
+    const auto soaScalar = ppl::ResolveKernel(ppl::Layout::SoA, ppl::SimdWidth::Scalar, true);
+    CHECK(soaScalar.effective == ppl::SimdWidth::Scalar);
+    CHECK(soaScalar.branchlessApplied);
+
+    const auto soaSse = ppl::ResolveKernel(ppl::Layout::SoA, ppl::SimdWidth::SSE, true);
+#if defined(PERF_LAB_X86_SIMD)
+    CHECK(soaSse.effective == ppl::SimdWidth::SSE);
+    CHECK(!soaSse.branchlessApplied);  // SIMD는 이미 마스크 select
+#else
+    CHECK(soaSse.effective == ppl::SimdWidth::Scalar);
+    CHECK(soaSse.reason == KernelFallback::NoIntrinsics);
+#endif
+
+    const auto soaAvx = ppl::ResolveKernel(ppl::Layout::SoA, ppl::SimdWidth::AVX2, false);
+#if defined(PERF_LAB_X86_SIMD) && defined(PERF_LAB_AVX2)
+    CHECK(soaAvx.effective == ppl::SimdWidth::AVX2);
+    CHECK(soaAvx.reason == KernelFallback::None);
+#elif defined(PERF_LAB_X86_SIMD)
+    CHECK(soaAvx.effective == ppl::SimdWidth::SSE);
+    CHECK(soaAvx.reason == KernelFallback::Avx2NotCompiled);
+#else
+    CHECK(soaAvx.effective == ppl::SimdWidth::Scalar);
+    CHECK(soaAvx.reason == KernelFallback::NoIntrinsics);
+#endif
+}
+
+// F04/F26: 유효 좌표 계약과 비정상 입력 처리.
+void TestInputContracts() {
+    const ppl::Layout layouts[] = {
+        ppl::Layout::SoA, ppl::Layout::AoS, ppl::Layout::Archetype};
+
+    for (ppl::Layout l : layouts) {
+        auto sim = ppl::CreateSimulation(l);
+        sim->Init(64, 0, -5);  // 비정상 viewport도 계약 안(>=2)으로 올린다
+        CHECK(sim->Count() == 64);
+
+        std::vector<float> before, after;
+        sim->CopyState(before);
+
+        // 유효 상태에서 dt=0/NaN/음수는 상태를 바꾸지 않는다.
+        sim->Update(0.0f, ppl::SimdWidth::Scalar, false);
+        sim->CopyState(after);
+        CHECK(NearStates(before, after, 0.0f));
+
+        sim->Update(std::numeric_limits<float>::quiet_NaN(),
+                    ppl::SimdWidth::Scalar, true);
+        sim->CopyState(after);
+        CHECK(NearStates(before, after, 0.0f));
+
+        sim->Update(-1.0f, ppl::SimdWidth::Scalar, false);
+        sim->CopyState(after);
+        CHECK(NearStates(before, after, 0.0f));
+    }
+
+    // 초기 좌표가 Update 상한 안에 있다(0 <= x <= W-1, 0 <= y <= H-1).
+    auto sim = ppl::CreateSimulation(ppl::Layout::SoA);
+    sim->Init(100, 640, 480);
+    std::vector<float> state;
+    sim->CopyState(state);
+    int outOfRange = 0;
+    for (std::size_t i = 0; i < 100; ++i) {
+        const float px = state[i * 4 + 0];
+        const float py = state[i * 4 + 1];
+        if (px < 0.0f || px > 639.0f || py < 0.0f || py > 479.0f) ++outOfRange;
+    }
+    CHECK(outOfRange == 0);
 }
 
 // ── 시뮬 레이아웃 검증 ────────────────────────────────────────────────
@@ -517,12 +745,13 @@ void TestSimdEquivalence() {
 #if defined(PERF_LAB_AVX2)
     // AVX2는 FMA로 pos += vel*dt 의 중간 반올림이 사라져 스칼라와 비트가 다르다.
     // SSE와 같은 허용 오차를 그대로 쓰지 않고 프레임 수에 비례한 상한을 쓴다.
+    //
+    // "수치가 다르다"는 실제 실행 경로의 증거가 아니다(FMA를 써도 같은 값이 나올 수
+    // 있고, 잘못된 계산도 다른 값을 낸다). 실행 경로는 KernelResolution 테스트의
+    // ResolveKernel 판정으로 확인하고, 여기서는 정확성만 본다.
     std::vector<float> d;
     wide->CopyState(d);
     CHECK(NearStates(a, d, ToleranceFor(ppl::SimdWidth::AVX2, kFrames)));
-    // 그래도 SSE 만큼 가깝지는 않다는 것까지 못 박아 둔다. 이 단언이 깨지면
-    // AVX2 토글이 실제로는 SSE/스칼라로 폴백하고 있다는 뜻이다.
-    CHECK(!NearStates(a, d, 1e-6f));
 #endif
 
     // AoS 는 SIMD 토글을 통째로 무시하고 언제나 scalar 경로를 돈다(stride 때문에
@@ -742,6 +971,18 @@ void TestTogglePanelGeometry() {
     CHECK(RectsOverlap(DropdownOpenRect(container, 3),
                        PanelFieldRect(PanelColumn2X(x), y, 1)));
 
+    // 0 이하 크기는 면적 0이라 겹치지 않는다.
+    CHECK(!RectsOverlap(UiRect{5, 5, 0, 1}, UiRect{0, 0, 10, 10}));
+    CHECK(!RectsOverlap(UiRect{0, 0, 10, 10}, UiRect{5, 5, 0, 0}));
+    CHECK(!RectsOverlap(UiRect{0, 0, 0, 0}, UiRect{0, 0, 0, 0}));
+
+    // 기본 창(720)에서 패널 상단을 올려 모든 열린 콤보가 창 안에 들어온다.
+    // 올리기 전 기본 배치(y=592)는 allocator 팝업이 736으로 넘친다(보고된 결함).
+    CHECK(!ppl::PanelOpenFitsWindow(592, 720));
+    const int panelY = ppl::PanelOriginY(592, 720);
+    CHECK(panelY <= 592);
+    CHECK(ppl::PanelOpenFitsWindow(panelY, 720));
+
     // 두 패스 그리기: 모든 위젯이 정확히 한 번 그려지고, 열린 콤보만 두 번째
     // (= 마지막) 패스에 그려진다.
     CHECK(PanelDrawsWidget(/*widgetOpen=*/false, /*openPass=*/false));
@@ -808,11 +1049,16 @@ const TestCase kTests[] = {
     {"layout",    "LayoutEquivalence",      TestLayoutEquivalence},
     {"layout",    "BoundaryInvariants",     TestBoundaryInvariants},
     {"simd",      "SimdEquivalence",        TestSimdEquivalence},
+    {"simd",      "KernelResolution",       TestKernelResolution},
     {"branch",    "BranchlessEquivalence",  TestBranchlessEquivalence},
+    {"layout",    "InputContracts",         TestInputContracts},
     {"allocator", "AlignmentHelpers",       TestAlignmentHelpers},
     {"allocator", "MallocAndArena",         TestMallocAndArena},
     {"allocator", "PoolAndSlab",            TestPoolAndSlab},
     {"allocator", "PoolExhaustion",         TestPoolExhaustion},
+    {"allocator", "AllocatorContractGuards", TestAllocatorContractGuards},
+    {"allocator", "PoolOwnership",          TestPoolOwnership},
+    {"allocator", "BenchmarkStatusAndReset", TestBenchmarkStatusAndReset},
     {"allocator", "EventBenchmarkContract", TestEventBenchmarkContract},
     {"container", "ContainerEquivalence",   TestContainerEquivalence},
     {"graph",     "FrameTimerChannels",     TestFrameTimerChannels},

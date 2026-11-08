@@ -300,6 +300,11 @@ stateDiagram-v2
     TASK_UNINTERRUPTIBLE --> EXIT_ZOMBIE: exit()
     EXIT_ZOMBIE --> EXIT_DEAD: wait() by parent
     EXIT_DEAD --> [*]
+    note right of EXIT_ZOMBIE
+        요약 상태도다. sleep에서 exit로 가는 화살표는
+        wakeup과 RUNNING 경유 실행 복귀를 생략한 것이며
+        커널의 직접 상태 전이표가 아니다.
+    end note
 ```
 
 ### TASK_RUNNING: 실행 중 또는 실행 대기
@@ -714,10 +719,11 @@ struct pid *alloc_pid(struct pid_namespace *ns, pid_t *set_tid,
     pid->level = ns->level;
     for (i = ns->level; i >= 0; i--) {
         int tid = 0;
+        int index = ns->level - i;
 
-        /* 사용자 지정 PID가 있으면 사용 */
-        if (set_tid_size) {
-            tid = set_tid[ns->level - i];
+        /* 사용자 지정 PID가 있으면 사용 (제공된 배열 길이 안에서만) */
+        if (index < set_tid_size) {
+            tid = set_tid[index];
             /* ... 검증 ... */
         }
 
@@ -838,8 +844,8 @@ static struct mm_struct *dup_mm(struct task_struct *tsk,
     /* oldmm의 내용을 mm에 복사 */
     memcpy(mm, oldmm, sizeof(*mm));
 
-    /* 새 페이지 테이블 생성 */
-    if (!mm_alloc_pgd(mm))
+    /* 새 페이지 테이블 생성 (mm_alloc_pgd는 0이면 성공) */
+    if (mm_alloc_pgd(mm))
         goto fail_nopgd;
 
     /* 각 VMA를 복사하면서 페이지를 COW로 설정 */
@@ -936,24 +942,27 @@ static inline void copy_one_pte(struct mm_struct *dst_mm,
     pte_t pte = *src_pte;
     struct page *page;
 
-    /* 쓰기 가능한 페이지를 읽기 전용으로 변경 */
-    if (is_cow_mapping(vma->vm_flags)) {
-        if (pte_write(pte))
-            pte = pte_wrprotect(pte);  /* 쓰기 권한 제거 */
+    /* COW 대상 private writable mapping인지 확인 */
+    if (is_cow_mapping(vma->vm_flags) && pte_write(pte)) {
+        /* 부모 PTE와 자식에 설치할 PTE를 모두 read-only로 만든다. */
+        ptep_set_wrprotect(src_mm, addr, src_pte);
+        pte = pte_wrprotect(pte);
+        /* 부모의 이전 writable TLB 번역이 남아 있으면 fault 없이 공유 페이지에
+           쓸 수 있으므로 적절한 범위에서 함께 무효화해야 한다. */
     }
 
-    /* 페이지 참조 카운터 증가 */
+    /* 페이지 참조 카운터 증가 (pin/추가 참조는 별도 계약) */
     page = vm_normal_page(vma, addr, pte);
     if (page) {
         get_page(page);  /* refcount++ */
     }
 
-    /* 자식의 페이지 테이블에 PTE 설정 */
+    /* 자식의 페이지 테이블에 read-only PTE 설정 */
     set_pte_at(dst_mm, addr, dst_pte, pte);
 }
 ```
 
-`pte_wrprotect`는 PTE의 쓰기 비트를 제거한다. 이제 부모와 자식 모두 읽기 전용으로 페이지를 공유한다.
+`ptep_set_wrprotect`는 부모의 PTE에서, `pte_wrprotect`는 자식에 설치할 PTE에서 쓰기 비트를 제거한다. 이제 부모와 자식 모두 읽기 전용으로 페이지를 공유하므로 어느 쪽이든 쓰기를 시도하면 fault가 발생한다. 부모 쪽에 이전 writable TLB 번역이 남아 있으면 fault 없이 쓰기가 통과하므로 함께 무효화해야 한다.
 
 ### 페이지 폴트 핸들러: COW 실행
 
@@ -968,21 +977,23 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
     struct page *new_page;
     pte_t entry;
 
-    /* COW 페이지인지 확인 (참조 카운터 > 1) */
-    if (PageAnon(old_page) && !PageKsm(old_page)) {
-        if (total_mapcount(old_page) > 1) {
-            /* 페이지 복사 필요 */
-            goto copy;
-        }
+    /*
+     * 익명 독점 페이지일 때만 복사 없이 재사용한다.
+     * total_mapcount==1만으로는 충분하지 않다. KSM/zero page/private file 매핑은
+     * 재사용 대상이 아니고, GUP pin이나 추가 참조가 있으면(page_count > 1)
+     * 복사해야 한다. 세부 독점성 판정은 커널 버전마다 다르다.
+     */
+    if (PageAnon(old_page) && !PageKsm(old_page) &&
+        total_mapcount(old_page) == 1 && page_count(old_page) == 1) {
+        /* 독점 소유: 복사 없이 쓰기 가능하게 변경 */
+        entry = maybe_mkwrite(pte_mkdirty(vmf->orig_pte), vma);
+        if (ptep_set_access_flags(vma, vmf->address, vmf->pte, entry, 1))
+            update_mmu_cache(vma, vmf->address, vmf->pte);
+        return VM_FAULT_WRITE;
     }
 
-    /* 참조 카운터가 1이면 그냥 쓰기 가능하게 변경 */
-    entry = maybe_mkwrite(pte_mkdirty(vmf->orig_pte), vma);
-    if (ptep_set_access_flags(vma, vmf->address, vmf->pte, entry, 1))
-        update_mmu_cache(vma, vmf->address, vmf->pte);
-    return VM_FAULT_WRITE;
-
 copy:
+    /* 위 조건을 만족하지 않는 매핑은 복사 경로로 보낸다. */
     /* 새 페이지 할당 */
     new_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma, vmf->address);
     if (!new_page)
@@ -1013,18 +1024,25 @@ COW가 없다면 `fork` 시점에 부모의 복사 대상 페이지 내용을 �
 
 벤치마크 결과:
 ```c
-/* 테스트: 100MB 할당 후 fork() 시간 측정 */
+/* 테스트: 100MB 할당 후 fork() 시스템 콜 반환 지연 측정 */
 char *buf = malloc(100 * 1024 * 1024);
 memset(buf, 0, 100 * 1024 * 1024);
 
-clock_t start = clock();
+struct timespec start, end;
+clock_gettime(CLOCK_MONOTONIC, &start);
 pid_t pid = fork();
-clock_t end = clock();
+clock_gettime(CLOCK_MONOTONIC, &end);
 
-printf("fork() process CPU time: %f ms\n",
-       (double)(end - start) / CLOCKS_PER_SEC * 1000);
+if (pid == 0) {
+    _exit(0);  /* 자식은 부모의 시작 시각을 자기 CPU 시간 기준으로 빼지 않는다 */
+}
 
-/* 출력: fork() time: 0.15 ms */
+printf("fork() latency: %f ms\n",
+       (end.tv_sec - start.tv_sec) * 1000.0 +
+       (end.tv_nsec - start.tv_nsec) / 1000000.0);
+waitpid(pid, NULL, 0);
+
+/* 출력: fork() latency: 0.15 ms (머신·설정에 따라 다르다) */
 ```
 
 ### COW의 한계
@@ -1069,7 +1087,7 @@ if (pid == 0) {
 ```c
 int execl(const char *path, const char *arg, ...);
 int execlp(const char *file, const char *arg, ...);
-int execle(const char *path, const char *arg, ..., char *const envp[]);
+int execle(const char *path, const char *arg, ...);  /* envp는 `...` 뒤에 오는 마지막 인자다 */
 int execv(const char *path, char *const argv[]);
 int execvp(const char *file, char *const argv[]);
 int execvpe(const char *file, char *const argv[], char *const envp[]);
@@ -1078,7 +1096,7 @@ int execvpe(const char *file, char *const argv[], char *const envp[]);
 - `l` (list): 인자를 가변 인자로 전달
 - `v` (vector): 인자를 배열로 전달
 - `p` (path): PATH 환경 변수에서 실행 파일 검색
-- `e` (environment): 환경 변수를 명시적으로 전달
+- `e` (environment): 환경 변수를 명시적으로 전달 (`execle`는 가변 인자 목록의 마지막에 `envp`를 받는다)
 
 모두 내부적으로 `execve` 시스템 콜을 호출한다:
 
@@ -1323,11 +1341,11 @@ static int exec_mmap(struct mm_struct *mm)
     activate_mm(active_mm, mm);
     task_unlock(tsk);
 
-    /* 기존 mm 해제 */
+    /* 기존 mm 해제: old_mm의 사용자 참조와 borrowed active_mm 참조를 분리한다. */
     if (old_mm) {
-        mmdrop(active_mm);
         mmput(old_mm);
-        return 0;
+    } else {
+        mmdrop(active_mm);
     }
 
     return 0;
@@ -1478,7 +1496,7 @@ SYSCALL_DEFINE0(getppid)
 
 ### 고아 프로세스 (Orphan Process)
 
-부모가 자식보다 먼저 종료되면, 자식은 **고아 프로세스**가 된다. 리눅스는 고아 프로세스를 init 프로세스(PID 1)가 입양하도록 한다.
+부모가 자식보다 먼저 종료되면, 자식은 **고아 프로세스**가 된다. 리눅스는 고아를 같은 스레드 그룹에 살아 있는 태스크가 있으면 그쪽으로 보내고, 없으면 가장 가까운 살아 있는 **subreaper**(`prctl(PR_SET_CHILD_SUBREAPER)`)나 해당 PID 네임스페이스의 `child_reaper`에게 입양시킨다. 전역 네임스페이스에서 그것이 보통 PID 1이지만, 컨테이너에서는 그 네임스페이스의 init이다.
 
 ```c
 /* kernel/exit.c */
@@ -1487,7 +1505,7 @@ static void forget_original_parent(struct task_struct *father,
 {
     struct task_struct *p, *t, *reaper;
 
-    /* 새 부모 찾기 (보통 init) */
+    /* 새 부모 찾기: 같은 thread group → subreaper → namespace child_reaper */
     reaper = find_new_reaper(father, NULL);
 
     /* 모든 자식을 새 부모에게 이전 */
@@ -1522,7 +1540,7 @@ int main() {
         /* 자식: 계속 실행 */
         sleep(2);
         printf("Child (PID %d) PPID: %d\n", getpid(), getppid());
-        /* PPID가 1 (init)이 됨 */
+        /* 일반 설정에서는 PPID가 subreaper나 namespace init이 됨 */
     }
 
     return 0;
@@ -1621,6 +1639,9 @@ static long do_wait(struct wait_opts *wo)
     int retval;
 
 repeat:
+    /* 매 반복마다 기본값을 -ECHILD로 두고, eligible 자식을 보면 0으로 지운다. */
+    wo->notask_error = -ECHILD;
+
     /* 자식 프로세스 순회 */
     tsk = current;
     do {
@@ -1635,20 +1656,14 @@ repeat:
 
     } while_each_thread(current, tsk);
 
-    /* 자식이 없으면 에러 */
-    if (!wo->notask_error) {
-        retval = -ECHILD;
-        goto end;
+    /* eligible 자식이 하나도 없을 때만 notask_error가 -ECHILD로 남는다. */
+    retval = wo->notask_error;
+    if (!retval && !(wo->wo_flags & WNOHANG)) {
+        /* 살아 있는 eligible 자식이 있으므로 종료를 기다린다. */
+        __set_current_state(TASK_INTERRUPTIBLE);
+        schedule();
+        goto repeat;  /* 깨어나면 다시 확인 */
     }
-
-    /* WNOHANG 플래그: 블록하지 않음 */
-    if (wo->wo_flags & WNOHANG)
-        goto end;
-
-    /* 자식 종료 대기 */
-    __set_current_state(TASK_INTERRUPTIBLE);
-    schedule();
-    goto repeat;  /* 깨어나면 다시 확인 */
 
 end:
     return retval;
@@ -1709,7 +1724,7 @@ $ ps aux | grep defunct | wc -l
 
 1. 부모가 `wait` 호출
 2. `signal(SIGCHLD, SIG_IGN)`: 자동으로 자식 회수
-3. 부모 프로세스 종료: init이 입양 후 회수
+3. 부모 프로세스 종료: subreaper나 namespace init이 입양 후 회수
 
 ### 이중 fork 트릭
 
@@ -1731,14 +1746,14 @@ if (pid > 0) {
         exit(0);
     } else if (pid2 == 0) {
         /* 손자: 실제 작업 수행 */
-        /* PPID가 init(1)이 됨 */
+        /* PPID가 subreaper나 namespace init이 됨 */
         /* 세션 리더가 아니므로 제어 터미널을 다시 얻을 수 없다 */
         /* ... 데몬 작업 ... */
     }
 }
 ```
 
-이제 손자 프로세스의 부모는 init이고, init이 자동으로 회수한다.
+이제 손자 프로세스의 부모는 subreaper나 namespace init이고, 그것이 자동으로 회수한다.
 
 ## 8. 프로세스 vs 스레드: clone의 플래그들
 
@@ -1810,10 +1825,17 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                       CLONE_THREAD | CLONE_SYSVSEM | CLONE_SETTLS |
                       CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID);
 
-    /* x86-64 raw clone ABI: flags, stack, parent_tid, child_tid, tls */
+    /*
+     * raw clone은 커널이 준비한 새 스택에서 자식을 시작한다. 자식은 이 C 함수의
+     * 프레임/반환 주소로 정상 반환하지 않으며, glibc는 새 스택에 자식 함수를
+     * 호출하고 종료하는 trampoline을 둔다. libc의 clone(fn, stack, flags, arg)도
+     * 이런 trampoline을 제공한다.
+     * x86-64 raw clone ABI: flags, stack, parent_tid, child_tid, tls
+     */
     pid_t pid = syscall(__NR_clone, clone_flags, stack,
                         &pd->tid, &pd->tid, tls);
 
+    /* 아래 return은 부모 쪽 경로에만 해당한다. 자식은 start_routine에서 시작한다. */
     /* ... */
     return 0;
 }
@@ -2194,10 +2216,34 @@ int main() {
 
     int pid, ppid, pgrp, session, tty_nr;
     char comm[256], state;
-    unsigned long flags;
+    char line[4096];
+    char *start_comm, *end_comm;
+    int comm_len;
 
-    fscanf(f, "%d %s %c %d %d %d %d",
-           &pid, comm, &state, &ppid, &pgrp, &session, &tty_nr);
+    /* comm에는 공백과 ')'가 들어갈 수 있어 %s로 읽으면 필드가 어긋난다.
+       잘리지 않은 전체 레코드를 읽는다. */
+    if (!fgets(line, sizeof(line), f)) {
+        fclose(f);
+        return 1;
+    }
+
+    /* PID는 첫 필드, comm은 첫 '('와 마지막 ')' 사이, 나머지는 마지막 ')' 뒤에 온다. */
+    start_comm = strchr(line, '(');
+    end_comm = strrchr(line, ')');
+    if (start_comm == NULL || end_comm == NULL || start_comm >= end_comm ||
+        sscanf(line, "%d", &pid) != 1 ||
+        sscanf(end_comm + 1, " %c %d %d %d %d",
+               &state, &ppid, &pgrp, &session, &tty_nr) != 5) {
+        fprintf(stderr, "stat parse error\n");
+        fclose(f);
+        return 1;
+    }
+
+    comm_len = (int)(end_comm - start_comm - 1);
+    if (comm_len >= (int)sizeof(comm))
+        comm_len = sizeof(comm) - 1;
+    memcpy(comm, start_comm + 1, comm_len);
+    comm[comm_len] = '\0';
 
     printf("PID:     %d\n", pid);
     printf("Name:    %s\n", comm);
@@ -2388,13 +2434,34 @@ typedef struct {
 
 int read_process_info(int pid, Process *proc) {
     char path[256];
+    char line[4096];
+    char *start_comm, *end_comm;
+    char state;
+    int comm_len;
     snprintf(path, sizeof(path), "/proc/%d/stat", pid);
 
     FILE *f = fopen(path, "r");
     if (!f) return -1;
 
-    fscanf(f, "%d %s %*c %d", &proc->pid, proc->name, &proc->ppid);
+    /* comm의 공백/')' 때문에 %s로 이름을 읽지 않는다. */
+    if (!fgets(line, sizeof(line), f)) {
+        fclose(f);
+        return -1;
+    }
     fclose(f);
+
+    start_comm = strchr(line, '(');
+    end_comm = strrchr(line, ')');
+    if (start_comm == NULL || end_comm == NULL || start_comm >= end_comm ||
+        sscanf(line, "%d", &proc->pid) != 1 ||
+        sscanf(end_comm + 1, " %c %d", &state, &proc->ppid) != 2)
+        return -1;
+
+    comm_len = (int)(end_comm - start_comm - 1);
+    if (comm_len >= (int)sizeof(proc->name))
+        comm_len = sizeof(proc->name) - 1;
+    memcpy(proc->name, start_comm + 1, comm_len);
+    proc->name[comm_len] = '\0';
 
     return 0;
 }
@@ -2460,16 +2527,36 @@ typedef struct {
 
 void read_stat(int pid, ProcStat *stat) {
     char path[256];
+    char line[4096];
+    char *start_comm, *end_comm;
+    int comm_len;
     snprintf(path, sizeof(path), "/proc/%d/stat", pid);
 
     FILE *f = fopen(path, "r");
     if (!f) return;
 
-    fscanf(f, "%d %s %c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu %*d %*d %*d %*d %*d %*d %*u %*u %ld",
-           &stat->pid, stat->name, &stat->state,
-           &stat->utime, &stat->stime, &stat->rss);
-
+    /* comm의 공백/')' 때문에 %s로 이름을 읽지 않는다. 전체 레코드를 읽는다. */
+    if (!fgets(line, sizeof(line), f)) {
+        fclose(f);
+        return;
+    }
     fclose(f);
+
+    start_comm = strchr(line, '(');
+    end_comm = strrchr(line, ')');
+    if (start_comm == NULL || end_comm == NULL || start_comm >= end_comm ||
+        sscanf(line, "%d", &stat->pid) != 1 ||
+        sscanf(end_comm + 1,
+               " %c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu"
+               " %*d %*d %*d %*d %*d %*d %*u %*u %ld",
+               &stat->state, &stat->utime, &stat->stime, &stat->rss) != 4)
+        return;
+
+    comm_len = (int)(end_comm - start_comm - 1);
+    if (comm_len >= (int)sizeof(stat->name))
+        comm_len = sizeof(stat->name) - 1;
+    memcpy(stat->name, start_comm + 1, comm_len);
+    stat->name[comm_len] = '\0';
 }
 
 int main() {
@@ -2536,7 +2623,7 @@ int main() {
 - W. Richard Stevens, Stephen A. Rago, *Advanced Programming in the UNIX Environment* (2013)
 - Remzi H. Arpaci-Dusseau, Andrea C. Arpaci-Dusseau, *Operating Systems: Three Easy Pieces* (2018)
 - Dennis M. Ritchie, Ken Thompson, "The UNIX Time-Sharing System" (1974)
-- Marshall K. McKusick et al., "A Fast File System for UNIX" (1984)
+- Marshall K. McKusick et al., "A Fast File System for UNIX" (1984) — 파일 시스템 계보 배경이며, 이 장의 COW·exec·wait 설명에 대한 직접 근거는 아니다
 - Linux 커널 소스: `kernel/fork.c`, `kernel/exit.c`, `fs/exec.c`
 - [LWN.net](https://lwn.net/)
 - [Linux Kernel Documentation](https://www.kernel.org/doc/html/latest/)

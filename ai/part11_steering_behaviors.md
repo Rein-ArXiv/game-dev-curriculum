@@ -26,7 +26,7 @@ flowchart LR
 5. **Pursue와 Evade** — 미래 위치 예측, 정면 충돌 보정, intercept의 기하.
 6. **Obstacle Avoidance와 Wall Following** — feeler 투사, 가장 위협적인 장애물 선택, 데드락.
 7. **Path Following** — 관 기반 추종, 코너 컷, 진행 방향 보장.
-8. **행동 결합** — 합산·우선순위·dithering·컨텍스트의 절충.
+8. **행동 결합** — 합산·우선순위·중재·컨텍스트의 절충.
 9. **회전·정렬과 군집** — heading 분리, boids 세 규칙의 창발.
 10. **디버깅·성능** — 시각화, 공간 분할, SoA 핫 루프.
 
@@ -62,6 +62,7 @@ struct Agent {
     float maxSpeed;      // 속도 상한 (m/s)
     float maxAccel;      // 조향 가속도 상한 (m/s^2)
     float responseTime;  // 목표 속도에 접근하는 시정수 (s), > 0
+    float radius;        // 충돌·회피 판정에 쓰는 몸 반경 (m)
     float lookAhead = 1.0f;    // Path Following의 예측 거리 (m)
     float wanderAngle = 0.0f;  // Wander의 지속적인 각도 상태
 };
@@ -182,7 +183,11 @@ Arrive는 Seek과 같지만, 목표 근처의 *감속 반경(slowing radius)* �
 Vec2 Arrive(const Agent& a, Vec2 target, float slowRadius) {
     Vec2  toTarget = target - a.position;
     float dist = Length(toTarget);
-    if (dist < 0.001f) return Vec2{0, 0};
+    if (dist < 0.001f) {
+        // 목표 위 — desiredVelocity=0을 추종하는 제동 가속도를 반환한다.
+        Vec2 brake = (Vec2{0, 0} - a.velocity) / a.responseTime;
+        return Truncate(brake, a.maxAccel);
+    }
 
     float desiredSpeed = a.maxSpeed;
     if (dist < slowRadius)                            // 감속 반경 안
@@ -193,7 +198,7 @@ Vec2 Arrive(const Agent& a, Vec2 target, float slowRadius) {
 }
 ```
 
-핵심은 desired *speed* 를 거리에 비례시키는 것이다. 감속 반경 밖에서는 최대 속도로 Seek하다가, 반경 안으로 들어오면 목표 속력을 줄인다. 연속 모델의 감쇠비와 이산 적분 조건이 적절하면 부드럽게 수렴하지만, 감속 반경이 작거나 응답이 공격적이면 Arrive도 오버슈트할 수 있다.
+핵심은 desired *speed* 를 거리에 비례시키는 것이다. 감속 반경 밖에서는 최대 속도로 Seek하다가, 반경 안으로 들어오면 목표 속력을 줄인다. 도착 반경 안에서도 `desiredVelocity=0`을 두고 속도 오차를 `responseTime`으로 나눈 제동 가속도를 반환한 뒤 `maxAccel`로 제한하므로, 목표에 이미 도달했어도 남은 속도는 정지할 때까지 줄어든다. 가속도를 0으로 반환해 "이미 멈췄다"고 가정하지 않는다. 연속 모델의 감쇠비와 이산 적분 조건이 적절하면 부드럽게 수렴하지만, 감속 반경이 작거나 응답이 공격적이면 Arrive도 오버슈트할 수 있다.
 
 ```mermaid
 flowchart LR
@@ -374,24 +379,30 @@ steering이 목표를 향하더라도 장애물에 부딪히면 소용없다. *O
 원형 장애물에 대한 충돌 검사는 ahead 선분과 원의 거리로 한다. 정확하게는 에이전트 로컬 좌표로 변환해 검사하는 편이 깔끔하지만, 여기서는 월드 공간에서 직관적으로 본다.
 
 ```cpp
-const Obstacle* MostThreatening(const Agent& a, Vec2 ahead, Vec2 ahead2,
+// 선분(position→ahead)과 장애물 원의 최근접점으로 충돌을 검사한다.
+const Obstacle* MostThreatening(const Agent& a, Vec2 ahead,
                                 const std::vector<Obstacle>& obs) {
     const Obstacle* worst = nullptr;
     float worstDist = FLT_MAX;
+    Vec2  seg = ahead - a.position;                 // feeler 선분 전체
+    float segLen2 = Dot(seg, seg);
     for (const Obstacle& o : obs) {
-        // 두 feeler(긴/짧은) 중 하나라도 장애물 원 안에 들어오는가
-        bool hit = DistanceSq(ahead,  o.center) < o.radius * o.radius
-                || DistanceSq(ahead2, o.center) < o.radius * o.radius
-                || DistanceSq(a.position, o.center) < o.radius * o.radius;
-        if (!hit) continue;
-        float d = DistanceSq(a.position, o.center);
-        if (d < worstDist) { worstDist = d; worst = &o; }  // 가장 가까운 위협
+        float expanded = o.radius + a.radius;       // agent 반경 포함
+        // 선분 위 최근접점 (선분이 퇴화하면 agent 위치로 축소)
+        float u = (segLen2 > 1e-12f)
+                ? std::clamp(Dot(o.center - a.position, seg) / segLen2, 0.0f, 1.0f)
+                : 0.0f;
+        Vec2 closest = a.position + seg * u;
+        if (DistanceSq(o.center, closest) > expanded * expanded) continue;
+        // 충돌 진입 거리 근사 — 가장 먼저 닿는 장애물을 고른다
+        float entry = DistanceSq(a.position, closest);
+        if (entry < worstDist) { worstDist = entry; worst = &o; }
     }
     return worst;
 }
 ```
 
-긴 feeler(`ahead`)와 짧은 feeler(`ahead2`)를 같이 쓰는 이유는, 빠른 접근에서 긴 더듬이로 미리 감지하면서도 *바로 코앞* 의 장애물(이미 ahead가 지나쳐 버린 경우)을 짧은 더듬이로 놓치지 않기 위함이다. 에이전트 위치 자체도 검사에 넣어 *겹친* 상태를 잡는다.
+위 코드는 `ahead` 한 점이 아니라 *에이전트 위치에서 `ahead`까지의 선분 전체* 와 원의 최근접점을 검사하고, 원 반경에 `a.radius`를 더한다. 따라서 느린 접근의 코앞 장애물과 작은 장애물을 점 하나로 놓치지 않는다. 선분이 퇴화하는(`ahead == position`) 경우와 수치 오차도 `segLen2` 하한과 제곱거리 비교로 처리한다.
 
 ### 횡방향 회피력
 
@@ -401,23 +412,30 @@ Vec2 AvoidObstacles(const Agent& a, const std::vector<Obstacle>& obs) {
     if (speed < 1e-5f) return Vec2{0, 0};                // 0벡터 정규화 방지
     float aheadLen = speed * 0.5f;                       // 0.5초 앞의 이동 거리
     Vec2  dir = a.velocity / speed;
-    Vec2  ahead  = a.position + dir * aheadLen;
-    Vec2  ahead2 = a.position + dir * (aheadLen * 0.5f);
-    const Obstacle* threat = MostThreatening(a, ahead, ahead2, obs);
+    Vec2  ahead = a.position + dir * aheadLen;
+    const Obstacle* threat = MostThreatening(a, ahead, obs);
     if (!threat) return Vec2{0, 0};
-    // 장애물 중심에서 ahead 점을 밀어내는 횡방향 가속도
-    Vec2 avoid = ahead - threat->center;
+    // 진행선 기준 장애물의 수직 성분을 반대로 써서 좌/우 회피 방향을 정한다
+    Vec2  toThreat = threat->center - a.position;
+    Vec2  perp = toThreat - dir * Dot(toThreat, dir);    // forward 수직 성분
+    Vec2  avoid = -perp;                                 // 장애물 반대쪽
+    if (LengthSq(avoid) < 1e-4f) {                       // 정면 정중앙 — 방향 모호
+        float side = Cross(dir, toThreat);              // 부호로 좌/우 결정
+        Vec2 sidePerp = (side > 0) ? Vec2{ dir.y, -dir.x }  // 오른쪽 법선
+                                   : Vec2{-dir.y,  dir.x }; // 왼쪽 법선
+        return sidePerp * a.maxAccel;
+    }
     return Normalize(avoid) * a.maxAccel;                // 회피는 강하게
 }
 ```
 
 탐지 거리를 *현재 속력에 비례* 시키는 것이 중요하다. 빠를수록 더 멀리 내다봐야 제때 피한다. 현재 속력이 5m/s이면 위 코드의 탐지 거리는 2.5m이고, 정지에 가까우면 거의 0이라 멈춰 있을 때 헛회피하지 않는다.
 
-회피 가속도는 장애물 중심에서 ahead 점으로 향하는 방향을 사용한다. 정면 감속만 주면 장애물 앞에서 멈출 수 있으므로, 횡방향 성분과 제동 성분을 상황에 맞게 분리하는 편이 안전하다. 여기서는 `maxAccel`을 사용해 회피가 가속도 예산을 우선 차지하게 한다.
+회피 가속도는 장애물 중심을 진행 방향에 투영해 얻은 *수직 성분* 을 반대로 사용한다. `ahead - center`처럼 검출점 사이 벡터를 그대로 쓰면 그 방향이 진행 방향과 평행할 때 횡성분이 사라진다. 정면 감속만 주면 장애물 앞에서 멈출 수 있으므로, 횡방향 성분과 제동 성분을 상황에 맞게 분리하는 편이 안전하다. 여기서는 `maxAccel`을 사용해 회피가 가속도 예산을 우선 차지하게 한다.
 
 ### 실패 모드: 대칭 데드락
 
-feeler 회피의 고전적 함정은 *정면 정중앙* 장애물이다. ahead 점이 장애물 중심과 거의 일직선이면 `ahead - center`가 0에 가까워 회피 방향이 불안정해진다 — 왼쪽으로 갈지 오른쪽으로 갈지 못 정하고 떨거나, 매 프레임 방향이 바뀌어 정면으로 직진한다. 두 가지 보정이 흔하다.
+feeler 회피의 고전적 함정은 *정면 정중앙* 장애물이다. 장애물 중심이 진행선과 거의 일직선이면 위 수직 성분이 0에 가까워 회피 방향이 불안정해진다 — 왼쪽으로 갈지 오른쪽으로 갈지 못 정하고 떨거나, 매 프레임 방향이 바뀌어 정면으로 직진한다. 두 가지 보정이 흔하다.
 
 - *결정론적 측면 선택*: 회피 벡터가 너무 작으면, 장애물 중심에 대한 진행 방향의 *외적 부호* 로 좌/우를 강제로 정한다. `cross(dir, center - pos)`의 부호로 항상 같은 쪽으로 비킨다.
 - *살짝 비대칭 feeler*: feeler를 정확히 정면이 아니라 미세하게 한쪽으로 틀어, 정중앙 대칭이 깨지게 한다.
@@ -456,11 +474,11 @@ Vec2 FollowPath(Agent& a, const Path& path) {
         Vec2 target = closest + segDir * a.lookAhead;   // 경로 따라 약간 앞
         return Seek(a, target);
     }
-    return Vec2{0, 0};   // 관 안 — 보정 불필요
+    return Vec2{0, 0};   // 관 안 — 이 함수는 이탈 보정 전용 (전진은 별도 행동)
 }
 ```
 
-발상은 "*미래 위치가 경로 관을 벗어날 때만* 복귀 힘을 낸다"는 것이다. 관 안에 있으면 그냥 진행하고, 벗어나려 할 때만 경로 방향의 약간 앞 지점으로 Seek해 부드럽게 끌어들인다. 이렇게 하면 에이전트가 웨이포인트를 정확히 밟지 않고 *경로의 흐름을 따라 매끄럽게* 이동한다. 곡선 구간에서 안쪽으로 자연스럽게 깎으며 도는 궤적이 나온다.
+발상은 "*미래 위치가 경로 관을 벗어날 때만* 복귀 힘을 낸다"는 것이다. 관 안에 있으면 그냥 진행하고, 벗어나려 할 때만 경로 방향의 약간 앞 지점으로 Seek해 부드럽게 끌어들인다. 이렇게 하면 에이전트가 웨이포인트를 정확히 밟지 않고 *경로의 흐름을 따라 매끄럽게* 이동한다. 곡선 구간에서 안쪽으로 자연스럽게 깎으며 도는 궤적이 나온다. 이 함수는 관 이탈 *보정* 전용이므로, 관 안에서의 전진 속도는 별도의 cruise/progress 행동이나 상위 이동기가 담당한다는 계약을 전제한다 — 정지했거나 경로 반대 방향으로 움직이는 에이전트는 이 보정만으로 스스로 나아가지 못한다.
 
 ### 가장 가까운 점 계산
 
@@ -538,7 +556,7 @@ Vec2 Prioritized(const Agent& a) {
 
 충돌 회피처럼 반드시 반영돼야 할 가속도를 앞에 두면 조향 예산을 먼저 차지한다. 덜 중요한 행동은 남는 예산만 쓴다. 위 코드는 누적 크기가 아니라 *남은 예산(budget)* 을 추적한다.
 
-이 방식의 변형이 *priority dithering* 이다 — 정렬된 행동 중 첫 번째로 *0이 아닌* 힘을 내는 행동 하나만 골라 그 힘을 그대로 쓴다. 회피력이 0이면 분리, 그것도 0이면 seek으로 내려간다. 매 프레임 한 행동만 평가/적용해 비용이 가장 싸지만, 행동 간 전환이 급격해질 수 있다.
+이 방식의 변형이 *우선순위 중재(priority arbitration)* 다 — 정렬된 행동을 위에서부터 검사해 처음 *0이 아닌* 힘을 내는 행동을 골라 그 힘만 적용한다. 회피력이 0이면 분리, 그것도 0이면 seek으로 내려간다. 앞 행동이 0이면 다음 행동을 검사하므로 평가 횟수는 0이 아닌 행동을 만날 때까지 늘어날 수 있지만, 적용은 한 행동만 해 비용이 가장 싸다. 확률적으로 행동을 평가하는 dithering과 달리 결정론적 중재이며, 행동 간 전환이 급격해질 수 있다.
 
 ### 결합 전략 비교
 
@@ -546,7 +564,7 @@ Vec2 Prioritized(const Agent& a) {
 |---|---|---|---|---|
 | 가중 합산 | 약함 | 절단으로 섞임 | 낮음 | 일반, 군중 |
 | 우선순위 절단 | 보통 | 예산 배분 | 보통 | 안전 우선 소수 |
-| dithering | 약함 | 단일 선택 | 가장 낮음 | 대규모 군중 |
+| 우선순위 중재 | 약함 | 단일 선택 | 가장 낮음 | 대규모 군중 |
 | 컨텍스트 | 강함 | 구조적 회피 | 높음 | 정밀 회피 |
 
 ### 컨텍스트 스티어링
@@ -579,7 +597,7 @@ Vec2 ChooseDirection() {
 
 핵심은 *더하지 않고 고른다* 는 점이다. 두 회피 방향이 반대라도, 흥미가 살아 있는 가장 안전한 슬롯을 *선택* 하므로 0벡터가 나오지 않는다. 정면이 막혔으면 위험 마스킹으로 정면 슬롯이 배제되고, 좌우 중 흥미가 높은 쪽을 고른다. 슬롯 해상도(N)와 보간 방식이 품질·비용을 정한다. 16슬롯이면 방향 분해능이 22.5도라, 부드러운 결과를 위해 슬롯 간 보간이나 인접 슬롯으로의 흥미 확산을 더하기도 한다.
 
-결합 전략의 선택은 *상황의 안전 요구와 유닛 수* 에 달렸다. 정밀한 회피가 생명인 소수 에이전트는 우선순위/컨텍스트를, 대량 군중은 값싼 가중 합 + dithering을 쓴다. 어느 경우든 핵심은 "여러 단순 행동의 합성으로 복잡한 움직임을 만든다"는 steering의 근본 철학이다.
+결합 전략의 선택은 *상황의 안전 요구와 유닛 수* 에 달렸다. 정밀한 회피가 생명인 소수 에이전트는 우선순위/컨텍스트를, 대량 군중은 값싼 가중 합 + 우선순위 중재를 쓴다. 어느 경우든 핵심은 "여러 단순 행동의 합성으로 복잡한 움직임을 만든다"는 steering의 근본 철학이다.
 
 ## 9. 회전·정렬과 군집
 
@@ -691,7 +709,8 @@ struct SpatialHash {
     int64_t Key(Vec2 p) const {
         int gx = (int)std::floor(p.x / cell);
         int gy = (int)std::floor(p.y / cell);
-        return ((int64_t)gx << 32) ^ (uint32_t)gy;
+        // 음수 cell 좌표도 안전하도록 unsigned 비트 결합으로 만든다
+        return (int64_t)((uint64_t)(uint32_t)gx << 32 | (uint32_t)gy);
     }
     void Insert(int id, Vec2 p) { grid[Key(p)].push_back(id); }
 
@@ -700,7 +719,7 @@ struct SpatialHash {
         int gy = (int)std::floor(p.y / cell);
         for (int dx = -1; dx <= 1; ++dx)
         for (int dy = -1; dy <= 1; ++dy) {
-            int64_t k = ((int64_t)(gx+dx) << 32) ^ (uint32_t)(gy+dy);
+            int64_t k = (int64_t)((uint64_t)(uint32_t)(gx+dx) << 32 | (uint32_t)(gy+dy));
             if (auto it = grid.find(k); it != grid.end())
                 out.insert(out.end(), it->second.begin(), it->second.end());
         }
@@ -739,7 +758,7 @@ Steering Behaviors는 국소 운동을 목표 속도와 조향 가속도의 합�
 
 Seek/Flee의 기본 끌림·밀침과 오버슈트($v^2/2a$ 만큼 지나침), Arrive의 선형·제곱근 감속 프로파일, Wander의 1차 마르코프 각도 누적, Pursue/Evade의 미래 위치 예측과 정면 충돌 보정, Obstacle Avoidance의 feeler 회피와 대칭 데드락, Path Following의 관 기반 추종 — 각 행동은 단순한 벡터 연산이지만 고유한 실패 모드와 매개변수 민감도를 가진다. 이 행동들을 조합하면 생생한 움직임이 되고, 그 합성 가능성이 steering의 핵심 가치다.
 
-힘의 결합은 단순 합산의 상쇄·포화 함정과, 그것을 푸는 우선순위·dithering, 그리고 더하지 않고 *고르는* 컨텍스트 스티어링 사이의 절충이다. heading을 속도와 분리해 회전을 다루고, 같은 모델을 분리·정렬·응집 세 규칙으로 확장하면 중앙 제어 없는 군집이 창발한다. 공간 분할로 이웃 탐색을 $O(N^2)$에서 $O(N)$으로 낮추고 SoA로 핫 루프를 캐시에 맞추면, 이 모델은 수천 에이전트 규모까지 실시간으로 확장된다. steering은 길찾기가 정한 전역 경로를 *그럴듯한 국소 운동* 으로 옮기는 마지막 층이다.
+힘의 결합은 단순 합산의 상쇄·포화 함정과, 그것을 푸는 우선순위·중재, 그리고 더하지 않고 *고르는* 컨텍스트 스티어링 사이의 절충이다. heading을 속도와 분리해 회전을 다루고, 같은 모델을 분리·정렬·응집 세 규칙으로 확장하면 중앙 제어 없는 군집이 창발한다. 공간 분할로 이웃 탐색을 $O(N^2)$에서 $O(N)$으로 낮추고 SoA로 핫 루프를 캐시에 맞추면, 이 모델은 수천 에이전트 규모까지 실시간으로 확장된다. steering은 길찾기가 정한 전역 경로를 *그럴듯한 국소 운동* 으로 옮기는 마지막 층이다.
 
 ## 더 읽을거리
 

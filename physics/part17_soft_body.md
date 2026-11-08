@@ -51,9 +51,11 @@ soft body 의 *기하학적 모델*. 정밀성 vs 비용 의 결정.
 
 ```mermaid
 flowchart LR
-    A[입자 격자] -->|spring 연결| B[제약 그래프]
-    B --> C[PBD 시뮬]
-    C --> D[변형 가능 객체]
+    A[입자 격자] -->|"spring 연결 (force-based)"| Force[힘 계산]
+    A -->|"거리/위치 제약 (PBD)"| PBD[PBD 시뮬]
+    Force --> D[변형 가능 객체]
+    PBD --> D
+    Note[force-based 와 PBD 는<br/>별개 모델, 혼용 아님] -.-> D
 ```
 
 장점: 구현 단순. 단점: *모서리 가까이서 깍둑* — 표면이 *입자 해상도* 에 묶임.
@@ -79,7 +81,7 @@ flowchart LR
 
 각 tetrahedron에서 rest pose와 현재 pose로 deformation gradient를 구하고, 구성 방정식에서 응력이나 탄성 에너지를 계산한다. 결과의 물리적 의미는 재료 모델, 요소 차수, mesh 품질, 시간 적분과 선형·비선형 솔버의 수렴 허용 오차에 달려 있다.
 
-실시간에서도 규모와 요구에 따라 FEM을 사용할 수 있고, PBD·XPBD·shape matching을 선택할 수도 있다. 전자는 재료 파라미터와 응력 해석에 유리하고, 후자는 제약 기반 제작과 제한된 반복 예산에서의 강건성에 유리하다.
+실시간에서도 규모와 요구에 따라 FEM을 사용할 수 있고, PBD·XPBD·shape matching을 선택할 수도 있다. 전자는 재료 파라미터와 응력 해석에 유리하고, 후자는 제약 기반 제작과 제한된 반복 예산에서의 강건성에 유리하다. 여기서 FEM은 공간 이산화와 구성 에너지의 선택이고, PBD/XPBD는 그 에너지나 제약을 어떤 solver로 최소화하는지의 선택이다. 두 축은 직교에 가까워 같은 구성 에너지를 PBD/XPBD로 풀 수도 있으므로, 아래 비용·정밀도 표를 두 방법의 배타적 정확도 순위로 읽지 않는다.
 
 ### 1.5 산업 결정
 
@@ -204,6 +206,8 @@ flowchart LR
  - Goal: $\vec{g}_i = \vec{c} + R \vec{r}_i$.
  - 입자를 $\vec{x}_i \leftarrow \vec{x}_i + \alpha (\vec{g}_i - \vec{x}_i)$ 로 보정.
 
+데이터 계약으로 rest shape의 질량 가중 중심 $\vec{c}^{\,0} = \sum_i m_i \vec{x}_i^{0} / \sum_i m_i$ 을 먼저 정의하고, 저장하는 rest 좌표를 $\vec{q}_i = \vec{x}_i^{0} - \vec{c}^{\,0}$ 로 고정한다. 즉 `restRelative`는 이미 rest COM을 뺀 데이터여야 한다. 고정 입자($invMass=0$)도 질량 가중치로 $A_{pq}$ fitting에는 참여하되 위치 보정 $\vec{x}_i \leftarrow \vec{x}_i + \alpha (\vec{g}_i - \vec{x}_i)$ 에서는 제외한다. $R$은 $\det(R)=+1$ 로 강제한다.
+
 단순 $\alpha$ 는 호출 횟수와 dt에 따른 보정 비율이다. 재료의 시간 단위 강성처럼 사용하려면 지수 응답으로 변환하거나 XPBD compliance와 결합해야 한다.
 
 ### 3.3 최적 회전 찾기
@@ -310,6 +314,7 @@ PBD 표준 루프. predict → project (모든 거리 + 부피) → correct.
 void StepTetSoftBody(TetSoftBody& body, vec3 gravity, float dt) {
     // 1. Predict
     for (auto& p : body.particles) {
+        p.predicted = p.position;                 // 고정 입자도 predicted 가 있어야 제약이 앵커로 읽는다
         if (p.invMass <= 0) continue;
         p.velocity += gravity * dt;
         p.predicted = p.position + p.velocity * dt;
@@ -330,6 +335,8 @@ void StepTetSoftBody(TetSoftBody& body, vec3 gravity, float dt) {
 }
 ```
 
+고정 입자도 예측 위치를 가지며 constraint geometry에는 앵커로 참여하되 적분·위치 보정에서는 제외한다. 움직이는 anchor, teleport, 재고정 시에는 현재 position 복사만으로 속도·반작용을 모두 모델링하지 못하므로 target pose·anchor velocity·양방향 결합 정책을 별도 계약으로 둔다.
+
 ### 4.5 표면 vertex vs 내부 vertex
 
 - *표면 vertex* (외피) — 충돌 / 렌더링 mesh 와 연결.
@@ -345,11 +352,9 @@ tet이 뒤집히면 signed volume의 부호가 바뀌고 deformation gradient의
 
 ### 4.7 corotational FEM (한 발 앞서)
 
-PBD 의 자연 확장 — *deformation gradient* $F = \partial \vec{x} / \partial \vec{X}$ 로 *stress* 계산. polar decomposition $F = R S$ 에서 $R$ 분리 후 *strain = S - I*.
+PBD/XPBD와 마찬가지로 FEM도 *deformation gradient* $F = \partial \vec{x} / \partial \vec{X}$ 에서 응력을 계산하는 구성 모델을 쓸 수 있다. *선형 소변형(linear small-strain)* strain $S - I$ 를 그대로 쓰면 큰 회전에서 객관성(objectivity)이 깨져 비물리적 응력이 생긴다. polar decomposition $F = R S$ 에서 $R$ 을 분리해 회전을 제거한 *corotational FEM* 은 이 문제를 줄이는 한 가지 모델이다.
 
-이 strain 이 큰 회전에도 *적당* — 일반 FEM 의 *회전 시 stress 발산* 문제 해결. 영화·고급 게임의 *corotational FEM* 표준.
-
-게임은 *PBD + shape matching* 이 *근사적으로 같은 효과* — corotational 의 단순 버전.
+따라서 “회전 시 stress 발산”은 일반 FEM 전체의 한계가 아니라 선형 소변형 strain 모델의 한계다. 선형 FEM, corotational FEM, 비선형 hyperelastic FEM은 서로 다른 에너지를 정의하고, 그 에너지를 어떤 solver로 최소화하는지는 별도 축이다. PBD + shape matching이 corotational과 근사적으로 유사한 시각 효과를 줄 수 있지만, corotational FEM은 PBD의 자연 확장이나 동의어가 아니다.
 
 
 ## 5. 렌더링 mesh 와의 결합
@@ -583,7 +588,7 @@ Soft body는 연속체를 유한한 자유도와 재료·제약 모델로 이산
 3. **Shape matching** — 전역 또는 cluster별 목표 형상으로 복원.
 4. **렌더링 mesh** — barycentric 으로 시뮬 mesh 에 연결. 시뮬과 렌더 해상도 분리.
 5. **충돌** — 표면 입자 vs 환경. cloth 의 self-collision 와 동일 패턴.
-6. **트레이드오프** — N × kIter × 제약 수. budget 안에서 조정.
+6. **트레이드오프** — 입자 수 $N$, 제약 수 $M$, 반복 횟수 $k$ 를 조정. 기본 갱신은 $O(N + kM)$ 이고 이웃 탐색·충돌 비용은 별도. budget 안에서 조정.
 7. **통합** — 상태 이전, 충돌 결합, 계측과 실패 정책.
 
 Soft body 의 핵심은 *변형 자유도* 를 어떻게 제한하느냐다. 거리, 부피, shape matching, tetrahedral mesh 는 모두 시각적 그럴듯함과 계산 비용 사이의 선택지다.

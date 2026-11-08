@@ -61,10 +61,15 @@ struct InfluenceMap {
     bool  InBounds(int x, int y) const {
         return x >= 0 && x < width && y >= 0 && y < height;
     }
-    // 월드 좌표 → 셀 인덱스
-    void WorldToCell(float wx, float wy, int& cx, int& cy) const {
-        cx = int((wx - originX) / cellSize);
-        cy = int((wy - originY) / cellSize);
+    // 월드 좌표 → 셀 인덱스. 유한성·cellSize 양수·범위를 검사하고 음수도 올바르게 내림.
+    bool WorldToCell(float wx, float wy, int& cx, int& cy) const {
+        if (!std::isfinite(wx) || !std::isfinite(wy) || !(cellSize > 0.f)) {
+            cx = cy = -1;
+            return false;
+        }
+        cx = int(std::floor((wx - originX) / cellSize));   // int() 절삭은 음수를 0으로 당긴다
+        cy = int(std::floor((wy - originY) / cellSize));
+        return InBounds(cx, cy);
     }
 };
 ```
@@ -99,8 +104,7 @@ struct InfluenceMap {
 ```cpp
 void StampPoint(InfluenceMap& m, float wx, float wy, float strength) {
     int cx, cy;
-    m.WorldToCell(wx, wy, cx, cy);
-    if (m.InBounds(cx, cy))
+    if (m.WorldToCell(wx, wy, cx, cy))            // 유한·범위 검사 + floor 변환
         m.cells[cy * m.width + cx] += strength;   // 누적: 같은 셀 여러 유닛 합산
 }
 ```
@@ -169,7 +173,7 @@ void SpreadIterative(InfluenceMap& m, float decay, int iterations) {
 
 감쇠율 `decay`(예: 0.7)와 반복 횟수 `iterations`가 영향력이 퍼지는 *반경* 을 정한다. `decay`가 클수록 멀리 번지고, 반복이 많을수록 넓게 퍼진다. 한 점에서 $n$칸 떨어진 셀의 값은 대략 $\text{strength} \times \text{decay}^n$이 되므로, 영향력이 무시할 수준($\epsilon$)으로 떨어지는 반경은 $n \approx \log_{\text{decay}}(\epsilon/\text{strength})$이다. 이 점이 *벽을 우회* 한다는 게 결정적 장점이다 — `IsWall` 검사로 영향력이 장애물을 통과하지 못하게 하면, 적이 벽 너머에 있을 때 그 위협은 벽을 돌아온 거리만큼만 미친다.
 
-반복 확산에는 *두 가지 결함* 이 있다. 첫째, *비등방성(anisotropic) 왜곡* 이다. "이웃 중 최대"를 쓰면 영향력이 8방향 격자를 따라 별 모양·다이아몬드 모양으로 번진다 — 원형 falloff가 아니다. 둘째, *반복 비용* 이다. 한 번 spread에 $O(WH)$이고, 넓게 번지려면 $I$번 반복하므로 $O(WH \cdot I)$다. 반경을 키우면 비용이 선형으로 는다.
+반복 확산에는 *두 가지 결함* 이 있다. 첫째, *비등방성(anisotropic) 왜곡* 이다. "이웃 중 최대"를 쓰면 영향력이 8방향 격자를 따라 축에 정렬된 사각형 등고선으로 번진다 — 원형 falloff가 아니다. 둘째, *반복 비용* 이다. 한 번 spread에 $O(WH)$이고, 넓게 번지려면 $I$번 반복하므로 $O(WH \cdot I)$다. 반경을 키우면 비용이 선형으로 는다.
 
 다음은 한 점 영향력 100을 `decay=0.6`, 8방향 max로 3회 확산했을 때 소스를 지나는 축 방향 한 행의 값 변화다.
 
@@ -192,7 +196,7 @@ $$
 
 이다. 여기서 $d_\infty$는 *체비쇼프(Chebyshev) 거리* , 즉 $L^\infty$ 거리다. 유도는 간단하다. $h$번 홉을 거쳐 들어온 양은 $s\cdot\text{decay}^h$이고 $\text{decay}\in(0,1)$이라 *홉 수가 가장 적은 경로* 가 max로 선택된다. 8연결 격자에서 $(\Delta x,\Delta y)$까지의 최소 홉 수는 정확히 $\max(|\Delta x|,|\Delta y|)$다 — 대각 이동이 한 홉에 $x$와 $y$를 동시에 1씩 줄이기 때문이다. 따라서 max-multiply 확산은 *대각 홉을 축 홉과 똑같이 한 걸음으로 친다* . 코너 $(3,3)$도 같은 법칙에 따라 축 방향 $(3,0)$과 똑같이 $100\cdot0.6^3=21.6$이 된다(시뮬레이션 고정점이 $s\cdot\text{decay}^{d_\infty}$와 $10^{-15}$까지 일치).
 
-그러므로 등영향력 집합 $\{\text{value}=c\}$는 $\{d_\infty=\text{const}\}$, 곧 *축에 정렬된 정사각형* 이지 원이 아니다. 이것이 "별 모양·다이아몬드 모양"의 정체다.
+그러므로 등영향력 집합 $\{\text{value}=c\}$는 $\{d_\infty=\text{const}\}$, 곧 *축에 정렬된 정사각형* 이지 원이 아니다. 별 모양·다이아몬드 모양은 서로 다른 확산 알고리즘에서 나타나는 일반적인 격자 이방성의 예이며, 여기 8연결 max-multiply의 등고선은 정사각형이다.
 
 비등방성의 크기는 척도 변환으로 못 박는다. 같은 임계 $c$에 도달하는 거리를 보면, 축 방향은 유클리드 거리 $R_{\text{axis}}=\log_{\text{decay}}(c/s)$에서 닿고, 대각(45°) 방향은 같은 홉 수 $n$이 유클리드 거리 $n\sqrt2$에 해당하므로 $R_{\text{diag}}=\sqrt2\,R_{\text{axis}}$다. 즉 영향력이 대각으로 *항상 $\sqrt2\approx1.414$배 멀리* 새 나간다 — 41.4% 과도 도달이며, $\text{decay}$ 값과 임계 $c$에 *무관* 한 고정 상수다. 값 영역으로 보면, 셀 $(4,4)$(유클리드 $4\sqrt2\approx5.66$)는 $\text{decay}^4=0.130$인데 같은 유클리드 거리의 축 셀은 $\text{decay}^{5.66}=0.056$이라, 대각의 영향력이 *2.33배 과대* 하다.
 
@@ -237,7 +241,7 @@ void SpreadGaussianSeparable(InfluenceMap& m, const std::vector<float>& k) {
 }
 ```
 
-분리 가능 블러의 한계는 *장애물을 못 다룬다* 는 것이다. 1D 패스가 벽을 가로지르면 영향력이 새 나간다. 그래서 분리 가능 가우시안은 *개활지 위주* 거나, 장애물 처리는 별도(벽 셀을 0으로 강제, 또는 패스 중 벽에서 누적 중단)로 보정해 쓴다. "부드럽고 빠르되 장애물에 둔감"이 이 방식의 성격이다.
+분리 가능 블러의 한계는 *장애물을 못 다룬다* 는 것이다. 1D 패스가 벽을 가로지르면 커널이 벽 반대편 source를 읽어 영향력이 새 나간다. 결과에서 벽 셀을 0으로 지워도 커널이 이미 넘겨준 반대편 셀의 누적은 취소되지 않으므로, 벽 차단이 목적이면 *walkable 그래프 위의 거리나 연결성* 을 반영한 전파(거리장 기반)를 써야 한다. 분리 가능 가우시안은 *개활지 위주* 의 밀도 평활에 두고, "부드럽고 빠르되 장애물에 둔감"이 이 방식의 성격이다.
 
 ### 거리장 기반 전파
 
@@ -272,13 +276,13 @@ void SpreadByDistance(InfluenceMap& m, const std::vector<Cell>& sources,
 }
 ```
 
-`Falloff`는 거리를 영향력으로 바꾸는 함수다 — 선형 $\max(0, 1 - d/r)$, 지수 $e^{-d/\sigma}$, 역제곱 $1/(1+d^2)$ 등을 쓴다. 이 방식은 대각 $\sqrt 2$ 보정 덕에 비등방성이 octile 잔여분(최대 약 8.24%)으로 줄고(거리는 그래프 위의 진짜 측지 거리), 장애물을 정확히 우회한다. 비용은 우선순위 큐 때문에 $O(WH \log WH)$로 반복 확산보다 무겁지만, 한 번에 정확한 거리를 얻는다. 세 방식의 절충은 다음과 같다.
+`Falloff`는 거리를 영향력으로 바꾸는 함수다 — 선형 $\max(0, 1 - d/r)$, 지수 $e^{-d/\sigma}$, 역제곱 $1/(1+d^2)$ 등을 쓴다. 이 거리장은 *가장 가까운 소스* 까지의 거리 하나만 담으므로 source별 강도·부호가 같고 falloff가 거리의 단조 함수일 때만 합산 영향력을 복원한다 — 강도·부호가 다른 이질 소스는 최단거리 하나로 나타낼 수 없으므로 동질 채널로 나누거나 가중 누적 전파를 써야 한다. 이 방식은 대각 $\sqrt 2$ 보정 덕에 비등방성이 octile 잔여분(최대 약 8.24%)으로 줄고(거리는 그래프 위의 진짜 측지 거리), 장애물을 정확히 우회한다. 비용은 우선순위 큐 때문에 $O(WH \log WH)$로 반복 확산보다 무겁지만, 한 번에 정확한 거리를 얻는다. 세 방식의 절충은 다음과 같다.
 
 | 방식 | 복잡도 | 장애물 | 등방성 | 적합 |
 |---|---|---|---|---|
-| 반복 확산 (max) | $O(WH \cdot I)$ | 우회함 | 나쁨 (별 모양) | 거친 위협 맵, 작은 반경 |
+| 반복 확산 (max) | $O(WH \cdot I)$ | 우회함 | 나쁨 (L∞ 사각형 등고선) | 거친 위협 맵, 작은 반경 |
 | 분리 가우시안 | $O(WH \cdot r)$ | 무시 | 좋음 (원형) | 개활지, 밀집도 맵 |
-| 거리장 BFS | $O(WH \log WH)$ | 정확히 우회 | 좋음 | 정확한 위협·접근 맵 |
+| 거리장 BFS | $O(WH \log WH)$ | 정확히 우회 | 좋음 | 동질 소스 위협·접근 맵 |
 
 ## 4. Decay와 시간적 감쇠
 
@@ -478,10 +482,11 @@ Creative Assembly가 공개한 Total War: Warhammer III 캠페인 AI 설명에�
 
 - *시간 분할(time-slicing)*: 맵을 가로 띠로 나눠 매 프레임 일부 행만 갱신, N프레임에 걸쳐 전체를 돈다. 프레임당 비용을 1/N로 평탄화한다.
 - *더티 영역(dirty region)*: 유닛이 움직인 셀 주변만 다시 stamp·spread한다. 정적인 후방은 그대로 둔다.
-- *비동기 갱신*: 영향력 맵 갱신을 별도 잡(job)/스레드로 빼고, 전술 AI는 *직전 완성본* 을 읽게 한다(더블 버퍼).
+- *비동기 갱신*: 영향력 맵 갱신을 별도 잡(job)/스레드로 빼고, 전술 AI는 *직전 완성본* 을 읽게 한다(더블 버퍼). 독자가 다 읽기 전에는 그 버퍼를 다음 write용으로 재사용하지 않는다.
 
 ```cpp
 // published는 읽기 전용 완성본, building은 다음 세대의 작업 버퍼다.
+// 공개(publish) → 독자 읽기 완료(reader-complete) → 재사용(reuse) 순서를 지킨다.
 void TickSliced(const InfluenceMap& published, InfluenceMap& building,
                 int& band, int bandCount, int stencilRadius) {
     int y0 = building.height * band / bandCount;
@@ -492,9 +497,10 @@ void TickSliced(const InfluenceMap& published, InfluenceMap& building,
     BuildRowsFromSnapshot(published, building, y0, y1, halo0, halo1);
 
     if (++band == bandCount) {
-        PublishCompletedGeneration(building); // 원자적 핸들 교환 또는 락
+        PublishCompletedGeneration(building); // release 저장으로 새 핸들 공개
+        WaitForReadersOfRetiredBuffer();      // 독자 pin/refcount/epoch·job 완료 대기
         band = 0;
-        BeginNextGeneration(building);
+        BeginNextGeneration(building);        // 읽기 완료 후에만 이전 버퍼를 덮는다
     }
 }
 ```
@@ -503,10 +509,12 @@ void TickSliced(const InfluenceMap& published, InfluenceMap& building,
 flowchart LR
     Frame[매 프레임] --> Slice{시간 분할}
     Slice -->|구역 1/N만| Update[부분 갱신]
-    Update --> Read[전술 AI는 직전 완성본 읽음]
+    Update --> Publish[완성본 출판<br/>release]
+    Publish --> Read[전술 AI가 읽음]
+    Read -->|독자 완료| Reuse[이전 버퍼 재사용]
 ```
 
-영향력 맵은 보통 정밀한 물리 상태가 아니라 전술적 근사다. 허용 가능한 stale 시간은 유닛 속도와 질의 계약으로 정한다. 띠별 갱신은 같은 공개 버퍼를 직접 덮으면 서로 다른 시점의 행이 섞이고, spread stencil이 띠 경계를 넘을 때 수치 결과도 순서에 의존한다. halo 영역을 포함해 작업 버퍼에 쓰고, 한 세대가 완성된 뒤 버퍼를 교환하면 독자는 일관된 스냅숏만 본다. 즉 시간 분할은 프레임 비용을 평탄화하지만 전체 작업량을 자동으로 줄이지 않으며, 완성까지의 지연을 늘린다.
+영향력 맵은 보통 정밀한 물리 상태가 아니라 전술적 근사다. 허용 가능한 stale 시간은 유닛 속도와 질의 계약으로 정한다. 띠별 갱신은 같은 공개 버퍼를 직접 덮으면 서로 다른 시점의 행이 섞이고, spread stencil이 띠 경계를 넘을 때 수치 결과도 순서에 의존한다. halo 영역을 포함해 작업 버퍼에 쓰고, 한 세대가 완성된 뒤 버퍼를 교환하면 독자는 일관된 스냅숏만 본다. 즉 시간 분할은 프레임 비용을 평탄화하지만 전체 작업량을 자동으로 줄이지 않으며, 완성까지의 지연을 늘린다. 이때 출판은 release/acquire로 짝지어야 하고, 폐기된 이전 버퍼는 *독자들이 읽기를 마쳤다는 완료 신호* 이후에만 다음 write용으로 재사용한다 — 포인터만 교환하면 독자가 보유한 버퍼를 writer가 다음 프레임에 덮어쓸 수 있다. 단일 스레드나 프레임 job completion barrier, reader pin/refcount/epoch 같은 reclamation 장치가 이 재사용 게이트를 제공한다.
 
 ### 디버깅과 시각화
 
@@ -557,5 +565,5 @@ spread는 구현에 따라 성격이 갈린다. 반복 확산은 단순하고 �
 - Alberto Uriarte & Santiago Ontañón, "Kiting in RTS Games Using Influence Maps" (AIIDE 2012) — StarCraft 봇에서 영향력 맵을 kiting에 적용하고 평가한 사례.
 - Creative Assembly, "Total War: WARHAMMER III — Improving AI in Campaign" — 군대의 범위와 상호작용 강도를 나타내는 캠페인 influence map 설명.
 - Gunilla Borgefors, "Distance Transformations in Digital Images" (Computer Vision, Graphics, and Image Processing 34(3), 1986) — chamfer 거리 변환과 격자 거리 척도의 비등방성 한계.
-- Per-Erik Danielsson, "Euclidean Distance Mapping" (Computer Graphics and Image Processing 14(3), 1980) — 정확한 유클리드 거리 변환의 고전.
-- Pedro F. Felzenszwalb & Daniel P. Huttenlocher, "Distance Transforms of Sampled Functions" (Theory of Computing 8(1), 2012) — 정확한 EDT의 선형 시간 알고리즘.
+- Per-Erik Danielsson, "Euclidean Distance Mapping" (Computer Graphics and Image Processing 14(3), 1980) — 벡터 전파 기반 근사 유클리드 거리 변환의 고전(ITK는 Danielsson 계열을 pixel accuracy의 approximate Euclidean distance로 설명한다). 정확한 EDT는 아래 Felzenszwalb–Huttenlocher를 본다.
+- Pedro F. Felzenszwalb & Daniel P. Huttenlocher, "Distance Transforms of Sampled Functions" (Theory of Computing 8(1), Article 19, 2012, pp. 415–428) — 정확한 EDT의 선형 시간 알고리즘.

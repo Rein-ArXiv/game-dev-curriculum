@@ -30,7 +30,10 @@ std::size_t SlabAllocator::SizeToClass(std::size_t size) {
 }
 
 void* SlabAllocator::Allocate(std::size_t size, std::size_t alignment) {
+    // 공통 계약: 0바이트 요청은 no-op(nullptr)이고 어떤 카운터도 바꾸지 않는다.
+    if (size == 0) return nullptr;
     if (!IsValidAlignment(alignment)) {
+        RecordFailure();
         return nullptr;
     }
     // size 또는 alignment 중 큰 쪽을 기준으로 클래스를 고른다.
@@ -38,12 +41,15 @@ void* SlabAllocator::Allocate(std::size_t size, std::size_t alignment) {
     const std::size_t need = std::max(size, alignment);
     const std::size_t cls  = SizeToClass(need);
     if (cls == kClassCount) {
-        return nullptr;  // 클래스 한도 초과
+        RecordFailure();  // 클래스 한도 초과
+        return nullptr;
     }
 
     void* ptr = pools_[cls]->Allocate(size, alignment);
     if (ptr) {
         RecordAlloc(size);
+    } else {
+        RecordFailure();  // 해당 class 고갈 (안쪽 Pool도 자기 카운터를 올린다)
     }
     return ptr;
 }
@@ -81,6 +87,22 @@ std::size_t SlabAllocator::ClassInUse(std::size_t classIdx) const {
 
 std::size_t SlabAllocator::ClassCapacity(std::size_t classIdx) const {
     return classIdx < kClassCount ? pools_[classIdx]->BlockCount() : 0;
+}
+
+std::size_t SlabAllocator::ReservedBacking() const {
+    std::size_t total = 0;
+    for (const auto& pool : pools_) {
+        if (pool) total += pool->ReservedBacking();
+    }
+    return total;
+}
+
+std::size_t SlabAllocator::SlotBytesLive() const {
+    std::size_t total = 0;
+    for (const auto& pool : pools_) {
+        if (pool) total += pool->SlotBytesLive();
+    }
+    return total;
 }
 
 }  // namespace ppl

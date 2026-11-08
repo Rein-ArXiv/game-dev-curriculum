@@ -60,7 +60,7 @@ CD 품질(44.1kHz, 스테레오, 16-bit)은 초당 $44100 \times 2 \times 2 = 17
 
 ### 손실 압축의 트레이드오프
 
-손실 코덱은 신호를 시간·주파수 영역으로 변환하고, 청각 마스킹 모델과 비트 할당으로 덜 지각되는 성분을 더 거칠게 양자화한다. 단순히 가청 주파수 위를 잘라내는 방식이 아니다. 비트레이트를 낮출수록 크기는 줄지만 pre-echo, warbling, 금속성 음색과 고역 손실 같은 아티팩트가 커질 수 있다.
+MP3·Vorbis 같은 변환 기반 지각 코덱은 신호를 시간·주파수 영역으로 변환하고, 청각 마스킹 모델과 비트 할당으로 덜 지각되는 성분을 더 거칠게 양자화한다. 단순히 가청 주파수 위를 잘라내는 방식이 아니다. 비트레이트를 낮출수록 크기는 줄지만 pre-echo, warbling, 금속성 음색과 고역 손실 같은 아티팩트가 커질 수 있다. Opus처럼 선형 예측(SILK)과 변환(CELT)을 결합하는 하이브리드 코덱은 이 구조만으로 설명되지 않는다.
 
 - *BGM*: 길어서 압축 이득이 크다. 허용 비트레이트는 장르, 채널 수, 마스터 품질과 목표 장치에서 블라인드 청취 테스트로 정한다.
 - *효과음*: 짧고 자주 반복되며 *피치 변조* 가 흔하다. 손실 압축의 아티팩트가 변조로 증폭될 수 있어, 짧은 효과음은 *무압축 PCM 또는 ADPCM* 으로 두는 편이 안전하다.
@@ -154,9 +154,9 @@ public:
 flowchart LR
     Disk[디스크] -->|백그라운드 스레드| Fill[버퍼 B 채우기]
     Play[오디오 콜백] -->|재생 중| BufA[버퍼 A]
-    BufA -->|소진| Swap[교체]
+    BufA -->|소진: 청크 끝 도달| Swap[교체 시점<br/>fillReady가 true일 때만]
     Fill --> BufB[버퍼 B]
-    Swap --> BufB
+    Swap --> BufB; Swap -.->|미준비면 교체 없이<br/>폴백·무음| Under[버퍼 언더런]
 ```
 
 ```cpp
@@ -167,18 +167,27 @@ struct StreamingVoice {
     std::atomic<bool> fillReady[2];      // 채움 완료 플래그
 
     // 실시간 콜백: 이미 디코드된 PCM만 읽는다.
+    // 요청 frames가 현재 청크의 남은 프레임보다 길면 청크 경계를 여러 번 넘으며 소비한다.
+    // 계약: 청크 전환은 fillReady가 true일 때만 일어나고, producer는 콜백이 비운 버퍼만 채운다.
+    //       EOF·초기 프리필 부족·underflow에서는 커서를 임의로 진행시키지 않고 남은 출력만 폴백으로 채운다.
     void Mix(float* out, int frames) {
-        if (PlayBufferExhausted()) {
-            int next = playBuffer ^ 1;
-            if (!fillReady[next].load(std::memory_order_acquire)) {
-                MixFallbackOrSilence(out, frames);
-                return;
+        int written = 0;
+        while (written < frames) {
+            if (PlayBufferExhausted()) {
+                int next = playBuffer ^ 1;
+                if (!fillReady[next].load(std::memory_order_acquire)) {
+                    MixFallbackOrSilence(out + written, frames - written);
+                    return;                  // underflow: 남은 출력만 폴백으로 채운다
+                }
+                playBuffer ^= 1;             // 채워진 버퍼로 교체
+                fillReady[playBuffer].store(false, std::memory_order_release);
+                RequestFillNonBlocking(playBuffer ^ 1); // SPSC 요청 큐
             }
-            playBuffer ^= 1;             // 채워진 버퍼로 교체
-            fillReady[playBuffer].store(false, std::memory_order_release);
-            RequestFillNonBlocking(playBuffer ^ 1); // SPSC 요청 큐
+            int take = std::min(frames - written, FramesLeftInChunk(playBuffer));
+            MixPreparedPCM(pcm[playBuffer], written, out, take);
+            AdvanceCursor(playBuffer, take);
+            written += take;
         }
-        MixPreparedPCM(pcm[playBuffer], out, frames);
     }
 };
 ```
@@ -225,18 +234,20 @@ Voice* AcquireVoiceOrSteal(const SoundRequest& request) {
         }
     }
     if (victim && lowestImportance < Importance(request)) {
-        victim->FadeOutOrStop();                   // 클릭을 피할 수 있으면 짧게 감쇠
-        return pool_.Recycle(victim);              // 같은 슬롯을 새 요청에 재사용
+        victim->StopNow();                         // 채택한 정책: 즉시 정지(오디오 스레드를 기다리지 않음)
+        return pool_.Recycle(victim);              // 슬롯 회수는 음향적 종료와 분리
     }
     return nullptr;
 }
 ```
 
+채택한 정책은 *즉시 정지* 다. `FadeOutOrStop`처럼 비동기 페이드와 슬롯 재사용을 한 함수에 겹치면, 페이드가 끝나기 전에 `Recycle`이 파라미터를 덮어 이전 소리의 꼬리를 잃거나, 반대로 오디오 스레드를 페이드 종료까지 기다리게 만든다. 부드러운 꼬리가 필요하면 *별도 tail voice*나 *짧은 크로스페이드용 여분 슬롯*으로 분리하고, pool 회수(자원)와 음향적 종료(신호)를 구분한다.
+
 중요도 함수는 들리는 결과를 좌우한다. 거리 자체보다 감쇠·가림·버스 게인까지 반영한 예상 loudness, 게임플레이 중요도, 재생 진행도와 반복 여부를 정규화해 비교한다. 대사·경고음처럼 중단 불가 범주는 가중합보다 먼저 hard constraint로 보호한다. 서로 단위가 다른 거리·초·게인을 임의 상수로 더하면 월드 스케일이나 에셋 길이가 바뀔 때 정책이 무너진다.
 
 ### Virtualization — 들리지 않아도 추적
 
-빼앗긴 사운드를 *완전히 죽이지 않고* *가상 보이스(virtual voice)* 로 강등하는 기법이 있다. 가상 보이스는 *DSP·디코딩은 안 하지만 재생 위치·상태는 계속 추적* 한다. 나중에 그 사운드가 다시 중요해지면(가까워지거나 다른 사운드가 끝나면) *정확한 위치에서 실제 보이스로 복귀* 한다.
+빼앗긴 사운드를 *완전히 죽이지 않고* *가상 보이스(virtual voice)* 로 강등하는 기법이 있다. 가상 보이스는 *DSP·디코딩은 안 하지만 재생 위치·상태는 계속 추적* 한다. 복귀 지점은 채택한 *경과 시간(elapsed-time)* 정책으로 정한다 — 재생 시각만 진행시키고 이후 정확한 위치에서 실제 보이스로 되돌리되, pitch·loop 상태, 압축 스트림의 decoder seek, DSP 체인의 상태 복구 범위는 구현에 따라 다르다. "처음부터 재생"과 "멈춘 위치에서 재개"는 다른 정책이며, 미들웨어가 이 전부를 항상 자동 보장한다고 단정하지 않는다.
 
 ```cpp
 // 긴 루프 앰비언스가 멀어져 빼앗겼다가 다시 가까워질 때
@@ -264,6 +275,9 @@ virtualization 없이 빼앗으면, 복귀 시 *루프가 처음부터 다시 �
 | 커스텀 커브 | 디자이너 그래프 | 게임플레이 튜닝 |
 
 ```cpp
+// 전제: 유한 입력, 0 < refDist <= fadeStart < maxDist, rolloff >= 0.
+// 이 순서를 어기면(fadeStart < refDist) 경계 직후 게인이 급락한다.
+// 설정 검증은 오디오 콜백이 아니라 게임/툴 스레드에서 수행한다.
 float DistanceAttenuation(float dist, float refDist,
                           float fadeStart, float maxDist, float rolloff) {
     if (dist <= refDist) return 1.0f;
@@ -297,7 +311,9 @@ $$p(r) = \sqrt{I(r)} \propto \frac{1}{r}$$
 - *HRTF(Head-Related Transfer Function)*: 머리·귓바퀴의 방향별 필터를 모델링해 헤드폰에서 위아래·앞뒤 단서를 제공한다. 사용자별 HRTF 차이와 계산 비용이 있으며, VR에서 특히 가치가 크지만 모든 VR 콘텐츠의 기능적 필수조건은 아니다.
 
 ```cpp
-// 패닝: 방위각으로 좌우 게인 (등파워 패닝)
+// 패닝: 정면 반공간의 방위각을 좌우 게인으로 매핑한다 (등파워 패닝).
+// 계약: azimuth는 정면 기준 [-π/2, π/2]로 제한한다. 뒤쪽 ±π 부근은 이 함수로
+//       매핑하지 않는다 — 같은 방향인데 좌우가 반대로 튀기 때문이다(HRTF와 별개).
 void StereoPan(float azimuth, float& gainL, float& gainR) {
     float pan = std::clamp<float>(azimuth / (M_PI * 0.5f), -1.0f, 1.0f);  // -1=왼, +1=오른
     float angle = (pan + 1.0f) * 0.25f * M_PI;                      // 0~π/2
@@ -375,7 +391,12 @@ $$
 IIR 필터는 이전 출력 값을 피드백해 적은 계수로 강한 특성을 만든다.
 
 ```cpp
-// 2차 biquad의 Direct Form I 예시
+// 2차 biquad의 Direct Form I 예시.
+// 차분방정식: y[n] = (b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]) / a0.
+// 아래 계수는 a0로 정규화되어 있다고 가정한다(a0는 코드에 나타나지 않는다).
+// x1,x2,y1,y2는 지연 상태이며, 스테레오 등 채널마다 독립 인스턴스로 0에서 초기화한다.
+// 이 형태는 고정 계수(LTI)의 안정 조건을 전제한다. 재생 중 계수를 바꾸면 상태와
+// 새 계수가 불연속을 만들 수 있으므로 보간·유효 범위 제한이 별도로 필요하다.
 float Process(float x) {
     const float y = b0*x + b1*x1 + b2*x2 - a1*y1 - a2*y2;
     x2 = x1; x1 = x;
@@ -390,7 +411,7 @@ float Process(float x) {
 
 ### 비선형 처리와 aliasing
 
-게인과 선형 필터는 입력에 없던 주파수를 만들지 않는다. clipping, saturation, distortion, 일부 compressor 동작은 비선형이므로 새 고조파를 만든다. 새 고조파가 Nyquist 주파수를 넘으면 가청 대역으로 aliasing된다.
+고정 게인과 시불변(LTI) 선형 필터는 정상상태에서 입력에 없던 주파수를 만들지 않는다. 다만 시간에 따라 변하는 게인은 입력에 대해 선형이어도 변조로 sideband를 만든다 — 선형성과 시불변성을 혼동하면 안 된다(아래 gain ramp가 그 예다). clipping, saturation, distortion, 일부 compressor 동작은 비선형이므로 새 고조파를 만든다. 새 고조파가 Nyquist 주파수를 넘으면 가청 대역으로 aliasing된다.
 
 비선형 효과를 내부적으로 더 높은 샘플레이트에서 처리한 뒤 저역 통과 필터와 다운샘플링을 적용하면 aliasing을 줄일 수 있다. oversampling은 품질을 높이지만 효과 처리 비용과 버퍼 지연을 늘린다. 모든 보이스에 무조건 적용하지 않고, 왜곡이 강한 효과나 노출이 큰 버스에 제한하는 것이 일반적이다.
 

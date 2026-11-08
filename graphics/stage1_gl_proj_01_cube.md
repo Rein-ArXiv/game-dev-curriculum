@@ -251,7 +251,7 @@ void main() {
 }
 ```
 
-정점 셰이더의 `out vec3 vColor`와 프래그먼트 셰이더의 `in vec3 vColor`는 *이름과 타입이 같으면 자동 연결* 된다. 그 사이에 래스터라이저가 끼어들어 *프래그먼트마다 다른 값* 으로 보간한다. 이름이 한 글자라도 다르거나 타입이 다르면 링크 시점에 연결이 끊겨, 프래그먼트 셰이더의 `in` 변수가 정의되지 않은 값을 받는다. 디버그 컨텍스트는 이를 link 단계에서 경고로 알려준다.
+정점 셰이더의 `out vec3 vColor`와 프래그먼트 셰이더의 `in vec3 vColor`는 *이름과 타입이 같으면 자동 연결* 된다. 그 사이에 래스터라이저가 끼어들어 *프래그먼트마다 다른 값* 으로 보간한다. 이름이 한 글자라도 다르거나 타입이 다르면 개별 셰이더 컴파일은 통과하더라도 링크 단계에서 interface 불일치로 *링크가 실패* 한다(예: VS `out vec3` ↔ FS `in vec2`). 이때 `glGetProgramiv(GL_LINK_STATUS)`와 `glGetProgramInfoLog`로 실패와 원인을 확인한다.
 
 ### 무게중심 좌표 보간
 
@@ -544,7 +544,7 @@ while (!glfwWindowShouldClose(window)) {
 }
 ```
 
-`glfwGetTime`을 회전 각도로 직접 쓰면 회전 속도가 *프레임 레이트와 무관* 하게 실제 경과 시간에 묶인다. 만약 `model = glm::rotate(model, dt,...)`처럼 매 프레임 누적시키면 회전 속도가 fps에 비례해 버리므로, 시간 기반 갱신이 더 안정적이다.
+`glfwGetTime`을 회전 각도로 직접 쓰면 회전 속도가 *프레임 레이트와 무관* 하게 실제 경과 시간에 묶인다. `model = glm::rotate(model, anglePerFrame, ...)`처럼 *프레임당 고정 각도* 를 누적하면 fps가 회전 속도를 좌우한다. 대신 `anglePerSpeed * dt`처럼 초 단위 속도에 경과 시간 dt를 곱해 누적하면 fps와 무관하다(같은 축 회전은 각도가 합산되므로 dt 합이 같으면 결과가 같다). 누적 곱의 부동소수 drift를 피하려면 절대 시간 t에서 매 프레임 `model`을 새로 만드는 편이 안정적이다.
 
 이 단계에서 면 컬링을 잠시 끄고 실행하면 *큐브가 돌긴 하지만 면의 앞뒤가 뒤죽박죽* 으로 보인다. 깊이 테스트가 켜져 있지 않아 *마지막에 그린 면이 항상 위* 에 나타나기 때문이다. 볼록한 큐브 하나는 컬링만으로도 올바르게 보이지만, 여러 물체나 오목한 메시에서는 면 컬링만으로는 부족하다 — 컬링은 *자기 자신* 의 뒷면만 지우지, 한 물체가 다른 물체를 가리는 관계는 풀지 못한다.
 
@@ -603,16 +603,16 @@ flowchart TB
 
 ### Early Depth Test
 
-대부분의 현대 GPU는 *프래그먼트 셰이더를 실행하기 전* 에 깊이 테스트를 한다 — 통과 못 할 픽셀은 *셰이더 호출 자체를 생략* 한다. 이를 *Early-Z* 또는 *HiZ* 라고 부른다. 프래그먼트 셰이더 비용을 공짜로 줄여주는 최적화다.
+대부분의 현대 GPU는 *프래그먼트 셰이더를 실행하기 전* 에 깊이 테스트를 한다 — 통과 못 할 픽셀은 *셰이더 호출 자체를 생략* 한다. 이를 *Early-Z* 라고 부르고, 깊이 전용 패스에서 계층적 가림을 쓰는 것을 *Hi-Z* 라고 부른다. 프래그먼트 셰이더 비용을 크게 줄여주는 최적화다.
 
-단, 셰이더가 `gl_FragDepth`를 명시적으로 갱신하거나 `discard`를 호출하면 *Early-Z가 비활성화* 되어 모든 셰이더가 실행된 뒤에 테스트된다. 깊이 값을 셰이더가 결정하기 전까지는 하드웨어가 미리 판단할 수 없기 때문이다. 알파 컷오프 / 마스크 텍스처를 쓰는 풀잎 같은 메시가 *느려지는* 이유다. GLSL 4.2의 `layout(early_fragment_tests) in;`을 쓰면 `discard`가 있어도 테스트를 강제로 앞당길 수 있지만, 이 경우 discard된 픽셀의 깊이 쓰기는 막을 수 없다.
+단, 셰이더가 `gl_FragDepth`를 갱신하거나 `discard`를 호출하면 *early depth update*(early test 결과의 깊이 쓰기)가 제한되어, 통과하지 못할 프래그먼트도 셰이더가 실행되는 경우가 많다. 이것이 알파 컷오프 / 마스크 텍스처를 쓰는 풀잎 같은 메시가 *느려지는* 이유다. 여기서 early *test* 와 early *update*, 그리고 Hi-Z는 서로 다른 개념이며 구현·하드웨어 최적화에 따라 허용 범위가 다르다. GLSL 4.2의 `layout(early_fragment_tests) in;`으로 early test를 명시적으로 강제할 수 있고, `GL_ARB_conservative_depth`의 `layout(depth_greater/less) out float gl_FragDepth;` 같은 조건이면 early test를 유지하는 구현도 있다. discard된 픽셀의 깊이 쓰기는 보장되지 않는다.
 
-| 셰이더 패턴 | Early-Z |
-|---|---|
-| 단순 fragment shader | 활성 |
-| `gl_FragDepth =...` | 비활성 |
-| `discard` | 비활성 |
-| `out` 변수만 갱신 | 활성 |
+| 셰이더 패턴 | early test | early depth update |
+|---|---|---|
+| 단순 fragment shader | 허용 | 허용 |
+| `gl_FragDepth =...` | conservative depth 조건에서 허용 | 제한 |
+| `discard` | 조건부/구현 의존 | 제한 |
+| `out` 변수만 갱신 | 허용 | 허용 |
 
 Early-Z가 잘 작동하려면 *불투명 객체를 앞에서 뒤 순서(front-to-back)* 로 그리는 것이 유리하다. 가까운 것을 먼저 그려 깊이 버퍼를 채워두면, 뒤에 있는 가려진 프래그먼트가 셰이더 실행 전에 버려진다. 이 정렬이 깊이 prepass의 기본 아이디어다.
 
@@ -653,12 +653,14 @@ near를 0.1에서 0.01로 줄이면 *카메라 코앞의 객체* 를 더 가깝�
 
 ```cpp
 glEnable(GL_POLYGON_OFFSET_FILL);
-glPolygonOffset(1.0f, 1.0f);   // factor, units: 깊이를 약간 밀어낸다
+// 표준 0=near, GL_LESS 규약: 양수 offset은 깊이를 키워 *뒤로* 민다.
+// 데칼을 표면 위로 드러내려면 음수 offset으로 데칼을 당긴다.
+glPolygonOffset(-1.0f, -1.0f);
 DrawDecal();
 glDisable(GL_POLYGON_OFFSET_FILL);
 ```
 
-오프셋은 표면의 화면 공간 기울기에 비례한 양(factor)과 깊이 버퍼의 최소 분해능 단위(units)를 더해 적용된다. 근본 해결은 아니고, 두 면이 같은 평면이라는 사실이 알려진 특수 케이스용이다.
+오프셋은 표면의 화면 공간 기울기에 비례한 양(factor)과 깊이 버퍼의 최소 분해능 단위(units)를 더해 적용된다. 부호는 depth 규약에 따라 뒤집히므로, 표준 0=near·`GL_LESS`에서는 음수가 데칼을 앞으로 당기고 reverse-Z(`GL_GREATER`)에서는 반대가 된다. 근본 해결은 아니고, 두 면이 같은 평면이라는 사실이 알려진 특수 케이스용이다.
 
 ### Reverse-Z
 

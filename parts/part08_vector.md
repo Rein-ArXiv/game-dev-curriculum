@@ -25,7 +25,7 @@ vector는 단순한 동적 배열을 넘어 메모리 연속성, 캐시 지역�
 
 ### 기본 설계
 
-대부분의 표준 라이브러리 구현에서 `std::vector`는 놀랍게도 단 세 개의 포인터로 구성된다:
+대부분의 표준 라이브러리 구현에서 `std::vector<T>`(기본 allocator, `bool` 제외)는 놀랍게도 단 세 개의 포인터로 구성된다. stateful allocator나 fancy pointer, debug ABI를 쓰면 allocator 객체가 공간을 차지해 레이아웃이 달라질 수 있고, `std::vector<bool>`은 비트를 압축하는 특수화라 이 구조가 아니다:
 
 ```cpp
 template<typename T, typename Allocator = std::allocator<T>>
@@ -285,10 +285,11 @@ $$k \leq \frac{1 + \sqrt{5}}{2} = \phi \approx 1.618$$
 여기서 $\phi$는 **황금비(golden ratio)** 이다.
 
 **이상화된 aggregate-space 결론:**
-- $k \leq \phi$이면 과거 해제량의 합이 새 buffer 크기에 도달할 수 있다.
+- $1 < k < \phi$이면 유한 단계에서 과거 해제량의 합이 새 buffer 크기에 도달할 수 있다.
+- $k = \phi$이면 유한 단계에서는 미달하고 극한에서만 경계에 접근한다.
 - $k > \phi$이면 이 합조차 새 buffer보다 작다.
 
-이 조건은 충분조건이 아니다. 실제 allocator에서는 block이 비연속이고 size class, header, alignment와 다른 allocation이 끼어들기 때문에 $k \leq \phi$여도 같은 주소 영역을 재사용하지 못할 수 있다.
+이 조건은 충분조건이 아니다. 실제 allocator에서는 block이 비연속이고 size class, header, alignment와 다른 allocation이 끼어들기 때문에 $k < \phi$여도 같은 주소 영역을 재사용하지 못할 수 있다.
 
 | 대표 정책 | 황금비와의 관계 | aggregate-space 필요조건 |
 |---|---|---|
@@ -453,7 +454,10 @@ void push_back(const T& value) {
             new (new_end) T(std::move(*p));
         }
 
-        // 3. 이전 메모리 해제
+        // 3. 이전 요소 소멸 후 메모리 해제
+        for (T* p = m_begin; p != m_end; ++p) {
+            p->~T();
+        }
         deallocate(m_begin);  // ← 이터레이터들이 가리키던 메모리!
 
         // 4. 포인터 갱신
@@ -467,7 +471,7 @@ void push_back(const T& value) {
 }
 ```
 
-이전 메모리가 해제되었으므로, 그 주소를 가리키던 모든 이터레이터는 dangling pointer가 된다.
+이전 메모리가 해제되었으므로, 그 주소를 가리키던 모든 이터레이터는 dangling pointer가 된다. 이 축약 구현은 예외 처리와 `v.push_back(v[i])` 같은 자기 별칭을 다루지 않는다. 표준 구현은 새 원소를 먼저 구성한 뒤 옛 저장소를 정리해 두 경우를 모두 처리한다.
 
 ### end 이터레이터의 특수성
 
@@ -616,7 +620,8 @@ LLVM은 컴파일러 인프라이므로 작은 임시 배열을 엄청나게 많
 **기본 구조:**
 
 ```cpp
-// llvm/ADT/SmallVector.h의 단순화 버전
+// llvm/ADT/SmallVector.h의 레이아웃을 단순화한 교육용 의사코드다.
+// 실제 LLVM은 정렬·소유권·예외 처리를 다른 방식으로 다룬다.
 template <typename T>
 class SmallVectorImpl {
 protected:
@@ -625,6 +630,8 @@ protected:
     unsigned Capacity;
 
 public:
+    explicit SmallVectorImpl(unsigned N) : Capacity(N) {}
+
     void push_back(const T& Elt) {
         if (Size >= Capacity) {
             grow();
@@ -634,11 +641,16 @@ public:
     }
 
     void grow() {
-        size_t NewCapacity = Capacity * 2;
+        size_t NewCapacity = Capacity ? Capacity * 2 : 1;  // N == 0도 1 이상으로
+        // malloc은 기본 정렬만 보장하므로 alignof(T)가 크면 aligned allocation이 필요하다.
         T* NewElts = static_cast<T*>(malloc(NewCapacity * sizeof(T)));
+        if (!NewElts) return;  // 할당 실패는 호출자 계약으로 처리
 
-        // 이동 or 복사
-        std::uninitialized_move(BeginX, BeginX + Size, NewElts);
+        // 이동한 뒤 옛 원소는 소멸시킨다.
+        for (unsigned i = 0; i < Size; ++i) {
+            ::new (static_cast<void*>(NewElts + i)) T(std::move(BeginX[i]));
+            BeginX[i].~T();
+        }
 
         // 이전 메모리 해제 (인라인 버퍼가 아닌 경우만)
         if (!isSmall()) {
@@ -655,7 +667,9 @@ public:
     }
 
     const void* getFirstEl() const {
-        // this 바로 뒤의 메모리 (인라인 스토리지 시작 위치)
+        // this 바로 뒤의 메모리 (인라인 스토리지 시작 위치).
+        // 이 축약은 기반 객체 바로 뒤에 인라인 저장소가 오는 레이아웃을 가정한다.
+        // alignof(T)가 기반보다 크면 패딩이 끼어 실제 주소와 어긋날 수 있다.
         return reinterpret_cast<const void*>(
             reinterpret_cast<const char*>(this) + sizeof(*this)
         );
@@ -852,9 +866,9 @@ struct TIsTriviallyRelocatable {
     enum { Value = TIsTriviallyCopyConstructible<T>::Value };
 };
 
-// 명시적 특수화로 안전하지 않은 타입 표시
+// 명시적 특수화로 안전하지 않은 타입 표시 (자기 참조 저장소를 가진 가상의 타입)
 template<>
-struct TIsTriviallyRelocatable<FString> {
+struct TIsTriviallyRelocatable<SmallBuffer> {
     enum { Value = false };
 };
 ```
@@ -886,7 +900,7 @@ void grow() {
 
 물론 이는 위험하다. 잘못된 타입에 TArray를 사용하면 크래시나 메모리 손상이 발생한다. Unreal은 이를 다음과 같이 완화한다:
 
-1. **엄격한 타입 정책**: 엔진 코드에서 사용하는 타입은 모두 검증됨
+1. **엄격한 타입 정책**: 엔진 컨테이너가 요구하는 relocatable 가정을 trait와 문서로 규정
 2. **컴파일 타임 체크**: 특정 타입에 대해 `static_assert` 사용
 3. **문서화**: 커스텀 타입 작성 시 주의사항 명시
 4. **대안 제공**: relocatable하지 않은 타입을 위한 `TIndirectArray` 등
@@ -982,11 +996,13 @@ public:
 };
 ```
 
+여기서는 컨테이너를 `load()` 지역 변수로 두었지만, 레벨 수명을 따르게 하려면 `GameLevel`의 멤버로 두고 raw `Enemy*`/`Mesh*` pointee의 소유자도 명시해야 한다. arena `reset()`은 비-trivial 객체의 소멸자를 호출하지 않으므로 소멸이 필요한 객체는 먼저 destroy한 뒤 reset하고, GPU가 비동기로 참조하는 자원은 frame-in-flight가 끝난 뒤에만 reset한다.
+
 **이점:**
 
 1. **빠른 할당/해제**: Arena allocator는 단순한 포인터 증가
 2. **캐시 친화적**: 관련 데이터가 메모리에 인접
-3. **단편화 없음**: 레벨 전체를 한 번에 해제
+3. **외부 단편화 없음**: 레벨 전체를 한 번에 해제 (예약분의 내부 낭비는 남음)
 4. **디버깅 용이**: 메모리 릭을 arena 단위로 추적
 
 **EASTL의 추가 최적화:**
@@ -1125,30 +1141,33 @@ for (int i = 0; i < 100; ++i) {
 
 **Godot의 선택 이유:**
 
-GDScript는 값 타입 시맨틱스를 사용한다:
+GDScript의 `Array`는 참조 시맨틱스를 따른다. 값 스냅샷이 필요하면 `duplicate()`로 복사한다:
 
 ```gdscript
 var enemies = [enemy1, enemy2, enemy3]
 
 func backup_state():
-    var backup = enemies  # 복사처럼 보임
-    # COW 덕분에 실제 복사는 일어나지 않음
+    var backup = enemies.duplicate()  # 독립적인 복사본
+    # duplicate() 없이 대입하면 같은 Array를 공유한다
     return backup
 
 func modify_enemies():
-    enemies.append(enemy4)  # 이제 복사 발생
+    enemies.append(enemy4)  # enemies만 변경되고 backup은 그대로
 ```
 
-스크립트 레벨에서는 복사가 빈번하지만 대부분 읽기 전용이다. COW는 이 패턴에 최적화되어 있다.
+스크립트 레벨에서는 복사가 빈번하지만 대부분 읽기 전용이다. C++ 내부 `Vector`의 COW와 스크립트 `Array`의 참조 시맨틱스는 구분해서 봐야 한다.
 
 **성능 트레이드오프 정리:**
 
 | 패턴 | std::vector | TArray | EASTL | Godot COW |
 |------|------------|--------|-------|-----------|
 | 복사 | O(n) | O(n) | O(n) | O(1) |
-| 읽기 | O(1) | O(1) | O(1) | O(1) + atomic |
+| 읽기 | O(1) | O(1) | O(1) | O(1) |
 | 첫 쓰기 (공유 시) | O(1) | O(1) | O(1) | O(n) |
-| 멀티스레드 | 안전 | 안전 | 안전 | atomic 오버헤드 |
+| 멀티스레드 (읽기 전용) | 안전 | 안전 | 안전 | 공유 시 atomic refcount |
+| 멀티스레드 (구조 변경) | 별도 동기화 | 별도 동기화 | 별도 동기화 | 별도 동기화 |
+
+atomic 참조 카운트는 pointee의 동시 수정이나 컨테이너 구조 변경을 보호하지 않는다. 동시 접근 계약은 컨테이너별로 다르며, 같은 컨테이너의 구조 변경과 동일 원소 수정에는 별도 동기화가 필요하다.
 
 ## 6. 핵심 함수 구현 깊이 파기
 
@@ -1185,6 +1204,8 @@ public:
 };
 ```
 
+이 축약에서 `value`가 이 벡터의 원소(예: `v.push_back(v[i])`)를 가리키면 `reserve`의 재할당 뒤 `value`가 dangling이 된다. 표준 구현은 새 자리를 먼저 확보한 뒤 원소를 생성해 이 경우도 처리한다.
+
 왜 `new T(value)`가 아니라 `::new (m_end) T(value)` 형태를 쓸까.
 
 일반 `new`는 두 가지를 수행한다:
@@ -1211,9 +1232,15 @@ void push_back(const T& value) {
             ::new (static_cast<void*>(new_slot)) T(value);
             slot_built = true;
 
-            // 2. 기존 요소들을 앞에서부터 이동
+            // 2. 기존 요소들을 앞에서부터 옮긴다.
             for (T* p = m_begin; p != m_end; ++p, ++new_end) {
-                ::new (static_cast<void*>(new_end)) T(std::move(*p));
+                // 이동이 noexcept가 아니고 복사 가능하면 복사해 원본을 보존한다.
+                if constexpr (std::is_nothrow_move_constructible_v<T> ||
+                              !std::is_copy_constructible_v<T>) {
+                    ::new (static_cast<void*>(new_end)) T(std::move(*p));
+                } else {
+                    ::new (static_cast<void*>(new_end)) T(*p);
+                }
             }
             ++new_end;  // 맨 뒤의 새 요소까지 포함
         } catch (...) {
@@ -1247,7 +1274,7 @@ void push_back(const T& value) {
 }
 ```
 
-이 구현은 **강력한 예외 보장(strong exception guarantee)** 을 제공한다. 즉, `push_back`이 예외를 던지면 벡터는 호출 전 상태를 유지한다.
+이 구현은 **강력한 예외 보장(strong exception guarantee)** 을 제공한다. 즉, `push_back`이 예외를 던지면 벡터는 호출 전 상태를 유지한다. 단, 이동 생성자가 `noexcept`가 아니고 복사까지 불가능한 move-only throwing 타입에서는 원본이 이미 moved-from이 될 수 있어 강력 보장이 불가능하며, 이때는 표준도 기본 보장에 그친다.
 
 ### reserve: 용량 확장의 핵심
 
@@ -1259,6 +1286,7 @@ void reserve(size_type new_cap) {
 
     T* new_begin = m_alloc.allocate(new_cap);
     T* new_end = new_begin;
+    const size_type old_size = size();  // 기존 storage 해제 전에 크기를 저장한다
 
     try {
         // 기존 요소 이동
@@ -1292,7 +1320,6 @@ void reserve(size_type new_cap) {
     }
 
     // 포인터 갱신
-    size_type old_size = size();
     m_begin = new_begin;
     m_end = new_begin + old_size;
     m_end_of_storage = new_begin + new_cap;
@@ -1356,6 +1383,8 @@ reference emplace_back(Args&&... args) {
 }
 ```
 
+이 `emplace_back`은 예외 정리와 포인터 갱신의 세부를 `...`으로 생략한 의사코드다. 실제 구현은 완성된 `push_back`처럼 새 원소를 먼저 만들고, 실패하면 새 storage만 정리한 뒤 예외를 재전파한다.
+
 **성능 차이 실험:**
 
 ```cpp
@@ -1367,11 +1396,12 @@ struct Widget {
         std::cout << "Widget constructed\n";
     }
 
-    Widget(const Widget&) {
+    Widget(const Widget& other) : id(other.id), name(other.name) {
         std::cout << "Widget copied\n";
     }
 
-    Widget(Widget&&) noexcept {
+    Widget(Widget&& other) noexcept
+        : id(other.id), name(std::move(other.name)) {
         std::cout << "Widget moved\n";
     }
 };

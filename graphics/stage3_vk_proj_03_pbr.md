@@ -176,7 +176,8 @@ void main() { fragColor = vec4(texture(equirect, SampleSphericalMap(normalize(vP
 layout(set = 0, binding = 0) uniform samplerCube envMap;
 void main() {
     vec3 N = normalize(vWorldPos);
-    vec3 right = normalize(cross(vec3(0,1,0), N));
+    vec3 ref   = abs(N.y) < 0.999 ? vec3(0,1,0) : vec3(0,0,1);  // up과 평행할 때 퇴화 방지
+    vec3 right = normalize(cross(ref, N));
     vec3 up    = normalize(cross(N, right));
     vec3 irradiance = vec3(0.0); int samples = 0;
     for (float phi = 0.0; phi < 6.2831; phi += 0.025)
@@ -190,7 +191,7 @@ void main() {
 }
 ```
 
-`cos(theta)`는 램버트 가중, `sin(theta)`는 구좌표 야코비안 — 빠뜨리면 천정이 과하게 밝아진다.
+`cos(theta)`는 램버트 가중, `sin(theta)`는 구좌표 야코비안 — 빠뜨리면 천정이 과하게 밝아진다. `ref`는 N과 평행하지 않은 축을 고르는 안정화다. `abs(N.y)`가 1에 가까우면 `cross(vec3(0,1,0), N)`의 길이가 0이 되어 정규화가 정의되지 않으므로 다른 축을 쓴다. orthonormal basis helper를 따로 두더라도 평행 입력에서 정의되도록 이 처리를 계약으로 명시한다.
 
 프리필터 맵(정반사): 거칠기별 결과를 mip 체인에 담는다. Vulkan 구현의 요점은 *Filtered Importance Sampling* — 샘플 입체각과 텍셀 입체각을 비교해 mip을 골라 거친 표면의 반딧불이 노이즈를 억제한다(`textureLod`).
 
@@ -304,6 +305,6 @@ Vulkan에서 PBR/IBL의 본체는 수식 자체보다 *명시적 자원 관리* 
 ## 더 읽을거리
 
 - Brian Karis, ["Real Shading in Unreal Engine 4"](https://cdn2.unrealengine.com/Resources/files/2013SiggraphPresentationsNotes-26915738.pdf) — split-sum 근사의 원전.
-- Christopher Kulla, Alejandro Conty, "Revisiting Physically Based Shading at Imageworks" (SIGGRAPH 2017) — 다중 산란 에너지 보정.
+- Christopher Kulla, Alejandro Conty, "Revisiting Physically Based Shading at Imageworks" (SIGGRAPH 2017) — 다중 산란 에너지 보정의 관련 배경. 본문 `MultiscatterBRDF`가 BRDF LUT를 재활용하는 정확한 식은 Carmelo J. Fdez-Agüera, ["A Multiple-Scattering Microfacet Model for Real-Time Image Based Lighting"](https://jcgt.org/published/0008/01/03/) (JCGT 8(1), 2019)에서 온 것이며, 원식과 본문의 수정·근사를 구분한다.
 - [Sascha Willems, Vulkan glTF-PBR](https://github.com/SaschaWillems/Vulkan-glTF-PBR) — 본문과 같은 IBL 전처리의 완성 구현.
 - [Khronos glTF Sample Renderer](https://github.com/KhronosGroup/glTF-Sample-Renderer) — 표준 PBR 셰이더 레퍼런스.

@@ -275,6 +275,9 @@ void BuildFlowMinNeighbor(const CostField& cf, const IntegrationField& f, FlowFi
         for (auto [dx,dy] : kNeighbors8) {
             int nx=x+dx, ny=y+dy;
             if (!flow.InBounds(nx,ny)) continue;
+            // integration과 같은 합법 간선 집합을 쓴다. 유한한 값만 보고 고르면
+            // corner-cutting 금지 등 이동 규칙이 integration과 어긋난다.
+            if (!CanTraverse(cf, Cell{x,y}, Cell{nx,ny})) continue;
             // 이웃 값만 비교하면 안 된다 — 이 셀을 떠나는 간선 비용(대각 ×√2)을 더해야
             // 최단경로 선행 셀이 뽑힌다. BuildIntegration과 같은 식이라 선행 셀은 v == here.
             float step = cf.At(x,y) * StepLen(Cell{x,y}, Cell{nx,ny});
@@ -286,7 +289,7 @@ void BuildFlowMinNeighbor(const CostField& cf, const IntegrationField& f, FlowFi
 }
 ```
 
-이 방식은 셀당 8회 비교로 $O(V)$다. 빠르고 견고하다 — integration이 INF인 셀(도달 불가)을 자연스럽게 정지(`{0,0}`)로 두고, 목표 셀(자기보다 작은 이웃 없음)도 정지로 둔다. 단점은 방향이 8방향으로 *양자화* 된다는 것이다. 유닛이 8개 방향으로만 움직여 흐름이 각져 보이고, 넓은 평지에서 사선으로 가야 할 곳을 계단처럼 꺾어 간다.
+이 방식은 셀당 8회 비교로 $O(V)$다. 빠르고 견고하다 — integration이 INF인 셀(도달 불가)을 자연스럽게 정지(`{0,0}`)로 두고, 목표 셀(자기보다 작은 이웃 없음)도 정지로 둔다. integration이 대각 이동을 막는 corner-cutting 규칙을 쓴다면 flow 추출도 같은 `CanTraverse(from,to)`를 통과한 간선만 봐야 한다 — 최단 우회로 도달 가능하다는 전역 사실과 현재 셀에서 그 방향으로 바로 이동 가능하다는 것은 다르다. 단점은 방향이 8방향으로 *양자화* 된다는 것이다. 유닛이 8개 방향으로만 움직여 흐름이 각져 보이고, 넓은 평지에서 사선으로 가야 할 곳을 계단처럼 꺾어 간다.
 
 ### 중심 차분 방식
 
@@ -316,15 +319,16 @@ void BuildFlowGradient(const IntegrationField& f, FlowField& flow) {
 
 ### 양자화 오차의 정량화
 
-두 방식의 차이를 수치로 본다. 목표가 셀 (10, 0)에 있고 유닛이 (0, 3)에 있다면, 이상적 방향은 $\text{atan2}(-3, 10) \approx -16.7°$다.
+두 방식의 차이를 수치로 본다. 격자는 x가 오른쪽, y가 아래로 증가하고 각도는 +x축에서 잰다. 목표가 셀 (10, 0)에 있고 유닛이 (0, 3)에 있으면, *유클리드 해석 거리*를 미분한 이상적 방향은 $\text{atan2}(0-3, 10-0) = \text{atan2}(-3, 10) \approx -16.7°$다(화면에서 목표가 위쪽이라 음수).
 
-| 방식 | 만드는 방향 | 이상과의 오차 |
+| 방식 | 만드는 방향(부호 통일) | 유클리드 해석 방향과의 오차 |
 |---|---|---|
-| 4방향 최소 이웃 | 동(0°) 또는 북(90°) | 최대 45° |
-| 8방향 최소 이웃 | 동(0°) 또는 북동(45°) | 16.7° 또는 28.3° |
-| 중심 차분 | $\approx -16.7°$ | 거의 0 |
+| 4방향 최소 이웃 | 동(0°) 또는 북(−90°) | 최대 45° |
+| 8방향 최소 이웃 | 동(0°) 또는 북동(−45°) | 16.7° 또는 28.3° |
+| 해석적 유클리드 중심 차분 | $\approx -16.7°$ | 0° |
+| 옥타일 거리장 중심 차분 | $\approx -22.5°$ | $\approx 5.8°$ |
 
-최소 이웃의 양자화 오차(위 예에서 16.7° 또는 28.3°)는 좁은 통로에서는 통로 방향에 가려질 수 있지만, 넓은 평지에서는 유닛 무리가 사선 대신 "동→북동→동"으로 지그재그 이동하는 원인이 된다. 중심 차분도 *integration field 자체의 격자 오차* 를 물려받으므로, 방향 샘플링과 거리장 이산화는 따로 평가해야 한다.
+최소 이웃의 양자화 오차(위 예에서 16.7° 또는 28.3°)는 좁은 통로에서는 통로 방향에 가려질 수 있지만, 넓은 평지에서는 유닛 무리가 사선 대신 "동→북동→동"으로 지그재그 이동하는 원인이 된다. 중심 차분은 *integration field 자체의 격자 오차* 를 물려받으므로 해석적 유클리드 경사와 같지 않다 — 옥타일 거리장의 중심 차분은 위 예에서 약 $-22.5°$로 해석적 $-16.7°$와 약 $5.8°$ 차이가 난다. 방향 샘플링과 거리장 이산화는 따로 평가해야 한다.
 
 이렇게 만든 flow field는 한 장의 "이 격자 위 어디서든 목표로 흐르는 방향 지도"다. 유닛은 어느 셀에 있든 자기 셀 벡터만 읽으면 된다.
 
@@ -357,12 +361,12 @@ float SolveEikonal(float a, float b, float cost) {
     if (std::abs(a - b) >= cost) return std::min(a, b) + cost;  // 한 축만 기여
     // 2D: (T-a)^2 + (T-b)^2 = cost^2 의 큰 근
     float sum = a + b;
-    float disc = 2.0f * cost * cost - (a - b) * (a - b);        // 판별식 ≥ 0 보장됨
+    float disc = 2.0f * cost * cost - (a - b) * (a - b);        // 이 분기(|a-b|<cost)에서 ≥ 0
     return 0.5f * (sum + std::sqrt(disc));
 }
 ```
 
-판별식 조건 `|a-b| < cost`일 때만 두 축이 함께 기여하고, 그렇지 않으면 한 축이 너무 멀어 1차 갱신(`min(a,b)+cost`)으로 강등된다. 이 분기가 FMM의 정확성을 지킨다 — 무작정 2차 공식을 쓰면 판별식이 음수가 되어 NaN이 나온다.
+두 축이 함께 기여하는 것은 *업윈드 인과성* `T >= max(a,b)`를 만족할 때뿐이고, 그 조건이 정확히 `|a-b| <= cost`다. 인과성이 깨지면 한 축이 너무 멀어 1차 갱신(`min(a,b)+cost`)으로 강등된다. 판별식 비음수는 이보다 약한 `|a-b| <= √2·cost`로, 실근이 존재한다는 것과 인과적이라는 것은 다른 조건이다. 이 분기가 FMM의 정확성을 지킨다 — 무작정 2차 공식을 쓰면 인과성을 깨는 작은 근을 고르거나 `|a-b| > √2·cost`에서 판별식이 음수가 되어 NaN이 나온다.
 
 ### 국소 풀이의 유도 — 업윈드 이산화, 큰 근, 인과성 조건
 
@@ -392,9 +396,9 @@ T_+-b=\frac{-\delta+\sqrt{2\,\text{cost}^2-\delta^2}}{2}\ge0
 \;\iff\; \delta\le\text{cost}.
 $$
 
-즉 *큰 근이 인과적(causal)으로 유효한 것은 정확히 $|a-b|\le\text{cost}$일 때* 이고, 이것이 코드 분기 `if (abs(a-b) >= cost) ... min(a,b)+cost`가 갈라지는 지점이다. 같은 부등식이 판별식 $2\,\text{cost}^2-(a-b)^2\ge0$의 비음수 조건이기도 하다 — 두 사실은 우연이 아니라 동일한 부등식이다. 경계 $|a-b|=\text{cost}$에서는 $T_+=\min(a,b)+\text{cost}$가 되어 1차 분기와 *연속* 으로 이어지므로, 분기 전환에 값 점프가 없다.
+즉 *큰 근이 인과적(causal)으로 유효한 것은 정확히 $|a-b|\le\text{cost}$일 때* 이고, 이것이 코드 분기 `if (abs(a-b) >= cost) ... min(a,b)+cost`가 갈라지는 지점이다. 판별식 $2\,\text{cost}^2-(a-b)^2\ge0$의 비음수 조건은 이보다 약한 $|a-b|\le\sqrt2\,\text{cost}$다 — 실근이 존재하는 것과 인과적인 큰 근이 존재하는 것은 다르다. 예를 들어 $a{=}0,b{=}1.2,\text{cost}{=}1$이면 판별식 $2-1.44=0.56>0$으로 실근이 있지만 $T_+\approx0.974<1.2=\max(a,b)$라 2축 해가 성립하지 않는다. 경계 $|a-b|=\text{cost}$에서는 $T_+=\min(a,b)+\text{cost}$가 되어 1차 분기와 *연속* 으로 이어지므로, 분기 전환에 값 점프가 없다.
 
-작은 근 $T_-$는 가짜다. $a{=}0,b{=}0.6,\text{cost}{=}1$에서 $T_+{=}0.940$, $T_-{=}-0.340<\max(a,b)$로 업윈드 조건을 깨므로 버린다. 또 분기 없이 2D 공식을 무조건 쓰면 $|a-b|>\text{cost}$일 때 판별식이 음수가 되어($a{=}0,b{=}2$이면 $2-4=-2$) $\sqrt{\;}$에서 NaN이 난다. `|a-b|>=cost` 분기는 *정확성(올바른 근)과 수치 안정성(NaN 회피)을 동시에* 지킨다.
+작은 근 $T_-$는 가짜다. $a{=}0,b{=}0.6,\text{cost}{=}1$에서 $T_+{=}0.940$, $T_-{=}-0.340<\max(a,b)$로 업윈드 조건을 깨므로 버린다. 또 분기 없이 2D 공식을 무조건 쓰면 $|a-b|>\sqrt2\,\text{cost}$일 때 판별식이 음수가 되어($a{=}0,b{=}2,\text{cost}{=}1$이면 $2-4=-2$) $\sqrt{\;}$에서 NaN이 난다. `|a-b|>=cost` 분기는 *정확성(올바른 근)과 수치 안정성(NaN 회피)을 동시에* 지킨다.
 
 **기하적 의미.** 2D 갱신은 업윈드 경사 $\nabla T=(T-a,\;T-b)$가 $|\nabla T|=\text{cost}$를 *정확히* 만족하도록 $T$를 놓는 것이다(국소적으로 파면을 평면으로 본다). 특성(characteristic) 방향각 $\arctan\frac{T-b}{T-a}$는 $|a-b|$가 $0\to\text{cost}$로 갈 때 $45°\to0°$로 두 축이 이루는 사분면을 쓸고 지나간다($a{=}0,\text{cost}{=}1$에서 $b{=}0\to45.0°$, $b{=}0.6\to19.9°$, $b{=}1\to0°$). $|a-b|>\text{cost}$면 특성이 그 사분면을 *벗어나야* 하므로 비물리적이고, 그래서 파면이 한 축만 따라 도달하는 1D 갱신으로 강등된다.
 
@@ -540,7 +544,7 @@ flowchart TB
     Agents[유닛들] -->|splat 누적| Density[밀도장 ρ + 속도장 v̄]
     Density --> Speed[속도장 f: 밀도 높을수록 느림]
     Speed --> DynCost[동적 cost = 시간 + 불편 가중]
-    DynCost --> Eik[Eikonal 풀이]
+    DynCost --> Eik[Eikonal 풀이<br/>등방 근사]
     Eik --> Flow[밀도 반영 flow]
     Flow --> Move[유닛 이동]
     Move --> Agents
@@ -554,8 +558,11 @@ flowchart TB
 void SplatDensity(const std::vector<Unit>& units, DensityField& rho, VelField& vbar) {
     rho.Clear(); vbar.Clear();
     for (const Unit& u : units) {
-        float fx = u.position.x / cellSize, fy = u.position.y / cellSize;
-        int x0=(int)fx, y0=(int)fy; float tx=fx-x0, ty=fy-y0;
+        if (!std::isfinite(u.position.x) || !std::isfinite(u.position.y)) continue;
+        // SampleBilinear와 같은 cell-centered 변환(셀 중심이 정수 격자점)
+        float fx = u.position.x / cellSize - 0.5f, fy = u.position.y / cellSize - 0.5f;
+        int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
+        float tx = fx - x0, ty = fy - y0;
         float w00=(1-tx)*(1-ty), w10=tx*(1-ty), w01=(1-tx)*ty, w11=tx*ty;
         rho.Add(x0,y0,w00); rho.Add(x0+1,y0,w10);
         rho.Add(x0,y0+1,w01); rho.Add(x0+1,y0+1,w11);
@@ -565,7 +572,7 @@ void SplatDensity(const std::vector<Unit>& units, DensityField& rho, VelField& v
 }
 ```
 
-밀도 $\rho$가 높은 셀일수록 통행 속도 $f$가 떨어진다. Continuum Crowds는 속도를 밀도의 함수로 정의한다 — 밀도가 임계 이하면 지형 최고 속도, 임계를 넘으면 선형으로 감속하다 군중 밀집 한계에서 0에 수렴한다. 또 이동 방향이 군중 흐름($\bar v$)과 같으면 빠르고, 거스르면 느리게 두어 *흐름을 거스르는 비용* 을 만든다.
+밀도 $\rho$가 높은 셀일수록 통행 속도 $f$가 떨어진다. Continuum Crowds는 속도를 밀도의 함수로 정의한다 — 밀도가 임계 이하면 지형 최고 속도, 임계를 넘으면 선형으로 감속하다 군중 밀집 한계에서 0에 수렴한다. 또 이동 방향이 군중 흐름($\bar v$)과 같으면 빠르고, 거스르면 느리게 두어 *흐름을 거스르는 비용* 을 만든다. 이 글의 축약 스케치는 `FollowFlow`가 고정 `maxSpeed`를 쓰므로 방향별 속도 보정·속도장 sampling은 생략되어 있다.
 
 ### 동적 cost와 Eikonal 재풀이
 
@@ -575,7 +582,7 @@ $$
 C = \alpha \cdot (\text{거리}) + \beta \cdot (\text{시간} = \tfrac{\text{거리}}{f(\rho)}) + \gamma \cdot (\text{불편})
 $$
 
-속도 $f$가 밀도에 의존하므로 시간 항이 혼잡 지역에서 커지고, 거기에 Eikonal(5절)을 풀면 flow가 *자동으로 대안 경로로 분산* 된다. 마주 오는 두 군중이 서로를 동적 장애물로 인식해 *차선을 형성* 하는(lane formation) 창발적 행동이 나온다 — 명시적 차선 규칙 없이, 밀도-비용-흐름의 피드백만으로. 한쪽으로 흐르는 군중이 만든 "역방향 비용"이 반대 군중을 옆 차선으로 밀어내고, 그게 다시 첫 군중의 차선을 굳힌다.
+속도 $f$가 밀도에 의존하므로 시간 항이 혼잡 지역에서 커지고, 거기에 Eikonal(5절)을 풀면 flow가 대안 경로로 분산되는 경향이 나온다. 다만 이 스케치는 scalar cost·등방 Eikonal·고정 maxSpeed 조향만 쓰는 *등방성 교육용 근사* 다. 원 논문은 밀도·방향별 속도 제약과 속도장 sampling을 함께 풀어 마주 오는 두 군중의 *차선 형성(lane formation)* 같은 현상을 얻지만, 이 축약 구현이 그 현상들을 모두 재현한다고 보장하지 않는다 — 밀도-비용-흐름 피드백으로 혼잡을 우회하는 거시적 경향까지만 기대한다.
 
 ```cpp
 void StepContinuum(std::vector<Unit>& units, /* 목표별 */ Goal goal, float dt) {
@@ -615,18 +622,19 @@ Supreme Commander는 수천 유닛의 동시 이동을 flow field 계열로 처�
 
 flow field의 약점은 *cost가 바뀌면 재계산* 이 필요하다는 것이다. 전체 재계산은 $O(V \log V)$로 비싸므로 다음 전략을 쓴다.
 
-- *tile 분할*: 맵을 고정 크기 타일(예: $32 \times 32$)로 나누고, 타일 경계에 *포털* 을 둔다. 변경된 타일과 그 이웃만 integration을 다시 전파하고, 타일 사이는 포털 그래프로 잇는다. 변경 영향 범위를 국소화한다.
+- *tile 분할*: 맵을 고정 크기 타일(예: $32 \times 32$)로 나누고, 타일 경계에 *포털* 을 둔다. 변경된 타일은 *시작점(seed)* 일 뿐이다 — 그 타일과 포털 경계 값을 다시 계산한 뒤, 경계 값이 달라진 상위 타일로 전파를 이어 *상위 의존 그래프/경계 값이 수렴할 때까지* 반복한다. 비용 *감소* 는 완화(relaxation)로 국소 전파되지만 *증가* 는 이미 작아진 값을 올려야 하므로 영향받는 타일을 무효화하고 다시 계산한다. 유일한 병목이 닫히면 멀리 떨어진 upstream 타일의 거리도 달라지므로 '이웃 타일만'으로 끝낼 수 없다.
 - *목표 캐싱*: 자주 쓰이는 목표(기지, 거점, 자원)의 flow field를 캐싱해 재사용한다. LRU로 캐시 한도를 관리한다.
 - *지연·배치 갱신*: cost 변경 즉시가 아니라 다음 갱신 주기에 모아서 한 번 재계산한다. 한 프레임에 타워 5개를 세워도 재빌드는 1회.
-- *증분 갱신*: 비용이 *증가* 만 한 경우(장애물 추가) 영향받은 셀만 큐에 넣어 다시 완화하는 dynamic Dijkstra(D* 계열) 변형을 쓴다. 다만 구현이 복잡해 게임에서는 타일 재빌드가 더 흔하다.
+- *증분 갱신*: 비용 *감소* 는 영향받은 셀을 시작점으로 최소 힙에 넣어 값이 더 작아지면 완화(relaxation)를 전파한다. 비용 *증가* 는 min-relaxation으로 이미 작아진 값을 올릴 수 없으므로 영향받는 영역을 무효화하고 경계 값이 수렴할 때까지 다시 완화하는 dynamic Dijkstra(D* 계열) 변형을 쓴다. 다만 구현이 복잡해 게임에서는 타일 재빌드가 더 흔하다.
 - *계층 결합*: 광역 이동은 flow field로, 국소 정밀 이동은 유닛별 steering/회피로 분리한다.
 
 ```mermaid
 flowchart TB
     Change[cost 변경<br/>타워 건설] --> Mark[영향 타일 dirty 표시]
     Mark --> Defer[다음 주기까지 배치]
-    Defer --> Rebuild[dirty 타일 + 이웃만<br/>integration 재전파]
-    Rebuild --> Portal[포털 그래프로 타일 연결]
+    Defer --> Seed[dirty 타일을 seed로<br/>경계값 재계산]
+    Seed --> Propagate[상위 의존/경계값이<br/>수렴할 때까지 전파]
+    Propagate --> Portal[포털 그래프로 타일 연결]
     Portal --> Done[flow 갱신 완료]
 ```
 

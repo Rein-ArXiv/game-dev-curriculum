@@ -85,13 +85,14 @@ oracle을 구현 코드의 복사본으로 만들면 같은 오류가 양쪽에 
 유한 테스트는 일반적으로 모든 입력의 정확성을 증명하지 않는다. 그러나 구현 불변식과 수학적 증명을 코드의 assertion·property에 연결하면 두 방식이 보완된다.
 
 ```cpp
-// 이진 탐색 loop invariant:
-// target이 존재한다면 항상 [lo, hi) 안에 있다.
+// lower_bound loop invariant:
+// 미탐색 구간은 [lo, hi)이고, 정답 삽입 인덱스는 그 끝을 포함한 [lo, hi] 안에 있다.
+// [0, lo)의 모든 원소는 target보다 작고, [hi, values.size())의 모든 원소는 target 이상이다.
 CHECK(lo <= hi);
 CHECK(hi <= values.size());
 ```
 
-증명은 어떤 성질을 검사해야 하는지 알려 주고, property test는 구현이 그 증명의 전제를 실제로 지키는지 반례를 찾는다.
+증명은 어떤 성질을 검사해야 하는지 알려 주고, property test는 구현이 그 증명의 전제를 실제로 지키는지 반례를 찾는다. 여기서 CHECK 두 줄은 인덱스 경계 안전성을 검사하며, target 보존 자체는 위 불변식과 갱신 규칙으로 따로 설명한다.
 
 ## 2. 예제와 property
 
@@ -158,9 +159,11 @@ $$
 $$
 
 $$
-\operatorname{Compare}(a,b)
-=-\operatorname{Compare}(b,a)
+\operatorname{sign}(\operatorname{Compare}(a,b))
+=-\operatorname{sign}(\operatorname{Compare}(b,a))
 $$
+
+이 식은 3-way compare 결과가 $-1,0,1$로 정규화됐을 때만 그대로 성립한다. `strcmp`류 API는 부호만 일정하면 되므로 $a<b$에서 $-2$, $a>b$에서 $1$을 돌려주어도 올바른 comparator다. 일반 API에서는 부호의 반대만 검사하고, `INT_MIN`에 단항 부정을 적용하면 signed overflow가 날 수 있다.
 
 sequence number의 wrap-safe 비교처럼 domain 일부에서만 관계가 정의되면 사전조건을 property에 포함한다.
 
@@ -270,12 +273,17 @@ void Apply(const Pop&, QueueModel& model, RealQueue& queue) {
     const bool modelOk = !model.values.empty();
     const auto actual = queue.Pop();
     CHECK(actual.has_value() == modelOk);
+    if (!actual) {
+        return;
+    }
     if (modelOk) {
         CHECK(*actual == model.values.front());
         model.values.pop_front();
     }
 }
 ```
+
+CHECK가 실패해도 실행을 계속하는 프레임워크라면 실패한 optional을 역참조하면 안 된다. 존재 여부를 확인한 뒤 실패 시 반환하거나, 실패를 즉시 중단하는 fatal assertion을 사용한다.
 
 ### 상태 전이 coverage
 
@@ -320,7 +328,7 @@ Crash
 Recover
 ```
 
-모든 write boundary에서 crash를 주입하고 복구 결과가 commit된 transaction의 prefix인지 검사한다.
+모든 write boundary에서 crash를 주입하되, 이미 durable 성공 응답을 받은 commit은 반드시 보존되고 미응답·미완료 transaction만 허용된 상태로 남는지 검사한다. 항상 빈 상태로 복구하는 구현도 prefix 조건만 보면 통과하므로, durable acknowledgment와 flush/barrier 지점을 model에 포함하고 acknowledged commit의 원자적 가시성까지 확인한다.
 
 ## 5. Metamorphic·differential testing
 
@@ -372,7 +380,7 @@ serializer와 network codec은 이전 released version의 binary를 corpus로 �
 
 ## 6. Coverage-guided fuzzing
 
-Fuzzer는 입력을 생성·변형하고 새로운 code coverage를 여는 입력을 corpus에 남긴다. 단순 random보다 checksum, length, nested parser의 깊은 상태에 도달하기 쉽다.
+Fuzzer는 입력을 생성·변형하고 새로운 code coverage를 여는 입력을 corpus에 남긴다. 단순 random보다 length field나 nested parser의 깊은 상태에 도달하기 쉽다. 다만 coverage feedback만으로 유효 checksum이 생기지는 않으므로, checksum repair·structured generation·value profiling/dictionary 같은 별도 보조가 필요하다.
 
 ### Fuzz target의 조건
 
@@ -397,6 +405,8 @@ extern "C" int LLVMFuzzerTestOneInput(
 ```
 
 parser가 오류를 반환하는 것은 실패가 아니다. out-of-bounds, use-after-free, integer overflow, 무한 loop, 상한 없는 allocation, 부분 외부 상태 commit이 실패다.
+
+ParsePacket/Encode 뒤의 사후 크기 검사는 helper가 이미 거대한 할당이나 loop를 실행한 뒤라면 자원 제한이 아니다. parser 내부 work budget과 process RSS·time 상한을 harness에서 강제하고, 성공 parse는 encode 후 decode가 같은 의미를 내는지도 비교한다.
 
 ### Sanitizer 결합
 
@@ -456,7 +466,13 @@ $$
 r=\|Ax-b\|
 $$
 
-해 $x$ 자체가 다른 reference와 다르더라도 residual과 domain invariant가 충분히 작을 수 있다.
+raw residual $r$ 자체는 scale에 의존하므로 $A$나 $b$의 크기가 작으면 해가 크게 틀려도 작아 보일 수 있다. 정규화한 backward error
+
+$$
+\frac{\|Ax-b\|}{\|A\|\|x\|+\|b\|}
+$$
+
+와 조건수 기반 forward error, 또는 도메인별 허용 오차를 함께 기록한다. 해 $x$ 자체가 다른 reference와 다르더라도 residual과 domain invariant가 충분히 작을 수 있다.
 
 ### 확률 알고리즘
 
@@ -468,7 +484,7 @@ $$
 \chi^2=\sum_{i=1}^{k}\frac{(O_i-E_i)^2}{E_i}
 $$
 
-통계 테스트는 정상 구현도 유의수준 확률로 실패한다. CI에서 단일 flaky threshold로 쓰기보다 sample 수, false-positive budget, 여러 seed 재검증을 설계한다.
+이 검정은 $E_i>0$이고 각 기대도수가 충분히 크며 표본이 독립일 때만 근사 임계값이 유효하다. 추정한 모수만큼 자유도를 보정하고, 기대도수가 작으면 exact/MonteCarlo 검정으로 대체한다. 통계 테스트는 정상 구현도 유의수준 확률로 실패한다. CI에서 단일 flaky threshold로 쓰기보다 sample 수, false-positive budget, 다중 검정 예산, 통과할 때까지 재시험하지 않는 판정 규칙을 설계한다.
 
 ### 동시성
 
@@ -482,7 +498,7 @@ $$
 - linearizability history 검사
 - ThreadSanitizer
 
-queue 연산의 호출·응답 history가 어떤 순차 순서로 설명 가능한지 검사한다. 가능한 선형화 순서를 찾는 비용은 history 길이에 급격히 증가하므로 작은 concurrent history를 많이 생성한다.
+queue 연산의 호출·응답 history가 어떤 순차 순서로 설명 가능한지 검사한다. 이때 완료 응답이 다음 호출보다 먼저인 연산 사이의 실시간 선후 관계를 순서에 보존해야 linearizability다(순차 일관성과 구별되는 조건). 각 연산의 반환값과 미완료 연산의 completion 정책도 history oracle에 포함한다. 가능한 선형화 순서를 찾는 비용은 history 길이에 급격히 증가하므로 작은 concurrent history를 많이 생성한다.
 
 ## 8. Mutation testing과 테스트 강도
 
@@ -526,7 +542,15 @@ $$
 - error status를 모두 허용
 - sequence 일부를 생성하지 않음
 
-테스트 suite가 여전히 통과하면 명세가 실제로 강제되지 않는 부분이 드러난다.
+테스트 suite가 여전히 통과하는지만 보면 강도를 판단할 수 없다. 정상 구현이 강한 property $P$를 만족하면 더 약한 property $Q$도 만족하므로, 약화된 suite에서 정상 코드가 통과하는 것은 자연스럽다. 강도를 판단하려면 같은 알려진 결함 구현 집합을 강한 검사와 약한 검사에 모두 실행하고, 제거한 property 때문에 새로 통과한 결함 구현을 추적한다. 정렬 property를 예로 들면 다음과 같다.
+
+| 구현 | 정렬성-only | 정렬성+보존 |
+|---|---|---|
+| 정상 정렬 | 통과 | 통과 |
+| 정렬 후 원소 삭제 | 통과 | 실패 |
+| 중복 치환 | 통과 | 실패 |
+
+정상 구현이 양쪽을 통과한 것만으로 검사 강도를 판단하지 않는다.
 
 ## 9. 비신뢰 입력과 자원 상한
 
@@ -579,6 +603,8 @@ property:
 ```text
 실패한 입력은 registry state hash를 바꾸지 않는다.
 ```
+
+Commit 자체가 중간에 실패하거나 예외를 던지면 외부 상태가 일부만 바뀔 수 있다. Commit에 strong exception guarantee(실패 시 rollback)나 no-fail swap을 요구하고, 예외·할당 실패 주입을 commit 내부 지점에도 적용한다.
 
 ### 시간 복잡도 공격
 

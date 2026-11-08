@@ -2,7 +2,13 @@
 
 현재까지의 결과물은 토글 패널과 프레임 그래프가 동작하지만, *실제로 동작하는 토글은 엔티티 수* 한 가지였다. 1k에서 100k로 바꾸면 그래프가 갈라지지만, 그건 *수가 늘어서 느려진* 자명한 결과다. 측정 도구의 진짜 가치는 *같은 수의 엔티티를 다른 방식으로 처리할 때* 어떻게 갈라지는가에 있다. 이 단계가 그 첫 번째 *진짜* 비교 축을 연다.
 
-이 단계의 목표는 *메모리 레이아웃 토글* 을 활성화하는 것이다. 같은 1만 점 시뮬을 SoA, AoS, Archetype 세 레이아웃으로 각각 구현해 두고, 콤보박스 한 번 클릭으로 시뮬 인스턴스 자체가 교체된다. 그 순간 update ms가 갈라지는 모습이 그래프에 그려진다. 결과 차이의 *원인* 은 메모리 접근 패턴과 자동 벡터화 가능성이다.
+이 단계의 목표는 *메모리 레이아웃 토글* 을 활성화하는 것이다. 같은 1만 점 시뮬을 SoA, AoS, Archetype 세 레이아웃으로 각각 구현해 두고, 콤보박스 한 번 클릭으로 시뮬 인스턴스 자체가 교체된다. 그 순간 update ms가 갈라지는 모습이 그래프에 그려진다. 결과 차이의 *원인* 은 메모리 접근 패턴 하나로 확정되지 않는다. 데이터가 SIMD 레지스터에 들어오는 방식, 연속성, 사용하는 필드의 비율, 컴파일러의 변환, 캐시·메모리 대역폭이 함께 작용한다.
+
+> 이 실습은 게임 개발의 모든 CS 주제를 하나의 프로그램에 구현하는 과정이 아니다. 같은 상태를 여러 메모리 배치와 연산 방식으로 처리하고, 할당·순회 비용을 나누어 관찰하는 저수준 성능 실습이다. ECS 는 단일 컴포넌트 조합의 저장 배치까지만 다룬다. query 와 구조 변경, 문자열·인코딩·동시성 등은 별도 실습에서 다룬다.
+>
+> 실행 결과가 특정 순서로 나와야 성공하는 실습은 아니다. 먼저 같은 입력에 대해 같은 의미의 결과를 계산하는지 확인한다. 그다음 작업량·측정 구간·실행 환경을 맞추고 반복 측정한다. 기대와 다른 성능이 나오면 결과를 숨기거나 구현 오류로 단정하지 않고, 이 실험이 어떤 가정을 충족하지 못했는지 확인한다.
+>
+> 각 장의 코드는 세 종류로 구분한다. `현재 단계 완성 코드`는 해당 단계의 파일 집합과 함께 빌드할 수 있어야 한다. `발췌 코드`는 생략된 선언과 helper 의 실제 위치를 함께 적는다. `설명용 의사코드`는 의미와 제어 흐름을 보여주며 그대로 붙여 넣는 소스가 아니다. 최종 `src/`와 중간 단계의 함수 시그니처가 다르면 변환 표를 제공한다.
 
 이 단계의 결과물은 다음 다섯 가지다.
 
@@ -44,25 +50,28 @@ CPU는 메모리에서 한 번에 *캐시 라인 단위* (보통 64 byte)로 데
 같은 *1만 개의 (posX, posY, velX, velY) 정점* 을 다음 셋으로 펼칠 수 있다.
 
 ```mermaid
-flowchart TD
-    SoA["<b>SoA (Structure of Arrays)</b><br/>posX 배열 1만 개<br/>posY 배열 1만 개<br/>velX 배열 1만 개<br/>velY 배열 1만 개"]
-    AoS["<b>AoS (Array of Structures)</b><br/>(posX, posY, velX, velY) struct 배열 1만 개<br/>한 정점의 4 필드가 메모리상 인접"]
-    Arch["<b>Archetype (Chunk-based SoA)</b><br/>256 entity 단위 chunk<br/>chunk 안은 SoA<br/>chunk 외부는 vector&lt;Chunk&gt;"]
-
-    SoA --> Use1["핫 루프가 posX만 순차 접근 → 캐시 라인에 16개 posX<br/>SIMD 친화: 한 번에 4/8개 처리"]
-    AoS --> Use2["한 정점의 모든 필드가 같은 캐시 라인<br/>임의 접근에는 좋지만 SIMD엔 stride 부담"]
-    Arch --> Use3["chunk 단위 부분 처리에 유리<br/>다양한 컴포넌트 조합을 분리 가능"]
+flowchart LR
+    A[동일 초기 fixture와 동일 업데이트 규칙] --> B[AoS: vector Entity]
+    A --> C[SoA: posX / posY / velX / velY 배열]
+    A --> D[Chunked SoA: vector unique_ptr Chunk]
+    B --> E[매 step 네 필드 모두 사용]
+    C --> E
+    D --> E
+    E --> F[독립 참조와 결과 비교]
+    F --> G[동일 kernel 정책으로 반복 측정]
 ```
+
+이 그림은 실제 구현용이다. 일반적인 ECS query나 position-only hot loop를 설명하는 그림은 별도 그림으로 분리한다. SoA와 Chunked SoA가 비슷한 성능을 내야 합격하는 것이 아니라, 같은 상태를 처리하고 측정 조건을 설명할 수 있어야 합격이다.
 
 세 레이아웃의 핫 루프 메모리 접근 패턴은 다음 표로 요약된다.
 
 | 레이아웃 | 핫 루프가 한 번에 만지는 위치 | SIMD 연속 로드 | 자동 벡터화 |
 |---|---|---|---|
 | SoA | `posX[0..15]` 한 캐시 라인 | 인접 4/8개 직접 로드 가능 | 매우 친화 |
-| AoS | `entity[0]` 한 정점의 4 필드 (모두 사용) | stride가 sizeof(Entity)라 인접 로드 불가, gather/scatter 필요 | stride 부담 |
-| Archetype | chunk 내부에서 SoA와 동일 | 인접 로드 가능 | SoA와 동등 |
+| AoS | `entity[0]` 한 정점의 4 필드 (모두 사용) | 한 컴포넌트만 모으면 stride가 sizeof(Entity)라 `_mm_loadu_ps` 인접 로드가 안 맞음 | 컴파일러에 따라 SLP·shuffle로 부분 벡터화 가능 |
+| Archetype | chunk 내부에서 SoA와 동일 | 인접 로드 가능 | chunk 내부는 SoA와 같은 형태 |
 
-핵심은 *캐시 낭비* 가 아니다 — 이 시뮬은 한 정점의 4 필드(posX/posY/velX/velY)를 모두 매 프레임 사용하므로 AoS도 캐시 라인을 거의 다 쓴다. 차이는 *SIMD가 인접 4/8개의 같은 컴포넌트를 한 번에 로드할 수 있느냐* 다. AoS는 stride가 16 byte라 SSE의 `_mm_loadu_ps` 같은 인접 로드가 동작하지 않고, gather/scatter 인트린식이 필요해 SIMD 효과가 크게 줄어든다. 이 단계가 그 차이를 *시각적 사건* 으로 만든다.
+핵심은 *캐시 낭비* 가 아니다 — 이 시뮬은 한 정점의 4 필드(posX/posY/velX/velY)를 모두 매 프레임 사용하므로 AoS도 캐시 라인을 거의 다 쓴다. 차이는 *SIMD가 인접 4/8개의 같은 컴포넌트를 한 번에 로드할 수 있느냐* 다. AoS는 한 컴포넌트만 모으면 stride가 16 byte라 SSE의 `_mm_loadu_ps` 같은 인접 로드가 그대로 맞지 않는다. 다만 *AoS라서 자동 벡터화가 불가능한 것은 아니다*. 컴파일러는 SLP·shuffle/transpose 등으로 AoS 루프도 부분 벡터화할 수 있다. 이 lab의 AoS에는 수동 SIMD 경로를 넣지 않았다는 것이 구현 범위다. 이 단계가 그 차이를 *시각적 사건* 으로 만든다.
 
 ## 2. ISimulation 추상 인터페이스와 팩토리
 
@@ -102,13 +111,15 @@ std::unique_ptr<ISimulation> CreateSimulation(Layout layout);
 }  // namespace ppl
 ```
 
-`Update` 의 인자에 `SimdWidth simd` 와 `bool branchless` 가 미리 들어 있다. 현재 모든 구현이 이 둘을 *무시* 하고 scalar 경로로 동작한다. 시그니처를 처음부터 넓게 잡아 두면 처리 경로가 늘어날 때 인터페이스를 다시 건드리지 않아도 된다.
+`Update` 의 인자에 `SimdWidth simd` 와 `bool branchless` 가 미리 들어 있다. 이 단계의 스냅숏에서는 모든 구현이 이 둘을 받기만 하고 하나의 경로로 동작한다. 시그니처를 처음부터 넓게 잡아 두면 처리 경로가 늘어날 때 인터페이스를 다시 건드리지 않아도 된다.
 
 ### 검증용 상태 스냅숏: CopyState
 
 `CopyState` 는 화면 출력과 무관하게 시뮬 상태를 꺼내는 통로다. 세 레이아웃은 내부 저장 방식이 전부 다르지만(분리 배열 / struct 배열 / chunk), `CopyState` 는 모두 *엔티티 순서대로 `[posX, posY, velX, velY]`* 를 이어 붙인 평탄한 `float` 배열을 만든다. 같은 시드·같은 `dt` 로 돌린 두 구현의 출력 벡터를 원소별로 비교하면 레이아웃 변경이 결과를 바꾸지 않았다는 것을 확인할 수 있다.
 
 `tests/core_tests.cpp` 가 이 비교를 수행한다. 정렬 헬퍼(`AlignUp`), 네 할당자, 컨테이너·이벤트 워크로드의 계약, 세 레이아웃의 결과 동등성, scalar·SSE·AVX2 경로의 허용 오차, 그리고 경계 반사 불변식을 한 실행 파일에서 검사한다. CMake가 이 파일과 `sim/`·`alloc/`·`measure/` 소스를 묶어 별도 타깃으로 만들고 `add_test` 로 등록한다.
+
+아래 CMake·테스트 블록과 이 장 뒤쪽의 `tests/core_tests.cpp` 발췌는 최종 `src/` 파일 집합을 기준으로 한다. 이 장 앞쪽의 단계별 코드 조각과 최종 파일의 시그니처가 다르면 함수 이름을 기준으로 대응시킨다. `Draw()` 처럼 화면 출력에만 쓰는 TU는 계산 코어와 분리되어 있다.
 
 ```cmake
 enable_testing()
@@ -224,15 +235,16 @@ private:
 ### 구현
 
 ```cpp
-// src/sim/soa.cpp + src/sim/soa_draw.cpp (현재 단계, scalar만)
-// raylib.h include와 Draw() 는 soa_draw.cpp 쪽이다. 계산 코어만 담은 soa.cpp 는
-// raylib을 링크하지 않는 테스트 타깃에도 그대로 들어간다.
+// 발췌: src/sim/soa.cpp(계산 코어) + src/sim/soa_draw.cpp(Draw).
+// 두 파일은 별도 TU로 컴파일된다. 계산 코어 soa.cpp 에는 raylib.h include가 없고
+// raylib을 링크하지 않는 테스트 타깃에도 그대로 들어간다. 아래 블록은 설명을 위해
+// 두 파일을 이어 붙인 것이며, 각 include 옆에 어느 파일에 속하는지 표시한다.
 
-#include "sim/soa.h"
+#include "sim/soa.h"        // soa.cpp / soa_draw.cpp 공통
 
-#include "raylib.h"
+#include "raylib.h"         // soa_draw.cpp 전용
 
-#include <algorithm>
+#include <algorithm>        // soa.cpp 전용
 #include <random>
 
 namespace ppl {
@@ -403,15 +415,15 @@ void AoSSimulation::UpdateScalar(float dt) {
 }
 ```
 
-핫 루프가 한 엔티티의 *4개 필드* 를 차례로 만진다. 같은 캐시 라인 안이라 임의 접근에는 좋다. 하지만 *한 컴포넌트만 순차 처리* 하는 SIMD 모델에는 stride가 16 byte라 인접 4개 `posX` 를 한 번에 못 가져온다.
+핫 루프가 한 엔티티의 *4개 필드* 를 차례로 만진다. 같은 캐시 라인 안이라 임의 접근에는 좋다. 다만 한 컴포넌트의 값 4개(`posX` 네 개)를 SSE 한 명령에 모으려면 stride가 16 byte라 `_mm_loadu_ps` 같은 인접 로드가 그대로 맞지 않는다. gather/scatter, shuffle/transpose, 개체 내 필드 벡터화(SLP), 임시 SoA 복사 같은 우회 전략이 있고, 컴파일러가 그중 일부를 자동으로 수행하기도 한다. 이 lab의 AoS에 *수동 SIMD 경로를 넣지 않았다* 는 것이 구현 범위이고, 그 자체가 *AoS는 SIMD가 불가능하다* 는 결론은 아니다. AoS는 *임의 접근* (예: 특정 ID로 한 엔티티의 모든 필드 한 번에 읽기) 에 강하고, *대량 핫 루프* 에서는 컴파일러 변환에 따라 손익이 갈린다.
 
-자동 벡터화는 부분적으로 가능하다 — 컴파일러가 strided load를 인식해 SSE로 묶는 경우도 있지만 SoA처럼 효율적이지는 않다. AoS는 *임의 접근* (예: 특정 ID로 한 엔티티의 모든 필드 한 번에 읽기) 에 강하고, *대량 핫 루프* 에는 손해를 본다.
+자동 벡터화는 컴파일러·플래그·루프 형태에 따라 부분적으로 일어날 수 있다. strided load를 인식해 묶는 경우도 있고, 개체 단위로 필드를 묶는 SLP가 도는 경우도 있다. 다만 SoA와 같은 폭의 이득을 항상 보장하지는 않으므로, 실제 변환 결과는 어셈블리나 컴파일러 벡터화 리포트로 확인한다.
 
 게임 엔진의 일반 규칙은 *전체 엔티티를 매 프레임 같은 방식으로 처리하면 SoA, 일부 엔티티에 임의 접근하면 AoS* 다. Archetype은 둘을 청크 단위로 결합한다.
 
 ## 5. Archetype: Chunk 단위 SoA
 
-Archetype은 *같은 컴포넌트 조합을 가진 엔티티들을 chunk로 묶어 SoA로 저장* 한다. Unity DOTS, Bevy ECS의 모델이다.
+Archetype은 *같은 컴포넌트 조합을 가진 엔티티들을 chunk로 묶어 SoA로 저장* 하는 모델이다. 이 lab은 *단일 컴포넌트 조합*(pos+vel 네 float)만 다룬다. Entity generation, component 추가·삭제, query matching, 다른 archetype으로의 migration은 구현하지 않았다. 같은 SoA라는 용어를 쓴다고 다른 엔진의 구체 저장 방식까지 이 구조와 같다고 단정하지 않는다. 예를 들어 Bevy의 Table은 컴포넌트별 type-erased column을 설명하는 자료이고(<https://docs.rs/bevy_ecs/latest/bevy_ecs/storage/struct.Table.html>), 이 lab의 고정 256개 `Chunk`를 직접 증명하지 않는다.
 
 ### 헤더
 
@@ -459,7 +471,7 @@ private:
 }  // namespace ppl
 ```
 
-`Chunk` 는 256 entity 단위. 한 chunk 안은 *4개 분리 배열* (`posX[256]`, `posY[256]`, `velX[256]`, `velY[256]`) 로 SoA다. chunk 외부는 `vector<unique_ptr<Chunk>>`.
+`Chunk` 는 256 entity 단위. 한 chunk 안은 *4개 분리 배열* (`posX[256]`, `posY[256]`, `velX[256]`, `velY[256]`) 로 SoA다. chunk 외부는 `vector<unique_ptr<Chunk>>` 이고 각 `Chunk` 는 별도로 확보된다. 네 배열의 payload 합은 256 × 4 float × 4 byte = 4096 byte지만, `size_t size` 멤버와 정렬을 포함한 구조체 전체 크기는 다르다. 이번 x86-64 빌드에서 `sizeof(Chunk)` 는 4104, `alignof(Chunk)` 는 8이었다. 64 byte 정렬(`alignas`)을 추가하면 padding 비용까지 더 늘어난다. unaligned load를 쓰므로 이 8 byte 정렬이 곧바로 SIMD 미정렬 접근 오류가 되는 것은 아니다.
 
 ### 구현 핫 루프
 
@@ -491,14 +503,14 @@ void ArchetypeSimulation::UpdateScalar(float dt) {
 }
 ```
 
-내부 루프(`i = 0..n`)는 SoA와 *문자 그대로 같은 형태* 다. `posX`, `velX` 가 chunk 안에서 인접 메모리에 있다. 컴파일러가 자동 벡터화하기 같은 수준으로 좋다.
+내부 루프(`i = 0..n`)는 SoA와 *문자 그대로 같은 형태* 다. `posX`, `velX` 가 chunk 안에서 인접 메모리에 있다. 컴파일러가 자동 벡터화하기 좋은 형태다.
 
 차이는 두 가지다.
 
 1. **외부 루프 오버헤드**: chunk마다 메모리 할당과 포인터 추적이 한 번씩 더. 실제 비용은 chunk 수 × 한 번의 indirect access 정도.
 2. **chunk 메타데이터**: 각 chunk가 `size_t size` 를 들고 있어 *부분 chunk* 처리가 자연스럽다.
 
-이 시뮬은 *모든 엔티티가 같은 컴포넌트(pos+vel)* 한 archetype이라 측정상 SoA와 *큰 차이 없는* 게 정상이다. Archetype의 진짜 이득은 *여러 컴포넌트 조합이 섞인 게임 월드* 에서 *특정 컴포넌트 조합 chunk만 골라 처리* 할 때 나타난다. 이 도구는 단일 archetype이라 그 이득을 보지는 못한다 — 측정 결과로 SoA ≈ Archetype 이 나오는 게 *옳은* 결과다.
+이 시뮬은 *모든 엔티티가 같은 컴포넌트(pos+vel)* 한 조합이라 측정상 SoA와 큰 차이가 나지 않을 수 있다. Archetype 저장 모델의 이득은 *여러 컴포넌트 조합이 섞인 월드* 에서 *특정 조합 chunk만 골라 처리* 할 때 나타나지만, 이 도구는 단일 조합이라 그 이득을 다루지 않는다. 다만 'SoA ≈ Archetype 이어야 정상'이라는 결론을 미리 정하지 않는다 — 같은 계산을 하고 측정 조건이 맞으면 예상 순서가 나오지 않아도 실험은 유효하다.
 
 ## 6. main의 다형성 통합과 Hud 활성화
 
@@ -621,7 +633,7 @@ cmake --build build --config Release
 
 - **SoA**: update ms가 가장 작음. 자동 벡터화가 가장 잘 동작.
 - **AoS**: SoA 대비 update ms가 *클 수 있다*. 다만 컴파일러가 AoS도 잘 풀거나 워크로드가 작으면 비슷하게 나올 수 있어, 큰 차이를 *반드시 본다고 단정하지 않는다*.
-- **Archetype**: SoA와 거의 동등. 차이가 미미한 게 *옳은* 결과 (단일 archetype 시뮬이라).
+- **Archetype**: SoA와 비슷하거나 다를 수 있음. 단일 조합 시뮬이라 차이가 작을 수 있지만, *작아야 정답* 이라는 기준은 두지 않는다.
 
 콤보박스 클릭 직후 그래프에 *세로 절벽* 이 그려진다. 직전 layout의 ms와 직후 layout의 ms가 한 줄로 이어지면서 차이가 시각적 사건이 된다.
 
@@ -631,7 +643,7 @@ cmake --build build --config Release
 
 ms를 비교하려면 세 레이아웃이 *같은 계산* 을 해야 한다. 그 전제를 `layout` 그룹이 두 방향에서 확인한다. 하나는 구현끼리의 동등성, 다른 하나는 구현과 무관한 절대 기준이다.
 
-동등성 쪽은 SoA/Scalar/branched를 baseline으로 두고 나머지 조합을 같은 프레임 수만큼 돌려 비교한다. 초기 상태는 시드가 같으므로 *비트 단위* 로 같아야 하고, 180프레임 뒤의 상태는 경로별 허용 오차 안에 들어야 한다.
+동등성 쪽은 SoA/Scalar/branched를 baseline으로 두고 나머지 조합을 같은 프레임 수만큼 돌려 비교한다. 초기 상태는 같은 시드·같은 좌표 상한에서 만들어지므로 모든 레이아웃이 수치적으로 같아야 한다. 검사는 허용 오차 0의 `NearStates` 로 하며, 이는 `+0`/`-0` 를 구분하지 않는 수치 동등이지 비트 동등이 아니다. 180프레임 뒤의 상태는 경로별 허용 오차 안에 들어야 한다.
 
 <!-- snippet: tests/core_tests.cpp#TestLayoutEquivalence -->
 ```cpp
@@ -658,7 +670,7 @@ void TestLayoutEquivalence() {
         auto sim = MakeAndInit(c.layout);
         CHECK_AT(sim->Count() == kEntities, label);
 
-        // 같은 시드니 초기 상태는 세 레이아웃이 비트 단위로 같다.
+        // 같은 시드·같은 좌표 상한이라 초기 상태는 수치적으로 같다(비트 동등이 아니다).
         std::vector<float> state;
         sim->CopyState(state);
         CHECK_AT(NearStates(state, baselineInit, 0.0f), label);
@@ -716,12 +728,13 @@ ctest --test-dir build -C Release -R parts_layout_tests --output-on-failure
 
 ```text
 parts_core_tests: group `layout`
-  layout/LayoutEquivalence ... 37 check(s) ok
-  layout/BoundaryInvariants ... 120 check(s) ok
-layout: 2 test(s), 157 check(s), 0 failure(s)
+  layout/LayoutEquivalence ... 55 check(s) ok
+  layout/BoundaryInvariants ... 180 check(s) ok
+  layout/InputContracts ... 13 check(s) ok
+layout: 3 test(s), 248 check(s), 0 failure(s)
 ```
 
-단언 수가 조합 수에 비례한다. 기본 빌드는 `{SoA, AoS, Archetype} x {Scalar, SSE} x {branched, branchless}` 12조합이라 위 수가 나오고, `-DPERF_LAB_ENABLE_AVX2=ON` 으로 구성하면 폭이 하나 늘어 18조합이 되면서 `55` / `180` / 합계 `235` 로 바뀐다. 수가 그보다 작으면 조합 하나가 빠졌다는 뜻이다.
+단언 수가 조합 수에 비례한다. 위 출력은 `-DPERF_LAB_ENABLE_AVX2=ON` 으로 구성한 18조합 빌드의 예로, `{SoA, AoS, Archetype} x {C++ Auto, SSE, AVX2} x {branched, branchless}` 다. 기본 빌드는 `{C++ Auto, SSE}` 12조합이라 `LayoutEquivalence` 37, `BoundaryInvariants` 120 이 나온다. `InputContracts` 는 조합 수와 무관하게 13개다. 합계는 기본 `170`(`37+120+13`), AVX2 빌드 `248`(`55+180+13`)이다. 수는 실행 통계일 뿐 검증 강도의 증거가 아니므로, 어떤 불변식을 검사했는지는 테스트 이름과 입력으로 확인한다.
 
 ### 검증 체크리스트
 
@@ -749,8 +762,8 @@ layout: 2 test(s), 157 check(s), 0 failure(s)
 세 가지 결정이 이 단계의 토대를 만들었다.
 
 1. **추상 인터페이스 + 팩토리** — vtable dispatch 한 번이 핫 루프 밖에 있어 dispatch 비용은 무시할 수 있다. *데이터 배치 차이* 만 측정에 남는다.
-2. **인터페이스 시그니처를 넓게 잡아 둠** — `Update(dt, simd, branchless)` 가 이 단계에선 simd/branchless를 무시하지만, 처리 경로가 늘어나도 시그니처를 바꾸지 않고 분기만 추가하면 된다.
-3. **Archetype의 측정상 동일성을 *기대치* 로 명시** — 단일 archetype 시뮬에서 SoA ≈ Archetype 이 나오는 게 옳은 결과. 차이가 안 나는 *것* 이 측정 도구가 알려 주는 정보다.
+2. **인터페이스 시그니처를 넓게 잡아 둠** — 이 단계의 스냅숏에서는 `Update(dt, simd, branchless)` 가 simd/branchless를 받기만 하지만, 처리 경로가 늘어나도 시그니처를 바꾸지 않고 분기만 추가하면 된다.
+3. **Archetype의 저장 범위를 *명시*** — 단일 조합 시뮬이라 SoA와 차이가 작을 수 있지만, 그 순서를 정답으로 고정하지 않는다. 차이가 나지 않는 *것* 도 측정 도구가 알려 주는 정보다.
 
 여기까지의 코드는 자동 벡터화에만 의존한다. 컴파일러가 잘 처리하는 부분과 못 처리하는 부분이 섞여 있어 차이가 *예측 가능하지 않다*. 핫 루프를 SSE/AVX2 명령으로 직접 짠 경로가 없어, 지금 측정된 차이 중 어디까지가 레이아웃 때문이고 어디까지가 컴파일러의 벡터화 판단 때문인지 분리할 수 없다.
 
@@ -758,8 +771,8 @@ layout: 2 test(s), 157 check(s), 0 failure(s)
 
 - Mike Acton, "Data-Oriented Design and C++" (CppCon 2014) — SoA/AoS 의 게임 엔진 적용
 - Michele Caini (skypjack), "ECS back and forth" — sparse set 대 archetype 등 ECS 저장 모델 비교 시리즈
-- [Unity Entities Components System](https://docs.unity3d.com/Packages/com.unity.entities@latest)
-- [Bevy ECS — 공식 Getting Started 가이드](https://bevy.org/learn/quick-start/getting-started/ecs/) — archetype 기반 컴포넌트 저장의 실물 구현
+- [Unity Entities Components System](https://docs.unity3d.com/Packages/com.unity.entities@latest) — ECS 저장 배치의 개념 비교 자료
+- [Bevy ECS — 공식 Getting Started 가이드](https://bevy.org/learn/quick-start/getting-started/ecs/) — archetype 기반 컴포넌트 저장의 개념 자료. 이 lab의 고정 256개 `Chunk`와 동일 구현이라는 근거는 아니다
 - Stoyan Nikolov, "OOP is Dead, Long Live Data-Oriented Design" (CppCon 2018)
 - [Andrei Alexandrescu, "Speed is found in the minds of people"](https://www.youtube.com/watch?v=FJJTYQYB1JQ) (CppCon 2019) — 자동 벡터화의 한계
 - [Compiler Explorer (godbolt.org)](https://godbolt.org/) — 자동 벡터화 결과를 어셈블리로 직접 확인

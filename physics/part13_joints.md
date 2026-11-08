@@ -62,6 +62,7 @@ struct DistanceJoint {
     vec2  localA;          // bodyA 로컬 anchor
     vec2  localB;          // bodyB 로컬 anchor
     float restLength;
+    float gamma = 0.0f;    // soft 모드의 완화 계수. hard 모드는 0
     vec2  rA, rB;          // Prepare 에서 계산해 Solve 에서 사용
     // ...
 };
@@ -132,7 +133,9 @@ void DistanceJoint::SolveVelocityConstraint() {
     vec2 vA = bodyA->linearVelocity + PerpV(rA, bodyA->angularVelocity);
     vec2 vB = bodyB->linearVelocity + PerpV(rB, bodyB->angularVelocity);
     float Cdot = dot(u, vB - vA);
-    float lambda = -effMass * (Cdot + bias);
+    // gamma 항이 누적 임펄스 잔차에 걸려야 soft 해로 수렴한다.
+    // gamma = 0 이면 hard 제약과 같은 식이다.
+    float lambda = -effMass * (Cdot + bias + gamma * impulse_acc);
     impulse_acc += lambda;
 
     vec2 P = u * lambda;
@@ -458,6 +461,10 @@ void HingeJoint::PrepareLimit(float dt) {
 }
 ```
 
+limit 상태가 바뀌면 누적 임펄스의 허용 부호도 바뀐다. Inactive 였다가 AtLower 로 전환되거나 그 반대가 되면 이전 상태의 `impulseLimit_acc` 는 새 feasible set 밖일 수 있다. 이전/현재 limit state 를 저장하고, 상태 전환·`referenceAngle`·한도 수정 시 누적 임펄스를 reset 하거나 새 허용 구간으로 투영한다. Inactive limit 의 stale impulse 는 warm start 에 적용하지 않는다.
+
+hinge 의 `angle = bodyB->angle - bodyA->angle - referenceAngle` 계산은 각 body 의 `angle` 이 연속값일 때만 한도를 올바르게 분류한다. Part04 처럼 `angle` 을 $[-\pi, \pi]$ 로 wrap 하면 연속 185° 가 -175° 가 되어 upper 방향이 lower 위반으로 오인된다. `WrapAngle` 을 한 번 더 적용하는 것으로는 multi-turn joint 가 해결되지 않는다. 물리 각도는 연속값(누적 joint angle)으로 유지하거나 상대 회전에서 branch 를 추적하고, shortest-arc motor 와 연속 회전 limit 를 서로 다른 계약으로 둔다.
+
 ### 6.3 활성 한도의 임펄스
 
 상태에 따라 *clamp 방향* 다름.
@@ -572,7 +579,7 @@ void DistanceJointSoft::PrepareVelocityConstraint(float dt) {
         float omega = 2 * kPi * frequency;
         float k = mass * omega * omega;          // spring constant
         float c = 2 * mass * damping * omega;    // damping
-        float gamma = dt * (c + dt * k);
+        gamma = dt * (c + dt * k);
         gamma = (gamma != 0) ? 1.0f / gamma : 0;
 
         // 변형된 effective mass + bias
@@ -582,7 +589,7 @@ void DistanceJointSoft::PrepareVelocityConstraint(float dt) {
 }
 ```
 
-기본값 `frequency = 0` 은 위 게이트에 걸려 soft 모드가 꺼진 상태 — 즉 *rigid 모드* 다. soft 로 쓰려면 `frequency` 에 양수를 준다. 예를 들어 *진동수 1 Hz + 감쇠 0.5* 로 두면 distance joint 의 위반량이 *고무처럼 응답*.
+기본값 `frequency = 0` 은 위 게이트에 걸려 soft 모드가 꺼진 상태 — 즉 *rigid 모드* 다. 이때 `gamma = 0` 이므로 base solve 식이 hard 제약과 정확히 일치한다. soft 로 쓰려면 `frequency` 에 양수를 준다. 예를 들어 *진동수 1 Hz + 감쇠 0.5* 로 두면 distance joint 의 위반량이 *고무처럼 응답*. soft 로 둔 row 는 hard position projection 으로 다시 조이지 않는다. hard 투영을 덧대면 compliance 가 사라진다.
 
 ### 7.4 API 로 노출할 값
 
@@ -604,9 +611,9 @@ soft constraint 가 *SI 솔버 안의 spring 효과* 면, PBD 의 *XPBD complian
 
 ### 8.1 Box2D
 
-2D 의 풍부한 joint 종류.
+Box2D 2.4.1 기준의 2D joint 종류.
 
-| Joint | 자유도 제거 | 추가 기능 |
+| Joint | solver 행 / 목표 운동 | 추가 기능 |
 |---|---|---|
 | Revolute (hinge) | 2 (위치만) | motor, limit |
 | Prismatic (slider) | 2 (측면 + 회전) | motor, limit |
@@ -617,6 +624,8 @@ soft constraint 가 *SI 솔버 안의 spring 효과* 면, PBD 의 *XPBD complian
 | Wheel | 1 (측면) | spring + motor |
 | Mouse | 2 (마우스 위치로 끌기) | - |
 | Friction | 2 + 1 (병진 + 회전 마찰) | - |
+
+표의 둘째 열은 configuration DOF 를 강제로 제거하는 holonomic rank 가 아니라 solver 가 만드는 행(row)과 목표 운동을 뜻한다. hard ideal constraint 만 rank 만큼 DOF 가 줄고, Mouse·Friction·compliant(soft) joint 는 유한 힘을 내는 행이지 DOF 를 제거하지 않는다. 목록과 이름은 Box2D 2.4.1 기준이며 3.x API 와는 다르다.
 
 다양한 *2D 게임플레이* 를 위한 풍부한 라이브러리.
 
@@ -697,6 +706,6 @@ joint 의 핵심은 *자유도를 제거하거나 제한하는 행(row)을 추�
 - Bullet 소스 (`btHingeConstraint.cpp`, `btGeneric6DofConstraint.cpp`) — 3D joint 산업 구현.
 - PhysX SDK Guide, "Joints" — D6 joint 의 자세한 매개변수.
 - Bullet manual, "Constraints" — joint 종류와 활용 패턴.
-- David Eberly, *Game Physics*, Ch. 7 — joint 의 학술 정리.
+- David Eberly, *Game Physics*, 2nd ed. (2010), §6.6–6.7 — constrained motion 과 joint 의 학술 정리.
 - Jakobsen, "Advanced Character Physics" (GDC 2001) — ragdoll 의 joint 디자인.
 - Wikipedia, "Kinematic pair" — 기계 joint 의 학술 분류.

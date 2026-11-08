@@ -107,19 +107,25 @@ GJK의 *유일한 도형 인터페이스*. 도형 표현이 무엇이든 이 함
 
 ### 2.1 정의
 
-도형 $S$ 의 지원 함수 (support function):
+수학에서 도형 $S$ 의 *지원 함수 (support function)* 는 방향별 최대 내적 *스칼라* 다.
 
 $$
-\text{support}_S(\vec{d}) = \arg\max_{\vec{p} \in S} \vec{d} \cdot \vec{p}
+h_S(\vec{d}) = \max_{\vec{p} \in S} \vec{d} \cdot \vec{p}
 $$
 
-방향 $\vec{d}$ 가 주어졌을 때, *$\vec{d}$ 방향으로 가장 먼 점* 을 반환.
+게임 충돌 문헌은 관용적으로 *그 최대를 이루는 점* 을 반환하는 함수를 지원 함수라 부른다. 이 글도 그 관용을 따르되, 이를 *지원 매핑 (support mapping)* 이라 구분해 적는다.
+
+$$
+\text{support}_S(\vec{d}) = \arg\max_{\vec{p} \in S} \vec{d} \cdot \vec{p}, \qquad h_S(\vec{d}) = \vec{d} \cdot \text{support}_S(\vec{d})
+$$
+
+방향 $\vec{d}$ 가 주어졌을 때, *$\vec{d}$ 방향으로 가장 먼 점* 을 반환한다. 최대를 이루는 점은 *유일하지 않을 수 있다* — 면이 방향에 수직이면 그 면의 모든 점이 같은 내적을 갖는다. 어느 하나를 골라도 최대 내적 $h_S$ 는 같다.
 
 기하학적 직관: *도형 $S$ 의 그림자를 $\vec{d}$ 방향에서 봤을 때 가장 멀리 보이는 점*.
 
 ```mermaid
 flowchart LR
-    Shape[도형 S] -->|방향 d| Support["가장 먼 점 = support_S(d)"]
+    Shape[도형 S] -->|"방향 d (d≠0, 양의 스케일 불변)"| Support["support_S(d) = 최대 내적 점<br/>동률이면 어느 점이든 h는 동일"]
 ```
 
 ### 2.2 도형별 지원 함수
@@ -135,9 +141,14 @@ flowchart LR
 
 ```cpp
 vec3 SupportSphere(Sphere s, vec3 d) {
-    float len = length(d);
-    if (len < 1e-6f) return s.center;
-    return s.center + s.radius * (d / len);
+    // d == 0 (정확히 영벡터) 만 별도 정책: support 가 유일하지 않으므로
+    // 호출자가 정한 기본점(여기서는 center)을 반환한다. 0 방향은 분리 증명에 쓰지 않는다.
+    // 비영 방향은 크기와 무관하게 최대 성분으로 나눈 뒤 정규화해
+    // 아주 작은 d 에서도 진짜 극점을 반환한다 (양의 스케일 불변).
+    float m = std::max(std::fabs(d.x), std::max(std::fabs(d.y), std::fabs(d.z)));
+    if (m == 0.0f) return s.center;
+    vec3 scaled = d / m;
+    return s.center + s.radius * (scaled / length(scaled));
 }
 
 vec3 SupportAABB(AABB box, vec3 d) {
@@ -194,7 +205,7 @@ Convex hull (n점) 만 $O(n)$. *대부분 게임 도형* 이 빠르다.
 
 지원 함수가 있으니 *Minkowski 차를 명시적으로 만들 필요 없다*. GJK 가 매 반복에서 *필요한 한 점만* 지원 함수로 얻어 사용.
 
-이 *지연 평가 (lazy evaluation)* 가 GJK 의 *메모리 효율성* 의 핵심. *수만 면의 다면체* 라도 GJK 는 *몇 개 점만* 평가.
+이 *지연 평가 (lazy evaluation)* 가 GJK 의 *메모리 효율성* 의 핵심. 다만 *저장하는 심플렉스 크기* 와 *support 검색 비용* 은 별개다. 심플렉스는 상수 개 ($O(1)$) 정점만 들고 다니지만, 2.2절의 선형 `SupportConvexHull` 은 *매 호출마다 hull 의 모든 정점 $O(n)$* 을 검사한다. 정점 수가 많으면 hill-climbing (인접 정점 따라 이동) 이나 지원 구조 (k-DOP, BVH) 로 검색을 줄인다.
 
 ## 3. GJK 핵심 아이디어
 
@@ -205,7 +216,7 @@ Minkowski 차의 원점 포함 여부를 *지원 함수만으로* 판정.
 ```mermaid
 flowchart TD
     Start[시작 방향 d] --> Sup[지원 함수로 첫 점 A]
-    Sup --> Simplex[심플렉스 시작 = A]
+    Sup --> Simplex[심플렉스 = A<br/>차원은 1~4로 성장]
     Simplex --> Loop[반복]
     Loop --> NewDir[원점 향한 새 방향]
     NewDir --> NewSup[새 지원점 B]
@@ -238,7 +249,7 @@ vec3 b = SupportMinkowskiDiff(d, supA, supB);
 
 이때 *$b$ 가 d 방향에서 원점 너머에 있지 않으면* — 즉 $\vec{d} \cdot b < 0$ — *Minkowski 차가 원점을 포함 못 함* — 분리. 즉시 종료.
 
-*접촉 (touching) 정책*. $\vec{d} \cdot b = 0$ 은 *원점이 정확히 support plane 위* — 두 도형이 *경계에서 닿은 상태*. 트리거 overlap 처럼 *touch 를 collision 으로 보려면* `< 0` 으로, *침투만 collision 으로 보려면* `<= 0` 또는 `< epsilon` 정책. 이 글의 코드는 *touch = collision (< 0 으로 분리 판정)* 정책.
+*접촉 (touching) 정책*. $\vec{d} \cdot b = 0$ 은 *원점이 그 방향의 support plane 위* 에 있다는 뜻일 뿐, *원점이 형상에 포함된다는 뜻은 아니다* — 예를 들어 $x=0$ 평면에 놓였지만 $y$ 가 떨어진 선분이 있다. 실제 접촉은 *심플렉스의 최근접점/원점 포함* 으로 확정해야 한다. $\vec{d} \cdot b < 0$ 이면 그 방향으로 원점에 닿지 못하므로 *분리가 증명* 되고, $\ge 0$ (특히 `= 0`) 은 *분리 증명의 실패* 일 뿐이다. 트리거 overlap 처럼 *touch 를 collision 으로 보려면* `< 0` 으로, *침투만 collision 으로 보려면* `<= 0` 또는 `< epsilon` 정책. 이 글의 코드는 *touch = collision (< 0 으로 분리 판정)* 정책.
 
 ### 3.3 심플렉스의 의미
 
@@ -302,11 +313,12 @@ bool DoLine(Simplex& s, vec3& d) {
         s.points = {a};
         d = ao;
     }
-    return false;  // 1D 심플렉스는 원점 포함 못 함
+    return false;  // 이 단계는 '원점 포함' 만 보고한다. 선분이 원점을 품을 수도 있지만
+                   // 그 접촉/침투 판정과 저차 EPA seed 확장은 6.1–6.2절에서 다룬다.
 }
 ```
 
-선분 진화의 두 케이스. 새 방향 $\vec{d}$ 를 갱신 후 다음 지원점. *ab 와 ao 가 평행* (원점이 선분의 연장선 위) 이면 `cross(cross(ab, ao), ab)` 가 영벡터 — 임의 수직축으로 fallback.
+선분 진화의 두 케이스. 새 방향 $\vec{d}$ 를 갱신 후 다음 지원점. *ab 와 ao 가 평행* (원점이 선분의 연장선 위) 이면 `cross(cross(ab, ao), ab)` 가 영벡터 — 임의 수직축으로 fallback. 선분이 원점을 내부에 포함하는 접촉도 가능하다 — 이 함수가 `false` 를 반환하는 것은 *원점 미포함* 이 아니라 *이 단계에서 포함을 확정하지 않음* 을 뜻한다.
 
 ### 4.2 2D — 삼각형 심플렉스
 
@@ -442,11 +454,11 @@ flowchart TB
 
 ## 5. 거리 GJK와 종료 조건
 
-GJK 가 *교차 안 할 때* 의 *최단 거리* 도 답한다. 종료 조건만 다르다.
+GJK 가 *교차 안 할 때* 의 *최단 거리* 도 답한다. 다만 *종료 조건이 다를 뿐 아니라* 현재 최근접 심플렉스와 witness 를 매 반복 갱신해야 한다.
 
 ### 5.1 거리 GJK
 
-원점이 Minkowski 차 안에 *없을 때*, 가장 가까운 점이 *심플렉스의 한 부분 심플렉스에서* 결정.
+원점이 Minkowski 차 안에 *없을 때*, 가장 가까운 점이 *심플렉스의 한 부분 심플렉스에서* 결정된다. 교차 GJK 와 달리 *종료 조건만 바뀌는 것이 아니다*. 매 반복에서 (a) 현재 심플렉스의 원점 최근접점 $\vec{v}$ 와 그 barycentric 좌표, (b) 새 지원점이 주는 거리 하한을 함께 갱신해야 한다. 임의의 탐색 방향과 단순한 Voronoi 처리만으로는 거리 상한/하한이 나오지 않는다.
 
 ```cpp
 struct DistanceResult {
@@ -456,9 +468,16 @@ struct DistanceResult {
 };
 
 DistanceResult GJKDistance(auto supA, auto supB) {
-    // ... GJK 와 비슷한 진화
-    // 단, 사면체에 도달해도 *원점을 안 포함하면* 가장 가까운 면을 유지
-    // 새 지원점이 *원점에 더 가깝지 않으면* 종료
+    // 1. 초기 심플렉스 (예: 첫 두 support 점).
+    // 2. 반복:
+    //    v    = 심플렉스의 원점 최근접점, |v| = 거리 *상한*
+    //    dHat = -v / |v|, newPt = support_{A⊖B}(dHat)
+    //    하한 = dot(newPt, dHat)          // 원점 방향 거리 하한
+    //    if (|v| - 하한 < epsilon) 종료
+    //    아니면 newPt 를 넣고 *원점 최근접 부분 심플렉스* 로 축소 (barycentric reduction)
+    //    새 support 점의 |newPt| 가 줄지 않아도 v 는 줄 수 있으므로
+    //    |newPt| 가 아니라 *갱신된 |v|* 를 진행 지표로 본다.
+    //    witness 점(closestOnA/B)은 v 의 barycentric 좌표로 복원한다 (5.4).
 }
 ```
 
@@ -469,9 +488,9 @@ DistanceResult GJKDistance(auto supA, auto supB) {
 | 모드 | 종료 |
 |---|---|
 | 교차 GJK | 사면체가 원점 포함 OR 새 지원점이 d 방향에서 진전 못 함 |
-| 거리 GJK | 새 지원점이 *현재 가장 가까운 거리만큼 진전 못 함* |
+| 거리 GJK | 최근접점 $\vec{v}$ 와 support 하한의 간격이 epsilon 이하 |
 
-거리 모드는 *epsilon 비교* 가 종료에 들어간다. 매 반복에서 *현재 closest point 방향 $\hat{d}$ (Minkowski 차의 closest-to-origin → 원점 방향)* 으로 새 지원점을 얻고, 그 지원점이 *현재 가장 가까운 거리* 보다 *충분히 더 가까이* 가지 않으면 수렴 종료.
+거리 모드는 *epsilon 비교* 가 종료에 들어간다. 매 반복에서 *현재 closest point 방향 $\hat{d}$ (Minkowski 차의 closest-to-origin → 원점 방향)* 으로 새 지원점을 얻고, 갱신한 심플렉스 거리와 support 하한의 간격이 *충분히 작아지면* 수렴 종료.
 
 ```text
 // 의사 코드:
@@ -481,6 +500,7 @@ DistanceResult GJKDistance(auto supA, auto supB) {
 //   newPt   = support_{A⊖B}(dHat)
 //   진행도  = |v| + dot(newPt, dHat)        // 상한 - 하한
 // 진행도 < epsilon 이면 종료, |v| 가 두 도형 사이 최단 거리.
+// 아니면 newPt 를 심플렉스에 넣고 원점 최근접 부분 심플렉스로 축소 + barycentric 갱신.
 ```
 
 진행도는 상한 − 하한이므로 *항상 0 이상* 이다. 원점이 Minkowski 차 *안에* 있으면 진행도가 작아지는 대신 심플렉스가 *원점을 포함* 하게 되어 $v = 0$ 이 되고, 이때 거리 0 (교차) 으로 분기해 EPA 로 넘긴다. 원점이 경계에 정확히 *닿은* touching 만이 $|v| \to 0$, $\text{dot}(\text{newPt}, \hat{d}) \to 0$ 으로 진행도가 0 에 수렴하는 경우다.
@@ -493,13 +513,15 @@ DistanceResult GJKDistance(auto supA, auto supB) {
 // 선분 closest point
 vec3 ClosestPointOnLineToOrigin(vec3 a, vec3 b) {
     vec3 ab = b - a;
-    float t = dot(-a, ab) / dot(ab, ab);
+    float denom = dot(ab, ab);
+    if (denom < 1e-12f) return a;   // 퇴화 선분 (a == b) — 0/0 방지
+    float t = dot(-a, ab) / denom;
     t = std::clamp(t, 0.0f, 1.0f);
     return a + t * ab;
 }
 ```
 
-삼각형·사면체도 같은 패턴 — *Voronoi 영역 분류 + barycentric 계산*.
+삼각형·사면체도 같은 패턴 — *Voronoi 영역 분류 + barycentric 계산*. 선분 helper 는 Part11 `ClosestPointOnSegment` 와 같은 퇴화 계약 (a == b -> 한 점) 을 따른다.
 
 ### 5.4 두 도형의 가장 가까운 점
 
@@ -526,11 +548,12 @@ GJK 가 *교차 여부* 만 답한다. *침투 깊이* 가 필요하면 EPA (Exp
 
 ### 6.1 핵심 아이디어
 
-GJK 의 *결과 사면체* 는 *원점을 포함하는 Minkowski 차 안의 부분*. EPA 는 그 사면체에서 시작해 *Minkowski 차의 경계* 에 *폴리토프* 를 *확장*. 원점에서 *가장 가까운 면* 의 *법선과 거리* 가 *침투 법선과 깊이*.
+GJK 의 *결과 심플렉스* 는 *원점을 포함하는 Minkowski 차 안의 부분*. 보통은 사면체지만 *점·선분·삼각형 접촉이나 퇴화 사면체* 로 끝날 수도 있다. EPA 는 원점을 둘러싼 *full-dimensional* 폴리토프가 필요하므로, 그 심플렉스를 시작 폴리토프로 확장하는 단계가 필수다 (6.2절). EPA 는 그 사면체에서 시작해 *Minkowski 차의 경계* 에 *폴리토프* 를 *확장*. 원점에서 *가장 가까운 면* 의 *법선과 거리* 가 *침투 법선과 깊이*.
 
 ```mermaid
 flowchart TD
-    GJK[GJK 사면체<br/>원점 포함] --> EPAStart[EPA 시작]
+    GJK[GJK 결과 심플렉스<br/>사면체 또는 저차원 - 점·선분·삼각형·퇴화 사면체] --> Seed[원점을 둘러싼 full-dimensional<br/>초기 폴리토프 확장이 필수]
+    Seed --> EPAStart[EPA 시작]
     EPAStart --> NearestFace[가장 가까운 면 찾기]
     NearestFace --> NewSup[그 면의 법선 방향 지원점]
     NewSup --> Q{새 점이 면에서 원점 너머?}
@@ -558,7 +581,12 @@ struct Polytope {
 };
 ```
 
-GJK 의 사면체 4 정점·4 면이 시작 폴리토프.
+교차 GJK 가 사면체를 만들어 종료하면 *그 4 정점·4 면* 이 시작 폴리토프다. 그런데 교차 함수가 `bool` 만 반환하거나, 접촉이 *점·선분·삼각형* 저차 심플렉스에서 확정되거나, 사면체가 *퇴화(거의 평면)* 일 수 있다. EPA 는 원점을 둘러싼 *일관된 외향 폐폴리토프 (full-dimensional)* 가 필요하므로, GJK→EPA 사이에 다음 계약이 필수다.
+
+- **심플렉스 보존**: 교차 판정 함수가 `bool` 만이 아니라 *마지막 심플렉스와 그 정점별 A/B witness* 를 함께 넘긴다.
+- **full-dimensional 초기화**: 원점을 포함하되 부피가 0이 아닌 폴리토프로 확장한다. 저차 심플렉스 (점·선분·삼각형) 는 그 *차원 방향으로 support 점을 추가* 해 한 차원씩 키운다. Bullet 의 `EncloseOrigin()` 이 이 역할로, simplex 차원에 따라 축/수직 방향으로 지원점을 더해 원점을 감싼다.
+- **touch 처리**: 원점이 경계에 정확히 닿은 접촉은 침투 깊이 0 으로 반환하고, 폴리토프 확장이 불가능하면 실패가 아니라 *zero-depth 접촉* 으로 처리한다.
+- **중복·퇴화면 제거**: 같은 support 점의 재등장, 면적 0 에 가까운 면, 일관성 없는 winding 을 제거하고, 그래도 full-dimensional 폴리토프를 못 만들면 *명시적 실패 상태* (별도 enum) 로 보고한다 (`bool` 로 뭉개지 않는다).
 
 ### 6.3 면 확장
 
@@ -622,7 +650,7 @@ flowchart LR
 
 ### 6.5 종료 조건과 정밀도
 
-새 지원점이 *현재 가장 가까운 면보다 원점에 더 가까이 가는 점이 없으면* 종료. 즉 *그 면이 Minkowski 차 경계 위* 에 있다는 뜻.
+새 지원점이 *현재 가장 가까운 면을 더 바깥으로 밀어낼 간격* 이 tolerance 이하이면 종료. 즉 support gap `newDist - face.distance` 가 epsilon 이하이고, *그 면이 Minkowski 차 경계에 도달* 했다는 뜻이다.
 
 epsilon이 작을수록 *정확* 하지만 *반복 수* 가 늘고 *수치 불안정* 위험. 게임은 보통 $10^{-4}$ ~ $10^{-6}$.
 
@@ -678,7 +706,7 @@ for (auto& existing : s.points) {
 }
 ```
 
-이 `return false` 는 *분리 확정* 이 아니라 *판정 실패* 다. 정확 연산의 완전 중복이면 분리가 증명되지만, 위 코드는 tolerance 비교라 touching 이나 epsilon 이하의 얕은 침투에서도 걸린다 — 그대로 분리로 접으면 충돌 누락 (터널링) 이 된다. 산업 구현은 별도 상태 (`DuplicateSupport`) 로 보고하고, 현재 최근접 거리가 contact slop 안이면 touching 으로 처리한다. 4.4절의 반복 상한 탈출도 마찬가지로 아무 정보를 주지 않으므로 분리로 단정할 수 없다.
+이 `return false` 는 *분리 확정* 이 아니라 *판정 실패* 다. 정확 연산의 완전 중복이라도 *곧바로 분리가 증명되는 것은 아니다* — 저차 심플렉스 접촉이나 원점을 포함한 심플렉스에서도 같은 지원점이 나올 수 있기 때문이다. 중복만으로 분리를 주장하려면 *distance mode 의 최근접점·정확성 전제* (5절) 가 추가로 필요하다. 위 코드는 tolerance 비교라 touching 이나 epsilon 이하의 얕은 침투에서도 걸리므로, 완전 중복이든 tolerance 중복이든 *현재 최근접 거리와 접촉 정책* 을 확인해 분리/접촉을 결정한다. 산업 구현은 별도 상태 (`DuplicateSupport`) 로 보고하고, 현재 최근접 거리가 contact slop 안이면 touching 으로 처리한다. 4.4절의 반복 상한 탈출도 마찬가지로 아무 정보를 주지 않으므로 분리로 단정할 수 없다.
 
 ### 7.2 EPA 의 면 분류 오류
 

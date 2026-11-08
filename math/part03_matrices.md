@@ -472,13 +472,19 @@ flowchart LR
     Sphere -->|비균일 스케일 1, 2, 1| Ellipsoid[타원체<br/>법선이 수직 아님]
 ```
 
-수학적으로, 비균일 스케일 행렬 $M$ 으로 *법선* 을 변환하려면 *역전치 행렬* 을 써야 한다.
+수학적으로, 선형 부분이 가역인 변환 행렬 $M$ 으로 *법선* 을 변환하려면 *역전치 행렬* 을 쓴다. 면 위의 두 접선 벡터 $\vec{t_1}, \vec{t_2}$ 가 $M$ 으로 변환되면 변환된 면 법선은 그 외적인 $(M\vec{t_1}) \times (M\vec{t_2})$ 이고, 외적의 항등식
 
 $$
-\vec{n}_{\text{world}} = (M^{-1})^T \vec{n}_{\text{model}}
+(M\vec{u}) \times (M\vec{v}) = \det(M)\, (M^{-1})^T (\vec{u} \times \vec{v})
 $$
 
-증명 스케치: 면 위의 두 접선 벡터 $\vec{t_1}, \vec{t_2}$ 가 $M$ 으로 변환되면 $M\vec{t_1}, M\vec{t_2}$ 가 되고, *변환된 면의 법선* 은 그 외적인 $(M\vec{t_1}) \times (M\vec{t_2})$. 이 외적이 $\det(M) (M^{-1})^T (\vec{t_1} \times \vec{t_2}) = \det(M) (M^{-1})^T \vec{n}$ 임을 외적의 성질로 보일 수 있다. $\det(M)$ 은 스케일 인자라 정규화 후엔 사라진다.
+에 의해 이것은 $\det(M) (M^{-1})^T \vec{n}$ 다. 여기서 $\det(M)$ 은 *부호를 가진* 스케일 인자다. 정규화가 없애는 것은 $|\det(M)|$ 의 *크기* 이지 $\det(M) < 0$ 의 *부호가 아니다*. 따라서 winding으로 만든 면 법선과 역전치로 운반한 방향 법선은 *행렬식이 음수인 변환에서 부호가 갈린다*:
+
+$$
+\operatorname{normalize}\big((M\vec{t_1}) \times (M\vec{t_2})\big) = \operatorname{sign}(\det M)\, \operatorname{normalize}\big((M^{-1})^T \vec{n}\big)
+$$
+
+예를 들어 $M = \operatorname{diag}(-1, 1, 1)$ (x축 거울) 에서 모델 법선 $\vec{n} = \hat{z}$ 를 생각하자. 변환된 접선의 외적은 $-\hat{z}$ 를 주지만, 역전치로 운반한 $(M^{-1})^T \vec{n} = \hat{z}$ 는 부호가 반대다. 정규화 후에도 이 부호 차이는 남는다. 거울 변환 ($\det M < 0$) 에서는 *winding 순서를 뒤집을지*, *front-face 상태를 바꿀지* 를 별도 계약으로 정한다.
 
 ```cpp
 // 위치 변환
@@ -489,7 +495,7 @@ mat3 normalMatrix = transpose(inverse(mat3(modelMatrix)));
 vec3 worldNormal = normalize(normalMatrix * modelNormal);
 ```
 
-균일 스케일이면 $(M^{-1})^T = M / s^2$ 이라 *방향만 같음*. 정규화하면 결과 같다 — 균일 스케일 시 법선 변환에 단순 행렬 곱을 써도 된다.
+이 코드는 *방향 법선 (oriented normal)* 을 보존한다 — 음수 행렬식이면 winding 기반 면 법선과 부호가 다를 수 있으므로 위 계약이 필요하다. 균일 스케일이면 $(M^{-1})^T = M / s^2$ 이라 *방향만 같음*. 정규화하면 결과 같다 — 균일 스케일 시 법선 변환에 단순 행렬 곱을 써도 된다.
 
 비균일 스케일이 들어가는 게임 엔진은 *셰이더에 normal matrix를 별도 uniform* 으로 넘기는 게 표준. 이를 안 하면 *라이팅이 잘못 되는 미묘한 버그* — 특히 원거리 빛이 어색하게 비치는 모습.
 
@@ -611,9 +617,11 @@ mat4 GetWorldMatrix(GameObject* obj) {
 
 ### 6.5 변환 분해 (decomposition)
 
-합성된 행렬 $M$ 에서 *T, R, S 를 다시 추출* 하는 역연산. 일반적으로:
+합성된 행렬 $M$ 에서 *T, R, S 를 다시 추출* 하는 역연산이다. 다음 코드는 *shear 없는 양수 스케일 TRS* 를 전제한다. 계층에서 상속된 변환을 다시 분해할 때는 *양수 단일 TRS*, *부호가 비유일한 signed TRS*, *shear가 있는 일반 affine* 을 구분해야 한다.
 
-아래 코드는 *단순 TRS — shear 없음, scale 양수 가정* 의 분해다. 일반 affine 변환 (전단 포함) 또는 *음수 스케일* 의 정확한 분해는 *Polar 분해 또는 SVD* 가 필요하다.
+- **양수 단일 TRS**: 위 코드처럼 각 열의 길이를 스케일로, 정규화한 열을 회전으로 뽑는다.
+- **signed TRS (shear 없음)**: 열 길이와 $\det M$ 의 부호를 조합해 *한 축의 부호* 를 선택하면 분해할 수 있다. 원래 각 축의 부호는 *비유일* 하지만 (어느 축에 음수를 붙여도 같은 행렬이 될 수 있다), *SVD가 반드시 필요한 것은 아니다*. 부호 선택 규약 (예: 항상 z축에 음수를 몰아넣기) 을 정한다.
+- **일반 affine (shear 포함)**: 하나의 *순수 TRS로 정확히 표현되지 않을 수 있다*. 이 경우 Polar 분해나 SVD로 회전·스케일·shear를 분리하거나, shear를 별도 성분으로 다룬다.
 
 ```cpp
 struct TRS {
@@ -644,7 +652,7 @@ TRS Decompose(mat4 M) {
 }
 ```
 
-다만 *비균일 스케일 + 회전이 합성된 행렬* 은 *완벽히 분해되지 않을* 수 있다 — 부동소수점 오차 + 분해의 비유일성. 게임 엔진은 *분해를 피하고 처음부터 T, R, S를 분리해 보관* 하는 게 일반.
+다만 *비균일 스케일 + 회전이 합성된 행렬* 의 *완벽한 TRS 분해* 는 보장되지 않는다 — 부동소수점 오차와 분해의 비유일성이 함께 작용한다. 게임 엔진은 *분해를 피하고 처음부터 T, R, S를 분리해 보관* 하는 게 일반.
 
 ## 7. 역행렬과 직교 행렬
 
@@ -741,16 +749,27 @@ $$
 
 ### 7.6 numerical 안정성
 
-일반 역행렬 계산은 *가우스 소거의 분모 0 함정* 이 있다. 행렬식이 *0에 가까운 작은 수* 면 역행렬이 *거대한 값* 으로 폭주. 부동소수점 정밀도가 깨진다.
+일반 역행렬 계산은 *가우스 소거의 pivot이 0에 가까워지는* 함정이 있다. 다만 *행렬식이 작은 것* 과 *조건이 나쁜 것 (ill-conditioned)* 은 다르다. $\varepsilon I$ 는 행렬식이 매우 작아도 조건수는 1이고, $\operatorname{diag}(K, 1/K, 1)$ 은 행렬식이 1이어도 $K$ 가 크면 조건수가 크다. 역의 정확도는 행렬식의 절대값이 아니라 *스케일을 반영한 조건수* 로 판단한다.
 
 ```cpp
 mat4 inv = Inverse(M);
-if (std::isnan(inv[0][0]) || std::isinf(inv[0][0])) {
-    // M이 거의 singular — fallback
-}
+
+// (1) 전체 원소의 finite 여부 — 최소 방어선
+for (int i = 0; i < 4; ++i)
+    for (int j = 0; j < 4; ++j)
+        if (!std::isfinite(inv[i][j])) { /* fallback */ }
+
+// (2) 잔차 ||M·inv − I|| 로 역의 정확도를 확인
+mat4 R = M * inv;
+for (int i = 0; i < 4; ++i)
+    for (int j = 0; j < 4; ++j)
+        R[i][j] -= (i == j) ? 1.0f : 0.0f;
+float residual = Norm(R);   // 스케일에 맞는 임계값과 비교
 ```
 
-게임 엔진은 *역행렬 계산 직후 NaN 검사* 가 흔하다. 또는 *처음부터 직교 + TRS 분리 보관* 으로 일반 역행렬 호출을 *피한다*.
+`inv[0][0]` 하나만 finite인지 보는 검사는 다른 원소의 NaN/Inf나 *유한하지만 큰 오차* 를 검출하지 못한다. finite 검사는 *전체 원소에 대한 최소 방어* 이고 역의 정확도 *보증이 아니다*. 정확도가 문제되는 경로에서는 스케일 상대적인 pivot/조건수 추정과 위 잔차 검사를 함께 쓴다.
+
+게임 엔진은 *역행렬 계산 직후 finite 검사* 가 흔하다. 또는 *처음부터 직교 + TRS 분리 보관* 으로 일반 역행렬 호출을 *피한다*.
 
 ## 8. Column-major vs Row-major
 
@@ -776,11 +795,11 @@ if (std::isnan(inv[0][0]) || std::isinf(inv[0][0])) {
 
 | 표기 | API |
 |---|---|
-| Column-major | OpenGL, GLSL, Vulkan, glm, Metal Shading Language, Unity (`Matrix4x4`) |
+| Column-major | OpenGL, GLSL, glm, Metal Shading Language, Unity (`Matrix4x4`) |
 | Row-major | DirectXMath, Unreal (DirectXMath의 row-vector + row-major 관례) |
-| 사용자 선택 | Eigen (column-major default) |
+| 사용자 선택 | Eigen (column-major default), Vulkan/SPIR-V (layout decoration으로 지정) |
 
-OpenGL 셰이더 코드가 *행렬 인덱싱이 `M[col][row]`* 인 이유는 column-major.
+OpenGL/GLSL 셰이더에서 *행렬 인덱싱이 `M[col][row]`* 인 것은 *언어가 열 벡터를 기준으로 정의한 규약* 이다. 이것은 메모리 저장 순서와 별개다 — `row_major` / `column_major` block layout 한정자는 *메모리 layout* 을 바꾸지만 언어의 인덱싱 의미는 바꾸지 않는다.
 
 HLSL의 *uniform parameter matrix packing 기본값은 column-major* 다 (Microsoft 공식 문서 기준). 이는 *DirectXMath의 일반 row-major 관례* 와 별개라 *호스트 코드와 셰이더 사이 행렬 packing* 이 어긋날 수 있다 — *D3DCOMPILE_PACK_MATRIX_ROW_MAJOR* 컴파일 플래그, `row_major` / `column_major` 키워드, `#pragma pack_matrix` 로 명시 변경. CPU 측 DirectXMath는 row-vector + row-major 관례지만 GPU 측 HLSL은 별도 packing 설정이라 *둘 사이 변환을 셰이더 컴파일 시점에 명시* 하는 게 표준.
 
@@ -839,9 +858,9 @@ DirectX, Unreal.
 ```mermaid
 flowchart LR
     Float16["float 16개 배열<br/>같은 비트 패턴"]
-    Float16 --> GL["OpenGL/GLSL<br/>column-major + column vector"]
-    Float16 --> DX["DirectX/HLSL<br/>row-major + row vector"]
-    GL --> Same[같은 변환]
+    Float16 --> GL["OpenGL/GLSL<br/>언어 규약: column vector 인덱싱<br/>메모리 layout: column-major 기본"]
+    Float16 --> DX["DirectXMath/HLSL<br/>CPU: row vector · row-major<br/>HLSL packing: column-major 기본<br/>곱 순서: mul 호출로 지정"]
+    GL --> Same["같은 변환<br/>(언어 인덱싱과 메모리 layout은 별개 축)"]
     DX --> Same
 ```
 

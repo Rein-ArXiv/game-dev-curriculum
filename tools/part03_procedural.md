@@ -60,9 +60,13 @@ flowchart LR
 | xoshiro256** | 32바이트 | 매우 빠름 | 게임에서 널리 쓰임 |
 | SplitMix64 | 8바이트 | 매우 빠름 | 시드 분배·해시 시드용 |
 
+표의 상대 속도는 *구현·플랫폼·컴파일러 의존* 이며 보편 순위가 아니다. 상태 크기·통계 품질·분기 기능과 함께 프로젝트에서 직접 측정해 정한다.
+
 작은 상태가 중요한 이유는 *스트림을 흩뿌리기* 때문이다. 청크마다, 객체마다, 기능마다 독립 RNG를 두려면 상태가 작아야 한다. 아래는 64비트 상태의 단순 PRNG 예시다.
 
 ```cpp
+std::uint64_t UniformBelow(std::uint64_t n);   // [0, n), n > 0
+
 struct Rng {
     uint64_t state;
     explicit Rng(uint64_t seed) : state(seed ? seed : 0x9E3779B97F4A7C15ull) {}
@@ -76,22 +80,32 @@ struct Rng {
     float NextFloat() {                      // [0,1)
         return (Next() >> 40) * (1.0f / 16777216.0f);   // 상위 24비트만 사용
     }
-    int Range(int lo, int hi) {              // [lo, hi)
-        return lo + static_cast<int>(Next() % static_cast<uint64_t>(hi - lo));
+    int Range(int lo, int hi) {              // [lo, hi), lo < hi 필요
+        if (lo >= hi) throw std::invalid_argument("Range requires lo < hi");
+        const std::int64_t low = lo;
+        const auto width = static_cast<uint64_t>(std::int64_t(hi) - low);
+        const uint64_t offset = UniformBelow(width);   // [0, width)
+        return static_cast<int>(low + static_cast<std::int64_t>(offset));
     }
 };
 ```
 
-`Range`의 `% (hi-lo)`는 *모듈로 편향(modulo bias)* 을 가진다 — 범위가 $2^{64}$의 약수가 아니면 작은 값이 미세하게 더 자주 나온다. 균등성이 중요한 곳(루트 테이블, 확률 분포)에서는 거부 샘플링으로 편향을 제거한다.
+`hi - lo`를 `int`에서 계산하면 `Range(INT_MIN, INT_MAX)`처럼 차가 오버플로한다. 그래서 폭은 *int64에서 계산* 하고 `lo < hi`를 먼저 검증한다. `lo + offset`도 `int64`에서 더해 결과가 `[lo, hi)`에 들어감을 보장한 뒤 `int`로 변환한다.
+
+`Next() % n`은 *모듈로 편향(modulo bias)* 을 가진다 — 범위가 $2^{64}$의 약수가 아니면 작은 값이 미세하게 더 자주 나온다. 균등성이 중요한 곳(루트 테이블, 확률 분포)에서는 거부 샘플링으로 편향을 제거한다. 아래 helper는 생략 가능한 함수가 아니라 *명시된 원천 분포에 맞는 범위 매핑 계약* 이다.
 
 ```cpp
-uint64_t RangeUnbiased(uint64_t n) {        // [0, n) 편향 없음
+// 요구 계약: n > 0일 때 [0, n) 값을 반환한다.
+uint64_t UniformBelow(uint64_t n) {
+    if (n == 0) throw std::invalid_argument("UniformBelow requires n > 0");
     uint64_t limit = UINT64_MAX - (UINT64_MAX % n);
     uint64_t x;
     do { x = Next(); } while (x >= limit);   // 꼬리 영역 거부
     return x % n;
 }
 ```
+
+`Next()`를 *full uint64 균등 원천* 이라 정의하면 이 limit 식은 정상이다. 그러나 제공된 xorshift64* 변종은 비영 상태와 홀수 곱 때문에 0을 출력하지 않아 그 전제가 그대로 맞지 않는다 — 이 원천을 쓸 때는 *실제 min/max와 분포* 에 맞는 acceptance 범위를 따로 계산한다(예: 비영 출력이 균등하다는 전제라면 `Next()-1`을 0..UINT64_MAX-1로 옮겨 그 결과 수에 맞춰 계산). 근거 없이 limit 식을 off-by-one으로 바꾸지는 않는다(T21).
 
 ### 시드 분기 — 계층적 결정론
 
@@ -174,7 +188,11 @@ float Fade(float t) { return t * t * t * (t * (t * 6 - 15) + 10); }
 노이즈 한 층은 단조롭다. 자연 지형은 *큰 산맥 위에 언덕, 그 위에 바위* 처럼 여러 주파수가 겹친다. 이를 만드는 표준 기법이 *fBm(fractional Brownian motion)* — 주파수를 배로 올리고(lacunarity) 진폭을 절반으로 줄이며(gain) 여러 *옥타브(octave)* 를 합산한다.
 
 ```cpp
+// 전제: octaves >= 1, lacunarity > 1, 0 <= gain <= 1, 기저 노이즈는 [-1,1].
 float fBm(float x, float y, int octaves, float lacunarity, float gain) {
+    if (octaves < 1) throw std::invalid_argument("octaves >= 1 required");
+    if (!(lacunarity > 1.0f) || !(gain >= 0.0f && gain <= 1.0f))
+        throw std::invalid_argument("lacunarity > 1, 0 <= gain <= 1 required");
     float sum = 0, amp = 0.5f, freq = 1.0f, norm = 0;
     for (int o = 0; o < octaves; ++o) {
         sum  += amp * Perlin2D(x * freq, y * freq);
@@ -182,11 +200,11 @@ float fBm(float x, float y, int octaves, float lacunarity, float gain) {
         freq *= lacunarity;       // 보통 2.0 — 주파수 배가
         amp  *= gain;             // 보통 0.5 — 진폭 절반
     }
-    return sum / norm;            // [-1, 1] 정규화
+    return sum / norm;            // 진폭 가중 정규화 (분산 정규화 아님)
 }
 ```
 
-`octaves`, `lacunarity`, `gain`이 *다양성 ↔ 통제력* 의 다이얼이다. 옥타브를 늘리면 디테일이 풍부해지지만 비용이 선형으로 늘고, gain을 높이면 거칠어지고 낮추면 매끄러워진다. 변형도 많다 — 절댓값을 씌워 능선을 만드는 *ridged 노이즈*, 출력을 다시 입력에 더하는 *도메인 워핑(domain warping)* 으로 흐르는 듯한 왜곡을 준다.
+`octaves`, `lacunarity`, `gain`이 *다양성 ↔ 통제력* 의 다이얼이다. 옥타브를 늘리면 디테일이 풍부해지지만 비용이 선형으로 늘고, gain을 높이면 거칠어지고 낮추면 매끄러워진다. `sum / norm`은 가중 *진폭* 을 정규화하는 것이지 결과를 정확히 [-1,1]로 보장하거나 *분산* 을 정규화하는 것이 아니다 — 기저 노이즈가 [-1,1]이고 가중치가 음수가 아닐 때만 가중 평균 설명이 성립한다. 변형도 많다 — 절댓값을 씌워 능선을 만드는 *ridged 노이즈*, 출력을 다시 입력에 더하는 *도메인 워핑(domain warping)* 으로 흐르는 듯한 왜곡을 준다.
 
 ```cpp
 // 도메인 워핑: 좌표 자체를 노이즈로 밀어 흐르는 형태를 만든다
@@ -214,7 +232,7 @@ float TerrainHeight(float x, float y) {
 
 ### 샘플링 분포 — 어디에 놓을 것인가
 
-높이뿐 아니라 *객체 배치* 도 노이즈/난수의 영역이다. 균등 난수로 나무를 뿌리면 뭉치거나 빈 구멍이 생긴다. 자연스러운 *고르게 흩어진 무작위* 가 필요하면 *포아송 디스크 샘플링(Poisson disk sampling)* 을 쓴다 — 모든 점이 최소 거리 $r$ 이상 떨어지도록 보장한다. Bridson 알고리즘은 활성 점 주변에 후보를 뿌리고 격자로 거리 검사를 해 $O(n)$에 가깝게 동작한다.
+높이뿐 아니라 *객체 배치* 도 노이즈/난수의 영역이다. 균등 난수로 나무를 뿌리면 뭉치거나 빈 구멍이 생긴다. 자연스러운 *고르게 흩어진 무작위* 가 필요하면 *포아송 디스크 샘플링(Poisson disk sampling)* 을 쓴다 — 모든 점이 최소 거리 $r$ 이상 떨어지도록 보장한다. Bridson 알고리즘은 활성 점 주변에 후보를 뿌리고 격자로 거리 검사를 해 $O(n)$에 가깝게 동작한다(반복당 $O(k)$와 고정 $k$ 전제에서의 분석이다).
 
 ```cpp
 // Bridson 포아송 디스크: 활성 리스트에서 후보를 던지고 최소 거리 검사
@@ -234,11 +252,13 @@ std::vector<Vec2> PoissonDisk(float r, Vec2 size, Rng& rng, int k = 30) {
                 found = true; break;
             }
         }
-        if (!found) active.erase(active.begin() + i);   // 더 못 놓으면 비활성
+        if (!found) { active[i] = active.back(); active.pop_back(); }   // 더 못 놓으면 비활성(순서 무관 → swap-remove)
     }
     return samples;
 }
 ```
+
+활성 리스트의 순서는 결과에 영향을 주지 않으므로 제거는 `erase(begin()+i)` 대신 swap-remove를 쓴다 — `erase(begin()+i)`는 삭제 위치 뒤 원소를 이동시켜 반복당 상수 시간 전제를 깬다(앞에서 차례로 지우면 매번 O(n) 이동). 교육용으로 단순 삭제를 유지한다면 원문 Bridson의 선형 분석을 그대로 적용할 수 없다고 제한해야 한다.
 
 밀도에 *변화* 를 주려면 $r$을 노이즈로 변조한다 — 숲 중심은 $r$을 줄여 빽빽하게, 가장자리는 늘려 성기게. 이렇게 *균등 분포 + 노이즈 변조* 로 군집 패턴을 만든다. 분포 선택이 곧 배치의 "느낌"을 정한다.
 
@@ -246,7 +266,7 @@ std::vector<Vec2> PoissonDisk(float r, Vec2 size, Rng& rng, int k = 30) {
 
 ### 노이즈로 못 만드는 것 — 구조
 
-노이즈는 *연속적이고 매끄러운* 형태에 강하다. 그러나 *방, 복도, 도로, 가지* 처럼 *이산적이고 위상이 중요한* 구조는 노이즈로 못 만든다. "모든 방이 연결되어야 한다", "막다른 길은 셋 이하"처럼 *관계* 가 핵심인 콘텐츠는 *그래프와 문법* 으로 생성한다. 이쪽은 다양성보다 *통제력* 에 무게가 실린 도구다.
+노이즈는 *연속적이고 매끄러운* 형태에 강하다. 그러나 *방, 복도, 도로, 가지* 처럼 *이산적이고 위상이 중요한* 구조는 노이즈 단독으로 보장하기 어렵다 — threshold·분류 뒤 제약 검증을 붙이면 이산 구조를 만들 수 있지만, 관계를 직접 정의하고 검증하지는 못한다. "모든 방이 연결되어야 한다", "막다른 길은 셋 이하"처럼 *관계* 가 핵심인 콘텐츠는 *그래프와 문법* 으로 생성한다. 이쪽은 다양성보다 *통제력* 에 무게가 실린 도구다.
 
 ### L-System — 재귀적 가지치기
 
@@ -287,7 +307,7 @@ flowchart TB
 
 ### 미션 그래프 — 의미를 먼저, 공간을 나중에
 
-던전 생성에서 강력한 패턴이 *그래프 우선(graph-first)* 접근이다. 먼저 *미션 그래프* 를 만든다 — "열쇠 → 잠긴 문 → 보스" 같은 *게임플레이 의존 관계* 를 노드와 엣지로 표현한다. 그 다음 이 그래프를 *공간에 임베딩* 해 실제 방 배치로 푼다. 공간을 먼저 만들고 의미를 끼워 넣으면 "열쇠가 잠긴 문 뒤에 있는" 모순이 생기지만, 그래프 우선은 *플레이 가능성을 구조적으로 보장* 한다.
+던전 생성에서 강력한 패턴이 *그래프 우선(graph-first)* 접근이다. 먼저 *미션 그래프* 를 만든다 — "열쇠 → 잠긴 문 → 보스" 같은 *게임플레이 의존 관계* 를 노드와 엣지로 표현한다. 그 다음 이 그래프를 *공간에 임베딩* 해 실제 방 배치로 푼다. 공간을 먼저 만들고 의미를 끼워 넣으면 "열쇠가 잠긴 문 뒤에 있는" 모순이 생기지만, 그래프 우선은 *그래프에서 정의·검증한 제약을 생성 과정에서 유지하기 쉽게* 한다. 단 임베딩이 통로 폭·상태 의존 통행 같은 기하 조건까지 보장하지는 않으므로, 플레이 경로의 최종 보장은 6절의 검증에 맡긴다.
 
 ```cpp
 // 미션 그래프: 게임플레이 의존을 위상으로 표현
@@ -346,11 +366,17 @@ CSP 탐색의 표준 알고리즘은 *백트래킹(backtracking)* 이다 — 한
 ```mermaid
 flowchart LR
     Assign[셀에 값 배정] --> Prop[이웃 도메인 축소 전파]
-    Prop --> Check{도메인 빈 셀?}
-    Check -->|있음| Back[백트래킹<br/>되돌리기]
-    Check -->|없음| Next[다음 셀 선택<br/>MRV 휴리스틱]
+    Prop --> PropOK{전파 성공?}
+    PropOK -->|아니오| Contradiction[모순<br/>실패 반환]
+    PropOK -->|예| Check{도메인 빈 셀?}
+    Check -->|있음| Contradiction
+    Check -->|없음| Done{모든 셀이<br/>유효한 singleton?}
+    Done -->|예| Success[성공 반환]
+    Done -->|아니오| Next[다음 셀 선택<br/>MRV 휴리스틱]
     Next --> Assign
+    Contradiction -->|대안 있음| Back[백트래킹<br/>되돌리기]
     Back --> Assign
+    Contradiction -->|대안 소진| Fail[실패 반환]
 ```
 
 전파에 *AC-3*(Arc Consistency) 같은 알고리즘을 쓰면 전체 탐색 전에 불가능한 값을 제거한다. *MRV(Minimum Remaining Values)* 는 선택지가 가장 적은 셀을 먼저 골라 실패를 빨리 드러낸다. WFC도 관측으로 한 셀의 가능 집합을 줄이고 인접 제약을 전파한다는 점에서 같은 CSP 구조를 사용하며, 모순 시 backtracking·restart 정책이 필요하다.
@@ -380,14 +406,19 @@ struct Cell {
 
 bool WFC(Grid& grid, const AdjacencyRules& rules, Rng& rng) {
     while (true) {
-        Cell* c = FindMinEntropy(grid);          // 선택지 최소 셀 (MRV)
-        if (!c) return true;                     // 모두 확정 → 성공
-        Collapse(c, rng);                        // 가중 무작위로 하나 선택
-        if (!Propagate(grid, rules, c))          // 모순 발생?
-            return false;                        // 실패 → 재시도 또는 백트래킹
+        if (HasEmptyDomain(grid)) return false;      // 모순(빈 도메인) → 실패
+        if (AllValidSingletons(grid))                // 모든 셀의 도메인 크기 == 1
+            return SatisfiesFixedConstraints(grid);  // 고정 제약까지 통과해야 성공
+        Cell* c = FindMinEntropy(grid);              // 미확정 셀만 반환 (MRV)
+        if (!c) return false;                        // 축소 가능한 셀이 없음 → 실패
+        Collapse(c, rng);                            // 가중 무작위로 하나 선택
+        if (!Propagate(grid, rules, c))              // 전파 실패도 실패로 전파
+            return false;                            // 재시도/백트래킹은 호출자가 결정
     }
 }
 ```
+
+`FindMinEntropy`가 null을 돌려주는 두 경우를 구분하는 것이 핵심이다 — *미확정 셀이 없음*(모든 셀 확정)과 *모든 도메인이 비어 있음*은 다르다. 전자는 `AllValidSingletons`로 모든 도메인 크기가 정확히 1임을 확인한 뒤에만 성공이고, 후자는 모순이다. 그래서 완료 검사(“모든 셀이 유효한 singleton”)와 empty domain 검사를 분리한다. 사전 제약·전파·탐색 어디서 실패해도 같은 실패 결과로 상위에 전파한다.
 
 *전파* 가 알고리즘의 심장이다. 한 셀이 확정되면, 그 인접 규칙에 따라 이웃에서 *불가능해진 타일* 을 제거하고, 이웃의 가능성이 줄었으면 *그 이웃의 이웃까지* 워크리스트로 연쇄 전파한다.
 
@@ -421,7 +452,7 @@ WFC는 *전파 중 어떤 셀의 가능 타일이 0이 되는* 모순에 종종 
 | 부분 고정 | 충돌 영역만 지우고 재생성 | 중간 | 점진적 |
 | 제약 완화 | soft 규칙 위반 허용 | 품질 저하 | 폴백 |
 
-가장 단순한 구현은 *재시작* 이다 — 모순이 나면 그리드를 비우고 다른 진행으로 다시 시도한다. 작은 맵에선 충분하지만, $50 \times 50$ 이상에선 실패율이 높아 비효율적이다. 큰 맵은 *백트래킹* 으로 마지막 몇 수만 되돌리거나, *모순 주변만 국소 재생성* 한다. 어느 쪽이든 *시드를 기록* 해 성공한 결과를 재현 가능하게 두는 것이 1절의 결정론과 이어진다.
+가장 단순한 구현은 *재시작* 이다 — 모순이 나면 변형된 실패 grid를 이어 쓰지 않고 *초기 도메인+고정 제약* 에서 다른 진행으로 다시 시도한다. 여기서 $50 \times 50$은 예시 경계이며, 실패율은 ruleset·가중치·시드에 의존한다. 큰 맵은 *백트래킹* 으로 마지막 몇 수만 되돌리거나, *모순 주변만 국소 재생성* 한다. 어느 쪽이든 *시드를 기록* 해 성공한 결과를 재현 가능하게 두는 것이 1절의 결정론과 이어진다.
 
 ### 가중치와 통제 — 다양성을 조율한다
 
@@ -429,11 +460,16 @@ WFC는 *전파 중 어떤 셀의 가능 타일이 0이 되는* 모순에 종종 
 
 ```cpp
 // 사전 제약: 디자이너가 일부 셀을 미리 확정 → WFC가 나머지를 일관되게 채움
-grid.At(cx, cy).possible = MaskOf(TileRiver);    // 강 고정
-grid.At(0, 0).possible   = MaskOf(TileEntrance); // 입구 고정
-Propagate(grid, rules, &grid.At(cx, cy));        // 고정한 셀마다 영향을 먼저 전파
-Propagate(grid, rules, &grid.At(0, 0));
-WFC(grid, rules, rng);                            // 남은 셀 채움
+Grid initial = grid;                              // 초기 도메인+고정 제약을 재시작 기준으로 보관
+grid.At(cx, cy).possible = MaskOf(TileRiver);     // 강 고정
+grid.At(0, 0).possible   = MaskOf(TileEntrance);  // 입구 고정
+if (!Propagate(grid, rules, &grid.At(cx, cy)) ||  // 고정한 셀마다 영향을 먼저 전파
+    !Propagate(grid, rules, &grid.At(0, 0)))
+    return;                                       // 사전 제약 자체가 모순 → 실패 처리
+if (!WFC(grid, rules, rng)) {                     // 남은 셀 채움(실패 반환을 사용)
+    grid = initial;                               // 변형된 실패 grid 재사용 금지
+    // 초기 도메인+고정 제약에서 다른 진행으로 재시도
+}
 ```
 
 이 *가중치 + 사전 제약* 이 WFC를 "통제 불가능한 마법"에서 *디자이너 도구* 로 바꾼다. 예시는 스타일을, 가중치는 분포를, 사전 제약은 구조를 담당한다 — 세 층의 통제가 다양성 위에 얹힌다.
@@ -468,7 +504,7 @@ bool ValidateReachability(const Map& map) {
 }
 ```
 
-미션 그래프(3절)가 있으면 검증이 더 강력해진다 — 단순 연결성이 아니라 *열쇠를 먼저 얻을 수 있는가*, *잠긴 문이 진행을 영구히 막지 않는가* 같은 *순서 제약* 까지 검사한다. 하드 제약 위반은 *재생성* 으로 처리한다 — 그 시드를 버리고 다음 시드로 넘어간다.
+플러드 필/BFS는 *정적 통행 가능성* 만 증명한다 — 열쇠·잠긴 문처럼 상태에 의존하는 통로는 미션 그래프(3절) 수준에서 따로 검증한다. 미션 그래프가 있으면 검증이 더 강력해진다 — 단순 연결성이 아니라 *열쇠를 먼저 얻을 수 있는가*, *잠긴 문이 진행을 영구히 막지 않는가* 같은 *순서 제약* 까지 검사한다. 하드 제약 위반은 *재생성* 으로 처리한다 — 그 시드를 버리고 다음 시드로 넘어간다.
 
 ### 소프트 메트릭 — 품질 점수
 
@@ -532,6 +568,7 @@ flowchart TB
     subgraph Runtime[런타임]
         Stream[청크 요청] --> Gen[시간 예산 내 생성]
         Gen --> Cache[LRU 캐시]
+        Cache --> Use["청크 사용(borrowed 참조)<br/>다음 cache 변경/eviction 전까지만 유효"]
     end
     Asset -.-> Runtime
 ```
@@ -571,6 +608,8 @@ class ChunkStreamer {
     LruCache<ChunkCoord, Chunk> cache_;      // 최근 청크 N개 유지
     uint64_t master_;
 public:
+    // 반환 참조는 borrowed — 다음 Get/Insert로 eviction되면 무효화된다.
+    // 장기 보관은 값 복사 또는 shared/pinned handle을 쓴다.
     const Chunk& Get(int cx, int cy) {
         if (Chunk* c = cache_.Find({cx, cy})) return *c;
         Rng rng(HashSeed(master_, cx, cy, kTerrainChannel));   // 위치 결정론
@@ -579,6 +618,8 @@ public:
     }
 };
 ```
+
+`Get`이 돌려주는 `const Chunk&`는 *빌려온 참조(borrowed reference)* 다 — 다음 `Get`/`Insert`가 다른 청크를 넣어 이 청크를 eviction하면 그 참조는 무효가 되고 이후 읽기는 use-after-free다. 호출 중에만 쓰려면 그대로 두고, 오래 붙잡아야 하면 값 복사 또는 shared/pinned handle을 반환하는 API를 쓴다.
 
 런타임 생성의 제약은 *시간 예산* 이다. 청크 하나를 한 프레임에 다 만들면 *히치(hitch, 끊김)* 가 난다. 그래서 생성을 *워커 스레드* 로 넘기거나(메인 스레드는 결과만 수령), *여러 프레임에 나눠 점진 생성* 한다. 점진 생성은 청크를 단계로 쪼갠다 — 1프레임 높이맵, 2프레임 식생, 3프레임 디테일. 1절의 *채널 분리* 가 여기서도 유효하다 — 단계마다 독립 채널을 써 순서에 무관하게 같은 결과를 낸다.
 
@@ -616,15 +657,25 @@ struct GenManifest {
 WFC(5절)나 백트래킹(4절)처럼 *반복적으로 진행하는* 알고리즘은 *스텝 시각화* 가 결정적이다. 매 관측·전파를 한 프레임씩 그려, 어디서 모순이 생기는지 *눈으로 추적* 한다. 모순이 잦은 영역, 백트래킹이 폭발하는 지점이 즉시 드러난다.
 
 ```cpp
-// 스텝 모드: 한 수씩 진행하며 셀 엔트로피를 색으로 시각화
+// 스텝 모드: 한 수씩 진행하며 셀 엔트로피를 색으로 시각화 (WFC와 같은 상태 기계)
 void WFC_StepVisualized(Grid& grid, DebugDraw& dbg) {
-    while (!grid.AllCollapsed()) {
-        Cell* c = FindMinEntropy(grid);
+    for (;;) {
+        if (HasEmptyDomain(grid)) {              // 모순 → 실패 상태
+            dbg.Flash(FirstEmptyCell(grid).pos, kRed);
+            dbg.WaitForStep();                   // pause/rollback/restart 전이
+            return;                              // 실패를 성공으로 넘기지 않는다
+        }
+        Cell* c = FindMinEntropy(grid);          // 미확정 셀만 반환
+        if (!c) return;                          // 모든 셀 유효한 singleton → 완료
         Collapse(c, rng_);
         bool ok = Propagate(grid, rules_, c);
         for (auto& cell : grid.cells)            // 엔트로피를 히트맵으로
             dbg.FillCell(cell.pos, EntropyToColor(cell.Entropy()));
-        if (!ok) dbg.Flash(c->pos, kRed);        // 모순 지점 강조
+        if (!ok) {                               // 전파 실패도 같은 실패 상태
+            dbg.Flash(c->pos, kRed);
+            dbg.WaitForStep();
+            return;
+        }
         dbg.WaitForStep();                       // 사용자가 한 수씩 넘김
     }
 }
@@ -648,6 +699,7 @@ flowchart LR
     Map --> D[밀도 히트맵]
     Map --> V[제약 위반 마커]
     R --> Q["왜 이 방이 막혔나?<br/>→ 즉시 답"]
+    V --> S["검증기가 구현한 제약의 통과<br/>(게임 전체 플레이 가능성 증명 아님)"]
 ```
 
 이 오버레이가 *생성 결과를 디버깅 가능한 데이터로* 바꾼다. "왜 보스에 못 가지?"는 도달성 맵으로, "왜 이 구역이 비었지?"는 밀도 히트맵으로 *즉시 답* 한다.
@@ -657,16 +709,23 @@ flowchart LR
 마지막 도구는 *비교* 다. 파라미터 하나를 바꿨을 때 결과가 어떻게 변하는지 보려면, *여러 시드를 격자로 나란히* 띄운다. 같은 파라미터로 시드만 바꾼 *변주 격자(variation grid)* 는 다양성을 한눈에 보여주고, 같은 시드로 파라미터를 스윕한 *파라미터 격자* 는 다이얼의 효과를 보여준다.
 
 ```cpp
-// 파라미터 스윕: 한 축으로 파라미터, 한 축으로 시드를 격자 렌더
+// 파라미터 스윕: 행=시드, 열=파라미터. 행의 시드는 한 번만 계산해 모든 열에 재사용한다.
 void RenderSweep(GenParams base, ParamAxis axis, int seeds, int steps) {
-    for (int s = 0; s < seeds; ++s)
+    if (seeds < 0 || steps < 1)
+        throw std::invalid_argument("seeds >= 0, steps >= 1 required");
+    for (int s = 0; s < seeds; ++s) {
+        const uint64_t rowSeed = HashSeed(0, s, 0, 0);   // 행마다 고정
         for (int t = 0; t < steps; ++t) {
-            GenParams p = base; axis.Apply(p, t / float(steps - 1));
-            Map m = Generate(HashSeed(0, s, t, 0), p);
-            DrawThumbnail(m, /*col=*/t, /*row=*/s);    // 격자에 썸네일
+            const float u = steps == 1 ? 0.0f : t / float(steps - 1);  // steps==1은 대표값 0
+            GenParams p = base; axis.Apply(p, u);         // 열은 파라미터만 변경
+            Map m = Generate(rowSeed, p);                 // 같은 시드, 다른 파라미터
+            DrawThumbnail(m, /*col=*/t, /*row=*/s);       // 격자에 썸네일
         }
+    }
 }
 ```
+
+행의 시드를 열마다 바꾸면 파라미터 효과와 난수 실현 차이를 구분할 수 없다 — 열은 파라미터만 바꾼다. `steps == 1`은 대표 파라미터(u=0) 하나만 그린다.
 
 이 격자가 *다양성 ↔ 통제력* 트레이드오프를 *눈으로 만지게* 한다. 시드 축은 다양성의 폭을, 파라미터 축은 통제의 효과를 보여준다 — 디자이너가 "이 다이얼을 여기까지 올리면 이렇게 변하는구나"를 *시행착오 없이* 안다. 좋은 절차적 생성 툴은 결국 *이 격자를 빠르게 그려주는 도구* 다.
 
@@ -687,6 +746,6 @@ void RenderSweep(GenParams base, ParamAxis axis, int seeds, int steps) {
 - Stefan Gustavson, "Simplex noise demystified" — Simplex 노이즈 구현 해설.
 - Robert Bridson, "Fast Poisson Disk Sampling in Arbitrary Dimensions" — $O(n)$ 포아송 디스크 알고리즘.
 - Maxim Gumin, Wave Function Collapse 저장소(github.com/mxgmn/WaveFunctionCollapse) — WFC 원 구현과 예시.
-- Joris Dormans, "Cyclic Generation" / "Adventures in Level Design" — 미션 그래프와 그래프 우선 던전 생성.
+- Joris Dormans, "Adventures in Level Design: Generating Missions and Spaces for Action Adventure Games" (DiGRA 2010) — 미션 그래프와 그래프 우선 던전 생성.
 - Procedural Content Generation in Games(procedural-generation 교과서, Shaker·Togelius·Nelson) — 생성·검증·메트릭의 학술 정리.
-- Sebastian Lague, 지형 생성·침식 시뮬레이션 시각화 — fBm·수력 침식의 직관적 구현 참고.
+- Sebastian Lague, "Hydraulic Erosion" 저장소(github.com/SebLague/Hydraulic-Erosion) — 수력 침식 시뮬레이션의 직관적 구현 참고.

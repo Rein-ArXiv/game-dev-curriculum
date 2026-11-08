@@ -145,7 +145,7 @@ shared float tile[1024];   // 4KB 공유 메모리
 
 사용 가능한 shared memory 상한은 `maxComputeSharedMemorySize`로 질의한다. 워크그룹당 4KiB를 쓴다고 해서 그 상한을 4KiB로 나눈 수만큼 상주한다고 결론낼 수 없다. 연산 유닛별 물리 용량, 최대 상주 subgroup·workgroup, 레지스터 할당 단위가 추가 제약이다. Vulkan은 셰이더의 물리 레지스터 수나 spill 임계값을 표준 속성으로 노출하지 않는다. 컴파일러 통계와 벤더 프로파일러에서 VGPR/SGPR·register·spill을 확인해야 한다.
 
-벤더 도구로 실제 점유율을 측정하는 것이 추측보다 낫다. NVIDIA Nsight Compute는 셰이더별 레지스터 사용량과 점유율 한계 요인을 보고하고, AMD Radeon GPU Profiler와 Radeon GPU Analyzer는 웨이브 점유율과 VGPR/SGPR 사용량을 보여 준다. 디스패치 그리드 크기를 바꿔 가며 측정하면, 점유율이 100%여도 더 빠르지 않거나 오히려 50% 점유율에서 더 빠른 경우를 종종 본다. 점유율은 목표가 아니라 지표다.
+벤더 도구로 실제 점유율을 측정하는 것이 추측보다 낫다. NVIDIA에서는 Nsight Graphics의 GPU trace 기능이, AMD에서는 Radeon GPU Profiler와 Radeon GPU Analyzer가 셰이더별 레지스터 사용량과 점유율 한계 요인, 웨이브 점유율과 VGPR/SGPR 사용량을 보여 준다. Nsight Compute는 CUDA·OptiX 중심 도구이므로 Vulkan compute shader의 실행 경로를 그대로 분석한다고 보장할 수 없다. Vulkan GPU shader 분석에는 RenderDoc이나 지원되는 Nsight Graphics 기능, 벤더 GPU profiler를 쓰고, 사용하는 도구 버전이 대상 GPU와 해당 API를 지원하는지 먼저 확인한다. 디스패치 그리드 크기를 바꿔 가며 측정하면, 점유율이 100%여도 더 빠르지 않거나 오히려 50% 점유율에서 더 빠른 경우를 종종 본다. 점유율은 목표가 아니라 지표다.
 
 ### 3D 디스패치: 이미지 처리
 
@@ -304,7 +304,7 @@ Vulkan 검증 레이어의 synchronization validation은 기록된 API 사용에
 
 ### Queue 분리와 소유권 이전
 
-컴퓨트 전용 큐와 그래픽 큐가 서로 다른 큐 패밀리(queue family)에 속하면, 버퍼 배리어의 `srcQueueFamilyIndex`와 `dstQueueFamilyIndex`로 큐 패밀리 소유권 이전(queue family ownership transfer)을 명시해야 한다. 비동기 컴퓨트(async compute)로 시뮬레이션을 그래픽과 병렬로 돌릴 때 이 처리가 필요하다. 같은 큐 패밀리 안에서만 쓴다면 두 인덱스 모두 `VK_QUEUE_FAMILY_IGNORED`로 둔다.
+컴퓨트 전용 큐와 그래픽 큐가 서로 다른 큐 패밀리(queue family)에 속하면, 버퍼 배리어의 `srcQueueFamilyIndex`와 `dstQueueFamilyIndex`로 큐 패밀리 소유권 이전(queue family ownership transfer)을 명시해야 한다. 이는 배리어 하나를 추가하는 것으로 끝나지 않는 *양쪽 계약*이다. 소유를 넘기는 쪽이 ownership release 배리어를, 받는 쪽이 ownership acquire 배리어를 각각 기록하고, 두 큐 사이의 실행·메모리 연결을 semaphore wait/signal로 맞춰야 한다. 같은 큐 패밀리 안의 서로 다른 큐라도 명령 순서가 자동으로 공유되지 않으므로 semaphore나 fence 의존성이 필요하다. 같은 큐 패밀리에서만 쓴다면 두 인덱스 모두 `VK_QUEUE_FAMILY_IGNORED`로 둔다. 비동기 컴퓨트(async compute)로 시뮬레이션을 그래픽과 병렬로 돌릴 때 이 처리가 필요하다.
 
 ## 5. GPU 파티클 데이터 구조
 
@@ -364,7 +364,7 @@ layout(std430, binding = 1) buffer Velocities { vec4 data[]; } velocities;
 layout(std430, binding = 2) buffer Colors     { vec4 data[]; } colors;
 ```
 
-선택 기준은 접근 패턴이다. 위치만 읽어 컬링하는 패스나 색만 읽어 그리는 패스처럼 한 속성만 건드리는 셰이더는 SoA가 빠르다. 한 워프가 읽는 위치들이 메모리에서 연속이라 접근이 완전히 합쳐지고, 쓰지 않는 속도·색 데이터로 캐시 라인을 채우지 않는다. 반면 시뮬레이션 셰이더처럼 모든 속성을 함께 읽고 쓰는 경우는 AoS가 낫다. 한 파티클의 모든 데이터가 인접해 한 번의 트랜잭션으로 들어온다. 파티클 시뮬레이션은 보통 갱신 패스가 전부를 만지므로 AoS를 기본으로 하고, 렌더링에만 쓰는 위치·색을 별도 버퍼로 분리하는 절충안도 흔하다.
+선택 기준은 접근 패턴이다. 위치만 읽어 컬링하는 패스나 색만 읽어 그리는 패스처럼 한 속성만 건드리는 셰이더는 SoA가 빠르다. 한 워프가 읽는 위치들이 메모리에서 연속이라 접근이 완전히 합쳐지고, 쓰지 않는 속도·색 데이터로 캐시 라인을 채우지 않는다. 반면 시뮬레이션 셰이더처럼 모든 속성을 함께 읽고 쓰는 경우는 AoS가 낫다. 한 파티클의 모든 데이터가 인접해 캐시 라인 안에서 함께 읽힌다(필요한 트랜잭션 수는 캐시·정렬·구현에 의존한다). 파티클 시뮬레이션은 보통 갱신 패스가 전부를 만지므로 AoS를 기본으로 하고, 렌더링에만 쓰는 위치·색을 별도 버퍼로 분리하는 절충안도 흔하다.
 
 ## 6. Indirect Draw와 동적 카운터
 
@@ -385,7 +385,7 @@ struct VkDrawIndirectCommand {
 };
 ```
 
-이 버퍼는 `VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT`와 `VK_BUFFER_USAGE_STORAGE_BUFFER_BIT`를 함께 가져야 한다. 컴퓨트가 스토리지 버퍼로 쓰고, 그래픽이 간접 인자로 읽기 때문이다. 시뮬레이션 셰이더는 살아 있는 파티클을 별도의 조밀한 배열로 모으면서 카운터를 올린다.
+이 버퍼는 `VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT`, `VK_BUFFER_USAGE_STORAGE_BUFFER_BIT`, `VK_BUFFER_USAGE_TRANSFER_DST_BIT`를 함께 가져야 한다. 컴퓨트가 스토리지 버퍼로 쓰고, 그래픽이 간접 인자로 읽으며, 초기화에서 `vkCmdFillBuffer`의 대상이 되기 때문이다. 시뮬레이션 셰이더는 살아 있는 파티클을 별도의 조밀한 배열로 모으면서 카운터를 올린다.
 
 ```glsl
 layout(std430, binding = 2) buffer DrawArgs {
@@ -404,7 +404,7 @@ void main() {
 }
 ```
 
-여기서 한 가지 주의가 있다. `instanceCount`는 매 프레임 디스패치 전에 0으로 초기화해야 한다. `vkCmdFillBuffer`로 카운터 필드를 0으로 채우고, 그 초기화와 컴퓨트 쓰기 사이에도 배리어가 필요하다. 초기화를 빠뜨리면 카운터가 무한히 증가해 버퍼 범위를 넘는다.
+여기서 한 가지 주의가 있다. `instanceCount`는 매 프레임 디스패치 전에 0으로 초기화해야 한다. `vkCmdFillBuffer`로 카운터 필드를 0으로 채우려면 이 버퍼에 `VK_BUFFER_USAGE_TRANSFER_DST_BIT` usage가 반드시 있어야 한다. transfer write 후 컴퓨트 셰이더의 읽기·쓰기로 가는 배리어, 이어 indirect read로 가는 배리어를 차례로 둔다. 초기화를 빠뜨리면 카운터가 무한히 증가해 버퍼 범위를 넘는다.
 
 ### CPU 측 Indirect Draw 발급
 

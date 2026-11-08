@@ -1,6 +1,6 @@
 ## 들어가며
 
-함수 호출은 스택에서 이루어진다. `call` 명령어가 리턴 주소를 push하고, 함수가 끝나면 `ret`로 돌아온다. 이것이 프로그래밍의 기본이다.
+함수 호출은 스택에서 이루어진다. 예를 들어 x86-64에서는 `call` 명령어가 리턴 주소를 스택에 push하고 함수가 끝나면 `ret`로 돌아온다. ARM64처럼 복귀 주소를 링크 레지스터(`LR`)에 두는 아키텍처도 있다. 이것이 프로그래밍의 기본이다.
 
 그런데 함수가 중간에 멈췄다가 나중에 재개할 수 있다면 어떨까. 실행 상태를 보존한 뒤 호출자에게 제어권을 돌려주고, 나중에 정확히 그 지점에서 계속할 수 있다면. 이것이 코루틴(Coroutine)과 Fiber가 제공하는 제어 흐름이다. Stackful Fiber는 호출 스택 전체를 보존하고, C++20의 stackless coroutine은 중단 뒤에도 필요한 상태를 별도 코루틴 프레임에 저장한다.
 
@@ -43,9 +43,9 @@ Thread A 실행 중 → [TICK] → 컨텍스트 저장 → Thread B 실행
 Task A 실행 → yield() 호출 → Task B 실행
 ```
 
-Windows 3.1 시대의 협력적 멀티태스킹은 악명 높았다. 한 프로그램이 `yield`를 안 하면 시스템 전체가 멈췄다. 그래서 Windows 95는 선점형으로 전환했다.
+Windows 3.1 시대의 협력적 멀티태스킹은 악명 높았다. 한 프로그램이 `yield`를 안 하면 시스템 전체가 멈췄다. 그래서 Windows 95는 32비트 응용 프로그램에 선점형 스케줄링을 도입했다(16비트 호환 응용 프로그램은 협력적 스케줄링이 유지되었다).
 
-하지만 게임 엔진과 서버는 다시 협력적 방식으로 돌아갔다.
+하지만 게임 엔진과 서버는 OS 선점형 스케줄러 위에 사용자 수준의 협력적 job/fiber 계층을 다시 얹었다.
 
 ### 왜 다시 협력적인가
 
@@ -244,7 +244,7 @@ longjmp는 활성 상태인 setjmp 호출 환경으로만 복귀 가능
 별도 스택을 만들고 전환하는 이식 가능한 API는 아님
 ```
 
-`setjmp/longjmp`만으로 별도 스택의 생성과 수명을 이식 가능하게 관리할 수는 없다. 구현 종속 어셈블리나 별도의 문맥 API와 결합해 Fiber를 만들 수는 있지만, C 표준이 그러한 스택 전환을 보장하지 않는다. 또한 `setjmp`를 실행한 함수가 반환한 뒤 그 환경으로 `longjmp`하면 동작이 정의되지 않는다.
+`setjmp/longjmp`만으로 별도 스택의 생성과 수명을 이식 가능하게 관리할 수는 없다. 구현 종속 어셈블리나 별도의 문맥 API와 결합해 Fiber를 만들 수는 있지만, C 표준이 그러한 스택 전환을 보장하지 않는다. 또한 `setjmp`를 실행한 함수가 반환한 뒤 그 환경으로 `longjmp`하면 동작이 정의되지 않는다. C++에서는 비자명 소멸자를 가진 자동 객체가 살아 있는 함수를 `longjmp`로 벗어나면 소멸자가 호출되지 않아 동작이 정의되지 않으며, `setjmp` 이후 변경된 non-volatile 자동 지역 변수의 값도 보존된다고 가정할 수 없다. 따라서 `longjmp`를 C++ 예외나 fiber 취소의 대체재로 쓰지 않는다.
 
 ### Boost.Context의 fcontext_t
 
@@ -529,7 +529,7 @@ Stackful 방식은 기존의 깊은 동기 호출 구조를 유지한 채 임의
 C++20은 세 가지 키워드를 추가했다.
 
 ```cpp
-co_await expr   // 일시 중단하고 expr이 완료될 때까지 대기
+co_await expr   // 중단할 수 있는 지점. await_ready에 따라 중단하지 않을 수도 있다
 co_yield value  // 값을 반환하고 일시 중단 (generator)
 co_return value // 코루틴 종료
 ```
@@ -543,6 +543,7 @@ Generator fibonacci() {
     int a = 0, b = 1;
     while (true) {
         co_yield a;
+        if (a > INT_MAX - b) co_return;  // signed overflow 전에 종료
         int next = a + b;
         a = b;
         b = next;
@@ -626,6 +627,7 @@ struct Task {
         return *this;
     }
     ~Task() {
+        // executor가 재개 권한을 보유하거나 resume 중이면 destroy하면 안 된다.
         if (handle) handle.destroy();  // 메모리 해제
     }
 
@@ -731,9 +733,11 @@ struct JobSystem {
 
     void run_job(Job* job) {
         job->func(job->data);
+        // 완료 게시 뒤에는 job을 다시 읽지 않도록 카운터 주소를 먼저 확보한다.
+        std::atomic<int>* completion = job->completion;
         // 마지막 감소가 카운터를 0으로 만들면 대기 fiber를 다시 runnable로 만든다
-        if (job->completion->fetch_sub(1, std::memory_order_release) == 1)
-            wake_fibers_waiting_on(job->completion);
+        if (completion->fetch_sub(1, std::memory_order_release) == 1)
+            wake_fibers_waiting_on(completion);
     }
 
     void wait_for_counter(std::atomic<int>& counter) {
@@ -749,7 +753,9 @@ struct JobSystem {
 };
 ```
 
-마지막 job의 release 감소와 완료를 관측한 acquire load 사이의 동기화로 job 결과가 대기자에게 보인다. 단순화한 코드에는 fiber 수명, cancellation, queue shutdown과 counter 주소의 수명 보장이 추가로 필요하다.
+마지막 job의 release 감소와 완료를 관측한 acquire load 사이의 동기화로 job 결과가 대기자에게 보인다. 단순화한 코드에는 fiber 수명, cancellation, queue shutdown과 counter 주소의 수명 보장이 추가로 필요하다. `park_current_fiber_on`은 대기 등록과 counter 재검사를 `wake_fibers_waiting_on`과 같은 프로토콜로 묶어야 한다. 그렇지 않으면 check와 park 사이에 마지막 감소와 wake가 끝나 fiber가 영원히 대기하는 lost wakeup이 생긴다. 또한 마지막 감소가 완료를 게시한 뒤에도 wake가 counter 주소를 사용하므로, 대기자가 접근을 마치기 전에 counter를 파괴해서는 안 된다.
+
+fiber는 서로 다른 worker 스레드에서 재개될 수 있으므로 `thread_local` 값은 fiber를 따라가지 않고 현재 OS 스레드의 값을 본다. 락을 보유한 채 yield하거나 스레드 귀속 API(예: FLS, 그래픽스·COM)에 의존하는 fiber는 고정 worker에서만 재개되도록 하거나 yield 전에 락을 놓는 규약을 지켜야 한다.
 
 사용 예시는 다음과 같다.
 
@@ -893,7 +899,8 @@ int main() {
     LPVOID fiber1 = CreateFiberEx(16 * 1024, 64 * 1024, 0, FiberProc, &data1);
     LPVOID fiber2 = CreateFiberEx(16 * 1024, 64 * 1024, 0, FiberProc, &data2);
 
-    for (int i = 0; i < 3; i++) {
+    // 각 fiber가 for 루프를 끝내고 finished=true를 세팅할 때까지 재개한다.
+    while (!data1.finished || !data2.finished) {
         if (!data1.finished) {
             printf("Main: switching to fiber 1\n");
             SwitchToFiber(fiber1);
@@ -911,7 +918,7 @@ int main() {
 }
 ```
 
-`CreateFiber`의 `dwStackSize`는 “Fiber 전체 스택의 정확한 크기”가 아니라 초기 commit 크기다. reserve와 commit을 각각 제어하려면 `CreateFiberEx`를 사용한다. 또한 Windows 문서상 Fiber 시작 함수가 반환하면 그 Fiber를 실행한 스레드가 종료되므로, 예제는 완료 플래그를 남기고 원래 Fiber로 전환한 채 정지한다.
+`CreateFiber`의 `dwStackSize`는 “Fiber 전체 스택의 정확한 크기”가 아니라 초기 commit 크기다. reserve와 commit을 각각 제어하려면 `CreateFiberEx`를 사용한다. 또한 Windows 문서상 Fiber 시작 함수가 반환하면 그 Fiber를 실행한 스레드가 종료되므로, 예제는 완료 플래그를 남기고 원래 Fiber로 전환한 채 정지한다. `DeleteFiber`는 fiber 스택을 회수할 뿐 C++ 자동 객체의 소멸자를 정상적으로 unwind하지 않으므로, 실제 job에서는 fiber가 종료되기 전에 필요한 자원 정리를 완료해야 한다.
 
 출력:
 
@@ -1017,7 +1024,7 @@ void update_game_object_async(GameObject* obj) {
 }
 ```
 
-`done` 플래그의 store는 release, load는 acquire여야 한다. 텍스처 포인터의 쓰기가 done 가시화 이전에 다른 스레드에서 관찰되어야 한다.
+`done` 플래그의 store는 release, load는 acquire여야 한다. 텍스처 포인터의 쓰기가 done 가시화 이전에 다른 스레드에서 관찰되어야 한다. 이 예제는 `GameObject`와 `ctx`가 로드가 끝날 때까지 살아 있어야 하며, 로드 실패나 예외에도 `done`을 게시해 fiber가 영원히 대기하지 않도록 해야 한다. 완료 후 `needs_new_texture`를 해제하는 것도 이 경로의 책임이다.
 
 타임라인은 다음과 같다.
 

@@ -51,8 +51,9 @@ Mat4 ViewOf(const CameraState& c) { return Inverse(TRS(c.position, c.rotation, V
 // smoothTime은 응답의 시간 척도이며, omega = 2 / smoothTime으로 둔다.
 Vec3 SpringFollow(Vec3 current, Vec3& velocity, Vec3 target,
                   float smoothTime, float dt) {
+    dt = Max(dt, 0.0f);                  // 다항식·지수 항이 같은 dt를 쓰도록 입구에서 정규화
     float omega = 2.0f / Max(smoothTime, 1e-4f);
-    float decay = Exp(-omega * Max(dt, 0.0f));
+    float decay = Exp(-omega * dt);
 
     Vec3 x0 = current - target;
     Vec3 j1 = velocity + x0 * omega;
@@ -79,14 +80,19 @@ Vec3 SpringFollow(Vec3 current, Vec3& velocity, Vec3 target,
 // 피벗(대상 머리쯤)에서 이상적 카메라 위치까지 구를 스윕한다.
 // 구 반지름은 near plane 크기와 허용 여백에서 정한다.
 // 구 스윕은 카메라 절두체를 보수적으로 근사할 뿐, near plane 사각형과 동일하지 않다.
-float armLen = idealDistance;
+float armLen = Max(0.0f, idealDistance);
 if (SweepSphere(pivot, idealDir, idealDistance, cameraRadius, &hit))
-    armLen = hit.distance;                       // 막힌 곳까지만 줄인다 (즉시)
-currentLen = Min(armLen,                          // 줄이기: 즉시 — 벽 통과는 한 프레임도 안 된다
-                 SpringFollow1D(currentLen, vel, armLen, /*halfLife=*/0.3f, dt)); // 늘리기: 천천히
+    armLen = Max(0.0f, hit.distance);            // 막힌 곳까지만 줄인다 (즉시)
+float springLen = SpringFollow1D(currentLen, vel, armLen, /*halfLife=*/0.3f, dt); // 늘리기: 천천히
+if (armLen < springLen) {                         // 막힘으로 잘리는 구간: 즉시 줄이고 속도 재설정
+    currentLen = armLen;
+    vel = 0;
+} else {
+    currentLen = Min(armLen, Max(0.0f, springLen));  // 음수 길이 방지
+}
 ```
 
-비대칭이 핵심 규칙이다 — *줄이기는 즉시, 늘리기는 스프링으로*. 벽 관통은 한 프레임도 허용할 수 없으니 즉시 줄이고, 장애물이 사라졌을 때 원래 거리로 *튕겨* 돌아가면 그 자체가 또 하나의 화면 출렁임이므로 천천히 푼다. 점 레이보다 부피 스윕을 쓰는 이유는 실제 가시 부피가 점이 아니기 때문이다. 다만 구는 near 평면의 사각형이나 전체 절두체와 같지 않으므로 얇은 모서리에서는 과보호하거나 놓칠 수 있다. 필요한 품질에 따라 다중 레이, 캡슐·박스 스윕, 최종 near-plane 코너 검사를 더한다.
+비대칭이 핵심 규칙이다 — *줄이기는 즉시, 늘리기는 스프링으로*. 벽 관통은 한 프레임도 허용할 수 없으니 즉시 줄이고, 장애물이 사라졌을 때 원래 거리로 *튕겨* 돌아가면 그 자체가 또 하나의 화면 출렁임이므로 천천히 푼다. 점 레이보다 부피 스윕을 쓰는 이유는 실제 가시 부피가 점이 아니기 때문이다. 다만 구는 near 평면의 사각형이나 전체 절두체와 같지 않으므로 얇은 모서리에서는 과보호하거나 놓칠 수 있다. 필요한 품질에 따라 다중 레이, 캡슐·박스 스윕, 최종 near-plane 코너 검사를 더한다. sweep이 시작부터 overlap으로 실패하거나 teleport로 피벗이 순간이동하면 법선과 목표 거리가 불안정하므로, 이때는 스프링 대신 안전한 최소 거리로 스냅하고 `vel`을 0으로 두는 별도 경로를 둔다.
 
 가늘고 작은 장애물(난간·가로등)마다 카메라가 덜컥이며 줄어드는 것도 문제다. 채널 분리로 푼다 — 카메라 충돌 채널에서 작은 동적 오브젝트·다른 캐릭터를 빼고, 큰 정적 지오메트리만 남긴다. 그래도 남는 가림(수풀 따위)은 거리 조절 대신 머티리얼 페이드(가린 물체를 반투명하게)로 처리하는 편이 화면이 조용하다.
 
@@ -103,10 +109,17 @@ currentLen = Min(armLen,                          // 줄이기: 즉시 — 벽 �
 struct CameraShake {
     float trauma = 0;                       // [0,1]. 폭발 +0.6, 피격 +0.3 식으로 가산
     float decayRate = 1.5f;                 // 초당 trauma 감쇠량
-    float freq = 12.0f;                     // 노이즈 샘플링 주파수
+    float freq = 12.0f;                     // 노이즈 좌표 진행률 (엄격한 cutoff/샘플링 주파수와 다름)
     float maxYaw = 0.05f, maxPitch = 0.05f, maxRoll = 0.03f;  // 최대 각 진폭(rad)
     int   seed0 = 0, seed1 = 1, seed2 = 2;  // 축마다 다른 노이즈 계열
-    void Update(float dt) { trauma = Max(0.0f, trauma - decayRate * dt); }
+    void AddTrauma(float amount) {
+        if (!(amount > 0) || !std::isfinite(amount)) return;
+        trauma = Min(1.0f, trauma + amount); // [0,1] 상한 유지
+    }
+    void Update(float dt) {
+        if (!(dt > 0) || !std::isfinite(dt)) return;    // 음수·비유한 dt 무시
+        trauma = Max(0.0f, trauma - decayRate * dt);
+    }
     Quat  Offset(float t) const {
         float amp = trauma * trauma;        // 제곱 매핑 — 작은 trauma 는 거의 안 흔들리게
         float yaw   = maxYaw   * amp * Perlin1D(t * freq, seed0);
@@ -117,7 +130,7 @@ struct CameraShake {
 };
 ```
 
-trauma의 제곱(또는 세제곱)을 진폭으로 쓰는 매핑이 요점이다 — 잔챙이 이벤트가 누적돼도 화면은 조용하고, 큰 이벤트만 크게 흔들린다. 셰이크 결과는 1절의 카메라 상태에 *마지막에 합성되는 오프셋* 으로 둔다 — 팔로우·충돌 로직이 셰이크에 오염되지 않고, 셰이크 끄기(접근성 옵션!)가 한 줄이 된다.
+trauma의 제곱(또는 세제곱)을 진폭으로 쓰는 매핑이 요점이다 — 잔챙이 이벤트가 누적돼도 화면은 조용하고, 큰 이벤트만 크게 흔들린다. 셰이크 결과는 1절의 카메라 상태에 *마지막에 합성되는 오프셋* 으로 둔다 — 팔로우·충돌 로직이 셰이크에 오염되지 않고, 셰이크 끄기(접근성 옵션!)가 한 줄이 된다. 다만 회전·FOV 오프셋도 near 평면 사각형이 쓸고 지나가는 실제 부피를 바꾸므로, 셰이크를 충돌 뒤에 무조건 더하면 가시 부피가 지오메트리 안으로 들어갈 수 있다. 충돌 전에 합성하거나, 합성 후 최종 유효성을 검사해 위반 시 오프셋을 줄이는 경로를 둔다. 충돌 스윕의 구 반경으로 최대 FOV·near 평면·회전을 포괄해 보호한다면 그 상한을 명시한다.
 
 ## 5. 카메라 스택과 블렌딩
 
@@ -195,7 +208,7 @@ Vec3 center = WeightedAverage(targets);
 float radius = BoundingSphereRadius(targets, center);
 ```
 
-카메라는 `center`를 바라보고, 모든 타깃이 안전 영역 안에 들어오도록 거리나 FOV를 조정한다. 그러나 거리와 FOV는 같은 문제가 아니다. 거리를 뒤로 빼면 원근감이 줄고 배경이 더 많이 보이며, FOV를 넓히면 가장자리 왜곡과 멀미 위험이 늘어난다. 격투 게임은 보통 거리를 조정하고, 일시적 부스트나 조준은 FOV를 조정한다.
+카메라는 `center`를 바라보고, 모든 타깃이 안전 영역 안에 들어오도록 거리나 FOV를 조정한다. 그러나 거리와 FOV는 같은 문제가 아니다. 거리를 뒤로 빼면 원근감이 줄고 배경이 더 많이 보이며, FOV를 넓히면 가장자리 왜곡과 멀미 위험이 늘어난다. 격투 게임은 보통 거리를 조정하고, 일시적 부스트나 조준은 FOV를 조정한다. 거리 하한은 구 중심을 바라볼 때 구 반지름 r이 세이프 프레임의 유효 반각 θ 안에 들어오는 조건에서 나온다. 중심에서 거리 d에 있으면 구가 차지하는 각 반지름은 대략 `asin(r/d)`이므로, r이 화면을 넘지 않게 하려면 `d >= r / sin(θ)`로 둔다. θ는 수평·수직 유효 반각 중 작은 값(세이프 프레임과 종횡비를 반영)을 쓴다. 이는 프레이밍 하한일 뿐 clipping·가림 해결과는 별개다.
 
 화면 안전 영역도 필요하다. 타깃이 화면 끝에 딱 붙으면 UI, 화면 흔들림, 플랫폼별 overscan, 스트리밍 지연에서 쉽게 잘린다. 따라서 구도 계산은 보통 NDC의 `[-1,1]` 전체가 아니라 더 안쪽의 safe frame을 사용한다.
 
@@ -249,6 +262,8 @@ struct CameraFrameInfo {
 ```
 
 이 경계가 없으면 카메라 전환은 논리적으로 맞아도 화면에는 잔상과 번짐으로 나타난다.
+
+리플레이 재현성도 시간축의 문제다. 물리 tick 상태와 입력·노이즈 seed가 같아도 가변 presentation dt와 alpha가 다르면 스프링 추적·충돌·셰이크 합성이 달라져 화면이 어긋난다. 물리 결과를 보간한 렌더 시각은 최신 권위 상태보다 한 tick 지연된 시점을 나타내므로, 픽셀 단위 재현이 필요하면 render dt·alpha·카메라 상태 또는 고정 presentation 정책을 함께 기록한다. state hash 결정론은 게임 상태 비교이고, 이 시각적 결정론과는 별개다.
 
 ## 10. 가림 처리 정책
 

@@ -10,7 +10,7 @@
 flowchart TB
     Squad[분대 조율층] --> Role[역할 할당<br/>제압/측면/돌격]
     Squad --> Cover[엄폐 관리<br/>점유 lock]
-    Squad --> BB[분대 blackboard<br/>공유 정보]
+    Squad --> BB[분대 blackboard<br/>전달 성공 시 갱신]
     Role --> M1[NPC 1: 제압]
     Role --> M2[NPC 2: 측면]
     Cover --> M1
@@ -595,18 +595,15 @@ struct SquadBlackboard {
     int               casualties = 0;          // 9절 누적 사상자
 };
 
-// 멤버가 적을 보면 분대 전체에 공유
+// 멤버가 적을 보면 자기 로컬 belief 를 먼저 갱신하고 메시지를 보낸다.
+// 분대 공유 blackboard 는 이 메시지가 실제로 전달된 수신자가 갱신한다.
 void Member::OnEnemySpotted(EntityId enemy, Vec3 pos, float now) {
-    auto& bb = squad_->blackboard_;
-    bb.knownEnemy     = enemy;
-    bb.enemyLastPos   = pos;
-    bb.enemyConfidence = 1.0f;
-    bb.lastSeenTime   = now;
-    squad_->BroadcastMessage({ MsgType::EnemySpotted, pos, this->id });
+    memory_.Remember(enemy, pos, now);          // 발견자 로컬 belief — 전달 실패와 무관
+    squad_->BroadcastMessage({ MsgType::EnemySpotted, pos, this->id, enemy });
 }
 ```
 
-분대 blackboard는 개별 NPC의 memory를 *집단 차원* 으로 올린 것이다. 한 멤버의 인지가 분대 전체의 정보가 되어, 적을 직접 못 본 멤버도 "동료가 본 적"을 향해 행동할 수 있다. 이것이 "한 명이 발견하면 전 분대가 반응"하는 협동의 기반이다. `enemyConfidence`는 시간에 따라 감쇠해, 오래 못 본 적의 위치 정보는 신뢰도가 떨어진다 — 분대는 마지막 목격 위치를 중심으로 *수색* 으로 전환한다.
+분대 blackboard는 개별 NPC의 memory를 *집단 차원* 으로 올린 것이다. 한 멤버의 인지가 분대 전체의 정보가 되어, 적을 직접 못 본 멤버도 "동료가 본 적"을 향해 행동할 수 있다. 이것이 "한 명이 발견하면 전 분대가 반응"하는 협동의 기반이다. 다만 이 승격은 *메시지 전달에 성공했을 때* 일어난다 — 발견자의 로컬 belief 는 즉시 갱신되지만, 분대 공유 blackboard 는 수신자가 지연 큐에서 메시지를 처리한 뒤에 바뀐다. `enemyConfidence`는 시간에 따라 감쇠해, 오래 못 본 적의 위치 정보는 신뢰도가 떨어진다 — 분대는 마지막 목격 위치를 중심으로 *수색* 으로 전환한다.
 
 ### blackboard와 메시지의 역할 분담
 
@@ -619,7 +616,7 @@ blackboard(공유 상태)와 메시지(이벤트)는 다른 일을 한다. 둘�
 | 적합 | "적이 어디 있나" | "방금 누가 쓰러졌다" |
 | 비유 | 칠판에 적힌 현황 | 무전 한 마디 |
 
-지속 정보(적 위치, 분대 상태, 토큰 수)는 blackboard에 두고 멤버가 polling한다. 순간 이벤트(적 발견, 아군 사망, 수류탄 투척)는 메시지로 한 번 발행한다. 메시지를 받은 멤버는 blackboard를 갱신하거나 자기 행동을 전환한다 — 즉 메시지는 *blackboard 갱신의 트리거* 이기도 하다.
+지속 정보(적 위치, 분대 상태, 토큰 수)는 blackboard에 두고 멤버가 polling한다. 순간 이벤트(적 발견, 아군 사망, 수류탄 투척)는 메시지로 한 번 발행한다. 지연이 지나 메시지가 실제 전달된 수신자는 `HandleMessage`에서 blackboard를 갱신하거나 자기 행동을 전환한다 — 즉 메시지는 *blackboard 갱신의 트리거* 이며, 전달에 실패하면 갱신도 일어나지 않는다.
 
 ### 지연과 신뢰도
 
@@ -638,6 +635,21 @@ void Squad::BroadcastMessage(const Message& msg) {
         m.inbox.PushDelayed(msg, delay);                   // 지연 큐에 적재
     }
     PlayVoiceLine(origin, msg.type);   // 게임플레이 신호로도 노출 — "적 발견!"
+}
+
+// 지연 큐에서 메시지가 실제 적용될 때(전달 성공 시)만
+// 수신자가 공유 blackboard 를 갱신한다. 전달되지 않으면 갱신되지 않는다.
+void Member::HandleMessage(const Message& msg) {
+    auto& bb = squad_->blackboard_;
+    switch (msg.type) {
+    case MsgType::EnemySpotted:
+        bb.knownEnemy      = msg.enemy;
+        bb.enemyLastPos    = msg.pos;
+        bb.enemyConfidence = 1.0f;
+        bb.lastSeenTime    = Now();
+        break;
+    // ... 아군 사망·수류탄 등 다른 메시지 처리
+    }
 }
 ```
 

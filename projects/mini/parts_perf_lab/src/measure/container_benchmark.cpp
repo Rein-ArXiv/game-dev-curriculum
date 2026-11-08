@@ -7,13 +7,21 @@ namespace ppl {
 
 void ContainerBenchmark::Init(Container type, IAllocator* intrusiveAlloc,
                               std::size_t count) {
+    // 이전 설정의 컨테이너 내용과 마지막 측정값을 모두 비운다. 이걸 빼면 새 설정의
+    // 결과와 옛 표본이 같은 조회 창에 섞인다.
     Shutdown();
 
     type_           = type;
+    requested_      = count;
     count_          = 0;
+    status_         = BenchStatus::Skipped;
     intrusiveAlloc_ = intrusiveAlloc;
 
-    // 결정론적 시드. 같은 측정을 재현 가능하게 한다.
+    if (count == 0) return;
+
+    // 결정론적 시드. 같은 바이너리·같은 표준 라이브러리에서 같은 초기 상태를 만든다.
+    // 표준 라이브러리가 다르면 uniform_real_distribution의 실수 매핑까지 같다는
+    // 보장은 없으므로, 교차 환경 비교에는 생성된 fixture와 hash를 쓴다.
     std::mt19937 rng(0xBADCAFEu);
     std::uniform_real_distribution<float> dist(0.0f, 100.0f);
 
@@ -30,7 +38,7 @@ void ContainerBenchmark::Init(Container type, IAllocator* intrusiveAlloc,
         }
         case Container::StdList: {
             // 일반적인 std::list 구현은 기본 allocator로 노드를 개별 힙 할당한다.
-            // 원소 주소 연속성이 보장되지 않아 캐시 미스가 늘기 쉽다.
+            // 원소 주소 연속성을 보장하지 않는다(항상 흩어진다는 뜻은 아니다).
             for (std::size_t i = 0; i < count; ++i) {
                 Node n{};
                 n.dist = dist(rng);
@@ -41,8 +49,10 @@ void ContainerBenchmark::Init(Container type, IAllocator* intrusiveAlloc,
         }
         case Container::IntrusiveList: {
             // 외부 allocator(Pool 권장)에서 노드 N개 받아 next로 link.
-            // Pool과 결합하면 연속 메모리에 가깝게 배치되어 캐시 친화적.
-            if (!intrusiveAlloc_) break;
+            if (!intrusiveAlloc_) {
+                status_ = BenchStatus::Skipped;
+                return;
+            }
             intrusiveHead_ = nullptr;
             for (std::size_t i = 0; i < count; ++i) {
                 void* p = intrusiveAlloc_->Allocate(sizeof(Node), alignof(Node));
@@ -56,6 +66,9 @@ void ContainerBenchmark::Init(Container type, IAllocator* intrusiveAlloc,
             break;
         }
     }
+
+    status_ = (count_ == requested_) ? BenchStatus::Valid
+                                     : BenchStatus::InvalidCapacity;
 }
 
 void ContainerBenchmark::Shutdown() {
@@ -75,6 +88,11 @@ void ContainerBenchmark::Shutdown() {
     intrusiveHead_  = nullptr;
     intrusiveAlloc_ = nullptr;
     count_          = 0;
+    requested_      = 0;
+    status_         = BenchStatus::Skipped;
+    // 마지막 측정값도 지운다. count==0 상태에서 옛 sum/ms가 조회되면 안 된다.
+    lastFrameMs_ = 0.0f;
+    lastSum_     = 0.0f;
 }
 
 void ContainerBenchmark::RunFrame() {

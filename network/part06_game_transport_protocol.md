@@ -101,7 +101,7 @@ ackBits bit 2 = packet 97 received
 ackBits bit 31 = packet 68 received
 ```
 
-이 방식은 한 패킷이 손실되어도 다음 패킷들에 같은 수신 확인 정보가 반복해서 실리므로 견고하다. ack 정보 자체가 2절의 "반복 포함"과 같은 원리로 보호되는 것이다 — ack를 나르는 패킷이 32개 연속으로 사라져야 수신 확인이 유실된다.
+이 방식은 한 패킷이 손실되어도 다음 패킷들에 같은 수신 확인 정보가 반복해서 실리므로 견고하다. ackBits는 "최근 ACK 번호 이전 32개 sequence의 수신 상태를 반복해 전달"하는 것이지, "ACK packet이 32개 연속 손실되어야 수신 확인이 유실된다"는 뜻이 아니다. 보존 시간은 송신률·역방향 ACK률·coalescing·sequence gap에 따라 달라지며, ACK packet 손실이 없어도 너무 오래된 sequence의 ACK 정보는 윈도우에서 빠질 수 있다.
 
 ```cpp
 template<typename T>
@@ -113,13 +113,13 @@ bool IsMoreRecent(T a, T b) {
     return a != b && forwardDistance < halfRange;
 }
 
-bool WasAcked(uint32_t seq, uint32_t ack, uint32_t ackBits) {
-    if (seq == ack) return true;
-    if (IsMoreRecent(seq, ack)) return false;
-
-    uint32_t diff = ack - seq;
-    if (diff == 0 || diff > 32) return false;
-    return (ackBits & (1u << (diff - 1))) != 0;
+// seq/ack는 같은 16-bit 공간이다. ReceivedPackets의 16-bit ack/ackBits와 폭을 맞춘다.
+// 세션 epoch와 outstanding lifetime이 오래된 한 바퀴 전 패킷을 배제해야 한다.
+bool WasAcked16(uint16_t seq, uint16_t ack, uint32_t ackBits) {
+    const uint16_t age = uint16_t(ack - seq);
+    if (age == 0) return true;
+    if (age > 32) return false;
+    return ((ackBits >> (age - 1)) & 1u) != 0;
 }
 ```
 
@@ -163,7 +163,7 @@ private:
 
 `initialized_`는 초기 상태를 실제 패킷 0과 구분한다. 또 `seq == latest_`를 `diff - 1` 비트 계산 전에 별도로 거르지 않으면, 최신 패킷의 중복 수신에서 `diff - 1`이 int로 승격되어 -1이 되고, 음수 시프트라는 미정의 동작이 발생한다. sequence 윈도우 코드는 첫 패킷·최신 중복·윈도우 경계·정확히 절반 거리·wrap 직전과 직후를 단위 테스트해야 한다.
 
-같은 자료구조가 세 가지 일을 동시에 한다 — ack 생성, 중복 패킷 검출(재전송·네트워크 중복 모두), 그리고 손실률 측정(윈도우의 0 비트 비율). 송신 측은 돌아온 ack/ackBits로 "어떤 패킷이 도착했는가"를 알고, 그 패킷에 실었던 reliable 메시지들을 큐에서 지우며, `ack 받은 시각 - 보낸 시각`으로 RTT 표본까지 얻는다. 헤더 12바이트가 프로토콜 계측의 전부를 떠받치는 셈이다.
+같은 자료구조가 세 가지 일을 동시에 한다 — ack 생성, 중복 패킷 검출(재전송·네트워크 중복 모두), 그리고 수신 상태 관측이다(윈도우의 0 비트 비율은 재정렬·샘플링이 섞인 관측값이지 곧바로 packet loss rate가 아니다). 송신 측은 돌아온 ack/ackBits로 "어떤 패킷이 도착했는가"를 알고, 그 패킷에 실었던 reliable 메시지들을 큐에서 지우며, `ack 받은 시각 - 보낸 시각`으로 RTT 표본까지 얻는다. 헤더 12바이트가 프로토콜 계측의 전부를 떠받치는 셈이다.
 
 ## 5. Reliable과 Unreliable Channel
 
@@ -171,7 +171,7 @@ Reliable channel은 메시지를 resend queue에 넣고, 상대가 ack할 때까
 
 ```cpp
 struct ReliableMessage {
-    uint16_t id;
+    uint16_t id;              // 채널별 순번 — ordered gap 판단의 키
     uint8_t channel;
     double firstSentTime;
     double lastSentTime;
@@ -181,7 +181,7 @@ struct ReliableMessage {
 
 void QueueReliable(uint8_t channel, ByteBuffer payload) {
     ReliableMessage msg;
-    msg.id = nextReliableId_++;
+    msg.id = nextReliableId_[channel]++;   // connection 전역이 아니라 ordered channel별로 할당
     msg.channel = channel;
     msg.firstSentTime = -1.0;
     msg.lastSentTime = -1.0;
@@ -193,7 +193,7 @@ void QueueReliable(uint8_t channel, ByteBuffer payload) {
 
 이 코드는 "즉시 보냈다"가 아니라 reliable payload를 재전송 관리 대상에 등록했다는 뜻이다. 실제 송신 루프는 congestion/window 정책, MTU 여유, 마지막 송신 시각을 보고 일부 메시지만 패킷에 싣는다. ack가 돌아오면 해당 메시지를 큐에서 제거하고, 오래 ack되지 않으면 재전송하거나 연결을 끊는다.
 
-여기서 주의할 구분 — ack는 *패킷* 단위인데 신뢰성은 *메시지* 단위다. 한 패킷에 reliable 메시지 여러 개가 실리고, 같은 메시지가 (재전송으로) 여러 패킷에 실릴 수 있다. 그래서 송신 측은 "패킷 N에 메시지 {a, b, c}를 실었다"는 매핑을 유지하고, 패킷 N의 ack가 오면 a·b·c를 완료 처리한다. 메시지에 자체 `id`가 있는 이유이기도 하다 — 수신 측은 메시지 id로 중복 수신(서로 다른 패킷에 같은 메시지)을 걸러낸다.
+여기서 주의할 구분 — ack는 *패킷* 단위인데 신뢰성은 *메시지* 단위다. 한 패킷에 reliable 메시지 여러 개가 실리고, 같은 메시지가 (재전송으로) 여러 패킷에 실릴 수 있다. 그래서 송신 측은 "패킷 N에 메시지 {a, b, c}를 실었다"는 매핑을 유지하고, 패킷 N의 ack가 오면 a·b·c를 완료 처리한다. 메시지에 자체 `id`가 있는 이유이기도 하다 — 수신 측은 `(channel, id)` 쌍으로 중복 수신(서로 다른 패킷에 같은 메시지)을 걸러낸다. `id`는 connection 전역 카운터가 아니라 각 ordered channel이 독립적으로 발급하므로, 그 채널의 연속 대기(gap) 판단과 같은 순번 공간을 쓴다. resend queue를 연결 단위로 두더라도 메시지는 `(channel, id)`로 식별하고, 패킷 ACK를 그 매핑을 통해 메시지 ACK로 옮긴다.
 
 상태 스냅샷을 reliable로 보내면 손실된 낡은 상태가 재전송되어 최신 상태 앞을 막는다. 실시간 상태는 unreliable로 보내고, reliable은 이벤트나 세션 상태에 제한해야 한다.
 
@@ -260,7 +260,7 @@ void Connection::SendPacket(double now) {
 
 ## 8. MTU와 재전송 정책
 
-인터넷 경로의 안전한 UDP payload는 보수적으로 잡아야 한다. IPv4에서 1200바이트 안팎을 목표로 하면 다양한 경로에서 IP fragmentation 위험을 줄일 수 있다. fragmentation은 조각 하나만 사라져도 전체 datagram이 사라지므로 실시간 게임에서 피하는 편이 낫다. 1500(이더넷 MTU)이 아니라 1200인 이유는 경로 어딘가의 터널(VPN·PPPoE·모바일 캐리어)이 오버헤드를 먹기 때문이다 — QUIC도 같은 이유로 1200을 초기 가정으로 쓴다.
+인터넷 경로의 안전한 UDP payload는 보수적으로 잡아야 한다. 여기서 쓸 수 있는 양은 effective path payload = PMTU − 모든 IP/UDP/보안(AEAD 태그)/게임 오버헤드이며 경로마다 다르다. IPv4에서 1200바이트 안팎은 모든 경로에 대한 보장값이 아니라 다양한 경로에서 IP fragmentation 위험을 줄이는 *일반적인 초기 예산*이다. fragmentation은 조각 하나만 사라져도 전체 datagram이 사라지므로 실시간 게임에서 피하는 편이 낫다. 1500(이더넷 MTU)이 아니라 1200인 이유는 경로 어딘가의 터널(VPN·PPPoE·모바일 캐리어)이 오버헤드를 먹기 때문이다. QUIC도 Initial을 담은 UDP 데이터그램 payload가 최소 1200바이트여야 한다는 규약을 두지만, 이는 QUIC transport의 최소 가정이지 임의 UDP 응용의 경로 독립 보장이 아니다. 실제 상한은 PMTU 확인(PLPMTUD)으로 정한다.
 
 큰 데이터는 세 가지 중 하나로 처리한다.
 
@@ -330,7 +330,7 @@ struct CongestionSignals {
 - **손실률**: ack 비트필드에서 공짜로 얻는다. 단, [무선 링크](#15-무선-링크의-함정)는 혼잡 없이도 손실을 내므로 손실 단독으로 판단하면 오판한다.
 - **지터**: 큐 길이의 변동. 급증하면 경로가 불안정하다는 보조 신호다.
 
-신호는 모두 *추정* 이고 노이즈가 크다. 그래서 [이진 모드 정책](#13-이진-모드-정책-단순한-것부터)은 신호 하나에 즉각 반응하지 않고, 임계 초과가 *지속* 될 때만 모드를 바꾸는 히스테리시스를 둔다.
+신호는 모두 *추정* 이고 노이즈가 크다. 그래서 [이진 모드 정책](#13-이진-모드-정책-단순한-것부터)은 악화와 회복을 비대칭으로 다룬다 — 임계 초과 sample이 오면 즉시 보수 모드로 강등하고, 임계 이하가 penaltyTime 동안 *지속* 될 때만 복귀한다. 초기 모드와 각 전환 시 timer reset 규칙도 표와 코드에 함께 맞춘다.
 
 ## 12. 조절 손잡이: 무엇을 줄이는가
 
@@ -444,7 +444,7 @@ tc qdisc add dev eth0 parent 1:10 handle 10: netem delay 50ms 10ms loss 1%
 ## 더 읽을거리
 
 - Glenn Fiedler, [Building a Game Network Protocol](https://gafferongames.com/categories/building-a-game-network-protocol/) — sequence/ack bitfield/패킷 단편화를 코드 수준으로 다루는 시리즈.
-- Valve Developer Wiki, [Source Multiplayer Networking](https://developer.valvesoftware.com/wiki/Source_Multiplayer_Networking) — 신뢰성 정책 분리의 실전 레퍼런스 구현.
+- Valve Developer Wiki, [Source Multiplayer Networking](https://developer.valvesoftware.com/wiki/Source_Multiplayer_Networking) — Source 엔진의 신뢰성 정책을 설명하는 운영/설명 문서(레퍼런스 구현과 구분).
 - [ENet](http://enet.bespin.org/) — 채널·신뢰성 플래그를 가진 게임용 UDP 라이브러리(이 글 모델의 실물).
 - Fabien Sanglard, [Quake 3 Network Model](https://fabiensanglard.net/quake3/network.php) — unreliable 스냅샷 중심 프로토콜의 원형 분석.
 - [Valve GameNetworkingSockets](https://github.com/ValveSoftware/GameNetworkingSockets) — 채널·신뢰성·암호화를 갖춘 현대적 구현체.

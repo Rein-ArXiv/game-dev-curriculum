@@ -300,7 +300,7 @@ void main() {
 
 `discard`(GLSL)는 SPIR-V의 `OpKill`(deprecated) 또는 `OpTerminateInvocation` 계열로 내려가 프래그먼트를 버리고 색과 깊이를 쓰지 않게 한다. 잎사귀나 철망 같은 cutout 텍스처에서 알파가 임계값 아래인 픽셀을 지울 때 쓴다. 문제는 `discard`가 *Early-Z를 방해* 할 수 있다는 점이다.
 
-GPU는 조건이 맞으면 프래그먼트 셰이더 실행 *전* 에 깊이 테스트를 수행해(Early-Z) 가려질 픽셀의 셰이더 실행을 건너뛴다. `discard`나 깊이 직접 쓰기(`gl_FragDepth`)는 구현이 조기 테스트·조기 쓰기를 적용하기 어렵게 만들며, 특히 side effect와 깊이 값 변경이 있으면 Late-Z가 필요할 수 있다. 다만 실제 최적화 여부는 API 의미와 구현에 달렸고, 보수적 깊이 한정자나 early fragment test 선언으로 일부 경우를 명시할 수 있다. 따라서 “항상 Early-Z가 꺼진다”가 아니라 *Early-Z 최적화를 제한할 수 있다* 고 이해해야 한다.
+GPU는 조건이 맞으면 프래그먼트 셰이더 실행 *전* 에 깊이 테스트를 수행해(Early-Z) 가려질 픽셀의 셰이더 실행을 건너뛴다. 여기서 조기 깊이 *테스트*와 조기 깊이 *갱신(update)* 은 구분된다. `discard`나 깊이 직접 쓰기(`gl_FragDepth`)는 구현이 조기 깊이 갱신을 적용하기 어렵게 만들며, 특히 side effect와 깊이 값 변경이 있으면 Late 처리가 필요할 수 있다. 반대로 GLSL `layout(early_fragment_tests) in;`나 보수적 깊이 한정자처럼 계약을 명시하면 조기 테스트의 의미를 고정할 수 있다. early test·early update·Hi-Z(계층적 깊이)는 서로 다른 단계이므로 “항상 Early-Z가 꺼진다”가 아니라 *Early-Z/early depth update 최적화를 제한할 수 있다* 고 이해해야 한다.
 
 cutout 머티리얼이 많은 장면(숲, 울타리)은 다음 대안을 고려한다.
 
@@ -354,11 +354,13 @@ flowchart TB
         E2 -->|통과| E3[Fragment Shader]
         E2 -->|실패| Ediscard[셰이더 생략]
     end
-    subgraph Late[Late-Z 강제]
+    subgraph Late[Late-Z 가능<br/>discard/gl_FragDepth<br/>조건부/구현 의존]
         L1[래스터화] --> L2[Fragment Shader<br/>discard / gl_FragDepth]
         L2 --> L3[Depth Test]
     end
 ```
+
+위 다이어그램은 `discard`/`gl_FragDepth`를 Late-Z로 묶은 기본 동작을 단순화한 것이다. 실제로는 명시적 early fragment test 선언, conservative depth 조건, 구현 최적화에 따라 조기 테스트와 조기 깊이 갱신의 허용 범위가 달라진다. 깊이 값을 셰이더에서 바꾸는지, 파이프라인 상태로 조기 테스트를 요구했는지에 따라 어느 처리가 허용되는지 판단해야 한다.
 
 Early-Z는 가려질 프래그먼트의 셰이더 실행을 통째로 없애므로, 불투명 객체를 *앞에서 뒤로(front-to-back)* 정렬해 그리면 뒤쪽 객체 대부분이 깊이에서 탈락해 셰이딩 비용이 크게 준다. 깊이만 먼저 채우는 depth pre-pass가 효과적인 이유도 같다. 본 패스 진입 시점에 깊이 버퍼가 완성되어 있어 Early-Z가 최대로 작동한다.
 

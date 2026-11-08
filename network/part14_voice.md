@@ -85,6 +85,7 @@ flowchart TB
     C[C] --> M
     M -->|믹스 - A| A2[A]
     M -->|믹스 - B| B2[B]
+    M -->|믹스 - C| C2[C]
 ```
 
 수신자는 하나의 mix stream만 decode할 수 있어 client CPU와 download를 줄일 수 있다. 서버는 active source를 decode하고 mix-minus를 만들며 수신자별 encode를 수행한다. channel/core 용량은 codec complexity, frame size, SIMD, resampling과 audio processing에 따라 benchmark한다. 이미 섞인 stream에서는 client가 발화자별 volume·spatialization을 다시 적용할 수 없으므로 그 기능이 필요하면 server가 개인화 mix를 만들거나 개별 stream을 전달해야 한다.
@@ -142,7 +143,7 @@ opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(5));   // 5% 손실 가정 — F
 opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(1));         // FEC 활성
 ```
 
-장점 — *광범위 비트레이트* (한 코덱으로 VoIP~음악), *2.5~60ms의 프레임 지속 시간*, *오픈소스 무료 라이선스*, *FEC / PLC 내장*. 짧은 상호작용 지연이 중요하면 보통 2.5~20ms 후보부터 평가한다. Opus는 WebRTC의 필수 음성 코덱이다.
+장점 — *광범위 비트레이트* (한 코덱으로 VoIP~음악), *2.5~60ms의 프레임 지속 시간*(적용 header 기준), *오픈소스 무료 라이선스*, *FEC / PLC 내장*. 짧은 상호작용 지연이 중요하면 보통 2.5~20ms 후보부터 평가한다. Opus는 WebRTC의 필수 음성 코덱이다.
 
 ### 프레임 인코딩의 실제
 
@@ -152,7 +153,7 @@ opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(1));         // FEC 활성
 constexpr int FRAME_MS = 20;
 constexpr int SR = 48000;
 constexpr int FRAME_SAMPLES = SR * FRAME_MS / 1000;    // 960 sample
-constexpr int MAX_PACKET = 1276;                       // opus_encode 권장 최대 버퍼
+constexpr int MAX_PACKET = 1276;                       // 구형 API 권장값; v1.5.2 header는 4000 권장
 
 int16_t pcm[FRAME_SAMPLES];                 // 20ms 모노 PCM
 uint8_t packet[MAX_PACKET];
@@ -163,7 +164,7 @@ else SendRtp(packet, n, rtpTimestamp);       // 실제 압축 바이트만 전�
 rtpTimestamp += FRAME_SAMPLES;
 ```
 
-함정 — 한 번의 `opus_encode`에 주는 `frame_size`는 `2.5/5/10/20/40/60ms` 중 하나에 해당해야 한다. 48kHz에서는 각각 `120/240/480/960/1920/2880` 샘플이며, 다른 값을 넣으면 `OPUS_BAD_ARG`다. 여러 호환 프레임은 repacketizer로 한 패킷에 묶을 수 있지만 전체 패킷 지속 시간은 120ms를 넘을 수 없다. 또 *24kbps × 20ms = 60바이트* 는 장기 목표에서 구한 평균일 뿐이다. VBR에서는 신호에 따라 개별 패킷 크기가 달라지고, DTX가 선택되면 1바이트가 반환될 수 있다.
+함정 — 한 번의 `opus_encode`에 주는 `frame_size`는 `2.5/5/10/20/40/60ms` 중 하나에 해당해야 한다. 48kHz에서는 각각 `120/240/480/960/1920/2880` 샘플이며, 다른 값을 넣으면 `OPUS_BAD_ARG`다. 이 열거는 적용한 libopus 버전·header의 계약이고, RFC가 다루는 packet duration·encoder `frame_size`·출력 buffer 권장치는 서로 다른 값이다. 검증한 libopus 1.5.2는 10/20ms를 받아들였고 30ms에는 `-1`을 반환했다. 30ms는 WebRTC VAD가 받는 block 길이이지 Opus `frame_size`가 아니며, 80/100/120ms 같은 긴 frame 수용 여부는 구현 시험 결과로만 다루고 다른 버전의 보장으로 쓰지 않는다. 여러 호환 프레임은 repacketizer로 한 패킷에 묶을 수 있지만 전체 패킷 지속 시간은 120ms를 넘을 수 없다. 또 *24kbps × 20ms = 60바이트* 는 장기 목표에서 구한 평균일 뿐이다. VBR에서는 신호에 따라 개별 패킷 크기가 달라지고, DTX가 선택되면 사용 버전 API가 정의한 크기의 패킷(구형 API 기준 1바이트, v1.5.2 header는 2바이트 이하)이 반환될 수 있다.
 
 `frame_size`와 별개로 codec algorithmic lookahead가 존재한다. 현재 encoder 설정의 실제 lookahead는 `opus_encoder_ctl(enc, OPUS_GET_LOOKAHEAD(&samples))`로 읽어 sample rate에 따라 시간으로 환산한다. 프레임 길이만 mouth-to-ear latency로 보고하면 codec 지연을 과소평가한다.
 
@@ -223,7 +224,7 @@ if (gotPacket) {
 }
 ```
 
-PLC 품질은 codec mode, signal과 연속 손실 길이에 따라 빠르게 나빠진다. 평균 loss rate와 별도로 loss-run histogram과 concealment duration을 측정한다. in-band FEC는 다음 packet이 제시간에 도착한 단일 손실에 주로 도움이 되고, jitter buffer는 늦은 packet을 기다릴 기회를 늘리지만 network loss 자체를 복구하지는 않는다.
+`opus_decode`에 넘기는 `frame_size`(출력 buffer capacity)와 PLC/FEC가 요구하는 frame duration도 encoder와 마찬가지로 사용 버전 API 계약으로 고정한다. PLC 품질은 codec mode, signal과 연속 손실 길이에 따라 빠르게 나빠진다. 평균 loss rate와 별도로 loss-run histogram과 concealment duration을 측정한다. in-band FEC는 다음 packet이 제시간에 도착한 단일 손실에 주로 도움이 되고, jitter buffer는 늦은 packet을 기다릴 기회를 늘리지만 network loss 자체를 복구하지는 않는다.
 
 ### 적응형 비트레이트
 
@@ -259,7 +260,13 @@ bool IsVoiceActive(VadHandle* vad, const int16_t* pcm, int samples) {
     return decision == 1;
 }
 
+// VAD가 받는 10/20/30ms와 Opus frame_size는 같은 집합이 아니다.
+// 두 block 크기를 같게 두려면 공유 frame duration을 10 또는 20ms로 고정한다.
 void EncodeFrame(const int16_t* pcm, int samples) {
+    // samples가 FRAME_SAMPLES(20ms=960)와 다르면(예: VAD의 30ms block)
+    // 누적·분할해 codec이 기대하는 sample 수를 넘긴다.
+    // 여기서는 20ms 고정 frame이라는 전제만 둔다.
+    assert(samples == FRAME_SAMPLES);
     if (SpeechGateAllowsSend(g_vad, pcm, samples)) {
         int n = opus_encode(enc, pcm, samples, packet, MAX_PACKET);
         if (n < 0) HandleOpusError(n);
@@ -270,23 +277,25 @@ void EncodeFrame(const int16_t* pcm, int samples) {
 }
 ```
 
-WebRTC VAD는 독립적으로 사용할 수 있는 경량 구현 후보다. 지원하는 sample rate와 10/20/30ms frame 길이만 받아들이며, mode 0~3은 false positive와 false negative의 동작점을 바꾼다. 공격적인 mode일수록 저에너지 음성·음악까지 무성으로 분류할 위험이 커진다. 함정은 speech onset이 판정되기 전에 첫 음소가 잘리는 것이다. 보완하려면 활성에서 무성으로 바뀐 뒤 일정 시간 전송을 유지하는 *hangover*와, 활성 진입 직전 PCM을 보존했다가 원래 RTP timestamp로 인코딩하는 *lookback buffer*를 둔다. 길이는 frame 개수 상수가 아니라 onset loss와 무음 대역폭을 함께 측정해 정한다.
+WebRTC VAD는 독립적으로 사용할 수 있는 경량 구현 후보다. 지원하는 sample rate와 10/20/30ms frame 길이만 받아들이며, 이 10/20/30ms는 Opus encoder의 `frame_size` 집합과 같지 않다. VAD가 30ms block을 허용해도 그 PCM을 같은 크기 그대로 `opus_encode`에 넘길 수 없으므로, 공유 frame을 10 또는 20ms로 고정하거나 VAD/encoder block을 분리해 누적·분할한다. mode 0~3은 false positive와 false negative의 동작점을 바꾼다. 공격적인 mode일수록 저에너지 음성·음악까지 무성으로 분류할 위험이 커진다. 함정은 speech onset이 판정되기 전에 첫 음소가 잘리는 것이다. 보완하려면 활성에서 무성으로 바뀐 뒤 일정 시간 전송을 유지하는 *hangover*와, 활성 진입 직전 PCM을 보존했다가 원래 RTP timestamp로 인코딩하는 *lookback buffer*를 둔다. 길이는 frame 개수 상수가 아니라 onset loss와 무음 대역폭을 함께 측정해 정한다.
 
-패킷을 생략해도 RTP timestamp는 캡처한 샘플 수만큼 전진해야 한다. RTP sequence는 실제 보낸 packet에만 증가한다. 그렇지 않으면 수신측은 무음 구간을 clock discontinuity로 해석하고 jitter·playout 계산이 깨진다.
+패킷을 생략해도 RTP timestamp는 캡처한 샘플 수만큼 전진해야 한다. RTP sequence는 *실제 전송한 packet의 순서* 이고 media timestamp는 capture/playout sample clock이므로, VAD·DTX로 패킷을 생략해도 오디오 시간은 진행한다. 그렇지 않으면 수신측은 무음 구간을 clock discontinuity로 해석하고 jitter·playout 계산이 깨진다. 수신측은 *의도적 무음(DTX gap)* 과 network loss, late packet, reset, epoch/SSRC 변경을 구분할 정보를 가져야 하며, sequence 번호만으로 audio 시간을 계산하지 않는다.
 
 ### DTX — Discontinuous Transmission
 
-DTX는 음성이 없는 구간에서 코덱이 전송량을 줄이는 모드다. Opus 인코더가 1바이트 DTX 패킷을 반환하면 애플리케이션은 그 패킷을 보내지 않아도 된다. 장시간 무음에서도 인코더는 상태 갱신을 위해 드물게 일반 패킷을 출력할 수 있으므로, 반환 크기를 보고 실제 전송 여부를 결정한다. 수신측이 겪는 패킷 공백은 디코더의 PLC와 애플리케이션의 comfort-noise 정책으로 처리한다.
+DTX는 음성이 없는 구간에서 코덱이 전송량을 줄이는 모드다. Opus 인코더가 DTX 패킷(구형 API 기준 1바이트, v1.5.2 header는 2바이트 이하)을 반환하면 애플리케이션은 그 패킷을 보내지 않아도 된다. 반환 크기와 `OPUS_SET_DTX` 동작은 사용하는 libopus 버전의 API 계약으로 고정한다. 장시간 무음에서도 인코더는 상태 갱신을 위해 드물게 일반 패킷을 출력할 수 있으므로, 반환 크기를 보고 실제 전송 여부를 결정한다. 수신측이 겪는 패킷 공백은 디코더의 PLC와 애플리케이션의 comfort-noise 정책으로 처리한다.
 
 ```cpp
+constexpr int DTX_PACKET_BYTES = 1;      // 구형 API 기준; v1.5.2 header는 2 이하
+
 opus_encoder_ctl(enc, OPUS_SET_DTX(1));
 int n = opus_encode(enc, pcm, FRAME_SAMPLES, packet, MAX_PACKET);
 if (n < 0) {
     HandleOpusError(n);
-} else if (n > 1) {
+} else if (n > DTX_PACKET_BYTES) {
     SendRtp(packet, n, rtpTimestamp);   // 음성 또는 주기적인 상태 갱신
 }
-// n == 1이면 전송하지 않아도 되는 DTX 패킷이다.
+// n <= DTX_PACKET_BYTES이면 전송하지 않아도 되는 DTX 패킷이다.
 rtpTimestamp += FRAME_SAMPLES;
 ```
 
@@ -406,7 +415,9 @@ public:
         TryStart();
     }
 
-    // 한 오디오 프레임마다 호출한다.
+    // 한 오디오 프레임마다 호출한다. 이 골격은 1 packet = 1 frame,
+    // DTX 없음, seq 연속을 가정한다. 실제 playout 시각은 RTP timestamp/
+    // media clock으로 계산하고 DTX gap을 loss와 분리해야 한다.
     DecodeAction Next() {
         if (state_ == State::Rebuffering)
             return {Action::Hold, {}};     // CNG/무음 출력하며 다시 채운다
@@ -438,7 +449,7 @@ public:
 };
 ```
 
-이 코드는 상태 전이를 드러내기 위한 골격이다. `UnwrapRtpSequence`는 16비트 sequence를 순환에 안전한 확장 번호로 바꾸고, `ContiguousAudioMs`는 단순 packet 개수가 아니라 첫 sequence부터 gap 없이 재생 가능한 길이를 계산해야 한다. 시작과 지속 언더런 때는 목표 길이만큼 다시 모은 뒤 재생하고, 이미 PLC로 소비한 sequence는 늦게 와도 재생하지 않는다. 실제 구현은 timestamp discontinuity, codec frame duration 변경, 중복, SSRC 전환과 최대 메모리 한도도 처리한다.
+이 코드는 상태 전이를 드러내기 위한 골격이며 완전한 adaptive jitter buffer 구현이 아니다. `UnwrapRtpSequence`는 16비트 sequence를 순환에 안전한 확장 번호로 바꾸고, `ContiguousAudioMs`는 단순 packet 개수가 아니라 첫 sequence부터 gap 없이 재생 가능한 길이를 계산해야 한다. `expectedSeq++`만으로 매 고정 frame의 재생 시각을 정의하지 않고 playout은 RTP timestamp/media clock을 기준으로 하며, DTX로 생략된 공백은 network loss·late packet과 분리해 처리한다. 시작과 지속 언더런 때는 목표 길이만큼 다시 모은 뒤 재생하고, 이미 PLC로 소비한 sequence는 늦게 와도 재생하지 않는다. 실제 구현은 timestamp discontinuity, codec frame duration 변경, 중복, SSRC 전환과 최대 메모리 한도도 처리한다.
 
 너무 작은 버퍼는 지연을 줄이는 대신 late loss와 concealment를 늘린다. 너무 큰 버퍼는 burst에 강하지만 mouth-to-ear latency를 늘린다. 목표 깊이는 경로 분포와 제품의 late-loss budget에 맞춰 적응시킨다.
 
@@ -502,19 +513,19 @@ voice PoP는 참가자별 one-way delay, packet loss, capacity와 data-residency
 
 ### 처리 파이프라인 순서
 
-캡처 PCM은 여러 처리기를 거쳐 인코더로 들어가지만 모든 구현에 통하는 단일 고정 순서가 있는 것은 아니다. 통합 audio-processing module은 AEC의 선형 추정·잔류 에코 억제, NS와 gain control을 내부 단계로 나눠 교차 적용할 수 있다. 외부에서 지켜야 할 핵심은 **render reference를 AEC에 정확한 시각으로 공급하고**, VAD·DTX가 실제 송신할 processed capture를 관찰하며, 각 단계의 level·delay 계약을 깨지 않는 것이다.
+캡처 PCM은 여러 처리기를 거쳐 인코더로 들어가지만 모든 구현에 통하는 단일 고정 순서가 있는 것은 아니다. 통합 audio-processing module은 AEC의 선형 추정·잔류 에코 억제, NS와 gain control을 내부 단계로 나눠 교차 적용할 수 있다. 외부에서 지켜야 할 핵심은 **render reference를 AEC에 정확한 시각으로 공급하고**, standalone VAD 판정과 codec 내부 DTX가 실제 송신할 processed capture를 관찰하며, 각 단계의 level·delay 계약을 깨지 않는 것이다.
 
 ```mermaid
 flowchart LR
     M[Mic PCM] --> AEC[AEC]
     AEC --> NS[Noise Suppression]
     NS --> AGC[AGC]
-    AGC --> VAD[VAD/DTX]
-    VAD --> ENC[Opus Encode]
+    AGC --> VAD[VAD 판정<br/>standalone]
+    VAD --> ENC[Opus Encode<br/>내부 DTX]
     SPK[Speaker out] -.참조 신호.-> AEC
 ```
 
-그림은 개념적 신호 흐름이다. AEC는 마이크 신호와 실제 speaker path에 대응하는 far-end reference의 시간 정렬이 필요하다. NS와 gain control의 세부 순서는 사용한 APM의 계약을 따르고, 단계별 모듈을 조립한다면 gain이 AEC 적응과 noise estimate를 불안정하게 만들지 않는지 double-talk·무음·클리핑 trace로 확인한다.
+그림은 개념적 신호 흐름이다. VAD는 별도로 동작하는 판정 모듈이고 DTX는 Opus 인코더 내부 모드라서, 둘을 하나의 stage로 합쳐 그리면 안 된다. 두 단계 모두 공유 frame clock 위에서 packet 생략 여부를 결정하며, packet을 생략해도 media clock은 계속 흐른다. AEC는 마이크 신호와 실제 speaker path에 대응하는 far-end reference의 시간 정렬이 필요하다. NS와 gain control의 세부 순서는 사용한 APM의 계약을 따르고, 단계별 모듈을 조립한다면 gain이 AEC 적응과 noise estimate를 불안정하게 만들지 않는지 double-talk·무음·클리핑 trace로 확인한다.
 
 ### AEC — Acoustic Echo Cancellation
 
@@ -807,7 +818,7 @@ struct VoiceTelemetry {
 | 수신 상한 K(우선순위 포워딩) | 4 |
 | SFU 1대 명목 egress 예시 | 10Gbps |
 
-이 표의 값은 특정 서비스의 측정 결과가 아니라 산식을 보이기 위한 가정이다. 5인 채널에서 각 사용자가 독립적으로 20%의 시간 동안 24kbps를 말하고, SFU가 발화자의 stream을 나머지 4명에게만 보낸다면 기대 복제 수는 `N(N-1)q = 5×4×0.2 = 4`다. 채널당 media egress는 약 `4×24kbps = 96kbps`, 100만 사용자가 모두 5인 채널에 있다면 20만 채널이므로 약 19.2Gbps다. 여기에 IP/UDP/암호/protocol header, RTCP·keepalive, FEC와 실제 사용한 복구 트래픽, 지역 간 전달을 더해야 한다. 발화가 서로 상관되거나 K 제한이 걸리면 기대값도 달라진다. 장비 수는 명목 10Gbps를 단순 나눗셈하지 않고 연결 수, PPS, 암호화 CPU, NIC queue, 장애 여유와 지역별 peak를 포함한 부하 시험으로 정한다.
+이 표의 값은 특정 서비스의 측정 결과가 아니라 산식을 보이기 위한 가정이다. 5인 채널에서 각 사용자가 독립적으로 20%의 시간 동안 24kbps를 말하고, SFU가 발화자의 stream을 나머지 4명에게만 보낸다면 기대 복제 수는 `N(N-1)q = 5×4×0.2 = 4`다. 채널당 media egress는 약 `4×24kbps = 96kbps`, 100만 사용자가 모두 5인 채널에 있다면 20만 채널이므로 약 19.2Gbps다. 여기에 IP/UDP/암호/protocol header, RTCP·keepalive, FEC와 실제 사용한 복구 트래픽, 지역 간 전달을 더해야 한다. 고정된 주변 발화 확률의 선형 fan-out에서는 발화가 상관되어도 기대 복제 수 `E[(N-1)b ΣX_i] = (N-1)b ΣE[X_i]`가 그대로다. 상관은 peak·분산·동시 발화 분포를 바꾸고, Top-K 절단 같은 비선형 선택이나 VBR와 발화의 결합을 모델에 넣으면 기대값도 그 모델에서 별도로 계산한다. 장비 수는 명목 10Gbps를 단순 나눗셈하지 않고 연결 수, PPS, 암호화 CPU, NIC queue, 장애 여유와 지역별 peak를 포함한 부하 시험으로 정한다.
 
 ### 비용 최적화
 
@@ -831,10 +842,10 @@ AEC의 double-talk, NS의 음성 손상, jitter-buffer 적응과 burst loss는 �
 
 ## 더 읽을거리
 
-- [RFC 6716: Definition of the Opus Audio Codec](https://www.rfc-editor.org/rfc/rfc6716), [Opus Encoder API](https://www.opus-codec.org/docs/html_api/group__opusencoder.html) — frame duration, packet 한도, FEC·DTX와 encoder 제어의 1차 명세.
+- [RFC 6716: Definition of the Opus Audio Codec](https://www.rfc-editor.org/rfc/rfc6716) — frame duration·packet 한도의 1차 명세. [Opus Encoder API(구형 html_api)](https://www.opus-codec.org/docs/html_api/group__opusencoder.html)와 [libopus v1.5.2 `opus.h`](https://raw.githubusercontent.com/xiph/opus/v1.5.2/include/opus.h) — encoder 제어·출력 buffer 권장치·DTX 반환값은 버전별 API 계약이므로 적용 버전을 고정해 대조한다.
 - [RFC 7874: WebRTC Audio Codec and Processing Requirements](https://www.rfc-editor.org/rfc/rfc7874) — WebRTC endpoint의 Opus 필수 지원과 audio-processing 요구.
 - Discord Engineering, ["How Discord Handles Two and Half Million Concurrent Voice Users using WebRTC"](https://discord.com/blog/how-discord-handles-two-and-half-million-concurrent-voice-users-using-webrtc) — SFU 운영 규모의 실측 기록.
-- [WebRTC 공식 문서](https://webrtc.org/) — AEC/NS/AGC 처리 파이프라인과 SRTP 의 레퍼런스 구현.
+- [WebRTC 공식 문서](https://webrtc.org/) — AEC/NS/AGC 처리와 SRTP 구현을 찾아보는 출발점. APM pipeline/SRTP의 특정 source·revision을 가리키지 않으므로 본문 주장의 직접 근거는 아니다.
 - [RFC 3550: RTP, A Transport Protocol for Real-Time Applications](https://www.rfc-editor.org/rfc/rfc3550) §6.4.1 — interarrival jitter 추정식($J_i$)과 EWMA 게인 1/16 의 원전 정의.
 - [RFC 3711: SRTP](https://www.rfc-editor.org/rfc/rfc3711), [RFC 5764: DTLS-SRTP](https://www.rfc-editor.org/rfc/rfc5764), [RFC 9605: SFrame](https://www.rfc-editor.org/rfc/rfc9605) — hop-by-hop media 보호와 payload E2EE의 서로 다른 신뢰 경계.
 - [RFC 9143: SDP BUNDLE](https://www.rfc-editor.org/rfc/rfc9143) — 여러 media description의 transport 공유와 RTP packet aggregation의 차이.

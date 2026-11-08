@@ -163,7 +163,7 @@ hybrid의 “부분 결정론”은 저절로 생기는 성질이 아니다. inp
 |---|---|---|
 | floating-point 실행 차이 | FMA / x87 중간 정밀도 / SIMD 폭 / 수학 라이브러리 | 연산·compiler·target 계약 고정 |
 | `time` / `rand` | 전역 가변 상태 | 결정론적 PRNG + 시드 *기록* |
-| 컨테이너 순회 순서 | `unordered_map` 의 구현·rehash 의존 순서 | `vector` + 정렬 키 |
+| 컨테이너 순회 순서 | 반복 순서가 표준 계약으로 고정되지 않음(구현·rehash 의존) | `vector` + 정렬 키 |
 | 포인터 주소 의존 | 정렬·해시 키로 주소 사용 | 안정적 ID |
 | 멀티스레드 | reduction·conflict 적용 순서 비결정 | deterministic partition과 merge order |
 | 외부 라이브러리 | 내부 상태·version·build option | 실행 계약 고정 + state hash 검증 |
@@ -216,15 +216,19 @@ struct ReplayHeader {
     std::string buildHash;         // 게임 빌드 식별자 (결정론 경계)
 };
 
+// 호환성 수준: ① 파일 파싱 가능 ② 시각 재생 가능 ③ bit-exact 재시뮬 가능.
+// 입력 replay의 재시뮬은 ③이 필요하므로 map/rule/physics/RNG/schema 계약을
+// 모두 확인한다. 이름이나 메이저 버전 일치만으로 ③을 통과시키지 않는다.
 bool CanReplay(const ReplayHeader& h) {
-    // 메이저 버전 일치 + 게임 데이터 일치 + 같은 빌드 결정론 경계
+    // 메이저 버전 + 게임 데이터 + 맵 + 결정론 경계 식별자
     return (h.engineVersion >> 16) == (CURRENT_VERSION >> 16) &&
            h.gameDataVersion       == CURRENT_DATA_VERSION   &&
+           h.mapHash               == CURRENT_MAP_HASH       &&
            h.buildHash             == CURRENT_BUILD_HASH;
 }
 ```
 
-함정 — *메이저 버전만 보고 통과시키면 마이너 패치의 결정론 변경을 놓친다*. 시뮬 로직에 영향을 주는 변경은 `buildHash` 같은 *결정론 경계 식별자* 로 명시 차단하는 편이 안전하다. 호환 안 되면 *"옛 패치 빌드 다운로드" 옵션* 또는 *재생 불가 표시*.
+함정 — *메이저 버전만 보고 통과시키면 마이너 패치의 결정론 변경을 놓친다*. 시뮬 로직에 영향을 주는 변경은 `buildHash` 같은 *결정론 경계 식별자* 로 명시 차단하는 편이 안전하다. `mapHash`·rule·physics·asset collision·RNG 소비와 schema migration 계약이 바뀌면 protocol이 읽혀도 같은 state를 재현하지 못하므로, 재현 가능 여부를 이름이나 build 이름 하나로 판단하지 않는다. 호환 안 되면 *"옛 패치 빌드 다운로드" 옵션* 또는 *재생 불가 표시*.
 
 ### 검증 체크섬
 
@@ -232,8 +236,10 @@ bool CanReplay(const ReplayHeader& h) {
 
 ```cpp
 void ValidateReplay(const InputReplay& r) {
-    GameState s = InitFromSetup(r.setup);
+    // 초기 상태 생성이 RNG를 소비할 수 있으므로 seed 복원을 먼저 한다.
+    // seed만 같아서는 부족하고 subsystem stream 구성·호출 순서·버전도 맞아야 한다.
     g_rng.Seed(r.seed);
+    GameState s = InitFromSetup(r.setup);
 
     for (const auto& t : r.ticks)
         Simulate(s, t.inputs);
@@ -243,7 +249,7 @@ void ValidateReplay(const InputReplay& r) {
 }
 ```
 
-hash를 최종 state뿐 아니라 tick 또는 chunk 경계마다 저장하면 최초로 관측된 mismatch 구간을 좁힐 수 있다. 두 실행이 갈라졌다가 같은 canonical state로 다시 수렴할 수도 있으므로 mismatch 여부가 단조롭다는 보장 없이 이진 탐색하지 않는다. 경계 hash를 순서대로 비교해 첫 mismatch를 찾고, 그 chunk를 system→entity→field hash로 세분한다. CI는 같은 build 반복 실행과 target 간 비교를 지속해 결정론 회귀를 잡는다.
+`InitFromSetup`이 RNG-free라는 계약이 아니면 seed 복원을 그보다 먼저 끝내거나 initial snapshot을 직접 복원한다. 같은 seed 하나로는 충분하지 않고 subsystem별 stream·호출 순서·build version이 함께 맞아야 한다. hash를 최종 state뿐 아니라 tick 또는 chunk 경계마다 저장하면 최초로 관측된 mismatch 구간을 좁힐 수 있다. 두 실행이 갈라졌다가 같은 canonical state로 다시 수렴할 수도 있으므로 mismatch 여부가 단조롭다는 보장 없이 이진 탐색하지 않는다. 경계 hash를 순서대로 비교해 첫 mismatch를 찾고, 그 chunk를 system→entity→field hash로 세분한다. CI는 같은 build 반복 실행과 target 간 비교를 지속해 결정론 회귀를 잡는다.
 
 ## 3. 데이터 압축 전략
 
@@ -512,9 +518,15 @@ Expected<GameState, SeekError> SeekTo(
     // 2. keyframe payload·checksum을 검증하고 RNG를 포함한 상태 복원
     GameState s = DecodeAndVerify(*it);
 
+    // exact keyframe이면 delta 순회 없이 바로 반환한다.
+    if (it->tick == targetTick) return s;
+
     // delta[t]는 tick t 처리 후의 상태로 전이시키는 record라는 계약.
-    for (uint32_t tick = it->tick + 1; tick <= targetTick; ++tick) {
-        const HybridReplay::DeltaFrame* frame = r.deltaIndex.Find(tick);
+    // 파일 tick은 단조 index다. keyframe.tick + 1이 UINT_MAX에서 0으로
+    // 돌아가므로 더 넓은 counter로 센다.
+    for (uint64_t t = uint64_t(it->tick) + 1; t <= uint64_t(targetTick); ++t) {
+        const HybridReplay::DeltaFrame* frame =
+            r.deltaIndex.Find(static_cast<uint32_t>(t));
         if (!frame) return Unexpected(SeekError::MissingDelta);
         for (const StateDelta& d : frame->changes) ApplyDelta(s, d);
     }
@@ -523,7 +535,7 @@ Expected<GameState, SeekError> SeekTo(
 }
 ```
 
-`upper_bound` 뒤의 이전 원소가 target 이하 최대 keyframe이지만, 첫 keyframe보다 앞이면 감소시킬 원소가 없으므로 반드시 검사한다. delta는 vector 위치가 tick과 같다고 암묵적으로 가정하지 않고 index에서 찾는다. 누락·손상 record를 조용히 건너뛰면 그 뒤 state 전체가 오염되므로 seek를 실패시키거나 다음 독립 keyframe으로 복구한다.
+`upper_bound` 뒤의 이전 원소가 target 이하 최대 keyframe이지만, 첫 keyframe보다 앞이면 감소시킬 원소가 없으므로 반드시 검사한다. keyframe tick이 target과 같으면 delta를 하나도 적용하지 않고 그대로 반환한다. delta는 vector 위치가 tick과 같다고 암묵적으로 가정하지 않고 index에서 찾는다. 누락·손상 record를 조용히 건너뛰면 그 뒤 state 전체가 오염되므로 seek를 실패시키거나 다음 독립 keyframe으로 복구한다.
 
 keyframe 간격이 K이고 delta decode 또는 simulation 한 tick의 p95 비용이 c라면 최악 seek 계산량의 1차 근사는 $(K-1)c$다. chunk read·decompress와 cache miss는 별도 항이다. timeline scrubbing의 latency SLO를 먼저 정하고 corpus benchmark에서 K를 선택하며, interactive seek는 취소 가능한 worker job과 generation ID로 오래된 결과가 화면을 덮지 못하게 한다.
 
@@ -612,24 +624,26 @@ enum class ViewMode {
 
 ```cpp
 ViewTarget AutoDirector(const GameState& s, ViewTarget prev) {
-    if (TimeSinceLastSwitch() < minDwellTime &&
-        IsStillValid(prev, s))
+    const bool prevValid = IsStillValid(prev, s);
+    if (prevValid && TimeSinceLastSwitch() < minDwellTime)
         return prev;
 
     float      best = 0;
     ViewTarget target = prev;
     for (const auto& p : s.players) {
         float score = ComputeInterestScore(p);  // 최근 킬·낮은 HP·액티브 스킬 가중
-        if (p.id == prev.id) score += hysteresisBonus;
+        if (prevValid && p.id == prev.id) score += hysteresisBonus;
         if (score > best) { best = score; target = ViewTarget(p); }
     }
-    if (target != prev && best < Score(prev, s) + switchMargin)
+    // prev가 무효면 Score(invalid) 비교 없이 점수만으로 새 target을 고른다.
+    if (prevValid && target != prev &&
+        best < Score(prev, s) + switchMargin)
         return prev;
     return target;
 }
 ```
 
-직전 대상 bonus는 hysteresis를 만들 뿐 최소 체류 시간을 보장하지 않는다. 명시적 `minDwellTime`, switch margin, target invalidation 예외를 함께 둔다. camera path도 target point로 순간 이동하기보다 shot type별 transition과 collision 검사를 거친다. 점수 weight와 체류 시간은 시청자 평가와 수동 caster override 횟수로 조정한다.
+직전 대상 bonus는 hysteresis를 만들 뿐 최소 체류 시간을 보장하지 않는다. 명시적 `minDwellTime`, switch margin, target invalidation 예외를 함께 둔다. 이전 target이 소멸·무효면 `prevScore + hysteresis` 비교를 건너뛰고 유효 후보 사이에서만 hysteresis를 적용한다. 유효 후보가 하나도 없을 때의 null/고정 관전 시점 반환 규약을 정한다. camera path도 target point로 순간 이동하기보다 shot type별 transition과 collision 검사를 거친다. 점수 weight와 체류 시간은 시청자 평가와 수동 caster override 횟수로 조정한다.
 
 ### 외부 방송 도구 통합
 
@@ -661,7 +675,9 @@ class ReplayRecorder {
     std::atomic<bool> replayValid_{true};
 
 public:
-    // single game-thread producer
+    // single game-thread producer.
+    // RecordedFrame은 worker가 소비할 때까지 유효한 immutable snapshot을
+    // 소유해야 한다 — GameState 포인터를 얕게 복사하면 안 된다.
     void OnGameTick(uint32_t tick, const GameState& s, const Input* in) {
         RecordedFrame frame = CaptureReplayFields(tick, s, in);
         if (!queue_.try_push(std::move(frame))) {
@@ -683,6 +699,8 @@ private:
 ```
 
 SPSC ring은 producer/consumer가 하나씩이라는 ownership 계약에서 bounded memory와 allocation-free enqueue를 만들기 쉽다. lock-free라는 이름만으로 worst-case latency가 사라지는 것은 아니며 cache contention과 retry가 남을 수 있다. queue가 가득 찼을 때 simulation을 block할지, replay를 invalid 처리할지, optional presentation sample만 drop할지를 데이터 종류별로 정한다. authoritative input/event를 조용히 버리고 정상 replay로 표시해서는 안 된다.
+
+queue에 넣는 `RecordedFrame`은 worker가 소비할 때까지 유효한 *immutable snapshot* 을 소유해야 한다. bytes 소유권과 queue의 acquire/release 동기화를 계약으로 두고, 이미 publish한 frame의 buffer를 game thread가 다시 만지지 않는다. 종료는 신규 publish 중단 → worker에 stop 알림·깨움 → 남은 frame drain·flush → join → buffer 회수 순서로 한다. overflow 시 drop·block·stop 중 무엇을 택했는지 데이터 종류별로 명시하고, 조용히 버린 구간은 replay에 표시한다.
 
 입력 기반도 input bytes뿐 아니라 tick, player mask, 외부 event와 integrity metadata를 capture한다. state 기반은 full world copy가 병목이 될 수 있으므로 dirty tracking, immutable snapshot page 또는 replay 전용 canonical buffer를 평가한다. delta 계산을 game thread로 옮기면 copy는 줄어도 CPU가 생기므로 두 경로의 p99를 측정한다.
 
@@ -729,7 +747,7 @@ class StreamingReplayPlayer {
 };
 ```
 
-prefetch horizon은 `재생 속도 × storage/decode p99 + safety margin`으로 정하되 memory budget으로 제한한다. seek가 발생하면 generation을 증가시켜 이전 worker 결과를 폐기하고 target keyframe 주변을 우선한다. input/hybrid replay는 worker에서 keyframe load와 delta 적용 또는 headless simulation까지 수행할 수 있지만, live render state와 공유하는 mutable world를 worker가 직접 수정해서는 안 된다.
+prefetch horizon은 `재생 속도 × storage/decode p99 + safety margin`으로 정하되 memory budget으로 제한한다. seek가 발생하면 generation을 증가시켜 이전 worker 결과를 폐기하고 target keyframe 주변을 우선한다. prefetch queue도 단일 소유(worker)와 SPSC/lock 규칙을 정해 producer·consumer가 동시에 만지지 않게 하고, cache에서 반환한 chunk는 immutable handle로 고정해 교체·삭제가 진행 중인 borrow를 무효화하지 않도록 수명을 보장한다. generation은 오래된 결과를 식별해 버리는 표식일 뿐 이미 해제된 메모리를 안전하게 만들지 않는다. input/hybrid replay는 worker에서 keyframe load와 delta 적용 또는 headless simulation까지 수행할 수 있지만, live render state와 공유하는 mutable world를 worker가 직접 수정해서는 안 된다.
 
 ## 8. 분석과 디버깅 활용
 
@@ -868,7 +886,7 @@ Hash TickHash(const World& world) {
 }
 ```
 
-raw `struct`에는 padding, pointer, uninitialized byte와 host byte order가 섞일 수 있으므로 그대로 hash하지 않는다. simulation-relevant field를 canonical 순서·endianness로 넣고, NaN payload나 `-0/+0`을 같은 값으로 볼지 contract에 명시한다. strict determinism은 exact canonical bits를 비교하고, 허용 오차 metric은 원인 분석용 별도 결과로 둔다.
+raw `struct`에는 padding, pointer, uninitialized byte와 host byte order가 섞일 수 있으므로 그대로 hash하지 않는다. simulation-relevant field를 canonical 순서·endianness로 넣고, NaN payload나 `-0/+0`을 같은 값으로 볼지 contract에 명시한다. strict determinism은 exact canonical bits를 비교하고, 허용 오차 metric은 원인 분석용 별도 결과로 둔다. 서로 다른 실행의 tick hash를 비교할 때는 양쪽이 같은 confirmed input prefix와 content/version을 사용해야 하며, 예측 입력이 섞인 tick의 hash 차이는 결정론 실패가 아니다. 이때 `TickHash`가 전체 relevant state인지 부분 진단 hash인지도 명명한다.
 
 두 replay가 처음 다른 hash를 내는 tick을 찾으면, 그 tick의 시스템별 하위 hash로 범위를 좁힐 수 있다.
 
@@ -897,4 +915,4 @@ world hash mismatch at tick 1842
 - Glenn Fiedler, [Deterministic Lockstep](https://gafferongames.com/post/deterministic_lockstep/) — 입력 기반 리플레이의 전제 조건인 결정론 정리.
 - Glenn Fiedler, [Snapshot Compression](https://gafferongames.com/post/snapshot_compression/) — smallest-three 회전 압축과 비트 예산 배분의 실무 정리.
 - Du Q. Huynh, "Metrics for 3D Rotations: Comparison and Analysis" (Journal of Mathematical Imaging and Vision 35(2), 2009) — 회전 사이 측지 거리 $2\arccos|\langle q_1,q_2\rangle|$의 표준 해설.
-- Factorio 개발 블로그(FFF)의 결정론·리플레이 관련 글 — <https://www.factorio.com/blog/> — 대규모 시뮬 게임이 결정론을 유지하는 실무 기록.
+- Factorio 개발 블로그(FFF)의 결정론·리플레이 글 목록 — <https://www.factorio.com/blog/> — 특정 글을 찾는 출발점. 개별 FFF 번호·제목을 특정하지 않으므로 본문 주장의 직접 근거는 아니다.

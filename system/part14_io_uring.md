@@ -83,7 +83,16 @@ cb.aio_buf = buf;
 cb.aio_nbytes = sizeof(buf);
 
 aio_read(&cb);
-aio_suspend(&cb, 1, NULL);
+
+/* 한 요청이라도 첫 인자는 aiocb 포인터 배열이다 */
+const struct aiocb *pending[] = { &cb };
+while (aio_error(&cb) == EINPROGRESS) {
+    if (aio_suspend(pending, 1, NULL) == -1 && errno != EINTR)
+        break;  /* 대기 실패 시 미완료 요청의 cb/buffer를 즉시 해제하지 않음 */
+}
+
+int operation_error = aio_error(&cb);
+ssize_t result = aio_return(&cb);  /* 완료된 요청당 한 번 */
 ```
 
 Linux에서 고려할 제약은 다음과 같다.
@@ -329,6 +338,13 @@ struct io_ring_ctx {
 사용자 공간에서는 다음과 같이 매핑한다.
 
 ```c
+// 매핑 크기는 고정값이 아니라 sq_off/cq_off와 entries로 계산한다.
+// SINGLE_MMAP feature면 SQ/CQ가 같은 매핑 범위를 공유한다.
+size_t sq_ring_sz = PAGE_ALIGN(params.sq_off.array +
+                               params.sq_entries * sizeof(__u32));
+size_t cq_ring_sz = PAGE_ALIGN(params.cq_off.cqes +
+                               params.cq_entries * sizeof(struct io_uring_cqe));
+
 // 1. SQ ring
 void *sq_ring = mmap(0, sq_ring_sz, PROT_READ | PROT_WRITE,
                      MAP_SHARED | MAP_POPULATE,
@@ -349,28 +365,28 @@ void *sqes = mmap(0, entries * sizeof(struct io_uring_sqe),
 커널 mmap 핸들러는 다음과 같다.
 
 ```c
-// fs/io_uring.c
+// fs/io_uring.c — 한 페이지가 아니라 요청 범위 전체를 매핑한다
 static int io_uring_mmap(struct file *file, struct vm_area_struct *vma)
 {
     struct io_ring_ctx *ctx = file->private_data;
     loff_t offset = (loff_t)vma->vm_pgoff << PAGE_SHIFT;
-    struct page *page;
-    void *ptr;
+    unsigned long sz = vma->vm_end - vma->vm_start;
+    unsigned long pfn;
 
     switch (offset) {
     case IORING_OFF_SQ_RING:
     case IORING_OFF_CQ_RING:
-        ptr = ctx->rings;
+        pfn = __pa(ctx->rings) >> PAGE_SHIFT;
         break;
     case IORING_OFF_SQES:
-        ptr = ctx->sq_sqes;
+        pfn = __pa(ctx->sq_sqes) >> PAGE_SHIFT;
         break;
     default:
         return -EINVAL;
     }
 
-    page = virt_to_head_page(ptr);
-    return vm_insert_page(vma, vma->vm_start, page);
+    /* sz는 caller가 sq_off/cq_off, entries, CQE 크기로 계산해 넘긴다 */
+    return remap_pfn_range(vma, vma->vm_start, pfn, sz, vma->vm_page_prot);
 }
 ```
 
@@ -387,6 +403,7 @@ SYSCALL_DEFINE6(io_uring_enter, unsigned int, fd,
     struct io_ring_ctx *ctx;
     struct file *file;
     long ret = -EBADF;
+    long submitted = 0;
 
     file = fget(fd);
     if (!file || file->f_op != &io_uring_fops)
@@ -395,14 +412,25 @@ SYSCALL_DEFINE6(io_uring_enter, unsigned int, fd,
     ctx = file->private_data;
 
     if (to_submit) {
-        ret = io_submit_sqes(ctx, to_submit);
-        if (ret != to_submit)
+        submitted = io_submit_sqes(ctx, to_submit);
+        if (submitted < 0) {
+            ret = submitted;
             goto out;
+        }
+        if (submitted != to_submit) {
+            ret = submitted;
+            goto out;
+        }
     }
 
     if (min_complete) {
         ret = io_cqring_wait(ctx, min_complete, sig, sigsz);
+        if (ret < 0)
+            goto out;
     }
+
+    /* 반환값은 완료 수가 아니라 제출된 SQE 수 규약이다 */
+    ret = submitted;
 
 out:
     return ret;
@@ -532,6 +560,8 @@ static bool io_cqring_event_overflow(struct io_ring_ctx *ctx, u64 user_data,
             cqe->user_data = user_data;
             cqe->res = res;
             cqe->flags = cflags;
+            /* body 작성 후 release로 tail을 공개한다 */
+            smp_store_release(&ctx->cq_ring->tail, ctx->cached_cq_tail + 1);
             return true;
         }
     }
@@ -558,6 +588,8 @@ static void io_req_complete_post(struct io_kiocb *req, s32 res, u32 cflags)
     io_put_req(req);
 }
 ```
+
+생산자는 CQE body를 작성한 뒤 release로 tail을 공개하고, 소비자는 acquire로 tail을 관측한 뒤 body를 읽는다. head 반환도 같은 순서 규약을 따른다.
 
 ## 4. epoll, AIO와의 비교
 
@@ -1005,24 +1037,36 @@ void use_fixed_files()
 static int io_sqe_files_register(struct io_ring_ctx *ctx, void __user *arg,
                                   unsigned nr_args)
 {
+    const int __user *ufds = arg;  /* element type을 갖춘 포인터 */
     struct file **files;
     int fd, ret;
+    int i;
 
     ctx->file_table = kzalloc(sizeof(*ctx->file_table), GFP_KERNEL);
     files = kcalloc(nr_args, sizeof(struct file *), GFP_KERNEL);
 
-    for (int i = 0; i < nr_args; i++) {
-        if (copy_from_user(&fd, &arg[i], sizeof(fd)))
-            return -EFAULT;
+    for (i = 0; i < nr_args; i++) {
+        if (copy_from_user(&fd, &ufds[i], sizeof(fd))) {
+            ret = -EFAULT;
+            goto out_unwind;
+        }
 
         files[i] = fget(fd);
-        if (!files[i])
-            return -EBADF;
+        if (!files[i]) {
+            ret = -EBADF;
+            goto out_unwind;
+        }
     }
 
     ctx->file_table->files = files;
     ctx->file_table->nr_files = nr_args;
     return 0;
+
+out_unwind:
+    while (i-- > 0)  /* 실패 시 이미 획득한 fd 참조를 되돌린다 */
+        fput(files[i]);
+    kfree(files);
+    return ret;
 }
 
 static struct file *io_file_get(struct io_ring_ctx *ctx,
@@ -1191,9 +1235,9 @@ void multishot_recv(int client_fd)
             break;
         }
 
-        // 2) buffer가 실제로 선택되어 응답되었는지 확인
+        // 2) F_BUFFER가 있을 때만 buffer ID가 유효하다 (F_MORE는 continuation 여부로 별개)
         if (!(cqe->flags & IORING_CQE_F_BUFFER)) {
-            // buffer가 비치지 않은 응답 — 별도 처리
+            // buffer가 선택되지 않은 응답(res=0 종료/오류 등) — 별도 처리
             io_uring_cqe_seen(&ring, cqe);
             continue;
         }
@@ -1811,6 +1855,8 @@ sysctl kernel.io_uring_disabled
 ```c
 #define BGID 0  // Buffer Group ID
 #define NR_BUFS 128
+#define PROVISION_TAG 0x1  // provide_buffers 완료 CQE 식별
+#define RECV_TAG      0x2  // recv 완료 CQE 식별
 
 void provided_buffers_example()
 {
@@ -1822,6 +1868,7 @@ void provided_buffers_example()
     for (int i = 0; i < NR_BUFS; i++) {
         struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
         io_uring_prep_provide_buffers(sqe, buffers[i], 4096, 1, BGID, i);
+        io_uring_sqe_set_data64(sqe, PROVISION_TAG);
     }
     io_uring_submit(&ring);
 
@@ -1831,27 +1878,45 @@ void provided_buffers_example()
     io_uring_prep_recv(sqe, sockfd, NULL, 0, 0);
     sqe->flags |= IOSQE_BUFFER_SELECT;
     sqe->buf_group = BGID;
+    io_uring_sqe_set_data64(sqe, RECV_TAG);
     io_uring_submit(&ring);
 
     struct io_uring_cqe *cqe;
-    io_uring_wait_cqe(&ring, &cqe);
+    for (;;) {
+        io_uring_wait_cqe(&ring, &cqe);
 
-    // CQE가 오류이거나 buffer가 선택되지 않았는지 먼저 검사
-    if (cqe->res < 0 || !(cqe->flags & IORING_CQE_F_BUFFER)) {
-        fprintf(stderr, "recv failed or no buffer (res=%d, flags=0x%x)\n",
-                cqe->res, cqe->flags);
+        // buffer 제공 완료 CQE는 recv 결과가 아니므로 user_data로 구분해 먼저 소비
+        if (cqe->user_data == PROVISION_TAG) {
+            int res = cqe->res;
+            io_uring_cqe_seen(&ring, cqe);
+            if (res < 0) {
+                fprintf(stderr, "provide_buffers failed: %s\n", strerror(-res));
+                io_uring_queue_exit(&ring);
+                return;
+            }
+            continue;
+        }
+
+        // user_data == RECV_TAG: recv 완료 처리
+        if (cqe->res < 0 || !(cqe->flags & IORING_CQE_F_BUFFER)) {
+            fprintf(stderr, "recv failed or no buffer (res=%d, flags=0x%x)\n",
+                    cqe->res, cqe->flags);
+            io_uring_cqe_seen(&ring, cqe);
+            io_uring_queue_exit(&ring);
+            return;
+        }
+
+        int buf_id = cqe->flags >> IORING_CQE_BUFFER_SHIFT;
+
+        sqe = io_uring_get_sqe(&ring);
+        io_uring_prep_provide_buffers(sqe, buffers[buf_id], 4096, 1, BGID, buf_id);
+        io_uring_sqe_set_data64(sqe, PROVISION_TAG);
+        io_uring_submit(&ring);
+
         io_uring_cqe_seen(&ring, cqe);
-        io_uring_queue_exit(&ring);
-        return;
+        break;
     }
 
-    int buf_id = cqe->flags >> IORING_CQE_BUFFER_SHIFT;
-
-    sqe = io_uring_get_sqe(&ring);
-    io_uring_prep_provide_buffers(sqe, buffers[buf_id], 4096, 1, BGID, buf_id);
-    io_uring_submit(&ring);
-
-    io_uring_cqe_seen(&ring, cqe);
     io_uring_queue_exit(&ring);
 }
 ```
@@ -2083,7 +2148,7 @@ io_uring은 리눅스 I/O의 패러다임을 바꾸었다. 핵심 정리는 다�
 
 ### 논문 및 발표
 - Axboe, J. (2019). *Efficient IO with io_uring*. https://kernel.dk/io_uring.pdf
-- Axboe, J. (2020). *io_uring and BPF*. Linux Plumbers Conference.
+- Axboe, J. (2020). *io_uring and BPF*. Linux Plumbers Conference. — 고유 식별 정보(세션·영상 URL) 미확인, 직접 근거로 확정하지 않음
 - Corbet, J. (2019). *Ringing in a new asynchronous I/O API*. LWN.net. https://lwn.net/Articles/776703/
 - Corbet, J. (2020). *The rapid growth of io_uring*. LWN.net. https://lwn.net/Articles/810414/
 

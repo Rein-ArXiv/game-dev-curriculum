@@ -61,6 +61,7 @@ flowchart LR
     C --> D["completion packet enqueue"]
     D --> E["worker가 dequeue"]
     E --> F["결과 적용과 다음 작업 제출"]
+    B -. "in-flight는 호출 전 예약, completion은 API 반환 전 관측 가능" .-> E
 ```
 
 completion 통지는 I/O 결과가 응용 상태에 이미 적용됐다는 뜻이 아니다. worker가 packet을 꺼내 operation을 식별하고, 오류를 판정하고, 세션 상태를 갱신해야 응용 수준 처리가 끝난다.
@@ -129,9 +130,13 @@ stateDiagram-v2
     Submitted --> CancelRequested: cancel 또는 close
     CancelRequested --> Completing: 성공 또는 취소 completion
     Free --> [*]: 소유자 파괴
+    note right of Submitted
+        진입 전에 session/operation 참조와 in-flight를 예약한다.
+        즉시 거절이면 rollback하고, 접수되면 completion이 정확히 한 번 회수한다.
+    end note
 ```
 
-취소 요청은 `Submitted`를 곧바로 `Free`로 만들지 않는다. 커널이 요청을 완료하거나 취소 결과를 반환하고 그 completion을 소비할 때까지 operation은 in-flight 상태다.
+취소 요청은 `Submitted`를 곧바로 `Free`로 만들지 않는다. 커널이 요청을 완료하거나 취소 결과를 반환하고 그 completion을 소비할 때까지 operation은 in-flight 상태다. 다른 worker는 제출 API가 반환하기 전에 completion을 dequeue할 수 있으므로, `Submitted`로 전이하기 전에 session·operation 참조와 in-flight를 먼저 예약한다. 즉시 거절이면 이 예약을 rollback하고, 접수되면 completion 측이 정확히 한 번 회수한다. 제출 API가 반환할 때까지 submitter 전용 참조를 유지한다.
 
 ## 3. Completion Port의 객체 모델
 
@@ -219,12 +224,15 @@ if (!ok) {
     if (error != WAIT_TIMEOUT) HandlePortFailure(error);
 }
 
+// BOOL은 batch 회수 성공일 뿐, 각 entry의 I/O 결과가 아니다.
+// Dispatch는 OVERLAPPED_ENTRY.Internal(또는 operation kind)을 확인해
+// entry별 NTSTATUS/결과를 판정해야 한다.
 for (ULONG i = 0; i < removed; ++i) {
     Dispatch(entries[i]);
 }
 ```
 
-batch 크기는 처리량만 보고 키우지 않는다. dequeue batch 크기 분포, packet queue 체류 시간, worker당 처리 시간, 연결별 공정성을 함께 측정한다.
+batch 크기는 처리량만 보고 키우지 않는다. dequeue batch 크기 분포, packet queue 체류 시간, worker당 처리 시간, 연결별 공정성을 함께 측정한다. `GetQueuedCompletionStatusEx`의 `BOOL`은 batch 자체의 회수 성공 여부이고 개별 entry의 I/O 성공 여부가 아니므로, `Dispatch`가 각 entry의 `Internal` 상태를 해석해 성공·실패·취소를 구분하도록 계약을 명시한다.
 
 ## 5. Winsock과 IOCP
 
@@ -280,7 +288,7 @@ $\lambda$가 초당 accept 완료 수이고 $W$가 완료를 처리해 새 accep
 
 `WSARecv`와 `WSASend`는 scatter/gather buffer 배열을 받는다. API가 반환된 뒤에도 실제 payload buffer는 completion까지 살아 있어야 한다. `WSABUF` 구조 배열을 operation 안에 보존하면 operation과 payload의 소유권을 한 단위로 묶을 수 있다.
 
-TCP receive completion의 byte 수가 0이면 peer의 orderly shutdown을 뜻한다. UDP는 길이 0인 datagram이 유효하므로 같은 판정을 적용할 수 없다. 소켓 종류와 operation kind를 모르는 공통 completion handler가 `bytes == 0`만으로 연결을 닫으면 올바른 UDP packet을 연결 종료로 오해한다.
+TCP receive completion의 byte 수가 0이면 peer의 orderly shutdown일 수 있지만, 항상 그런 것은 아니다. 성공한 nonzero-length receive의 0-byte completion, 처음부터 zero-byte readiness를 위한 receive, 실패 completion을 구분해야 한다. 따라서 `bytes == 0`만으로 연결을 닫지 않고 operation kind, 성공 상태, 원래 요청한 길이를 함께 검사한다. UDP는 길이 0인 datagram이 유효하므로 같은 판정을 적용할 수 없다. 소켓 종류와 operation kind를 모르는 공통 completion handler가 `bytes == 0`만으로 연결을 닫으면 올바른 UDP packet을 연결 종료로 오해한다.
 
 ## 6. 작업과 버퍼의 수명
 
@@ -380,9 +388,12 @@ stateDiagram-v2
     Closing --> Draining: 새 제출 금지, socket cancel/close
     Draining --> Reclaimable: in-flight == 0
     Reclaimable --> [*]: session 해제
+    note right of Reclaimable
+        in-flight == 0은 새 제출 차단과 API 호출 전 예약 카운터를 전제로 한다.
+    end note
 ```
 
-`Open`에서 `Closing`으로의 전이만 원자적으로 성공한 실행 흐름이 종료 원인을 기록하고 socket을 닫는다. 다른 흐름은 이미 종료 중임을 확인하고 참조만 반환한다. 각 accepted operation은 in-flight를 증가시키고 각 dequeued completion은 정확히 한 번 감소시킨다.
+`Open`에서 `Closing`으로의 전이만 원자적으로 성공한 실행 흐름이 종료 원인을 기록하고 socket을 닫는다. 다른 흐름은 이미 종료 중임을 확인하고 참조만 반환한다. 각 accepted operation은 in-flight를 증가시키고 각 dequeued completion은 정확히 한 번 감소시킨다. `in-flight == 0`은 새 제출 차단이 보장되고 카운터가 API 호출 전에 예약된 경우에만 회수 가능 조건이 된다. 완료가 제출 함수 반환보다 먼저 도착할 수 있으므로, 접수 이후에 카운터를 올리는 구현은 이미 회수된 operation을 다시 건드릴 수 있다.
 
 ### 종료 packet
 

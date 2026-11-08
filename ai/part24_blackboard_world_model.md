@@ -80,6 +80,7 @@ sequenceDiagram
     Q-->>D: EntityId + 점수 trace
     D->>B: Set(Target, enemy)
     D->>B: Set(DesiredCover, pos)
+    Note over B,D: 게시된 스냅샷은 이 틱 reader 완료 후에만 재사용
     B->>D: action 단계에서 읽기
 ```
 
@@ -201,14 +202,15 @@ struct MemoryRecord {
     Vector3   lastKnownPosition;  // 마지막으로 안 위치
     Vector3   lastKnownVelocity;  // 추정 이동 — 외삽에 사용
     double    timestamp;          // 관찰 시각 (초)
-    float     confidence;         // 0..1, 초기 신뢰도
-    float     uncertaintyRadius;  // 위치 오차 반경 (m)
+    float     confidence;         // 0..1, 초기 신뢰도 (위치 정확도와 별개)
+    float     uncertaintyRadius;  // 도달 가능 불확실성 반경 (m) — v_max 로 늘어나는 전파 반경
+    float     positionSigma;      // 위치 추정 1σ (m) — 통계적 정확도, 반경과 다른 차원
     float     decayRate;          // 출처별 감쇠 계수 (lambda)
     SenseType source;             // 출처
 };
 ```
 
-이 구조가 있어야 NPC가 "봤다", "들었다", "추정한다"를 구분한다. 시야로 본 위치는 정확하고(`uncertaintyRadius` 작음) 신뢰도가 높다(`confidence` 1.0). 소리로 들은 위치는 부정확하고 신뢰도가 중간이다. 출처에 따라 초기값이 달라진다.
+이 구조가 있어야 NPC가 "봤다", "들었다", "추정한다"를 구분한다. 시야로 본 위치는 정확하고(`positionSigma` 작음) 신뢰도가 높다(`confidence` 1.0). 소리로 들은 위치는 부정확하고 신뢰도가 중간이다. 출처에 따라 초기값이 달라진다.
 
 ```cpp
 void RememberSight(WorldModel& m, EntityId e, Vector3 pos, Vector3 vel, double now) {
@@ -218,7 +220,8 @@ void RememberSight(WorldModel& m, EntityId e, Vector3 pos, Vector3 vel, double n
     r.lastKnownVelocity = vel;
     r.timestamp         = now;
     r.confidence        = 1.0f;     // 직접 봤으니 확실하다
-    r.uncertaintyRadius = 0.5f;     // 거의 정확하다
+    r.uncertaintyRadius = 0.5f;     // 초기 도달 반경
+    r.positionSigma     = 0.5f;     // 위치 추정 1σ — 반경과 별도로 관리
     r.decayRate         = 0.15f;    // 천천히 잊는다
     r.source            = SenseType::Sight;
     m.Upsert(r);                    // 같은 entity 기록은 시간·출처 정책에 따라 병합
@@ -230,7 +233,8 @@ void RememberSound(WorldModel& m, Vector3 pos, double now) {
     r.lastKnownPosition = pos;
     r.timestamp         = now;
     r.confidence        = 0.5f;     // 방향만 안다
-    r.uncertaintyRadius = 4.0f;     // 위치가 부정확하다
+    r.uncertaintyRadius = 4.0f;     // 초기 도달 반경
+    r.positionSigma     = 4.0f;     // 위치 추정 1σ가 크다
     r.decayRate         = 0.6f;     // 빨리 잊는다
     r.source            = SenseType::Sound;
     m.Upsert(r);
@@ -329,7 +333,10 @@ $$
 r_{\text{uncert}}(t) = r_0 + v_{\max} \cdot \Delta t
 $$
 
+이 $r_{\text{uncert}}$는 최대 속도로 도달 가능한 *반경*(reachability radius)이지 위치 오차의 표준편차 $\sigma$가 아니다. 융합 가중에는 별도의 `positionSigma`를 쓴다.
+
 ```cpp
+// 도달 가능 반경 — 통계적 1σ(positionSigma)와 다른 양이다.
 float UncertaintyRadius(const MemoryRecord& r, double now, float maxSpeed) {
     float age = static_cast<float>(std::max(0.0, now - r.timestamp));
     return r.uncertaintyRadius + maxSpeed * age;
@@ -478,7 +485,7 @@ void WorldModel::Upsert(const MemoryRecord& r) {
 
 ### 왜 역분산 가중이 최적인가 — 정밀도의 합과 융합 분산
 
-같은 대상의 참 위치 $\mu$를 추정하는 서로 독립인 불편(unbiased) 측정 $x_i$가 있고, 각 측정의 분산이 $\sigma_i^2$라 하자(`uncertaintyRadius`를 $1\sigma$로 해석; 등방 대각 공분산 가정 하에 좌표축별로 따로 본다). 선형 불편 추정량 $\hat\mu=\sum_i w_i x_i$가 불편이려면 $\sum_i w_i = 1$이어야 하고, 독립성에서 그 분산은
+같은 대상의 참 위치 $\mu$를 추정하는 서로 독립인 불편(unbiased) 측정 $x_i$가 있고, 각 측정의 분산이 $\sigma_i^2$라 하자(`positionSigma`를 $1\sigma$로 사용; `uncertaintyRadius`는 도달 가능 반경이므로 융합에 쓰지 않는다. 등방 대각 공분산 가정 하에 좌표축별로 따로 본다). 선형 불편 추정량 $\hat\mu=\sum_i w_i x_i$가 불편이려면 $\sum_i w_i = 1$이어야 하고, 독립성에서 그 분산은
 
 $$
 V(w) = \sum_i w_i^2 \sigma_i^2
@@ -510,38 +517,40 @@ $$
 
 로, 과정 모델이 없는 *정적 스칼라 칼만 갱신* 과 정확히 같다. "칼만의 단순화 형태"라는 표현은 이 의미에서 옳다 — 단, 옳은 가중은 $1/\sigma^2$이다.
 
-반경의 역수 $1/\sigma$를 쓰는 흔한 휴리스틱과 차이를 수치로 확인할 수 있다. 두 시야 $r_1=1\text{m}$, $r_2=3\text{m}$(신뢰도 동일)를 1차원 위치 $x_1=0$, $x_2=12$로 융합하면:
+표준편차의 역수 $1/\sigma$를 쓰는 흔한 휴리스틱과 차이를 수치로 확인할 수 있다. 두 시야의 위치 표준편차 $\sigma_1=1\text{m}$, $\sigma_2=3\text{m}$(신뢰도 동일)를 1차원 위치 $x_1=0$, $x_2=12$로 융합하면:
 
 | 가중 방식 | $w_2$(3m 측정) | 융합 위치 $\hat\mu$ | 융합 $\sigma$ |
 |---|---:|---:|---:|
 | 최적 $1/\sigma^2$ | $0.1$ | $1.2$ | $0.949\text{m}$ |
 | 휴리스틱 $1/\sigma$ | $0.25$ | $3.0$ | — |
 
-휴리스틱은 최적 가중과 비교했을 때 노이즈가 큰 3m 측정의 정규화 가중을 $0.1$에서 $0.25$로, 2.5배 크게 잡는다. 그 결과 융합 위치도 정확한 측정에서 2.5배 멀어진다. 분산이 같은 $n$개 측정이면 최적 융합은 $\sigma_{\text{fused}} = \sigma/\sqrt{n}$이다($r=2\text{m}$ 둘이면 $1.41\text{m}$).
+휴리스틱은 최적 가중과 비교했을 때 노이즈가 큰 3m 측정의 정규화 가중을 $0.1$에서 $0.25$로, 2.5배 크게 잡는다. 그 결과 융합 위치도 정확한 측정에서 2.5배 멀어진다. 분산이 같은 $n$개 측정이면 최적 융합은 $\sigma_{\text{fused}} = \sigma/\sqrt{n}$이다($\sigma=2\text{m}$ 둘이면 $1.41\text{m}$).
 
 경계 조건은 넷이다.
 
 첫째, *상관* 이다. "정밀도가 더해진다"는 독립 가정에서만 성립한다. 같은 원관측을 두 분대원이 중계하면 두 측정은 거의 완전 상관이라, 독립으로 융합하면 융합 분산이 실제보다 작게 나와 *과신* 한다. 출처 ID와 관측 계보로 중복을 제거하고, 상관을 알고 있으면 교차 공분산까지 추적하는 track-to-track fusion을 사용한다. 상관을 알 수 없으면 covariance intersection처럼 과신하지 않는 보수적 융합이 필요하다.
 
-둘째, *잘못 보고된 분산* 이다. $1/\sigma^2$ 가중은 작은 $\sigma$를 강하게 신뢰하므로, 이상치가 작은 `uncertaintyRadius`로 들어오면 융합을 지배한다. 융합 전에 게이팅 — 마할라노비스 거리 $d_i^2 = (x_i-\hat\mu)^2/\sigma_i^2$가 $\chi^2$ 임계를 넘는 측정을 배제 — 이 필요하다. 본문이 말한 "거리 임계 클러스터링"이 바로 이 게이팅이다.
+둘째, *잘못 보고된 분산* 이다. $1/\sigma^2$ 가중은 작은 $\sigma$를 강하게 신뢰하므로, 이상치가 작은 `positionSigma`로 들어오면 융합을 지배한다. 융합 전에 게이팅 — 마할라노비스 거리 $d_i^2 = (x_i-\hat\mu)^2/\sigma_i^2$가 $\chi^2$ 임계를 넘는 측정을 배제 — 이 필요하다. 본문이 말한 "거리 임계 클러스터링"이 바로 이 게이팅이다.
 
 셋째, *모순 측정은 모델 오설정* 이다. BLUE는 모든 측정이 *같은* $\mu$를 추정한다고 가정한다. 앞과 뒤에서 동시에 난 두 소리가 서로 다른 대상이라면 평균은 둘 다 아닌 유령점이다. 거리 임계로 클러스터를 먼저 분리하고 클러스터 *내부* 만 융합해야 한다.
 
-넷째, 최소 표준편차 *바닥* 이다. $r\to0$의 0 나눗셈을 막는 정규화지만, $1/\sigma^2$ 형에서는 완벽 시야가 $r^{-2}$로 융합을 지배하려 하므로 `max(r, kMinSigma)`가 단일 측정의 최대 가중을 캡해 "하나의 완벽한 측정에 무한 신뢰"를 막는다. 모든 반경에 상수를 더하면 큰 오차까지 체계적으로 부풀리므로 바닥과 가산 오차 모델을 구분한다.
+넷째, 최소 표준편차 *바닥* 이다. $r\to0$의 0 나눗셈을 막는 정규화지만, $1/\sigma^2$ 형에서는 완벽 시야가 $r^{-2}$로 융합을 지배하려 하므로 `max(positionSigma, kMinSigma)`가 단일 측정의 최대 가중을 캡해 "하나의 완벽한 측정에 무한 신뢰"를 막는다. 모든 반경에 상수를 더하면 큰 오차까지 체계적으로 부풀리므로 바닥과 가산 오차 모델을 구분한다.
 
-독립·등방 측정에 대한 융합 코드는 다음과 같다. 분모가 $\sigma$가 아니라 $\sigma^2$인 점, 그리고 융합 정밀도 $\sum 1/\sigma_i^2$를 그대로 반환해 호출부가 새 `uncertaintyRadius`로 쓸 수 있다는 점이 핵심이다.
+독립·등방 측정에 대한 융합 코드는 다음과 같다. 분모가 $\sigma$가 아니라 $\sigma^2$인 점, 그리고 융합 정밀도 $\sum 1/\sigma_i^2$를 그대로 반환해 호출부가 새 `positionSigma`로 쓸 수 있다는 점이 핵심이다.
 
 ```cpp
 // 역분산(정밀도) 가중 융합 — 정적 칼만 갱신과 동형.
-// uncertaintyRadius 를 1σ 로 해석하고, 게이팅을 통과해 같은 대상으로 묶인 record 만 넘긴다.
+// 게이팅을 통과해 같은 대상으로 묶인 record 만 넘긴다.
+// 서로 다른 timestamp 의 측정은 공통 기준 시각 now 로 예측한 위치에서 융합한다.
+// 위치 정확도는 positionSigma(1σ)로만 가중하고, confidence 는 게이팅에서 별도 처리한다.
 std::optional<Vector3> FusePositionsBLUE(const std::vector<MemoryRecord>& cluster,
                                          double now, float& outFusedSigma) {
     Vector3 weighted{0, 0, 0};
     float   precisionSum = 0.0f;                  // Σ 1/σ²  → 융합 정밀도
     for (const auto& r : cluster) {
-        float sigma = std::max(r.uncertaintyRadius, kMinSigma); // 0 나눗셈 바닥
-        float prec  = DecayedConfidence(r, now) / (sigma * sigma); // 1/σ², conf=신뢰 가중
-        weighted     += r.lastKnownPosition * prec;
+        float sigma = std::max(r.positionSigma, kMinSigma); // 위치 1σ, 0 나눗셈 바닥
+        float prec  = 1.0f / (sigma * sigma);      // 위치 정확도만 — confidence 는 섞지 않는다
+        weighted     += PredictedPosition(r, now) * prec;
         precisionSum += prec;
     }
     // 정보량 0 — σ→∞가 극한이므로 0이 아니라 '아무것도 모른다'를 돌려준다.
@@ -554,7 +563,7 @@ std::optional<Vector3> FusePositionsBLUE(const std::vector<MemoryRecord>& cluste
 }
 ```
 
-`conf`를 곱한 것은 순수 분산 모형 밖의 항으로, "이 측정이 유효한(이상치 아닌) 관측일 확률" 정도의 신뢰 가중으로 해석한다 — 게이팅이 이상치를 거른 뒤의 부드러운 보정이다. 분산 모형을 엄밀히 따르려면 `conf`를 빼고 $1/\sigma^2$만 쓰거나, $\sigma^2$ 자체를 신뢰도로 부풀려($\sigma_{\text{eff}}^2 = \sigma^2/\text{conf}$) 정보 필터 한 식에 흡수한다.
+위치 정확도(σ)와 confidence는 서로 다른 양이므로 융합 가중에는 σ만 쓴다 — confidence는 게이팅/유효성에서 따로 다룬다. 그래도 정보 필터 한 식에 흡수하고 싶다면 $\sigma^2$를 신뢰도로 부풀려($\sigma_{\text{eff}}^2 = \sigma^2/\text{conf}$) 쓸 수 있지만, 이는 위치 정확도와 존재 신뢰도를 섞는 선택임을 명시해야 한다.
 
 ## 7. Query Interface
 
@@ -703,6 +712,8 @@ void WorldModel::DebugDraw(DebugRenderer& dr, double now) const {
 ```
 
 이 한 뷰가 "NPC가 빈 벽을 쏘는" 버그의 원인을 즉시 드러낸다 — 거기에 신뢰도 0.8짜리 시야 record가 남아 있고 불확실성 반경이 아직 작으면, decay가 너무 느린 것이다. 반경이 거대하면 query가 불확실성을 무시하고 중심점만 겨냥하는 것이다. 색으로 출처를 보면 "소리를 시야처럼 신뢰"하는 버그가 노란 구를 정확히 조준하는 모습으로 보인다.
+
+World Overlay가 읽는 `entities_`는 writer가 동시에 갱신할 수 있다. 다중 스레드라면 이 디버그 뷰가 라이브 컨테이너를 직접 순회하지 않고 *게시된 스냅샷*을 읽어야 한다. 게시(publish)는 release, 그 스냅샷의 읽기 완료는 acquire로 짝을 맞추고, 이전 버퍼는 모든 reader가 다 읽은 뒤(reuse barrier/epoch)에만 다음 write용으로 재사용한다. 단일 스레드이거나 프레임 완료 barrier가 있으면 이 수명 계약이 자동으로 성립한다.
 
 ### Memory Timeline
 

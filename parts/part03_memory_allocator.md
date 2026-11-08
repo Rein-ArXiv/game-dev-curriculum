@@ -80,7 +80,7 @@ LPVOID pCommitted = VirtualAlloc(
     PAGE_READWRITE
 );
 
-// 실제 물리 메모리 사용량: 4KB
+// 실제 commit charge: 4KB (resident 물리 페이지는 최초 touch 후 결정)
 // 예약된 주소 공간: 1GB
 ```
 
@@ -248,9 +248,9 @@ Fast bins의 핵심 특징:
 ```c
 // 예: 게임 엔진의 매 프레임마다
 for (int frame = 0; frame < 1000000; frame++) {
-    Vec3* temp = malloc(24);  // Fast bin에서 즉시 할당
+    Vec3* temp = malloc(24);  // tcache 활성 시 tcache에서, 아니면 Fast bin에서 즉시 할당
     // ... 계산 ...
-    free(temp);                // Fast bin에 즉시 반환
+    free(temp);                // tcache(또는 Fast bin)에 즉시 반환
 }
 // 병합했다면 매번 인접 청크 확인 필요 (비싼 연산)
 ```
@@ -271,7 +271,7 @@ typedef struct tcache_perthread_struct {
 Tcache의 특성:
 - **Thread-local**: 각 스레드마다 독립적 (TLS 사용)
 - **락 없음**: 경합 제로
-- **64개 bin**: 요청 크기 최대 1032바이트까지 커버 (16바이트 간격)
+- **64개 bin**: 요청 크기 최대 1032바이트까지 커버 (16바이트 간격). bin 수·커버 범위·`tcache_perthread_struct` 필드는 glibc 버전에 따라 달라질 수 있으므로 아래는 2.26 계열의 기본값을 기준으로 한 설명이다
 - **bin당 7개**: 최대 7개 청크까지 캐싱 (`glibc.malloc.tcache_count`로 조정)
 
 두 경로의 차이는 다음 의사 코드로 드러난다.
@@ -419,17 +419,17 @@ jemalloc의 핵심 목표는 두 가지이다:
 | | - Bins (크기 클래스별) | |
 | | - Extents (메모리 영역) | |
 | ↓ | *(메모리 부족)* | |
-| **3. Base Allocator** | OS 메모리 할당 | 큰 단위 할당 |
-| | - `mmap` / `VirtualAlloc` | |
-| | - 2MB aligned extents | |
+| **3. Page/Base Allocator** | OS 메모리 할당 | page 단위 할당과 내부 metadata용 별도 base allocator |
+| | - `mmap` / `VirtualAlloc` | 사용자 extent 경로 |
+| | - page 배수 extents | 내부 metadata는 별도 base allocator가 관리 |
 
 #### Extent: 메모리 영역 관리자
 
-Extent는 jemalloc의 독특한 개념이다. 큰 메모리 블록(보통 2MB)을 관리하는 단위이다.
+Extent는 jemalloc이 사용자 영역의 페이지 할당을 관리하는 단위다. 기본적으로 OS page 크기의 배수로 정렬되며, 크기와 정렬은 페이지 크기·size class·설정에 따라 달라진다. 2MB는 그중 하나의 예일 뿐 모든 extent의 고정 크기가 아니다.
 
 ```c
 struct extent_t {
-    void*        e_addr;        // 시작 주소 (2MB 정렬)
+    void*        e_addr;        // 시작 주소 (page 정렬)
     size_t       e_size;        // 크기 (페이지 배수)
     arena_t*     e_arena;       // 소속 arena
 
@@ -491,7 +491,7 @@ struct tcache_t {
 };
 ```
 
-동작 방식:
+동작 방식(실제 jemalloc 소스가 아니라 tcache 흐름을 보이는 개념 모델):
 
 ```c
 void* malloc(size_t size) {
@@ -504,7 +504,9 @@ void* malloc(size_t size) {
     }
 
     // Slow path: arena에서 배치로 리필 (20개 정도)
-    arena_batch_fill(bin, binind);
+    // 리필에 실패하면 0개가 되어 스택이 underflow하므로 NULL로 종료한다.
+    if (!arena_batch_fill(bin, binind))
+        return NULL;
     return bin->stack[--bin->ncached];
 }
 
@@ -518,8 +520,10 @@ void free(void* ptr) {
         return;
     }
 
-    // 캐시 가득 차면 arena로 플러시
+    // 캐시 가득 차면 arena로 플러시한 뒤 현재 ptr도 캐시에 넣는다.
+    // 플러시만 하고 끝내면 이번 해제 대상이 누락된다.
     arena_batch_flush(bin, binind);
+    bin->stack[bin->ncached++] = ptr;
 }
 ```
 
@@ -527,7 +531,7 @@ void free(void* ptr) {
 
 ### 232개 크기 클래스: 단편화 최소화
 
-jemalloc은 232개의 정교한 크기 클래스를 사용한다. 이는 무작위로 정한 것이 아니라, 내부 단편화를 최소화하도록 설계되었다.
+jemalloc은 232개의 정교한 크기 클래스를 사용한다(개수는 빌드 설정과 페이지 크기에 따라 달라질 수 있다). 이는 무작위로 정한 것이 아니라, 내부 단편화를 최소화하도록 설계되었다.
 
 #### Small 크기 클래스 (8B ~ 14KB)
 
@@ -540,11 +544,13 @@ jemalloc은 232개의 정교한 크기 클래스를 사용한다. 이는 무작�
 ...
 ```
 
-2의 거듭제곱 구간마다 4개의 클래스를 배치하므로, 크기가 두 배가 될 때마다 간격도 두 배가 된다. 이 설계의 내부 단편화 상한은 다음과 같다:
+2의 거듭제곱 구간마다 4개의 클래스를 배치하므로, 크기가 두 배가 될 때마다 간격도 두 배가 된다. 이 설계의 내부 단편화 상한은 다음과 같다(분모는 요청 크기가 아니라 할당된 클래스 크기다):
 
 $$
 \text{내부 단편화} = \frac{\text{할당 크기} - \text{요청 크기}}{\text{할당 크기}} < 20\%
 $$
+
+이 상한은 4 classes/doubling 간격이 적용되는 영역, 위 표에서는 64B 이상 클래스에서 성립한다. 8B·16B·32B처럼 최소 정렬(quantum)이 지배하는 최소 클래스에서는 (할당 크기 − 요청 크기)/할당 크기가 그보다 커질 수 있다.
 
 최악의 경우는 구간 경계 직후다. 예를 들어 129바이트를 요청하면 160바이트 클래스가 할당되어 낭비가 31바이트(19.4%)다. 반면 100바이트 요청은 112바이트 클래스에 들어가 낭비가 12바이트(10.7%)에 그친다.
 
@@ -577,17 +583,19 @@ struct arena_t {
 **Decay-based purging**은 시간 기반으로 메모리를 단계적으로 해제한다:
 
 ```text
-// 설정 예
-decay_dirty_ms: 10000    // dirty → muzzy: 10초 후
-decay_muzzy_ms: 10000    // muzzy → retained: 10초 후
+// 설정 예 (옵션명 dirty_decay_ms / muzzy_decay_ms)
+dirty_decay_ms: 10000    // dirty 페이지를 purge하기까지 목표로 하는 지연 시간(ms)
+muzzy_decay_ms: 10000    // muzzy 페이지를 purge하기까지 목표로 하는 지연 시간(ms)
 ```
+
+decay 값은 모든 블록이 정확히 그 시각에 다음 단계로 이동하는 deadline이 아니라 purge를 지연시키는 목표 시간이다. purge는 지연·lazy하게 수행되고, retained 상태도 물리 메모리 해제를 단순 보장하는 순차 단계가 아니라 virtual mapping을 유지하는 상태다.
 
 이는 다음과 같은 효과를 낸다:
 - 단기 메모리 스파이크를 dirty로 처리 (빠른 재사용)
 - 장기 미사용 메모리는 자동으로 OS에 반환
 - RSS(Resident Set Size) 지속적 증가 방지
 
-장기 실행 서버(Redis, Cassandra 등)에서 jemalloc을 선호하는 이유가 바로 이 기능 때문이다.
+장기 실행 서버에서 jemalloc을 선택하는 이유 중 하나가 이 반환 정책이다. 특정 제품이 jemalloc을 채택했는지는 제품 버전과 빌드 설정을 확인해야 한다.
 
 ## 4. tcmalloc: Front/Middle/Back-End
 
@@ -643,6 +651,10 @@ ThreadCache:
 현대 TCMalloc은 Linux의 restartable sequences(`rseq`)를 이용하는 Per-CPU front end를 제공한다. 2021년 OSDI 논문은 이 캐시 자체가 아니라 TCMalloc back end의 **Temeraire hugepage-aware allocator**를 다룬다. 두 설계를 같은 출처로 묶으면 안 된다.
 
 ```c
+/* rseq 보호 구간과 abort handler는 생략한 개념 모델이다.
+   GetCurrentCPU() 한 번과 일반 C++ increment는 rseq critical section이
+   아니므로, 선점·마이그레이션 중에는 같은 CPU slot을 다른 스레드가
+   조작할 수 있다. 실제 구현은 commit point 검증과 재시도가 필요하다. */
 class PerCPUCache {
 private:
     struct Slab {
@@ -815,7 +827,7 @@ public:
 
 tcmalloc의 최신 버전은 **HugePage**(2MB 페이지)를 적극 활용한다.
 
-TLB(Translation Lookaside Buffer)는 가상 주소를 물리 주소로 변환하는 캐시이다. TLB 미스는 100+ 사이클의 페이지 테이블 워킹을 발생시킨다.
+TLB(Translation Lookaside Buffer)는 가상 주소를 물리 주소로 변환하는 캐시이다. TLB 미스는 여러 단계의 페이지 테이블 워킹을 유발할 수 있지만, 실제 비용은 page-walk cache 적중 여부와 TLB 계층, working set에 따라 크게 달라진다(자세한 TLB 기초는 Part02 참조).
 
 TLB의 엔트리 수와 계층은 마이크로아키텍처마다 다르므로 “Intel x64” 하나의 고정 표로 설명할 수 없다. 동일한 엔트리 수라면 2MiB 페이지 하나가 4KiB 페이지보다 512배 넓은 가상 주소 범위를 매핑한다는 기하만 보편적이다. 실제 성능은 working set, 접근 패턴, page walk cache, NUMA 배치에 달려 있으며 huge page는 내부 단편화, 승격·분할 비용, 메모리 회수 지연을 늘릴 수 있다.
 
@@ -1087,16 +1099,24 @@ Large Page는 다음과 같은 경우 효과적이다:
 #### Windows에서 Large Page 사용
 
 ```c
-// 1. Large Page 크기 확인
-SIZE_T largePageSize = GetLargePageMinimum();  // 보통 2MB
+// 1. Large Page 크기 확인 (지원하지 않으면 0)
+SIZE_T largePageSize = GetLargePageMinimum();
+if (largePageSize == 0) {
+    // 이 시스템은 large page 미지원
+}
 
-// 2. 권한 필요 (SeLockMemoryPrivilege)
+// 2. 필요한 크기를 largePageSize의 배수로 올림 (overflow 검사 포함)
+SIZE_T want = 100 * 1024 * 1024;   // 100MB
+SIZE_T size = ((want + largePageSize - 1) / largePageSize) * largePageSize;
+
+// 3. 권한 필요 (SeLockMemoryPrivilege)
+// 관리자 계정이어도 토큰에서 이 권한을 명시적으로 활성화해야 한다.
 // 관리 도구 → 로컬 보안 정책 → "Lock pages in memory"
 
-// 3. 할당
+// 4. 할당: 크기와 주소가 largePageSize의 배수여야 한다
 void* ptr = VirtualAlloc(
     NULL,
-    100 * 1024 * 1024,  // 100MB (2MB 배수로 자동 라운딩)
+    size,
     MEM_COMMIT | MEM_RESERVE | MEM_LARGE_PAGES,
     PAGE_READWRITE
 );
@@ -1108,8 +1128,8 @@ if (ptr == NULL) {
 ```
 
 제약사항:
-- 관리자 권한 필요 (보안 정책 설정)
-- 2MB 단위로만 할당
+- SeLockMemoryPrivilege 활성화 필요 (관리자 계정 여부와는 별개)
+- 조회한 largePageSize(보통 2MB) 단위로만 할당
 - Swap 불가 (항상 물리 메모리에 상주)
 - 메모리 단편화 시 할당 실패 가능
 
@@ -1156,11 +1176,14 @@ write(fd2, buffer, 4096);  // 유저 버퍼 → 커널 버퍼
 void* ptr = mmap(NULL, file_size, PROT_READ | PROT_WRITE,
                  MAP_SHARED, fd, 0);
 
-// 메모리처럼 접근
-struct Record {
+// 메모리처럼 접근. 이 블록은 파일이 프로세스의 native layout
+// (size/alignment/endianness)과 일치하고 길이가 구조체 크기의 배수라면
+// 유효한 toy example이다. mmap은 C++ 객체 deserialization API가 아니므로
+// 실제 역직렬화는 Part23의 byte decode 경로를 따른다.
+typedef struct Record {
     int id;
     char name[256];
-};
+} Record;
 
 Record* records = (Record*)ptr;
 records[100].id = 999;  // dirty page가 됨. 영속 시점은 별도 동기화 계약이 필요
@@ -1205,8 +1228,9 @@ void* pView = MapViewOfFile(
 Data* data = (Data*)pView;
 data[1000000].value = 42;
 
-// 5. 수정된 page를 파일로 write-back하도록 요청
-FlushViewOfFile(data, sizeof(Data) * 1000000);
+// 5. 수정한 원소(index 1000000)를 포함하는 바이트 범위를 파일로 write-back
+//    (index + 1) * sizeof(Data)는 overflow와 view 크기 경계를 검사해야 한다.
+FlushViewOfFile(data, sizeof(Data) * 1000001);
 
 // 전원 손실까지 고려한 durable commit 계약이 필요하면 파일 핸들도 flush한다.
 // FlushViewOfFile만으로 디스크 장치까지의 영속성이 보장되지는 않는다.
@@ -1253,12 +1277,38 @@ int x = ((int*)pPrivate)[0];
 ```c
 class DynamicArray {
 private:
+    // 불변식: used_ <= committed_ <= reserved_
     void* base_;
     size_t reserved_;   // 예약된 크기 (주소 공간)
-    size_t committed_;  // 커밋된 크기 (물리 메모리)
+    size_t committed_;  // 커밋된 가상 범위 (commit charge)
     size_t used_;       // 실제 사용 크기
 
 public:
+    // 소유 자원의 기본 복사는 double release를 만든다. 복사는 금지하고
+    // 이동은 소유권을 넘기며 원본을 비운다.
+    DynamicArray(const DynamicArray&) = delete;
+    DynamicArray& operator=(const DynamicArray&) = delete;
+
+    DynamicArray(DynamicArray&& other) noexcept
+        : base_(other.base_), reserved_(other.reserved_),
+          committed_(other.committed_), used_(other.used_) {
+        other.base_ = nullptr;
+        other.reserved_ = other.committed_ = other.used_ = 0;
+    }
+
+    DynamicArray& operator=(DynamicArray&& other) noexcept {
+        if (this != &other) {
+            if (base_) VirtualFree(base_, 0, MEM_RELEASE);
+            base_ = other.base_;
+            reserved_ = other.reserved_;
+            committed_ = other.committed_;
+            used_ = other.used_;
+            other.base_ = nullptr;
+            other.reserved_ = other.committed_ = other.used_ = 0;
+        }
+        return *this;
+    }
+
     DynamicArray(size_t max_size) {
         // 1GB 주소 공간 예약 (물리 메모리 0)
         base_ = VirtualAlloc(
@@ -1266,7 +1316,7 @@ public:
             MEM_RESERVE,
             PAGE_NOACCESS
         );
-        reserved_ = max_size;
+        reserved_ = base_ ? max_size : 0;
         committed_ = 0;
         used_ = 0;
     }
@@ -1275,13 +1325,18 @@ public:
         if (new_size > committed_) {
             // 64KB 단위로 커밋 확장
             size_t new_commit = RoundUp(new_size, 64 * 1024);
+            if (new_commit > reserved_)
+                return;   // 예약 범위 초과
 
-            VirtualAlloc(
+            // 성공한 뒤에만 장부를 갱신한다.
+            void* p = VirtualAlloc(
                 (char*)base_ + committed_,
                 new_commit - committed_,
                 MEM_COMMIT,
                 PAGE_READWRITE
             );
+            if (!p)
+                return;
 
             committed_ = new_commit;
         }
@@ -1291,7 +1346,11 @@ public:
     void Shrink() {
         // 사용률 25% 이하면 절반 decommit
         if (used_ < committed_ / 4) {
-            size_t new_commit = committed_ / 2;
+            constexpr size_t kPage = 4096;  // 실제 값은 GetSystemInfo().dwPageSize
+            // decommit 단위는 페이지이므로 page 경계로 내림
+            size_t new_commit = (committed_ / 2) & ~(kPage - 1);
+            if (new_commit == 0)
+                return;
 
             VirtualFree(
                 (char*)base_ + new_commit,
@@ -1304,7 +1363,7 @@ public:
     }
 
     ~DynamicArray() {
-        VirtualFree(base_, 0, MEM_RELEASE);
+        if (base_) VirtualFree(base_, 0, MEM_RELEASE);
     }
 };
 ```
@@ -1373,7 +1432,7 @@ public:
 
 권장 전략:
 1. **예측 가능한 크기**: Reserve/Commit, decommit 최소화
-2. **변동 심한 크기**: Delayed decommit (10초 타임아웃)
+2. **변동 심한 크기**: Delayed decommit (타임아웃은 워크로드별로 측정해 결정)
 3. **메모리 제약**: Immediate decommit
 
 ## 7. 할당자 선택 가이드
@@ -1408,7 +1467,7 @@ public:
 **jemalloc**
 ```text
 적합한 경우:
-  - 장기 실행 서버 (Redis, Cassandra)
+  - 장기 실행 서버
   - 메모리 단편화 민감
   - RSS 제어 중요
   - 실제 배포 환경에서 jemalloc의 decay·통계·단편화 특성이 유리하다고 측정됨
@@ -1452,27 +1511,41 @@ public:
 // 간단한 벤치마크 프레임워크
 #include <chrono>
 
+static thread_local void* g_sink;  // 결과 escape로 할당 제거 방지 (스레드별)
+
 void benchmark_allocator(int num_threads, int iterations) {
-    auto start = std::chrono::high_resolution_clock::now();
+    if (num_threads <= 0 || iterations <= 0)
+        return;
+
+    auto start = std::chrono::steady_clock::now();
 
     #pragma omp parallel for num_threads(num_threads)
     for (int t = 0; t < num_threads; t++) {
         for (int i = 0; i < iterations; i++) {
             void* ptr = malloc(64);
+            g_sink = ptr;          // 관찰 가능한 사용
             // ... 사용 ...
             free(ptr);
         }
     }
 
-    auto end = std::chrono::high_resolution_clock::now();
+    auto end = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
 
+    // 시작-끝 wall time을 전체 병렬 op 수로 나눈 값은 역처리량이지
+    // 개별 할당의 latency가 아니다. 단일 op 지연은 별도로 측정한다.
     std::cout << "Total: " << duration.count() << " ns\n";
-    std::cout << "Per op: " << duration.count() / (num_threads * iterations) << " ns\n";
+    std::cout << "Wall per op: "
+              << duration.count() / (num_threads * iterations) << " ns\n";
+    std::cout << "Throughput: "
+              << (double)num_threads * iterations / (duration.count() * 1e-9)
+              << " ops/s\n";
 }
 ```
 
-각 할당자로 컴파일해서 비교:
+`g_sink`가 없으면 관찰 가능한 사용이 없어 컴파일러가 `malloc`/`free` 쌍을 최적화로 제거할 수 있다. 실제 측정에서는 생성한 assembly나 profile로 할당이 남아 있는지 확인한다.
+
+각 할당자로 컴파일해서 비교(아래는 헤더·`main`·결과 사용부를 포함한 `bench.cpp`가 있다고 가정한 발췌다):
 
 ```bash
 # ptmalloc2 (기본)

@@ -38,7 +38,7 @@ PITR이 게임에서 특히 중요한 이유 — 복구 대상의 다수가 *하
 
 ## 2. 복구: 연습하지 않은 백업은 없는 것이다
 
-복구의 두 지표가 설계 목표다 — RPO(Recovery Point Objective, 잃어도 되는 데이터의 시간 폭)와 RTO(Recovery Time Objective, 복구까지의 시간). PITR 구성에서 RPO는 로그 아카이브 주기(분 단위 가능)로, RTO는 "스냅샷 복원 + 로그 재생" 소요로 정해진다 — 그리고 RTO는 *측정해 봐야 아는 값* 이다. 수 TB의 복원과 수 시간치 로그 재생은 시간이 걸리고, 그 시간 동안 서비스가 멈춘다.
+복구의 두 지표가 설계 목표다 — RPO(Recovery Point Objective, 잃어도 되는 데이터의 시간 폭)와 RTO(Recovery Time Objective, 복구까지의 시간). PITR 구성에서 RPO 목표는 로그 아카이브 주기(분 단위 가능)로, RTO 목표는 "스냅샷 복원 + 로그 재생" 소요로 잡는다. 하지만 이는 정상 운전에서의 단계 예산일 뿐이다 — 실제 recovery point와 recovery time은 아카이브 실패·장애 도메인·탐지·결정·검증·트래픽 전환까지 포함하고, 측정 시작(사고 발생)과 종료(서비스 복구) 시점을 정해 놓고 재야 한다. 그래서 RTO는 *측정해 봐야 아는 값* 이다. 수 TB의 복원과 수 시간치 로그 재생은 시간이 걸리고, 그 시간 동안 서비스가 멈춘다.
 
 그래서 복구는 절차가 아니라 *근육* 이다.
 
@@ -56,12 +56,14 @@ PITR이 게임에서 특히 중요한 이유 — 복구 대상의 다수가 *하
 [확장]   1. 새 컬럼 추가 (기본값/NULL 허용 — 옛 코드는 모른 채 동작)
          2. 새 코드 배포: 양쪽 쓰기 (옛 컬럼 + 새 컬럼), 읽기는 옛 컬럼
          3. 백필: 기존 행의 새 컬럼을 배치로 채움 (속도 제한 — 부하 관리)
-[전환]   4. 읽기를 새 컬럼으로 전환 (검증: 양쪽 값 대조 기간)
+[전환]   4. 읽기를 새 컬럼으로 전환
+            (게이트: old-only writer가 남아 있지 않고, dual-write가 백필을
+             따라잡았으며, 읽기 직전 양쪽 값·스냅샷 버전이 일치함을 확인)
 [수축]   5. 옛 컬럼 쓰기 중단
-         6. 충분한 안정 기간 후 옛 컬럼 제거
+         6. 충분한 안정 기간 후 옛 컬럼 제거 (이후 되돌림은 별도 복구/전방 수정)
 ```
 
-각 단계가 독립 배포이고 *각 단계에서 롤백 가능* 하다는 것이 이 절차의 가치다 — 빅뱅 전환(점검 중 일괄 변경)은 실패 시 점검 연장과 롤백 불능으로 직행한다.
+각 단계가 독립 배포이고 전환 게이트를 통과해야 다음으로 간다는 것이 이 절차의 가치다 — 옛 컬럼 제거(drop) 이전까지는 데이터 복원 수단과 함께 되돌릴 수 있지만, 제거 후에는 이전 버전 재배포가 정상 rollback이 아니라 별도 복구/전방 수정(forward fix)이다. 빅뱅 전환(점검 중 일괄 변경)은 실패 시 점검 연장과 롤백 불능으로 직행한다.
 
 운영상 주의 둘. 첫째, *DDL 자체의 잠금 비용* — 데이터베이스·버전에 따라 컬럼 추가가 테이블 잠금이나 전체 재작성을 유발할 수 있다(기본값의 즉시 반영 여부 등). 대형 테이블의 모든 DDL은 실행 계획과 잠금 영향부터 확인하고, 온라인 스키마 변경 도구(섀도 테이블 + 점진 복사 방식)가 필요한 규모인지 판단한다. 둘째, *백필의 속도 제한* — 수억 행 갱신을 전속력으로 돌리면 복제 지연과 I/O 포화가 라이브를 때린다. 배치 크기 + 휴지 간격 + 복제 지연 감시 연동이 백필의 정석이다.
 
@@ -69,7 +71,7 @@ PITR이 게임에서 특히 중요한 이유 — 복구 대상의 다수가 *하
 
 데이터베이스 연결은 비싸다 — 연결마다 인증 핸드셰이크와 서버 측 메모리·프로세스 자원이 들고, 동시 연결 수에는 상한이 있다. 그래서 응용은 연결을 요청마다 만들지 않고 풀(pool)에서 빌려 쓴다. 풀 크기의 산수가 운영 품질을 가른다.
 
-기준 산수는 리틀의 법칙이다 — 필요한 동시 연결 수 $\approx$ 초당 질의 수 $\times$ 평균 질의 시간. 초당 2,000 질의 × 평균 5ms면 동시 10연결이 이론값이고, 여유를 둬도 수십이면 충분하다 — "동접 1만이니 연결 1만"이 아니라는 것이 요점이다. 연결을 늘린다고 처리량이 늘지 않는다 — DB 코어가 동시에 실행할 수 있는 질의 수를 넘는 연결은 대기열을 DB 안으로 옮길 뿐이며, 과도한 연결 수 자체가 컨텍스트 스위칭·메모리로 성능을 깎는다.
+기준 산수는 리틀의 법칙이다 — 필요한 동시 연결 수 $\approx$ 초당 질의 수 $\times$ 평균 질의 시간. 초당 2,000 질의 × 평균 5ms면 동시 10연결이 이론값이고, 여유를 둬도 수십이면 충분하다 — "동접 1만이니 연결 1만"이 아니라는 것이 요점이다. 다만 이 값은 안정 상태의 평균 동시 점유이지 타임아웃 목표를 만족하는 풀 크기가 아니다. W는 질의 실행 시간이 아니라 연결 점유 시간이어야 하고, 연결이 여러 질의·트랜잭션에 걸쳐 유지되면 다시 측정해야 한다. 평균은 피크를 감추므로 분위수·최대 부하에서의 여유는 별도 부하 시험으로 정한다. 연결을 늘린다고 처리량이 늘지 않는다 — DB 코어가 동시에 실행할 수 있는 질의 수를 넘는 연결은 대기열을 DB 안으로 옮길 뿐이며, 과도한 연결 수 자체가 컨텍스트 스위칭·메모리로 성능을 깎는다.
 
 운영 함정들:
 
@@ -95,7 +97,7 @@ PITR이 게임에서 특히 중요한 이유 — 복구 대상의 다수가 *하
 게임 DB의 부하는 평균이 아니라 사건이 결정한다 — 출시일, 대형 패치 직후, 이벤트 시작 정각, 방송 노출. 용량 계획은 "평시 여유율"이 아니라 *최악 사건의 모양* 에서 출발한다.
 
 - **부하 모델의 작성**: 핵심 시나리오별 질의 프로파일을 적는다 — 로그인 1회당 질의 N개, 매치 종료당 트랜잭션 M개, 이벤트 보상 정각의 동시 수령 규모. "동접 X 만 명, 로그인 폭주 분당 Y"가 곧 "초당 질의 Z"로 환산되는 표가 용량 계획의 입력이다.
-- **부하 시험의 충실도**: 합성 봇이 실제 질의 패턴(읽기/쓰기 비율, 핫스팟 분포)을 재현해야 의미가 있다 — 균등 랜덤 키의 시험은 캐시 히트율을 비현실적으로 만들어 낙관 결과를 준다. 운영 질의 로그 기반의 재생이 충실도의 기준이다.
+- **부하 시험의 충실도**: 합성 봇이 실제 질의 패턴(읽기/쓰기 비율, 핫스팟 분포)을 재현해야 의미가 있다 — 균등 랜덤 키의 시험은 핫스팟 경합을 숨기고 캐시 지역성도 비현실적으로 만들어 한쪽으로 치우친 결과를 준다. 낙관적이라는 방향을 고정할 수는 없으므로 실제 분포와 여러 부하 형태로 시험한다. 운영 질의 로그 기반의 재생이 충실도의 기준이다.
 - **데이터 부피의 시간축**: 성능은 데이터 크기의 함수다 — 출시 6개월 후 부피(원장·전적·이벤트 테이블의 성장률 × 기간)를 미리 채운 환경에서 시험해야 "그날 가서 느려지는" 질의가 보인다. 성장 빠른 테이블의 파티셔닝·아카이브 정책은 이 시험의 산출물이다.
 
 ## 7. 점검 창의 데이터 절차
@@ -128,8 +130,8 @@ PITR이 게임에서 특히 중요한 이유 — 복구 대상의 다수가 *하
 
 ```text
 경제 원장:
-  RPO = 0에 가깝게, commit된 거래 손실 금지
-  RTO = 30분
+  RPO = commit된 거래 손실 금지(해당 장애 모델에서 RPO=0 목표)
+  RTO 목표 = 30분, 실제 recovery time은 훈련 실측으로 기록
   SLO = P99 쓰기 50ms 이하, 월간 가용성 99.9%
 ```
 
@@ -192,13 +194,17 @@ state dual_write:
 
 state verify:
   assert old and new values match
+  assert no old-only writers remain
+  assert dual-write is caught up and backfill is complete
   block deploy if mismatch > 0
 
 state read_new:
   code reads new column
+  enter only after the verify gates pass
 
 state drop_old:
   old column removed after rollback window
+  after this, backward deploy is recovery/forward fix, not rollback
 ```
 
 각 상태에는 전진 조건과 롤백 조건이 있어야 한다.
@@ -213,6 +219,8 @@ SELECT COUNT(*) AS mismatch
  WHERE legacy_region IS DISTINCT FROM new_region;
 ```
 
+이 두 질의가 0을 돌려주는 것이 read 전환의 필수 조건이다. 다만 이 검사는 이미 기록된 행의 값 대조일 뿐, 백필 이후에도 옛 컬럼만 갱신하는 구버전 writer가 남아 있는지는 잡지 못하므로 그 여부는 위 전환 게이트에서 snapshot·버전 대조로 별도 확인한다.
+
 커넥션 풀도 코드 계약이다. "풀 크기를 적당히 둔다"는 말은 장애를 만든다. 인스턴스 수와 DB 한도를 이용해 상한을 계산하고 설정 파일에 박는다.
 
 ```text
@@ -226,12 +234,19 @@ pool_per_instance  = floor((800 - 50) / 30) = 25
 
 ```cpp
 void ValidateDbPoolConfig(const Config& c) {
-    int total = c.appInstances * c.poolSize + c.adminReserve;
+    if (c.appInstances <= 0 || c.poolSize <= 0 || c.adminReserve < 0 ||
+        c.dbMaxConnections <= 0) {
+        throw ConfigError("invalid domain");
+    }
+    std::int64_t total = std::int64_t(c.appInstances) * c.poolSize
+                       + c.adminReserve;
     if (total > c.dbMaxConnections) {
         throw ConfigError("DB connection budget exceeded");
     }
 }
 ```
+
+필드는 32-bit signed 범위라는 가정이고, 곱하기 전에 `std::int64_t`로 넓혀 overflow를 막는다. 입력이 이미 64-bit라면 더 넓은 산술이나 나눗셈 기반 사전 overflow 검사를 쓴다. 그리고 이 검사는 총량 상한이지 부하·지연 SLA를 만족하는 pool sizing의 증명이 아니다.
 
 백업도 파일 존재 여부가 아니라 복원 가능한 상태를 검증해야 한다.
 
@@ -258,8 +273,8 @@ daily restore drill:
 ## 더 읽을거리
 
 - [PostgreSQL 문서: Backup and Restore](https://www.postgresql.org/docs/current/backup.html) — 스냅샷·WAL 아카이브·PITR 구성의 1차 출처.
-- [GitLab의 2017년 데이터베이스 사고 포스트모템](https://about.gitlab.com/blog/postmortem-of-database-outage-of-january-31/) — "백업이 다섯 겹인데 복구 가능한 것이 없었다"는 산업 표준 반면교사.
+- [GitLab의 2017년 데이터베이스 사고 포스트모템](https://about.gitlab.com/blog/postmortem-of-database-outage-of-january-31/) — 정규 복구 절차들이 실패해 이전 LVM snapshot으로 복원했고, 데이터 손실과 긴 복구가 발생한 사례.
 - [GitHub Engineering: gh-ost](https://github.com/github/gh-ost) — 온라인 스키마 변경 도구의 설계 문서(트리거 없는 점진 복사).
-- [HikariCP Wiki: About Pool Sizing](https://github.com/brettwooldridge/HikariCP/wiki/About-Pool-Sizing) — "연결은 적을수록 빠르다"의 산수와 실측.
+- [HikariCP Wiki: About Pool Sizing](https://github.com/brettwooldridge/HikariCP/wiki/About-Pool-Sizing) — 과도한 연결 수의 비용과 부하 시험을 통한 pool sizing.
 - Betsy Beyer 외 편, *Site Reliability Engineering* (O'Reilly, 2016) — 복구 훈련·점진 개방·기준선 경보 등 운영 원칙의 본진(무료 공개).
 - Martin Kleppmann, *Designing Data-Intensive Applications*, Ch.12 — 파생 상태를 유지하며 시스템을 무중단으로 진화시키는 큰 그림.

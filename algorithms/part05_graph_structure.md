@@ -102,6 +102,8 @@ std::vector<int> BfsDistance(const Graph& g, int start) {
 }
 ```
 
+이 스니펫은 `start`가 `[0, g.size())`의 유효 정점이고 그래프가 비어 있지 않다고 가정한다. 빈 그래프에는 유효한 시작점이 없으므로 호출 전에 `g.empty()`를 거부하고, `Edge.to`를 포함한 모든 간선 끝점이 `[0, g.size())` 안인지 확인한다. 정점 수는 `int` 표현 범위($\le$ `INT_MAX`) 안에 있어야 하며 누적 간선 수도 그 범위를 넘지 않아야 한다.
+
 ### BFS 불변식
 
 Queue에서 정점을 꺼내는 거리는 비감소한다. 거리 $d$인 정점을 처리할 때 새로 발견되는 정점은 거리 $d+1$이다. 더 짧은 경로가 있었다면 해당 정점은 더 앞 계층에서 이미 발견됐어야 한다.
@@ -194,7 +196,7 @@ std::vector<int> TopologicalOrder(const Graph& g) {
 }
 ```
 
-결과 크기가 $V$보다 작으면 남은 subgraph의 모든 정점이 양의 indegree를 갖는다. 유한 방향 그래프에서 predecessor를 계속 따라가면 정점을 반복하므로 cycle이 존재한다.
+결과 크기가 $V$보다 작으면 남은 subgraph의 모든 정점이 양의 indegree를 갖는다. 유한 방향 그래프에서 predecessor를 계속 따라가면 정점을 반복하므로 cycle이 존재한다. 이 함수는 실패를 별도 오류 없이 완료된 prefix만 반환할 수 있으므로, 호출부에서 `order.size() == g.size()`를 검사해 cycle 여부를 판정한다.
 
 ### 결정적 위상 순서
 
@@ -219,7 +221,7 @@ std::vector<int> TopologicalOrder(const Graph& g) {
 
 ### Tarjan low-link
 
-Tarjan 알고리즘은 한 번의 DFS와 stack으로 SCC를 찾는다. `index[u]`는 발견 순서, `low[u]`는 DFS tree edge와 stack 안 정점으로 가는 edge를 사용해 도달 가능한 최소 index다.
+Tarjan 알고리즘은 한 번의 DFS와 stack으로 SCC를 찾는다. `index[u]`는 발견 순서다. `low[u]`는 tree edge를 0회 이상 따라간 뒤 stack 위 정점으로 가는 non-tree edge를 최대 한 번 사용해 도달 가능한 최소 index다. 갱신은 재귀 자식의 `low[v]`와 on-stack 이웃의 `index[v]`를 각각 취한다.
 
 `low[u]==index[u]`이면 `u`는 현재 SCC의 root다. Stack에서 `u`까지 pop한 정점들이 하나의 SCC다. 이미 SCC가 확정되어 stack에서 빠진 정점으로 가는 edge는 low-link 갱신에 사용하지 않는다.
 
@@ -236,7 +238,7 @@ SCC는 cycle 하나를 찾는 것보다 강한 결과를 제공하지만, 사용
 
 무방향 연결 그래프에서 정점 하나를 제거했을 때 component 수가 늘면 articulation point, 간선 하나를 제거했을 때 늘면 bridge다.
 
-DFS tree에서 `low[v]`를 정점 `v`의 subtree가 tree edge와 back edge를 사용해 도달 가능한 최소 발견 시간으로 정의한다.
+무방향 DFS tree에서 `low[v]`를 정점 `v`의 subtree가 tree edge와, 부모로 가는 역간선을 제외한 back edge를 사용해 도달 가능한 최소 발견 시간으로 정의한다. 이미 방문한 이웃으로는 그 이웃의 `tin`을 사용하고, 부모 역간선은 edge ID로 구분해 평행 간선에서도 제외한다.
 
 Tree edge `(u,v)`에 대해
 
@@ -296,6 +298,8 @@ private:
     std::vector<int> parent_, size_;
 };
 ```
+
+`Dsu(n)`은 `n >= 0`을 요구하고 `Find`·`Union`의 정점 ID는 `[0, n)`의 유효 범위여야 한다.
 
 두 최적화를 함께 사용하면 $m$개 연산의 시간은 $O(m\alpha(n))$이다. inverse Ackermann 함수 $\alpha(n)$은 현실적 크기에서 매우 작지만 엄밀한 상수 시간은 아니다.
 

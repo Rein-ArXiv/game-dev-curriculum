@@ -138,6 +138,15 @@ bool IsMoreRecent(uint32_t a, uint32_t b) {
 }
 
 void Client::OnServerSnapshot(const Snapshot& snapshot) {
+    // 검증된 최신 authoritative snapshot만 적용한다. packet 순서와 snapshot 순서·ack
+    // frontier는 별개다. 더 새 snapshot을 적용한 뒤 오래된 snapshot으로 되돌리면
+    // 이미 지운 pending input을 재시뮬레이션할 수 없다.
+    if (hasAppliedSnapshot_ && !IsMoreRecent(snapshot.tick, lastAppliedSnapshotTick_))
+        return;
+
+    lastAppliedSnapshotTick_ = snapshot.tick;
+    hasAppliedSnapshot_ = true;
+
     predictedState_ = snapshot.myAuthoritativeState;
 
     while (!pendingInputs_.empty() &&
@@ -159,6 +168,8 @@ void Client::OnServerSnapshot(const Snapshot& snapshot) {
 - 결과 상태는 서버 권위 과거 위에 미확정 입력을 쌓은 현재 예측이다.
 
 `IsMoreRecent`는 packet sequence와 같은 wrap-safe 비교 함수다. 입력 sequence가 충분히 긴 시간 동안 재사용되지 않는다는 전제는 필요하지만, 단순한 `<=` 비교를 그대로 쓰면 번호가 wrap되는 장시간 세션에서 pending input 정리가 틀릴 수 있다.
+
+여기서 전제는 *검증된 최신 snapshot만 이 함수에 들어온다* 는 것이다. packet sequence와 snapshot tick, 마지막 처리 입력 sequence는 서로 다른 의미다. dispatcher가 snapshot tick이나 id를 단조 비교해 더 오래된 것을 거르고, `lastProcessedInput`도 단조 증가한다고 가정한다. 동률·wrap·reset epoch 정책을 정하고, 신뢰 transport로 snapshot 순서를 보장한다면 그 전제를 명시한다.
 
 이 방식은 예측이 틀려도 서버 상태로 다시 수렴한다. 수렴의 보장이 어디서 오는지 명확히 해 두자 — 매 스냅샷마다 *권위 상태에서 다시 시작* 하기 때문이다. 예측 오차는 누적되지 않고, 항상 "권위 + 미확정 입력 몇 개"의 범위 안에 갇힌다. 미확정 입력의 재적용이 또 틀릴 수 있지만(같은 원인으로), 그 오차의 수명도 다음 스냅샷까지다. 오차가 *지속* 된다면 그것은 예측 구조의 문제가 아니라 클라/서버 시뮬레이션 차이(8절)의 문제다.
 
@@ -268,7 +279,7 @@ client recv: 42ms  96ms 171ms 190ms 280ms
 기본 재료는 snapshot에 실려 오는 `serverTick`이다. 수신 시각과 묶으면 표본이 된다 — "서버 시간 T인 패킷이 내 시간 t에 도착했다". 단방향 지연을 RTT/2로 근사하면 `서버시간 ≈ T + RTT/2 + (now - t)`로 현재 서버 시간을 추정할 수 있다.
 
 ```cpp
-// 서버 시간 추정기 — 표본을 EWMA 로 평활하고, 시계는 점프 대신 미세 가감속한다.
+// 서버 시간 추정기 — 표본을 EWMA 로 평활해 목표 시각만 만든다.
 class ServerClock {
 public:
     void OnSnapshot(double serverTime, double rttHalf, double now) {
@@ -276,13 +287,34 @@ public:
         double offset = estimate - now;
         offset_ = Lerp(offset_, offset, 0.05);             // 표본 노이즈 평활
     }
-    double Now(double localNow) const { return localNow + offset_; }
+    double Estimate(double localNow) const { return localNow + offset_; }
 private:
     double offset_ = 0;
 };
+
+// 화면에 공개하는 시계 — 추정값을 목표로 삼되 출력은 별도 상태를 양의 rate 로 적분한다.
+class DisciplinedClock {
+public:
+    bool Advance(double targetNow, double localDt) {
+        if (!std::isfinite(targetNow) || !std::isfinite(localDt) || localDt < 0.0)
+            return false;
+        if (!initialized_) { published_ = targetNow; initialized_ = true; return true; }
+        const double error = targetNow - published_;
+        const double rate = std::clamp(1.0 + gainPerSecond_ * error, 0.98, 1.02);
+        const double next = published_ + localDt * rate;   // rate > 0 이라 역행하지 않는다
+        if (!std::isfinite(next)) return false;
+        published_ = next;
+        return true;
+    }
+    double Now() const { return published_; }
+private:
+    double published_ = 0.0;
+    bool initialized_ = false;
+    double gainPerSecond_ = 0.5;
+};
 ```
 
-요점 두 가지. 첫째, 추정 오차는 ±지터 수준이며 그래도 된다 — [보간 delay](#12-interpolation-delay)가 그 오차를 덮을 만큼 크기 때문이다. 정밀 NTP가 필요한 게 아니라 *안정적인 단조 시계* 가 필요한 것이다. 둘째, offset이 갱신될 때 renderTime이 *점프하면 안 된다* — 화면의 모든 원격 엔티티가 동시에 움찔한다. offset 변화는 위 코드처럼 평활하거나, renderTime의 진행 속도를 ±0.5~2%로 미세 조절해(시간을 약간 빠르게/느리게 흐르게 해) 따라잡는다. "시계를 돌리지 말고 시계의 속도를 돌린다"가 규칙이다.
+요점 두 가지. 첫째, 추정 오차는 ±지터 수준이며 그래도 된다 — [보간 delay](#12-interpolation-delay)가 그 오차를 덮을 만큼 크기 때문이다. 정밀 NTP가 필요한 게 아니라 *안정적인 단조 시계* 가 필요한 것이다. 둘째, offset 추정값을 그대로 `localNow + offset`으로 노출하면 offset이 갱신될 때 renderTime이 뒤로 갈 수 있다 — 화면의 모든 원격 엔티티가 동시에 움찔한다. 그래서 추정기는 목표 시각만 만들고, 화면에 공개하는 시계는 `DisciplinedClock`처럼 별도 상태를 양의 rate로 적분한다. 초기 lock(큰 offset 변화의 한 번 점프)과 정상 진행 중 보정은 서로 다른 상태 전이로 다루고, 출력 시계는 rate > 0이라 역행하지 않는다. "시계를 돌리지 말고 시계의 속도를 돌린다"가 규칙이다.
 
 ### 시계 추정의 오차와 드리프트 보정
 
@@ -344,7 +376,10 @@ Vec3 SamplePosition(const RemoteHistory& h, double renderTime) {
                         (b->serverTime - a->serverTime));
         return Lerp(a->position, b->position, t);
     }
-    return h.samples.empty() ? Vec3{} : h.samples.back().position;
+    if (h.samples.empty()) return Vec3{};
+    if (renderTime <= h.samples.front().serverTime)
+        return h.samples.front().position;   // oldest보다 과거 — 가장 오래된 sample로 clamp
+    return h.samples.back().position;         // newest보다 미래 — 최신 sample(또는 제한된 extrapolation)
 }
 ```
 
@@ -357,8 +392,11 @@ History buffer는 너무 길 필요가 없다. 보간 지연과 최대 jitter, �
 Interpolation delay는 클라이언트가 얼마나 과거를 렌더링할지 정하는 값이다.
 
 ```text
-renderTime = estimatedServerTime - interpolationDelay
+renderTime = estimatedServerNow - totalDisplayDelay        // 시간축 A
+renderTime = latestReceivedServerTime - extraBufferDelay  // 시간축 B
 ```
+
+두 식의 delay는 서로 다른 양이다. A의 `totalDisplayDelay`는 하행 전송 지연과 추가 jitter buffer를 모두 포함하고, B의 `extraBufferDelay`는 최신 수신 sample timestamp에서 추가로 빼는 여유만 뜻한다. 이름만 같게 놓고 두 상수를 공유하면 안 된다. A를 쓰면서 snapshot 간격 기반 buffer 값만 대입하면 아직 전송 중인 시간을 덮지 못한다 — 서버 1000ms, 하행 지연 200ms, 간격 20ms, buffer 40ms면 대상은 960ms인데 최신 도착 sample은 800ms일 수 있어 bracket이 되지 않는다. history 양 끝을 벗어난 요청은 old 쪽은 oldest sample로, new 쪽은 newest sample(또는 제한된 extrapolation)로 각각 처리한다.
 
 delay가 크면 보간에 사용할 양쪽 snapshot이 안정적으로 존재한다. 화면은 부드럽지만 더 과거를 본다. delay가 작으면 최신 상태에 가깝지만 snapshot이 부족해 extrapolation이 자주 발생한다.
 
@@ -370,7 +408,7 @@ delay가 크면 보간에 사용할 양쪽 snapshot이 안정적으로 존재한
 
 Delay는 snapshot rate와 network jitter에 따라 조정한다. 20Hz snapshot의 두 간격은 100ms이고 60Hz의 두 간격은 약 33ms다. Source 계열에서 알려진 `cl_interp` 값은 특정 게임·버전·server update rate의 역사적 설정 예이지 현대 게임의 보편 기본값이 아니다.
 
-delay의 구성을 식으로 쓰면 `delay ≈ snapshot 간격 + 손실 여유 + 지터 여유` 다. 손실 여유는 "한 장 빠져도 다음 장으로 보간을 잇는" 1간격이고, 지터 여유는 도착 간격 분산의 상위 분위수다. 그래서 *적응형 delay* 가 자연스러운 발전형이다 — 클라이언트가 도착 간격의 P95 지터를 측정해 delay를 동적으로 잡고, 회선이 좋은 플레이어는 자동으로 더 최신을 본다. 단, delay 변경도 시계와 같은 규칙을 따른다: 점프 금지, 미세 가감속으로 이동.
+시간축 A의 `totalDisplayDelay` 구성을 식으로 쓰면 `totalDisplayDelay ≈ 하행 전송 지연 + snapshot 간격 + 손실 여유 + 지터 여유` 다. 손실 여유는 "한 장 빠져도 다음 장으로 보간을 잇는" 1간격이고, 지터 여유는 도착 간격 분산의 상위 분위수다. 그래서 *적응형 delay* 가 자연스러운 발전형이다 — 클라이언트가 도착 간격의 P95 지터를 측정해 delay를 동적으로 잡고, 회선이 좋은 플레이어는 자동으로 더 최신을 본다. 단, delay 변경도 시계와 같은 규칙을 따른다: 점프 금지, 미세 가감속으로 이동.
 
 server clock 추정이 정확하다면 내가 보는 상대의 snapshot time은 **현재 추정 server time보다 interpolation delay만큼 과거**다. `RTT/2`를 여기에 다시 더하면 client 표시 age를 중복 계산한다. 다만 사격 command가 server에 도착한 시점에서 보면, server가 되감아야 할 시간에는 사격 command의 outbound one-way delay 추정과 사격자가 사용한 interpolation delay가 함께 들어간다.
 
@@ -536,7 +574,9 @@ Hitscan 무기 판정 흐름은 다음과 같다.
 
 ```cpp
 bool ServerValidateShot(const ShotCommand& cmd, ClientId shooter) {
-    double receiveTime = ServerTime();
+    // command를 큐에 넣을 때 기록한 수신 시각을 쓴다. 처리 시각(ServerTime())을 쓰면
+    // server queue wait가 rewind 오차로 더해진다. 검증된 client shot tick도 함께 대조한다.
+    double receiveTime = cmd.arrivalServerTime;
     double rewindTime = receiveTime
         - EstimateOneWayLatency(shooter)
         - InterpolationDelay(shooter);
@@ -544,6 +584,9 @@ bool ServerValidateShot(const ShotCommand& cmd, ClientId shooter) {
     rewindTime = ClampRewind(rewindTime, receiveTime);
 
     Ray shotRay = ReconstructShotRay(cmd, shooter);
+    // 전제: PossibleTargets는 ray t 오름차순이고 world occlusion을 이미 반영한다.
+    // 그 전제가 없으면 첫 교차가 nearest visible hit가 아니므로, 최소 nonnegative
+    // hit distance를 모아 world obstruction과 비교해야 한다.
     for (PlayerId target : PossibleTargets(shooter)) {
         HitboxSample past = history_.Sample(target, rewindTime);
         if (Intersects(shotRay, past.hitCapsule)) {
@@ -558,7 +601,7 @@ bool ServerValidateShot(const ShotCommand& cmd, ClientId shooter) {
 
 되감기는 판정 순간에만 사용한다. 서버 월드 전체를 영구적으로 과거로 바꾸지 않는다. 일반적인 구현은 history에서 과거 hitbox를 샘플링해 임시 판정 구조를 만든다.
 
-빠뜨리기 쉬운 디테일 둘. 첫째, *벽도 되감아야 하는가* — 움직이는 엄폐물(문, 차량)이 있다면 그렇다. 정적 지오메트리만 있는 맵은 현재 월드로 가려짐 검사를 해도 되지만, 동적 엄폐물을 현재 상태로 검사하면 "사격자 화면에선 열려 있던 문"이 판정을 막는 비대칭이 생긴다. 둘째, *사격자 자신의 위치* — 사격 광선의 원점은 사격자의 그 시점 예측 위치다. 서버가 보유한 사격자 권위 상태(해당 입력 처리 시점)와 명령의 원점 주장을 대조해, 어긋나면 서버 측 원점으로 강제한다.
+빠뜨리기 쉬운 디테일 셋. 첫째, *벽도 되감아야 하는가* — 움직이는 엄폐물(문, 차량)이 있다면 그렇다. 정적 지오메트리만 있는 맵은 현재 월드로 가려짐 검사를 해도 되지만, 동적 엄폐물을 현재 상태로 검사하면 "사격자 화면에선 열려 있던 문"이 판정을 막는 비대칭이 생긴다. 둘째, *사격자 자신의 위치* — 사격 광선의 원점은 사격자의 그 시점 예측 위치다. 서버가 보유한 사격자 권위 상태(해당 입력 처리 시점)와 명령의 원점 주장을 대조해, 어긋나면 서버 측 원점으로 강제한다. 셋째, *시간 기준* — `rewindTime`의 기준은 command를 수신한 시각(`arrivalServerTime`)이지 deque·처리 시각이 아니다. 처리 시각을 쓰면 server queue wait가 되감기 깊이에 더해져 부하에 따라 판정이 흔들린다.
 
 ## 21. Hitscan과 Projectile
 
@@ -890,7 +933,7 @@ t=0ms    [클라] 발사 입력. 총구 화염·사운드 즉시 재생(연출 �
          입력 command(틱·시점 정보 포함)를 패킷에 실어 송신.
 t=40ms   [서버] 입력 도착, 입력 버퍼에 정렬.
 t=47ms   [서버] 해당 틱 실행: 사격 검증(탄약·쿨다운·시야각)
-         → 지연 보상: 현재 서버 시각 기준 약 140ms 과거로 hitbox 되감기
+         → 지연 보상: 수신 시각(40ms) 기준 약 140ms 과거로 hitbox 되감기(처리 시각 47ms 아님)
          → 명중 판정, 피해 적용. 권위 상태에 기록.
 t=47ms+  [서버] 다음 스냅샷에 결과 포함: 대상 체력, 사망 여부,
          피격 이벤트(reliable), lastProcessedInput 갱신.
@@ -982,7 +1025,7 @@ t=87ms~  [클라(피격자)] 자기 체력 감소 수신. 피격 연출.
 - Jared Cone, *It IS Rocket Science! The Physics of Rocket League Detailed* (GDC 2018) — 물리 차량의 예측·재조정 사례.
 - Timothy Ford, [Overwatch Gameplay Architecture and Netcode](https://www.youtube.com/watch?v=W3aieHjyNvw) (GDC 2017) — 예측 범위, 적응형 입력 버퍼, 클라이언트 선행과 판정 정책.
 - Valve Developer Wiki, [Source Multiplayer Networking](https://developer.valvesoftware.com/wiki/Source_Multiplayer_Networking), [Interpolation](https://developer.valvesoftware.com/wiki/Interpolation), [Lag Compensation](https://developer.valvesoftware.com/wiki/Lag_Compensation) — Source 엔진의 틱·보간·hitbox rewind 계약.
-- IEEE DIS(Distributed Interactive Simulation) 표준 — 운동 모델 기반 dead reckoning의 표준화된 형태.
+- IEEE 1278 계열(Distributed Interactive Simulation, DIS) 표준군 — 운동 모델 기반 dead reckoning을 규정하지만, 직접 근거로 쓰려면 적용 문서 번호·연도와 해당 dead reckoning 절을 함께 명시해야 한다.
 - David L. Mills, [RFC 5905: Network Time Protocol Version 4](https://www.rfc-editor.org/rfc/rfc5905) — §8은 왕복 지연·오프셋 계산, §10은 clock filter, §11.3은 clock discipline을 정의한다.
 - Flaviu Cristian, *Probabilistic Clock Synchronization* (Distributed Computing 3, 1989) — 단방향 지연을 RTT/2로 추정할 때의 오차 경계.
 - David Aldridge, *I Shot You First: Networking the Gameplay of Halo: Reach* (GDC 2011) — 권위·판정 정책·대역폭 운영 사례.

@@ -1,6 +1,6 @@
 ## 들어가며
 
-동적 계획법(Dynamic Programming, DP)은 점화식을 코드로 옮기는 기법이 아니다. 미래 결정에 필요한 과거 정보만 상태로 압축하고, 상태 사이 의존을 비순환 그래프로 만드는 설계 방법이다. 상태가 부족하면 서로 다른 과거를 잘못 합치고, 상태가 과하면 정확하지만 계산할 수 없는 크기로 폭발한다.
+동적 계획법(Dynamic Programming, DP)은 점화식을 코드로 옮기는 기법이 아니다. 미래 결정에 필요한 과거 정보만 상태로 압축하는 설계 방법이다. 이 장은 상태 의존을 비순환 그래프(DAG)로 만드는 유한 DP를 다루며, 순환 Bellman 방정식처럼 의존에 cycle이 있는 경우는 수렴·고정점 조건을 별도로 갖춰야 한다. 상태가 부족하면 서로 다른 과거를 잘못 합치고, 상태가 과하면 정확하지만 계산할 수 없는 크기로 폭발한다.
 
 코딩 문제에서 DP는 배열 채우기 패턴으로 보이기 쉽다. 실제 게임 시스템에서는 제한된 자원으로 upgrade 조합을 고르거나, animation sequence를 정렬하거나, 작은 전술 상태의 최적 정책을 계산할 때 같은 원리가 나타난다. 반면 실시간 월드 전체를 상태에 넣으면 지수 상태 공간 때문에 적용할 수 없다.
 
@@ -39,7 +39,7 @@ Divide-and-conquer도 부분 문제로 나누지만 보통 부분 문제가 겹�
 
 ### DP는 상태 DAG다
 
-상태를 정점, recurrence 의존을 간선으로 보면 DP는 DAG 위 계산이다.
+상태를 정점, recurrence 의존을 간선으로 보면 이 장에서 다루는 DP는 DAG 위 계산이다. 의존 그래프에 cycle이 있는 순환 Bellman 방정식과 value iteration도 DP에 포함되지만, 이들은 위상 순서 대신 수렴·고정점 조건을 추가로 요구하므로 이 장의 범위 밖이다.
 
 ```mermaid
 flowchart LR
@@ -47,6 +47,7 @@ flowchart LR
     S0 --> S2[다른 중간 상태]
     S1 --> G[목표 상태]
     S2 --> G
+    C["예: 유한 비순환 상태 DAG (모든 DP가 DAG라는 일반화는 아님)"]
 ```
 
 Memoization은 목표에서 필요한 상태만 DFS하고, bottom-up은 위상 순서로 상태를 채운다. 계산 순서가 의존 edge를 거슬러 읽으면 아직 정의되지 않은 값을 사용한다.
@@ -91,6 +92,8 @@ DP 상태가 충분하다는 것은 미래가 과거 전체가 아니라 현재 
 가능성: 도달 불가 = false, combine = OR
 ```
 
+도달 불가를 `INF` 같은 sentinel로 표현하면 그 값이 유한 비용에 더해지는 경로가 생기지 않도록 후속 값이 도달 불가인지 먼저 검사한다. Memoization에서는 도달 불가를 `optional`의 빈 상태로 분리하고, 유한 비용끼리 더할 때만 overflow 범위를 확인하는 편이 안전하다.
+
 ## 3. Memoization과 Bottom-up
 
 ### Top-down memoization
@@ -98,20 +101,23 @@ DP 상태가 충분하다는 것은 미래가 과거 전체가 아니라 현재 
 재귀 함수가 상태의 답을 계산하고 cache에 저장한다.
 
 ```cpp
-std::int64_t Solve(State s) {
+std::optional<std::int64_t> Solve(State s) {
     if (IsBase(s)) return BaseValue(s);
     if (memo.contains(s)) return memo[s];
 
-    std::int64_t best = INF;
+    std::optional<std::int64_t> best;
     for (Action a : Actions(s)) {
         if (!Feasible(s, a)) continue;
-        best = std::min(best, Cost(s, a) + Solve(Next(s, a)));
+        std::optional<std::int64_t> next = Solve(Next(s, a));
+        if (!next) continue;
+        std::int64_t candidate = CheckedAdd(Cost(s, a), *next);
+        if (!best || candidate < *best) best = candidate;
     }
     return memo[s] = best;
 }
 ```
 
-목표에서 도달 가능한 sparse 상태만 계산하는 장점이 있다. 재귀 stack, hash lookup, cycle 처리 비용이 생긴다. 상태 graph가 실제로 cyclic이면 “계산 중” 상태를 따로 표시하거나 DP 모델 자체를 다시 점검해야 한다.
+도달 불가 상태는 `optional`의 빈 상태로 반환해 유한 비용과 섞이지 않게 하고, 유한 비용끼리 더할 때만 `CheckedAdd`로 overflow를 검사한다. 목표에서 도달 가능한 sparse 상태만 계산하는 장점이 있다. 재귀 stack, hash lookup, cycle 처리 비용이 생긴다. 상태 graph가 실제로 cyclic이면 “계산 중” 상태를 따로 표시하거나 DP 모델 자체를 다시 점검해야 한다.
 
 ### Bottom-up tabulation
 
@@ -174,6 +180,8 @@ for (const Item item : items) {
     }
 }
 ```
+
+`capacity`와 `item.weight`는 부호 있는 정수형으로 두고 $0\le w_i$와 $0\le W<\text{INT\_MAX}$를 보장한다. `capacity + 1`과 인덱스 `c`가 signed `int` 범위를 넘지 않아야 하며, 가치 합은 `std::int64_t`로 표현 가능한 범위여야 한다. 무게 0인 항목도 signed 역순 순회에서는 각 항목을 정확히 한 번만 처리하므로 그 자체로 오류가 아니다. 반대로 `item.weight`가 unsigned라면 `c >= item.weight` 비교와 `c - item.weight` 뺄셈에서 음수가 큰 unsigned로 변환될 수 있으므로 피한다.
 
 작은 값부터 순회하면 이번 항목으로 갱신된 `dp[c-w]`를 같은 항목에서 다시 읽어 항목을 여러 번 사용한다. 이는 unbounded knapsack recurrence가 된다. Loop 방향은 단순 최적화가 아니라 문제 의미다.
 
@@ -414,10 +422,12 @@ top-down과 bottom-up 결과가 같다.
 
 ### Metamorphic property
 
-- 모든 가치에 양의 상수를 곱하면 선택이 같고 최적 값도 그만큼 곱해진다.
+- 모든 가치에 양의 상수 $k$를 곱하면 최적 값도 $k$배가 되고 원래 최적해는 새 문제에서도 유효하다. 반환한 하나의 선택까지 같으려면 tie-break와 결정성이 같고 정수 overflow나 부동소수점 반올림이 없어야 한다.
 - 용량을 늘리면 knapsack 최적 가치는 감소하지 않는다.
 - 두 sequence 앞에 같은 고유 symbol을 붙이면 LCS 길이가 1 증가한다.
 - Tree 정점 ID를 순열로 바꿔도 최적 값은 같다.
+
+최적값의 $k$배와 해의 유효성을 기본 oracle로 사용하고, 반환한 하나의 selection sequence가 정확히 같은지는 결정성이 계약된 경우에만 검사한다.
 
 ### 경계 입력
 
@@ -447,7 +457,7 @@ DP 성능 문제는 흔히 한 상태의 코드보다 상태 정의가 만든 �
 
 ## 결론
 
-동적 계획법의 핵심은 recurrence 암기가 아니라 미래에 필요한 과거 정보를 상태로 정확히 압축하는 일이다. 상태가 충분해야 서로 다른 history를 합칠 수 있고, 의존 관계가 DAG를 이뤄야 memoization과 bottom-up 계산이 같은 답을 낸다. Loop 순서와 in-place 갱신은 문제 의미를 바꿀 수 있다.
+동적 계획법의 핵심은 recurrence 암기가 아니라 미래에 필요한 과거 정보를 상태로 정확히 압축하는 일이다. 상태가 충분해야 서로 다른 history를 합칠 수 있고, 의존 관계가 DAG를 이뤄야 memoization과 bottom-up 계산이 같은 답을 낸다. 순환 의존은 수렴·고정점 조건을 추가로 요구하므로 이 장의 DAG 범위와 구분한다. Loop 순서와 in-place 갱신은 문제 의미를 바꿀 수 있다.
 
 Sequence·interval·tree·bitmask DP는 서로 다른 표 모양이 아니라 서로 다른 상태 graph 구조다. Exact DP가 너무 크면 지배 관계, sparse 상태, 추가 단조성, parameter 제한, 근사를 검토한다. 작은 완전 탐색 oracle과 복원 해 검증을 함께 사용해야 최적 값뿐 아니라 실제 선택도 정확함을 확인할 수 있다.
 

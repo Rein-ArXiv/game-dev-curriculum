@@ -26,7 +26,7 @@ C++11이 도입한 스마트 포인터는 메모리 관리의 패러다임을 �
 
 ### 자원의 수명을 객체에 묶는다
 
-RAII(Resource Acquisition Is Initialization)는 Bjarne Stroustrup이 C++ 초기에 도입한 패턴이다. 자원의 획득과 해제를 객체의 생성자/소멸자에 묶어, **스코프를 빠져나가는 모든 경로**에서 해제가 보장되도록 한다.
+RAII(Resource Acquisition Is Initialization)는 Bjarne Stroustrup이 C++ 초기에 도입한 패턴이다. 자원의 획득과 해제를 객체의 생성자/소멸자에 묶어, **스코프를 빠져나가는 모든 경로**에서 해제가 보장되도록 한다. 여기서 "모든 경로"는 정상적인 스코프 종료와 예외 unwinding을 뜻하며, `std::terminate`/`std::abort`나 `longjmp` 같은 비정상 종료는 소멸자 호출을 보장하지 않는다.
 
 ```cpp
 void process() {
@@ -48,6 +48,8 @@ C에서는 모든 분기에 `close`/`free`를 흩뿌려야 하지만, RAII는 �
 | 정적(static/global) | 프로그램 종료까지 | 런타임이 자동 정리 |
 | 자동(stack) | 스코프 종료까지 | 컴파일러가 생성한 소멸자 호출 |
 | 동적(heap) | `new`로 만들고 `delete`로 해제 | 프로그래머 (또는 RAII 래퍼) |
+
+표준의 저장 기간 분류에는 이 밖에 `thread_local`(thread storage duration)도 있으며, 여기서는 자원 관리 관점에서 자주 다루는 세 영역만 정리한다.
 
 스마트 포인터는 **동적 영역의 객체를 자동 영역의 수명으로 끌고 들어오는 어댑터**다. 스택에 놓인 `unique_ptr<T>`는 스코프를 벗어날 때 힙의 `T`까지 함께 해제한다.
 
@@ -122,7 +124,7 @@ public:
 };
 ```
 
-이동 후 원본은 **유효하지만 미지정 상태**(valid but unspecified)다. 소멸자가 안전하게 호출될 수 있어야 하며, 그 외 동작은 보장되지 않는다.
+이동 후 원본은 **유효하지만 미지정 상태**(valid but unspecified)다. 소멸은 물론 전제 조건이 없는 연산(대입, `clear`, `swap` 등)은 표준 라이브러리 타입에 한해 그대로 사용할 수 있지만, 특정 값이나 상태를 기대해서는 안 된다. 사용자 정의 타입은 moved-from 상태의 계약을 직접 정한다.
 
 ### unique_ptr의 본질은 이동
 
@@ -239,7 +241,7 @@ use_unique(std::unique_ptr<Widget>):
     jmp Widget::process()     ; 꼬리 호출
 ```
 
-인라인되지 않는 이 경계에서는 값 매개변수가 invisible reference로 들어와 역참조가 한 번 더 필요하고, 해제 코드는 호출자 쪽에 남는다. 인라인이 일어나는 일반적인 사용에서는 두 경로가 같은 코드로 합쳐진다. 이것이 의도한 zero-overhead 사용 경로다.
+인라인되지 않는 이 경계에서는 값 매개변수가 invisible reference로 들어와 역참조가 한 번 더 필요하고, 해제 코드는 호출자 쪽에 남는다. 인라인이 일어나는 일반적인 사용에서는 두 경로가 같은 코드로 합쳐진다. 이것이 의도한 zero-overhead 사용 경로다. 이 명령 수 비교는 `process()`가 예외를 던지지 않는 정상 경로를 가정한다. 예외가 발생하면 raw 버전은 `delete`에 도달하지 못해 누수되지만, `unique_ptr` 버전은 스택 unwind로 해제된다.
 
 한 가지 단서가 있다. Itanium C++ ABI에서 비자명(non-trivial) 소멸자를 가진 타입을 값으로 전달하면 레지스터가 아닌 메모리를 경유하고 소멸 책임이 호출자에 남아, 인라인되지 않는 경계에서는 raw 포인터 대비 미세한 차이가 생길 수 있다(Chandler Carruth, "There Are No Zero-cost Abstractions", CppCon 2019). 인라인이 일어나는 일반적인 사용에서는 차이가 사라진다.
 
@@ -396,7 +398,7 @@ void process_borrowed(Widget& w) {
 
 ```cpp
 // 메모리 누수 발생!
-class Node {
+struct Node {
     std::shared_ptr<Node> next;
     std::shared_ptr<Node> prev;  // 순환 참조
 };
@@ -410,7 +412,7 @@ b->prev = a;  // a ↔ b 순환, 둘 다 해제 안 됨
 **해결: weak_ptr 사용**
 
 ```cpp
-class Node {
+struct Node {
     std::shared_ptr<Node> next;
     std::weak_ptr<Node> prev;  // 약한 참조 (소유권 없음)
 };
@@ -586,7 +588,7 @@ private:
 `shared_ptr`의 `operator->`는 보관 중인 객체 포인터를 반환하고, 그 포인터로 객체에 접근한다:
 
 ```cpp
-shared_ptr<Widget> sp;
+auto sp = std::make_shared<Widget>();
 sp->process();  // 실제 접근:
 // 1. sp가 보관한 객체 포인터를 얻음
 // 2. 그 포인터로 Widget에 접근
@@ -600,7 +602,7 @@ sp->process();  // 실제 접근:
 // 나쁜 예: shared_ptr 배열
 std::vector<std::shared_ptr<Entity>> entities;
 for (auto& e : entities) {
-    e->update();  // 매번 2+ 포인터 역참조
+    e->update();  // 객체 포인터 역참조 1회 (제어 블록 접근 없음)
 }
 ```
 
@@ -717,18 +719,23 @@ public:
 
     IntrusivePtr& operator=(const IntrusivePtr& other) noexcept {
         if (this != &other) {
+            // other가 *this가 소유한 객체 내부에 있을 수 있으므로
+            // 기존 자원을 놓기 전에 RHS를 먼저 확보한다.
+            T* tmp = other.ptr_;
+            if (tmp) tmp->add_ref();
             if (ptr_) ptr_->release();
-            ptr_ = other.ptr_;
-            if (ptr_) ptr_->add_ref();
+            ptr_ = tmp;
         }
         return *this;
     }
 
     IntrusivePtr& operator=(IntrusivePtr&& other) noexcept {
         if (this != &other) {
-            if (ptr_) ptr_->release();
-            ptr_ = other.ptr_;
+            // RHS 소유권을 먼저 분리해 기존 자원 해제 뒤의 use-after-free를 막는다.
+            T* tmp = other.ptr_;
             other.ptr_ = nullptr;
+            if (ptr_) ptr_->release();
+            ptr_ = tmp;
         }
         return *this;
     }
@@ -886,13 +893,16 @@ public:
 
     PooledPtr& operator=(PooledPtr&& other) noexcept {
         if (this != &other) {
+            // RHS 소유권을 먼저 분리해 기존 자원 해제 뒤의 use-after-free를 막는다.
+            T* tmp = other.ptr_;
+            Pool* tmp_pool = other.pool_;
+            other.ptr_ = nullptr;
             if (ptr_) {
                 ptr_->~T();
                 pool_->deallocate(ptr_);
             }
-            ptr_ = other.ptr_;
-            pool_ = other.pool_;
-            other.ptr_ = nullptr;
+            ptr_ = tmp;
+            pool_ = tmp_pool;
         }
         return *this;
     }
@@ -991,7 +1001,17 @@ ObjectPool<Particle> particle_pool(10000);
 
 PoolUniquePtr<Particle> create_particle() {
     void* mem = particle_pool.allocate();
-    auto* p = new(mem) Particle();
+    if (!mem) {
+        // 할당 실패 정책: 슬롯이 없으면 빈 포인터를 반환한다.
+        return PoolUniquePtr<Particle>(nullptr, PoolDeleter<Particle>(&particle_pool));
+    }
+    Particle* p;
+    try {
+        p = new(mem) Particle();
+    } catch (...) {
+        particle_pool.deallocate((Particle*)mem);  // 생성 실패 시 슬롯 반환
+        throw;
+    }
     return PoolUniquePtr<Particle>(p, PoolDeleter<Particle>(&particle_pool));
 }
 ```
@@ -1003,7 +1023,14 @@ PoolUniquePtr<Particle> create_particle() {
 template<typename T, typename... Args>
 std::shared_ptr<T> allocate_shared_from_pool(ObjectPool<T>& pool, Args&&... args) {
     T* ptr = pool.allocate();
-    new(ptr) T(std::forward<Args>(args)...);
+    if (!ptr) return nullptr;
+
+    try {
+        new(ptr) T(std::forward<Args>(args)...);
+    } catch (...) {
+        pool.deallocate(ptr);  // 제어 블록 생성 전이므로 슬롯을 직접 반환
+        throw;
+    }
 
     return std::shared_ptr<T>(ptr, [&pool](T* p) {
         p->~T();
@@ -1062,9 +1089,12 @@ public:
 
     LinkedPtr& operator=(const LinkedPtr& other) {
         if (this != &other) {
+            // other가 *this가 소유한 객체 내부에 있을 수 있어
+            // 임시 사본으로 RHS의 수명과 링크를 먼저 확보한다.
+            LinkedPtr tmp(other);
             if (ptr_) Remove();
-            ptr_ = other.ptr_;
-            if (ptr_) Insert(other);
+            ptr_ = tmp.ptr_;
+            if (ptr_) Insert(tmp);
             else      prev_ = next_ = this;
         }
         return *this;
@@ -1105,7 +1135,9 @@ private:
 | 참조 수 확인 | $O(1)$ | $O(n)$ 순회 |
 | 캐시 지역성 | Control Block 별도 캐시 라인 | 포인터들이 스마트 포인터와 함께 |
 
-Linked Pointer가 2000년대 초반에 선택된 이유는 다음과 같다.
+control block 카운터의 원자성은 같은 `shared_ptr` 인스턴스에 대한 동시 대입이나 pointee의 동시 변경까지 보호하지 않는다. 전자는 `std::atomic<shared_ptr>`나 락이, 후자는 별도 동기화가 필요하다. 아래 수치는 64-bit LP64/LLP64와 특정 구현을 기준으로 한 예이며, ABI·할당자 배치·cache line 크기에 따라 달라진다.
+
+Linked Pointer가 2000년대 초반에 선택된 가능한 동기는 다음과 같다.
 
 | 이유 | 설명 |
 |------|------|
@@ -1164,21 +1196,21 @@ private:
 | 단계 | 동작 | union 멤버 |
 |------|------|------------|
 | 1. 풀에서 분리 | `obj = free_head; free_head = obj->next_free` | next_free_ |
-| 2. 초기화 | `ref_count_ = 1` | ref_count_로 전환 |
+| 2. 초기화 | placement new로 `ref_count_` 수명 시작 | ref_count_로 전환 |
 | 3. AddRef/Release | atomic 증감 | ref_count_ |
 | 4. count == 0 | `next_free_ = free_head; free_head = obj` | next_free_로 전환 |
 
-32-bit 환경의 클라이언트에서 객체 수가 수백만 개일 때 필드 하나(4 bytes)를 줄이는 것이 수 MB의 절약이었다. 이것이 union을 type punning에 가깝게 사용한 이유다.
+32-bit 환경의 클라이언트에서 객체 수가 수백만 개일 때 필드 하나(4 bytes)를 줄이는 것이 수 MB의 절약이었다. 이것이 같은 저장 공간을 두 상태가 번갈아 재사용한 이유다.
 
 ### Union 트릭의 위험
 
-C++ 표준상 union의 활성 멤버가 아닌 멤버에 접근하는 것은 정의되지 않은 동작에 가깝다. 실무에서 동작하는 조건은 다음과 같다.
+C++ 표준상 union의 비활성 멤버를 읽는 것은 원칙적으로 정의되지 않은 동작이다. 여기서 하는 것은 비활성 멤버 값을 해석하는 type punning이 아니라, 상태 전이마다 새 멤버의 수명을 시작하는 합법적 저장 공간 재사용이다. union의 크기는 크기가 가장 큰 멤버와 정렬 요구로 결정되므로 두 멤버의 크기가 같은 것은 전제 조건이 아니다.
 
 | 조건 | 설명 |
 |------|------|
-| 같은 크기 | 두 멤버가 동일한 바이트 수 (32-bit 시스템에서 `void*`와 `uint32_t`) |
+| placement new | `new (&ref_count_) std::atomic<uint32_t>(1)`처럼 새 멤버의 수명을 명시적으로 시작 |
+| 암묵적 수명 타입 | 포인터처럼 implicit-lifetime을 가진 멤버는 대입으로 수명이 시작되어 `next_free_ = ...`가 합법 |
 | 명확한 상태 전이 | 동시 접근이 없고, 누가 어느 멤버를 활성화했는지 추적 가능 |
-| 컴파일러 허용 | strict aliasing 규칙이 적용되지 않는 영역 |
 
 디버깅 측면에서도 까다롭다. free된 객체의 `ref_count_`를 디버거가 출력하면 그것은 사실 다음 free 블록의 포인터 값이다. `ref_count_ = 0x7FFE1234`라는 출력이 사실은 `next_free_`라는 사실을 모르면 혼란스럽다.
 
@@ -1217,8 +1249,8 @@ class Player {
 };
 
 // 2. shared_ptr 값 전달
-void process(std::shared_ptr<Entity> e);  // 복사!
-// -> const 참조 또는 원시 포인터 사용
+void process(std::shared_ptr<Entity> e);  // 소유권을 보관·공유한다면 의도된 계약
+// -> 소유권이 필요 없으면 const 참조 또는 원시 포인터 사용
 
 // 3. 컨테이너에 shared_ptr
 std::vector<std::shared_ptr<Component>> components_;

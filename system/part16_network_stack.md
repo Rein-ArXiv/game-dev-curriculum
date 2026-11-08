@@ -215,7 +215,7 @@ sk_buff:
               ↓
 [2] Hard IRQ → 드라이버 인터럽트 핸들러 (최소 작업만)
               ↓
-[3] Soft IRQ → ksoftirqd가 패킷 처리
+[3] Soft IRQ → IRQ 복귀(irq_exit) 시점 또는 ksoftirqd가 패킷 처리
               ↓
 [4] IP Layer → 라우팅, Netfilter 체크
               ↓
@@ -368,10 +368,12 @@ int tcp_v4_rcv(struct sk_buff *skb) {
     if (sk->sk_state == TCP_TIME_WAIT)
         goto do_time_wait;
 
-    if (sk->sk_state == TCP_NEW_SYN_RECV)
-        // SYN-RECEIVED 처리
+    if (sk->sk_state == TCP_NEW_SYN_RECV) {
+        // SYN-RECEIVED 처리 (별도 helper가 연결 성립을 처리)
+        return tcp_check_req(sk, skb);
+    }
 
-    // 4. 소켓으로 전달
+    // 4. ESTABLISHED 소켓으로 전달: receive queue로 넣는다.
     //
     // 참고: tcp_prequeue()는 과거 receive path에 있던 사용자 컨텍스트
     // 우선 큐다. 현재 커널에서는 제거되었고, 수신 경로는 backlog 큐
@@ -412,6 +414,7 @@ static int tcp_queue_rcv(struct sock *sk, struct sk_buff *skb) {
 ```c
 // net/ipv4/tcp.c
 int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, ...) {
+    struct tcp_sock *tp = tcp_sk(sk);
     int copied = 0;
     lock_sock(sk);
 
@@ -425,15 +428,21 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, ...) {
             continue;
         }
 
-        // 사용자 공간으로 복사
-        int chunk = min_t(unsigned int, skb->len, len);
-        if (skb_copy_datagram_msg(skb, 0, msg, chunk))
+        // 이미 소비한 offset을 유지한다. copied_seq는 사용자에게
+        // 아직 넘기지 않은 첫 byte를 가리킨다.
+        u32 offset = tp->copied_seq - TCP_SKB_CB(skb)->seq;
+        u32 avail = skb->len - offset;
+        int chunk = min_t(unsigned int, avail, len);
+
+        // 사용자 공간으로 복사 (매번 offset 0에서 시작하지 않는다)
+        if (skb_copy_datagram_msg(skb, offset, msg, chunk))
             break;
         copied += chunk;
         len -= chunk;
+        tp->copied_seq += chunk;  // 실제 소비량만큼 전진
 
-        // 다 읽었으면 제거
-        if (chunk == skb->len)
+        // 이 skb를 모두 소비했을 때만 제거
+        if (offset + chunk == skb->len)
             sk_eat_skb(sk, skb);
     }
 
@@ -467,6 +476,7 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, ...) {
 int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size) {
     struct tcp_sock *tp = tcp_sk(sk);
     int mss = tcp_send_mss(sk, &size, flags);
+    int copied = 0;
 
     while (size > 0) {
         // 1. 송신 버퍼 확인
@@ -476,20 +486,29 @@ int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size) {
             continue;
         }
 
-        // 2. sk_buff 할당
+        // 2. sk_buff 할당 (실패하면 지금까지 접수한 양을 반환)
         struct sk_buff *skb = sk_stream_alloc_skb(sk, 0, sk->sk_allocation);
+        if (!skb)
+            break;
 
-        // 3. 데이터 복사
+        // 3. 데이터 복사 (실제 복사한 길이를 사용)
         int copy = min_t(int, size, mss);
-        skb_add_data(skb, &msg->msg_iter, copy);
+        if (skb_add_data(skb, &msg->msg_iter, copy) < 0) {
+            kfree_skb(skb);  // 큐에 넣기 전 실패: 회수
+            break;
+        }
 
-        // 4. 송신 큐에 추가
+        // 4. write queue로 소유권 이전: 이 시점부터 skb는 소켓이 소유한다.
+        tcp_add_write_queue_tail(sk, skb);
+
+        // 5. 송신 큐로 push (소유권은 이미 소켓에 있음)
         tcp_push_one(sk, mss);
 
+        copied += copy;
         size -= copy;
     }
 
-    return 0;
+    return copied;  // 실제로 접수한(복사한) 바이트 수
 }
 ```
 
@@ -623,19 +642,32 @@ tc class add dev eth0 parent 1:1 classid 1:20 htb rate 50mbit
 static netdev_tx_t e1000_xmit_frame(struct sk_buff *skb, struct net_device *netdev) {
     struct e1000_adapter *adapter = netdev_priv(netdev);
     struct e1000_tx_ring *tx_ring = adapter->tx_ring;
+    unsigned int i = tx_ring->next_to_use;
+    struct e1000_tx_desc *tx_desc;
+    struct e1000_buffer *buffer_info;
 
-    // 1. TX descriptor 할당
-    unsigned int first = tx_ring->next_to_use;
-    struct e1000_tx_desc *tx_desc = E1000_TX_DESC(*tx_ring, first);
+    // 1. ring 공간 검사: 다음 슬롯이 아직 회수되지 않았으면 큐가 가득 찬 것이다.
+    if (tx_ring->next_to_clean == (i + 1) % tx_ring->count)
+        return NETDEV_TX_BUSY;
 
-    // 2. DMA 매핑
+    tx_desc = E1000_TX_DESC(*tx_ring, i);
+    buffer_info = &tx_ring->buffer_info[i];
+
+    // 2. DMA 매핑 (linear 영역과 frags를 각각 매핑한다)
     dma_addr_t dma = dma_map_single(&pdev->dev, skb->data, skb->len, DMA_TO_DEVICE);
+    if (dma_mapping_error(&pdev->dev, dma)) {
+        dev_kfree_skb_any(skb);
+        return NETDEV_TX_OK;
+    }
 
-    // 3. Descriptor 설정
+    // 3. Descriptor 설정과 per-slot ownership 기록
+    buffer_info->skb = skb;
+    buffer_info->dma = dma;
     tx_desc->buffer_addr = cpu_to_le64(dma);
     tx_desc->lower.data = cpu_to_le32(skb->len | E1000_TXD_CMD_EOP | E1000_TXD_CMD_IFCS);
 
-    // 4. NIC에 통지 (MMIO write)
+    // 4. ring index를 증가/랩한 뒤 NIC에 통지 (MMIO write)
+    tx_ring->next_to_use = (i + 1) % tx_ring->count;
     writel(tx_ring->next_to_use, adapter->hw.hw_addr + E1000_TDT);
 
     return NETDEV_TX_OK;
@@ -645,19 +677,29 @@ static netdev_tx_t e1000_xmit_frame(struct sk_buff *skb, struct net_device *netd
 **전송 완료 인터럽트:**
 ```c
 static void e1000_clean_tx_irq(struct e1000_adapter *adapter) {
+    struct e1000_tx_ring *tx_ring = adapter->tx_ring;
+    unsigned int i = tx_ring->next_to_clean;
+    struct e1000_tx_desc *tx_desc = E1000_TX_DESC(*tx_ring, i);
+    struct e1000_buffer *buffer_info = &tx_ring->buffer_info[i];
+
     while (tx_desc->upper.fields.status & E1000_TXD_STAT_DD) {
         // Descriptor Done bit 확인
 
-        // DMA 언매핑
-        dma_unmap_single(...);
+        // DMA 언매핑: 매핑 때 기록한 per-slot buffer_info를 사용한다
+        dma_unmap_single(&adapter->pdev->dev, buffer_info->dma,
+                         buffer_info->skb->len, DMA_TO_DEVICE);
 
-        // sk_buff 해제
+        // sk_buff 해제 후 슬롯을 비운다
         dev_kfree_skb_any(buffer_info->skb);
+        buffer_info->skb = NULL;
+        buffer_info->dma = 0;
 
-        // 다음 descriptor
+        // 다음 descriptor로 전진하고 ring index를 회수한다
         i = (i + 1) % tx_ring->count;
         tx_desc = E1000_TX_DESC(*tx_ring, i);
+        buffer_info = &tx_ring->buffer_info[i];
     }
+    tx_ring->next_to_clean = i;
 }
 ```
 
@@ -865,14 +907,18 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb) {
         break;
 
     case TCP_FIN_WAIT_1:
-        if (th->ack)  // 우리 FIN에 대한 ACK
+        // ACK flag만으로는 우리 FIN이 확인됐다고 볼 수 없다.
+        // cumulative ACK이 우리 FIN sequence까지 포함해(snd_una가 FIN 다음
+        // seq에 도달) 전진했는지 확인한다. 오래된 데이터 ACK에도 flag는 있다.
+        tcp_ack(sk, skb);
+        if (tp->snd_una == tp->write_seq)  // 우리 FIN까지 ACK됨
             tcp_set_state(sk, TCP_FIN_WAIT_2);
-        if (th->fin) {  // 상대 FIN 수신: ACK가 함께 왔으면 TIME_WAIT, 아니면 CLOSING(동시 종료)
+        if (th->fin) {  // 상대 FIN 수신
             tcp_send_ack(sk);
-            if (th->ack)
+            if (tp->snd_una == tp->write_seq)  // 우리 FIN도 확인됨: 동시 종료 완료
                 tcp_time_wait(sk, TCP_TIME_WAIT, 0);
             else
-                tcp_set_state(sk, TCP_CLOSING);
+                tcp_set_state(sk, TCP_CLOSING);  // 아직 우리 FIN 미확인
         }
         break;
 
@@ -900,7 +946,7 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb) {
 
 ```bash
 $ netstat -an | grep TIME_WAIT | wc -l
-45231  # 메모리 낭비
+45231  # TIME_WAIT 소켓 수
 
 # 현대 커널의 권장 튜닝 (Linux 4.x 이후)
 sysctl -w net.ipv4.tcp_tw_reuse=1      # outgoing 연결에 한해 TIME_WAIT 재사용
@@ -912,6 +958,8 @@ sysctl -w net.ipv4.tcp_fin_timeout=30  # FIN-WAIT-2 타임아웃
 # 4.12 이상의 커널에서 sysctl로 설정해도 효과가 없다.
 # tcp_tw_reuse는 처음부터 outgoing(connect) 경로에만 적용되며, 4.18부터 값이 0/1(전역)/2(loopback 한정, 기본값)로 나뉘었다.
 ```
+
+TIME_WAIT은 마지막 ACK의 도착과 지연·재전송 패킷의 흡수를 보장하는 상태다. `SO_REUSEADDR`는 TIME_WAIT 객체를 즉시 없애는 명령이 아니라 로컬 주소 재바인딩을 허용하는 설정이며, 실제 회수 시점은 `2*MSL`(`TCP_TIMEWAIT_LEN`) 타이머가 결정한다. 문맥을 말할 때도 softirq가 항상 `ksoftirqd`에서 실행된다고 단정하지 않는다. IRQ 복귀 시점의 `irq_exit` 경로에서 먼저 처리되고, 밀린 경우에만 `ksoftirqd`로 넘어간다.
 
 ## 7. 소켓 버퍼와 흐름 제어
 
@@ -958,8 +1006,17 @@ static u16 tcp_select_window(struct sock *sk) {
     u32 cur_win = tcp_receive_window(tp);
     u32 free_space = tcp_space(sk);  // 수신 버퍼 여유 공간
 
-    // 버퍼 여유로 새 윈도우를 정하되, 이미 광고한 윈도우보다 줄이지는 않는다 (RFC 1122)
-    return max(cur_win, free_space);
+    // 버퍼 여유로 논리적(스케일된) 윈도우를 정하되,
+    // 이미 광고한 윈도우보다 줄이지는 않는다 (RFC 1122)
+    u32 window = max(cur_win, free_space);
+
+    // wire에는 16-bit 필드가 실리므로 negotiated rcv_wscale만큼
+    // 오른쪽으로 보낸다. 65535(2^16-1)를 넘는 값은 이 필드에 그대로
+    // 담을 수 없으므로 right edge를 유지하도록 65535로 제한한다.
+    u32 scaled = window >> tp->rx_opt.rcv_wscale;
+    if (scaled > 65535)
+        scaled = 65535;
+    return (u16)scaled;
 }
 ```
 
@@ -1232,7 +1289,7 @@ TCP:   50000 (estab 100, closed 49800, orphaned 0, synrecv 0, timewait 49800/0)
 
 **해결:**
 ```bash
-# 1. 서버: SO_REUSEADDR 사용
+# 1. 서버: SO_REUSEADDR로 재바인딩 허용 (TIME_WAIT을 즉시 회수하지는 않음)
 int opt = 1;
 setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 

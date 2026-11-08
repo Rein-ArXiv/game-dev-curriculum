@@ -1,14 +1,22 @@
 ## 들어가며
 
-지난 일곱 단계를 거치며 토글 기반 측정 도구의 골격을 세웠다. SoA·AoS·Archetype 세 메모리 레이아웃, 스칼라·SSE·AVX2 세 SIMD 폭, 분기 vs 분기 없는 predication, 네 가지 allocator, 세 가지 container까지 — 모두 런타임 토글로 갈아 끼울 수 있다. 그리고 매 프레임 세 가지 측정 채널이 돈다.
+지난 일곱 단계를 거치며 토글 기반 측정 도구의 골격을 세웠다. SoA·AoS·Archetype 세 메모리 레이아웃, C++ Auto·SSE·AVX2 세 SIMD 폭, 분기 vs 분기 없는 predication, 네 가지 allocator, 세 가지 container까지 — 모두 런타임 토글로 갈아 끼울 수 있다. 그리고 매 프레임 세 가지 측정 채널이 돈다.
 
-- **frame ms**: 시뮬 update + draw 합산. layout/SIMD/branchless 토글이 영향을 준다.
+> 이 실습은 게임 개발의 모든 CS 주제를 하나의 프로그램에 구현하는 과정이 아니다. 같은 상태를 여러 메모리 배치와 연산 방식으로 처리하고, 할당·순회 비용을 나누어 관찰하는 저수준 성능 실습이다. ECS 는 단일 컴포넌트 조합의 저장 배치까지만 다룬다. query 와 구조 변경, 문자열·인코딩·동시성 등은 별도 실습에서 다룬다.
+>
+> 실행 결과가 특정 순서로 나와야 성공하는 실습은 아니다. 먼저 같은 입력에 대해 같은 의미의 결과를 계산하는지 확인한다. 그다음 작업량·측정 구간·실행 환경을 맞추고 반복 측정한다. 기대와 다른 성능이 나오면 결과를 숨기거나 구현 오류로 단정하지 않고, 이 실험이 어떤 가정을 충족하지 못했는지 확인한다.
+>
+> 각 장의 코드는 세 종류로 구분한다. `현재 단계 완성 코드`는 해당 단계의 파일 집합과 함께 빌드할 수 있어야 한다. `발췌 코드`는 생략된 선언과 helper 의 실제 위치를 함께 적는다. `설명용 의사코드`는 의미와 제어 흐름을 보여주며 그대로 붙여 넣는 소스가 아니다. 최종 `src/`와 중간 단계의 함수 시그니처가 다르면 변환 표를 제공한다.
+
+- **frame wall**: `BeginFrame()` 부터 `EndFrame()` 까지의 벽시계 시간. HUD 와 `EndDrawing`(flush/swap) 을 포함하지만 GPU 실행 시간이나 전체 프로그램 CPU 시간은 아니다. layout/SIMD/branchless 토글이 영향을 준다.
 - **alloc ms**: `EventBenchmark`가 매 프레임 alloc/free하는 노드 다발의 누적 시간. allocator 토글이 영향을 준다.
 - **container ms**: `ContainerBenchmark`가 매 프레임 N개 노드를 한 번 순회하는 비용. container 토글이 영향을 준다.
 
-그러나 지금까지의 HUD 그래프는 frame ms 한 라인만 그렸다. allocator를 바꿔도, container를 바꿔도 그래프 자체는 거의 움직이지 않는다 — 효과가 보고 싶은 그래프 채널과 다른 곳에서 나기 때문이다. 측정값은 HUD에 숫자로 표시됐지만 *시간 흐름에 따른 모습* 은 보이지 않았다.
+HUD 좌측 숫자에는 이 밖에 `sim`(Update 구간), `draw`(BeginDrawing/Clear/점 그리기 구간, draw-submit), 그 둘의 합 `sim+sub` 도 함께 표시된다. `sim+sub` 는 전체 CPU 프레임이 아니므로 `cpu fps` 같은 이름을 쓰지 않는다.
 
-이번 단계에서 그래프를 세 라인으로 확장한다. 같은 패널 위에 frame / alloc / container 세 채널을 색을 달리해 겹쳐 그리고, 자동 스케일은 셋의 최댓값으로 잡는다. 그리고 이 글이 parts_perf_lab 시리즈의 마지막이라, 도구 전체를 어떻게 쓸 것인가 — *어떤 토글 조합으로 어떤 가설을 검증할 것인가* — 와, 마지막으로 이 도구가 *말해주지 않는 것* 들을 정리한다.
+그러나 지금까지의 HUD 그래프는 frame 한 라인만 그렸다. allocator를 바꿔도, container를 바꿔도 그래프 자체는 거의 움직이지 않는다 — 효과가 보고 싶은 그래프 채널과 다른 곳에서 나기 때문이다. 측정값은 HUD에 숫자로 표시됐지만 *시간 흐름에 따른 모습* 은 보이지 않았다.
+
+이번 단계에서 그래프를 세 라인으로 확장한다. 같은 패널 위에 frame wall / alloc / container 세 채널을 색을 달리해 겹쳐 그리고, 자동 스케일은 셋의 최댓값으로 잡는다. 그리고 여기서 도구 전체를 어떻게 쓸 것인가 — *어떤 토글 조합으로 어떤 가설을 검증할 것인가* — 와, 마지막으로 이 도구가 *말해주지 않는 것* 들을 정리한다.
 
 ---
 
@@ -38,7 +46,7 @@
 - `EventBenchmark::RunFrame(alloc)`은 매 프레임 N개 노드를 alloc/free하며 allocator 자체의 처리량만 본다. 시뮬 토글과 분리된다.
 - `ContainerBenchmark::RunFrame()`은 시작 시 채워진 N개 노드를 그저 순회한다. 컨테이너 종류가 *순회 시* 캐시 동작에 어떻게 영향 주는가만 본다.
 
-세 채널은 *서로의 효과를 가리지 않고* 측정된다. allocator를 Pool에서 malloc으로 바꾸면 *alloc ms* 만 변하고 frame ms와 container ms는 그대로다 (이 정도 워크로드에서는). 컨테이너를 vector에서 list로 바꾸면 *container ms* 만 변한다. 이 분리가 도구의 핵심이다.
+세 채널은 각자 다른 workload 를 재므로 주된 효과가 서로 섞이지 않는다. 다만 workload 를 다른 구간에서 측정하는 것은 각 구간의 비용을 구분하는 데 유용할 뿐, 같은 CPU·cache·메모리·OS 를 사용하므로 서로의 성능 영향까지 제거되는 것은 아니다. allocator 를 바꿨을 때 다른 선도 함께 움직였다는 이유만으로 타이머가 잘못됐다고 판정하지 않는다. headless 단일 워크로드 결과와 GUI 동시 실행 결과는 나누어 비교한다.
 
 ### 한 그래프에 겹쳐 그리는 이유
 
@@ -48,16 +56,15 @@
 
 토글을 바꾼 순간이 그래프 위에서는 *수직선* 으로 나타난다. allocator를 Pool에서 malloc으로 바꾸는 순간 alloc ms 라인이 위로 점프하고, 같은 시점에 frame/container 라인은 평탄하다. *동시에* 변하는 것과 *동시에 변하지 않는* 것이 한 화면에 보이면, 인과가 한층 또렷해진다. 패널을 분리하면 같은 t에서 세 점을 눈으로 따라가야 하는데, 한 패널에 겹치면 시각적으로 묶인다.
 
-대신 트레이드오프가 있다. 자동 스케일이 *셋의 최댓값* 기준이라, frame ms가 ~5ms, alloc/container ms가 ~0.5ms 같은 비대칭 시나리오에서는 작은 채널이 바닥에 깔려 평평해 보인다. 이 한계는 명시적이다 — 작은 채널이 사라져 보이면 *그 채널이 frame에 비해 1/10 이하로 작다* 는 정보 자체가 신호다.
+대신 트레이드오프가 있다. 자동 스케일이 *셋의 최댓값* 기준이라, frame wall이 ~5ms, alloc/container ms가 ~0.5ms 같은 비대칭 시나리오에서는 작은 채널이 바닥에 깔려 평평해 보인다. 그래프가 평탄하다는 것은 *선택한 축과 픽셀 해상도에서* 큰 변화가 보이지 않는다는 뜻이다. 비용이 작은 채널에 변화가 없다는 증명은 아니다. 공통 축은 절대 비용 비교에 사용하고, 작은 변화는 독립 축과 수치 분포로 살펴본다. frame budget 선을 그리는 목적과 allocator 의 미세한 실행 시간을 보는 목적은 다르다.
 
-그래도 작은 채널의 변동이 보고 싶다면 시뮬 entity 수를 줄이거나(frame ms를 깎는다) container N을 키우는(container ms를 키운다) 식으로 *상대 크기* 를 조절할 수 있다. 같은 그래프, 같은 토글, 다른 워크로드 크기로.
+작은 채널의 변동을 보려면 공통 스케일을 그대로 둔 채 채널별 확대(개별 y 축) 모드로 전환하고, 숫자 요약을 함께 보는 것이 맞다. 워크로드 크기(N)를 바꾸면 전체 비용 자체가 달라지므로 스케일 문제의 해법이 아니다. 채널별 확대 모드, 숫자 요약, session 표식은 **보충 구현 목표** 다.
 
 ### 세 채널 한 패널에 겹친 그림
 
 ```mermaid
 flowchart LR
-    A[update<br/>scalar/SSE/AVX2] --> F[frame ms]
-    B[draw] --> F
+    A[루프 선두~EndDrawing<br/>HUD·flush·swap 포함] --> F[frame wall]
     C[EventBenchmark<br/>alloc·free 다발] --> G[alloc ms]
     D[ContainerBenchmark<br/>순회] --> H[container ms]
     F --> P[HUD 그래프 패널<br/>세 라인 겹침]
@@ -69,18 +76,34 @@ flowchart LR
 
 ## 2. `FrameTimer` 확장 — 두 채널 슬라이딩 윈도우 추가
 
-`FrameTimer`는 초기 구현부터 update/draw 두 채널의 슬라이딩 윈도우(600 프레임 ring buffer)를 들고 있었다. 그래프는 그 두 채널의 *합* 을 frame ms로 그렸다.
+`FrameTimer`는 초기 구현부터 update/draw 두 채널의 슬라이딩 윈도우(600 프레임 ring buffer)를 들고 있었다. 지금은 여기에 frame wall 과 alloc/container 채널이 더해졌다.
 
-이번에 alloc/container 두 채널을 추가한다. 다만 alloc ms와 container ms는 *외부에서 측정* 된다. `EventBenchmark`가 자기 RunFrame 내부에서 시간을 재고 `LastFrameMs()`로 노출하고, `ContainerBenchmark`도 마찬가지다. `FrameTimer`가 이 시간을 직접 측정하면 측정 책임이 흩어진다.
+frame wall 은 `BeginFrame()`/`EndFrame()` 한 쌍으로 잰다. `BeginFrame` 은 루프 선두, `EndFrame` 은 `EndDrawing` 뒤에 두므로 HUD·flush·swap 이 포함된다. 예전처럼 update+draw 부분합을 frame total 로 부르지 않고, 그 합은 `LastSimDrawSubmitMs()`(`sim + draw-submit`)라는 이름으로 따로 노출한다.
+
+alloc ms와 container ms는 *외부에서 측정* 된다. `EventBenchmark`가 자기 RunFrame 내부에서 시간을 재고 `LastFrameMs()`로 노출하고, `ContainerBenchmark`도 마찬가지다. `FrameTimer`가 이 시간을 직접 측정하면 측정 책임이 흩어진다.
 
 선택은 단순하다. `CommitFrame()`에 두 인자를 받아 슬라이딩에 push만 하게 한다.
 
 `measure/frame_timer.h`:
 
 ```cpp
+// 최근 N 프레임의 frame/sim/draw-submit/alloc/container 시간을 슬라이딩 윈도우로
+// 보관한다. HUD가 이 데이터를 그래프로 표시한다.
+//
+// 구간 정의(서로 다른 지표를 같은 이름으로 부르지 않는다):
+//   - frame wall      : BeginFrame()부터 EndFrame()까지. HUD와 EndDrawing(flush/swap)을
+//                       포함하지만 GPU 실행 시간이나 전체 프로그램 CPU 시간은 아니다.
+//   - sim             : 시뮬레이션 Update 호출 구간.
+//   - draw-submit     : BeginDrawing/Clear/점 그리기 호출 구간. HUD와 EndDrawing 제외.
+//                       일부 CPU 렌더 명령 발행 비용이며 GPU 완료 시간이 아니다.
+//   - alloc/container : 각 벤치마크가 자체 측정해 CommitFrame으로 넘기는 외부 값.
 class FrameTimer {
 public:
     static constexpr std::size_t kCapacity = 600;
+
+    // 프레임 전체 wall 구간. BeginFrame은 루프 선두, EndFrame은 EndDrawing 뒤에 둔다.
+    void BeginFrame();
+    void EndFrame();
 
     void BeginUpdate();
     void EndUpdate();
@@ -88,39 +111,44 @@ public:
     void BeginDraw();
     void EndDraw();
 
-    // 한 쌍의 update/draw 측정값과 외부 채널 ms를 슬라이딩 윈도우에 push한다.
-    // allocMs/containerMs는 EventBenchmark·ContainerBenchmark에서 측정된 값이라
-    // FrameTimer가 직접 재지 않고 인자로 받는다.
+    // 호출 직전에 EndFrame, BeginUpdate/EndUpdate, BeginDraw/EndDraw가 모두
+    // 호출되었다고 가정한다. 한 프레임의 측정값과 별도 채널 ms를 링 버퍼에 push한다.
     void CommitFrame(float allocMs = 0.0f, float containerMs = 0.0f);
 
+    // 최근 N 프레임 ms 배열. ring buffer라 head 위치도 함께 반환한다.
+    const std::array<float, kCapacity>& FrameWallMs() const { return frameWallMs_; }
     const std::array<float, kCapacity>& UpdateMs()    const { return updateMs_; }
     const std::array<float, kCapacity>& DrawMs()      const { return drawMs_; }
     const std::array<float, kCapacity>& AllocMs()     const { return allocMs_; }
     const std::array<float, kCapacity>& ContainerMs() const { return containerMs_; }
-
     std::size_t Head()   const { return head_; }
     std::size_t Filled() const { return filled_; }
 
-    float LastUpdateMs()    const { return lastUpdateMs_; }
-    float LastDrawMs()      const { return lastDrawMs_; }
-    float LastTotalMs()     const { return lastUpdateMs_ + lastDrawMs_; }
-    float LastAllocMs()     const { return lastAllocMs_; }
-    float LastContainerMs() const { return lastContainerMs_; }
+    float LastFrameWallMs()      const { return lastFrameWallMs_; }
+    float LastUpdateMs()         const { return lastUpdateMs_; }
+    float LastDrawSubmitMs()     const { return lastDrawMs_; }
+    // sim + draw-submit. 전체 CPU 프레임이 아니므로 옛 이름(LastTotalMs)을 쓰지 않는다.
+    float LastSimDrawSubmitMs()  const { return lastUpdateMs_ + lastDrawMs_; }
+    float LastAllocMs()          const { return lastAllocMs_; }
+    float LastContainerMs()      const { return lastContainerMs_; }
 
 private:
     using Clock = std::chrono::steady_clock;
     using Time  = Clock::time_point;
 
+    Time frameStart_{};
     Time updateStart_{};
     Time drawStart_{};
 
+    std::array<float, kCapacity> frameWallMs_{};
     std::array<float, kCapacity> updateMs_{};
     std::array<float, kCapacity> drawMs_{};
     std::array<float, kCapacity> allocMs_{};
     std::array<float, kCapacity> containerMs_{};
-    std::size_t head_   = 0;
+    std::size_t head_ = 0;
     std::size_t filled_ = 0;
 
+    float lastFrameWallMs_ = 0.0f;
     float lastUpdateMs_    = 0.0f;
     float lastDrawMs_      = 0.0f;
     float lastAllocMs_     = 0.0f;
@@ -137,6 +165,7 @@ void FrameTimer::CommitFrame(float allocMs, float containerMs) {
     lastAllocMs_     = allocMs;
     lastContainerMs_ = containerMs;
 
+    frameWallMs_[head_] = lastFrameWallMs_;
     updateMs_[head_]    = lastUpdateMs_;
     drawMs_[head_]      = lastDrawMs_;
     allocMs_[head_]     = lastAllocMs_;
@@ -157,12 +186,12 @@ timer.CommitFrame(bench.LastFrameMs(), cbench.LastFrameMs());
 `bench`(EventBenchmark)와 `cbench`(ContainerBenchmark)에서 마지막 프레임의 측정값을 그대로 끌어다 push한다. 두 워크로드는 매 프레임 `RunFrame`이 호출되며 `lastFrameMs_`를 갱신하므로, `CommitFrame` 시점에는 최신 값이 들어 있다.
 
 > 측정 시점 순서가 중요하다. main 루프는
-> `BeginUpdate → sim->Update → EndUpdate → bench.RunFrame → cbench.RunFrame → BeginDraw → sim->Draw → EndDraw → CommitFrame → hud.Draw`
-> 순으로 돈다. `bench.RunFrame`과 `cbench.RunFrame`은 update/draw 타이머 밖에서 측정된다. `CommitFrame`은 시뮬 draw가 끝난 뒤, HUD를 그리기 전에 호출된다. 그래서 `lastUpdateMs_`, `lastDrawMs_`, `bench.LastFrameMs()`, `cbench.LastFrameMs()`가 모두 *같은 프레임의 값* 으로 묶이고, 그래프에는 현재 샘플이 바로 반영된다. HUD 자체를 그리는 비용은 draw ms에서 제외된다.
+> `BeginFrame → BeginUpdate → sim->Update → EndUpdate → bench.RunFrame → cbench.RunFrame → BeginDraw → sim->Draw → EndDraw → hud.Draw → EndDrawing → EndFrame → CommitFrame`
+> 순으로 돈다. frame wall 은 루프 선두에서 시작해 HUD 와 `EndDrawing`(flush/swap) 뒤에서 끝나므로, `CommitFrame` 은 그 뒤에 온다. 그 결과 HUD 가 읽는 지표는 *직전 프레임* 의 커밋 값이고 그래프도 한 프레임 지연된다. `bench.RunFrame`과 `cbench.RunFrame`은 update/draw 타이머 밖에서 측정된다. draw-submit 은 HUD 와 `EndDrawing` 을 제외하지만, frame wall 은 셋을 모두 포함한다.
 
 ### 자동 검증: `parts_graph_tests`
 
-세 라인을 한 시간축에 겹쳐 그리는 그림이 의미를 가지려면, 같은 인덱스의 네 값이 *같은 프레임* 의 것이어야 한다. 채널이 하나라도 어긋나게 밀리면 "동시에 변한다"는 관측 자체가 거짓이 된다. 그 정렬은 창 없이 확인되는 순수 계산이라 `graph` 그룹이 붙들고 있다.
+세 라인을 한 시간축에 겹쳐 그리는 그림이 의미를 가지려면, 같은 인덱스의 여러 채널 값이 *같은 프레임* 의 것이어야 한다. 채널이 하나라도 어긋나게 밀리면 "동시에 변한다"는 관측 자체가 거짓이 된다. 그 정렬은 창 없이 확인되는 순수 계산이라 `graph` 그룹이 붙들고 있다.
 
 <!-- snippet: tests/core_tests.cpp#TestFrameTimerChannels -->
 ```cpp
@@ -181,7 +210,10 @@ void TestFrameTimerChannels() {
     timer.CommitFrame();
     CHECK(timer.LastAllocMs() == 0.0f);
     CHECK(timer.LastContainerMs() == 0.0f);
-    // ...
+    CHECK(timer.AllocMs()[1] == 0.0f);
+    CHECK(timer.ContainerMs()[1] == 0.0f);
+    CHECK(timer.Head() == 2);
+
     // 링을 한 바퀴 넘겨도 네 채널이 같은 head로 함께 밀린다.
     constexpr std::size_t kCap = ppl::FrameTimer::kCapacity;
     ppl::FrameTimer rolled;
@@ -224,23 +256,28 @@ graph: 1 test(s), 14 check(s), 0 failure(s)
 
 ## 3. `Hud::DrawFrameGraph` 확장 — 세 라인을 그리는 폴리라인 폼
 
-기존 `DrawFrameGraph`는 frame total(update + draw) 한 라인만 그리는 구조였다. 폴리라인 그리기 로직을 *함수 객체* 로 빼서 같은 코드를 채널마다 반복한다.
+기존 `DrawFrameGraph`는 frame total(update + draw) 한 라인만 그리는 구조였다. 지금은 frame wall 한 라인과 alloc/container 두 라인을 그린다. 폴리라인 그리기 로직을 람다로 빼서 같은 코드를 채널마다 반복한다.
 
 `ui/hud.cpp`의 그래프 부분:
 
 ```cpp
+const auto& frameWall = timer.FrameWallMs();
+const auto& draw      = timer.DrawMs();
+const std::size_t filled = timer.Filled();
+if (filled == 0) return;
+
 const auto& alloc     = timer.AllocMs();
 const auto& container = timer.ContainerMs();
 
-// 자동 스케일: 세 채널(frame total / alloc / container)의 max.
+// 자동 스케일: 세 라인(frame wall / alloc / container)의 max.
 float maxMs = 0.0f;
 for (std::size_t i = 0; i < filled; ++i) {
-    const float total = update[i] + draw[i];
-    if (total > maxMs)        maxMs = total;
+    if (frameWall[i] > maxMs) maxMs = frameWall[i];
     if (alloc[i] > maxMs)     maxMs = alloc[i];
     if (container[i] > maxMs) maxMs = container[i];
 }
-// 최소 16.67ms 스케일 (60fps 기준선이 보이도록)
+// 최소 16.67ms 스케일 (60fps 기준선이 보이도록). 이 기준선은 frame budget 관점이며,
+// 작은 alloc/container 차이를 가릴 수 있다(그 해석은 숫자 요약과 함께 본다).
 if (maxMs < 16.67f) maxMs = 16.67f;
 
 // 60fps / 30fps 기준선. 패널 안에 들어올 때만 그린다.
@@ -257,19 +294,19 @@ drawHline(33.33f, Color{200, 200, 80, 100});  // 30fps
 스케일이 정해지면 각 채널을 같은 좌표계에 폴리라인으로 그린다.
 
 ```cpp
-const std::size_t cap  = FrameTimer::kCapacity;
+const std::size_t cap = FrameTimer::kCapacity;
 const std::size_t head = timer.Head();
 
-// 한 채널을 폴리라인으로 그리는 람다. update/draw 합산 모드와
-// 단일 시리즈 모드를 한 함수로 처리한다.
+// 한 채널을 폴리라인으로 그린다. ms[idx] 값을 0..maxMs 정규화해 y 좌표로.
+// x축은 sample index다(프레임률에 따라 실제 경과 시간 길이가 달라진다).
 auto drawSeries = [&](const std::array<float, FrameTimer::kCapacity>& series,
-                      bool addBoth, Color c) {
+                      Color c) {
     int prevX = -1;
     int prevY = 0;
-    const float denom = (filled > 1) ? (float)(filled - 1) : 1.0f;
+    const float denom = (filled > 1) ? static_cast<float>(filled - 1) : 1.0f;
     for (std::size_t i = 0; i < filled; ++i) {
         const std::size_t idx = (head + cap - filled + i) % cap;
-        const float v = addBoth ? (update[idx] + draw[idx]) : series[idx];
+        const float v = series[idx];
         const float ratio = v / maxMs;
 
         const int px = x + (int)((float)i * w / denom);
@@ -282,10 +319,12 @@ auto drawSeries = [&](const std::array<float, FrameTimer::kCapacity>& series,
         prevY = py;
     }
 };
+(void)draw;
 
-drawSeries(update,    /*addBoth=*/true,  Color{200, 220, 255, 220}); // frame total
-drawSeries(alloc,     /*addBoth=*/false, Color{ 80, 220, 220, 200}); // alloc
-drawSeries(container, /*addBoth=*/false, Color{255, 200,  80, 200}); // container
+// 라인 셋. frame wall은 HUD/EndDrawing 포함, alloc/container는 벤치마크 자체 측정.
+drawSeries(frameWall, Color{200, 220, 255, 220}); // frame wall
+drawSeries(alloc,     Color{ 80, 220, 220, 200}); // alloc
+drawSeries(container, Color{255, 200,  80, 200}); // container
 ```
 
 마지막으로 현재 스케일과 세 채널 범례를 같은 패널에 올린다.
@@ -297,22 +336,22 @@ std::snprintf(label, sizeof(label), "max %.2f ms", maxMs);
 DrawText(label, x + 6, y + 4, 12, GRAY);
 
 // 우측 상단: 라인 범례.
-const int legendX = x + w - 160;
+const int legendX = x + w - 200;
 const int legendY = y + 4;
-DrawRectangle(legendX,        legendY, 8, 8, Color{200, 220, 255, 220});
-DrawText("frame",     legendX + 12,  legendY,    10, LIGHTGRAY);
-DrawRectangle(legendX + 50,   legendY, 8, 8, Color{ 80, 220, 220, 200});
-DrawText("alloc",     legendX + 62,  legendY,    10, LIGHTGRAY);
-DrawRectangle(legendX + 100,  legendY, 8, 8, Color{255, 200,  80, 200});
-DrawText("container", legendX + 112, legendY,    10, LIGHTGRAY);
+DrawRectangle(legendX, legendY,     8, 8, Color{200, 220, 255, 220});
+DrawText("frame wall",  legendX + 12, legendY,     10, LIGHTGRAY);
+DrawRectangle(legendX + 74, legendY, 8, 8, Color{ 80, 220, 220, 200});
+DrawText("alloc",      legendX + 86, legendY,     10, LIGHTGRAY);
+DrawRectangle(legendX + 124, legendY, 8, 8, Color{255, 200,  80, 200});
+DrawText("container",  legendX + 136, legendY,    10, LIGHTGRAY);
 ```
 
-세 줄의 `drawSeries` 호출이 본체다. 같은 인덱싱·같은 정규화·같은 그리기를 색만 바꿔 세 번 반복한다. `addBoth`는 frame total 채널이 *update + draw 합산* 임을 표현하기 위한 플래그다 — 두 배열 모두 슬라이딩에 들어 있어서 어느 한쪽이 아닌 합을 그려야 frame ms가 된다.
+세 줄의 `drawSeries` 호출이 본체다. 같은 인덱싱·같은 정규화·같은 그리기를 색만 바꿔 세 번 반복한다. frame wall 은 이미 `BeginFrame`/`EndFrame` 한 쌍이 HUD·`EndDrawing` 을 포함해 잰 값이라, 별도로 채널 둘을 더하지 않는다.
 
 색은 의도적으로 *채도가 다른* 셋을 골랐다.
 
-- frame: 차분한 라일락 빛 흰색. baseline 채널.
-- alloc: 시안. allocator는 보통 frame보다 *작은 ms* 라 채도 높은 색이 가독성에 유리.
+- frame wall: 차분한 라일락 빛 흰색. baseline 채널.
+- alloc: 시안. allocator는 보통 frame wall보다 *작은 ms* 라 채도 높은 색이 가독성에 유리.
 - container: 앰버. alloc과 색상환에서 떨어져 있어 두 작은 채널이 겹쳐도 구분된다.
 
 알파를 200~220 사이로 잡아 세 라인이 겹치는 구간에서도 각각이 보인다.
@@ -321,10 +360,12 @@ DrawText("container", legendX + 112, legendY,    10, LIGHTGRAY);
 
 ## 4. 자동 스케일과 기준선의 의미
 
-자동 스케일은 *세 채널의 최댓값* 으로 잡는다. 거기에 두 가지 가드가 있다.
+자동 스케일은 *세 라인(frame wall / alloc / container)의 최댓값* 으로 잡는다. 거기에 두 가지 가드가 있다.
 
 - 최소 스케일 16.67ms. 모든 채널이 작을 때도 60fps 라인이 패널 안에 들어오게 한다.
 - 기준선 16.67ms / 33.33ms는 maxMs를 넘으면 그리지 않는다. 패널 위로 튀어나가는 라인을 막는다.
+
+이 최소 스케일은 *frame budget 관점* 의 가드다. alloc/container 처럼 16.67ms 아래에서 움직이는 작은 채널은 이 공통 축에서 픽셀로 반올림되며 차이가 사라져 보일 수 있다. 공통 축은 절대 비용 비교에 쓰고, 그 아래 미세한 차이는 채널별 확대(개별 y 축)와 숫자 요약으로 본다. x축은 고정된 초 단위 구간이 아니라 *표본 번호(sample index)* 라, 같은 600 표본이라도 프레임률에 따라 실제 경과 시간 길이가 달라진다. per-channel 확대 모드와 session 표식은 **보충 구현 목표** 다.
 
 기준선 두 개는 *프레임 예산* 의 가시화다.
 
@@ -352,9 +393,9 @@ branchless = on
 simd     = Scalar  →  SSE  →  AVX2
 ```
 
-순서대로 토글을 바꾸며 frame ms를 본다. SoA는 SIMD가 잘 먹히는 layout이라 Scalar 대비 SSE/AVX2가 *눈에 띄게* 줄어든다. 다만 ms 차이를 *어디에서* 보고 있는지 정확히 인지해야 한다 — 이 도구는 sim->Update 안에서만 SIMD를 쓴다. draw도 SIMD를 쓸 수 있지만 raylib 라이브러리에 맡겼다.
+순서대로 토글을 바꾸며 frame wall 을 본다. SoA는 SIMD 폭이 커질 때 frame wall 이 줄어들 *수 있다*. 다만 ms 차이를 *어디에서* 보고 있는지 정확히 인지해야 한다 — 이 도구는 `sim->Update` 안에서만 수동 SIMD를 쓴다. draw 는 raylib 에 맡겼다. 특정 배수나 방향을 합격 기준으로 삼지 않고, 같은 입력에 대한 정확성 검사를 먼저 통과시킨 뒤 측정한다.
 
-대조군: `layout = AoS`로 바꿔 같은 시나리오를 다시 돈다. AoS는 SIMD가 stride 문제 때문에 도구상 *Scalar 폴백* 으로 두었다. SSE/AVX2 토글이 무시되고 ms가 줄지 않는다 — 이게 의도된 결과다. 사용자는 *왜 같은 입력에 같은 토글인데 ms가 다른가* 를 layout 차이로 귀결시킨다.
+대조군: `layout = AoS`로 바꿔 같은 시나리오를 다시 돈다. 이 lab의 AoS 구현에는 수동 SIMD 경로가 없어 SSE/AVX2 요청이 실제 C++ 경로(`C++ Auto`)로 표시된다. HUD의 `simd 요청>실제` 표기가 그 차이를 보여 준다. 이때 토글이 무시된다는 사실은 layout 효과를 입증하는 증거가 아니다 — AoS 에도 compiler 자동 벡터화가 걸릴 수 있으므로, 기대와 다른 결과가 나오면 그 조건을 함께 기록한다.
 
 ### 시나리오 B — branchless의 효과는 작다
 
@@ -367,40 +408,42 @@ simd     = Scalar     ← SIMD 경로는 이미 마스크 기반이라 branchles
 branchless = off  →  on
 ```
 
-이 도구의 경계 반사 분기는 매 프레임 *대부분 false* 다. 한 프레임에 경계를 넘는 점은 전체의 1% 미만이라 branch predictor의 적중률이 99%를 넘고, 분기 예측 미스로 인한 ms 차이는 거의 나타나지 않는다. 그래서 branchless 토글이 만드는 차이는 분기 예측이 아니라 *양쪽 분기를 모두 계산하는 추가 비용* 에서 온다. 경계에 닿지 않는 99% 이상의 점에도 반사와 clamp를 무조건 걸기 때문에 branchless on이 오히려 *조금 느리게* 보일 가능성이 높다. *극적인 차이* 가 아니라 *방향성이 일관* 한지를 본다.
+이 도구의 경계 반사 데모는 드문 경계 사건을 만들 수 있지만, 실제 branch miss 율은 측정하지 않는다. 경계를 넘는 점의 비율은 dt 가 바뀌면 함께 바뀌고, 참/거짓 빈도와 하드웨어 예측 실패율은 다른 측정값이다. ON 경로는 경계에 닿지 않는 원소에도 clamp 를 수행하므로 추가 연산이 있을 수 있다. 다만 C++ 조건 연산자는 선택된 피연산자 하나만 평가하고, compiler 가 부작용 없는 계산을 select 등으로 낮출 수 있으므로 *양쪽을 모두 계산한다* 고 단정하지 않는다. 시간 차이만으로 원인을 확정하지 않고, 생성된 분기와 가능하면 PMU 의 branch miss 를 함께 본다(**보충 구현 목표**). *극적인 차이* 가 아니라 *방향성이 일관* 한지를 본다.
 
-만약 차이가 거의 없다면 그 자체가 결과다 — branchless가 항상 이기는 게 아니라는 사실, predictor가 충분히 영리한 경우는 분기 코드가 더 짧아 명령 캐시에 유리할 수도 있다는 사실이 보인다. 도구가 *환상을 깨는* 사례.
+만약 차이가 거의 없다면 그 자체가 결과다 — branchless가 항상 이기는 게 아니라는 사실, 분기 코드가 더 짧아 명령 캐시에 유리할 수도 있다는 가설이 보인다. 도구가 *환상을 깨는* 사례.
 
-### 시나리오 C — allocator 토글로 *frame ms와 alloc ms의 분리* 를 확인한다
+### 시나리오 C — allocator 토글로 *frame wall과 alloc ms의 관계* 를 본다
 
 목적: alloc 워크로드가 시뮬과 *진짜로* 분리되어 있는지.
 
 ```text
-entity   = 10k       ← frame ms를 낮게 유지
+entity   = 10k       ← frame wall을 낮게 유지
 layout   = SoA
 simd     = AVX2
 allocator = Malloc → Arena → Pool → Slab
 ```
 
-토글을 바꿀 때마다 *alloc 라인만* 변하고 *frame 라인은 그대로* 여야 한다. 만약 frame 라인까지 변한다면, 도구의 *측정 분리* 가 깨졌다는 신호다. Arena로 바꾸면 alloc ms가 가장 낮고 (Reset이 bump pointer를 0으로 되돌리는 한 줄), Pool도 낮고 (O(1) push/pop에 Reset의 free list 재구성만 더해진다), Malloc은 상대적으로 높고, Slab은 프레임마다 여덟 개 클래스 풀 전부를 Reset하느라 Pool의 열 배 안팎까지 올라간다.
+토글을 바꿀 때 *alloc 라인* 이 주로 변하고 frame wall 라인은 크게 움직이지 않는지 본다. 다만 frame wall 까지 함께 흔들렸다고 해서 곧바로 측정 분리가 깨졌다고 판정하지 않는다. 같은 CPU·cache·주파수·OS 를 공유하므로 어느 정도 상호 영향이 남는다. alloc 유효성은 먼저 target/completed/failed 와 capacity 로 확인한다. Arena·Pool·Slab 은 backend 마다 capacity 가 다르고, target 을 채우지 못한 표본(`WARN invalid sample`)은 시간 비교에서 제외한다. 기본 trace(24 B 요청)는 Slab 의 한 class 만 사용하므로, 과거에 사용한 class 수·Owns 탐색·전체 backing 등 여러 요인이 비용을 바꿀 수 있다. 특정 상대배수는 실제 로그 없이 정답처럼 제시하지 않는다.
 
-이 시나리오는 *수치를 보지 않아도* 시각화만으로 검증된다 — alloc 라인이 토글 변경 시점에 *수직 점프* 하고 frame 라인은 평탄하다면, 분리는 정상이다.
+이 시나리오는 alloc 라인이 토글 변경 시점에 *수직 점프* 하는 모양을 확인하는 데 유용하다. 다만 평탄한 frame 라인을 독립성의 증명으로 쓰지 않는다. headless 단일 워크로드 기준선과 GUI 동시 실행 결과는 서로 다른 실험으로 기록한다.
 
-### 시나리오 D — container 토글로 *순회 시 캐시 차이* 를 본다
+### 시나리오 D — container 토글로 *순회 비용 차이* 를 본다
 
 목적: 컨테이너 종류가 단순 순회 비용에 미치는 영향.
 
 ```text
-entity   = 10k       ← frame ms를 낮게 유지
+entity   = 10k       ← frame wall을 낮게 유지
 layout   = SoA
 container = Vector  →  StdList  →  IntrusiveList
 ```
 
-container 라인만 본다.
+container 라인을 본다. 아래는 예상 방향이지 정답이 아니다.
 
-- Vector: 가장 낮다. 연속 메모리, prefetcher 친화.
-- StdList: 가장 높을 가능성. 노드가 힙 곳곳에 흩어져 캐시 미스 발생. 다만 *시작 시 한 번에* push_back으로 넣은 직후라면 메모리가 비교적 연속할 수도 있다 — 이 점은 사용자가 도구를 오래 돌리며 실제로 확인해야 한다.
-- IntrusiveList: vector와 list 사이. 외부 Pool을 결합하면 노드가 *연속에 가깝게* 배치되어 list보다 빠르지만, 포인터 추적은 여전히 prefetch가 어려워 vector를 따라잡기 힘들다.
+- Vector: 순회 wall time 이 가장 낮을 가능성. 연속 메모리, prefetcher 친화.
+- StdList: 높을 가능성. 노드 주소 연속성을 보장하지 않아 캐시 미스가 늘기 쉽다. 다만 시작 시 한 번 push_back 으로 넣은 직후라면 메모리가 비교적 연속할 수 있다.
+- IntrusiveList: vector 와 list 사이일 수 있음. 외부 Pool 을 결합하면 노드가 *연속에 가깝게* 배치될 수 있지만, 포인터 추적은 여전히 prefetch 가 어려워 vector 를 따라잡기 어렵다.
+
+주소 배치는 순회 전용 모드에서 `Init` 이후 그대로 유지된다. 오래 돌린다고 노드 주소가 자동으로 흩어지지 않는다. 주소 분포의 변화를 보려면 삭제·재삽입·할당·해제를 넣은 churn trace 를 명시적으로 추가하고, 시작 직후와 후반의 노드 주소 목록과 순회 순서를 기록해 실제 변경 여부를 확인한다(**보충 구현 목표**). 시간이 올라간 것만으로 단편화 증거로 보고하지 않는다.
 
 이 시나리오는 *교과서 예측대로 안 나올 수도 있다*. 이게 도구의 가치 — *정확한 코드 + 정확한 워크로드* 에서 *실제로 어떤 차이* 가 나는지를 본인 머신에서 확인한다.
 
@@ -421,18 +464,35 @@ layout 토글만 바꾸며 세 라인 *모두* 를 관찰한다. 직관적으로
 - layout 변경은 시뮬 데이터 재초기화를 트리거한다. 메모리 할당기 상태가 흔들리면 alloc ms도 살짝 영향을 받을 수 있다.
 - 큰 메모리 영역이 새로 만들어지면 OS 페이지 캐시·CPU 캐시 상태가 변한다. *전혀 관계없어 보이는* container 라인도 첫 몇 프레임은 다르게 보일 수 있다.
 
-이 *섞임* 을 보는 것 자체가 결과다. *완벽한 분리* 는 도구가 약속하지 않는다 — 약속하는 건 *주된 효과* 가 채널별로 분리된다는 것이다. 마이크로 측정의 흔들림은 측정 도구가 *현실의 캐시·메모리 시스템* 위에서 돈다는 사실의 그림자다.
+이 *섞임* 을 보는 것 자체가 결과다. 측정 구간과 객체 소유권은 분리했지만, 같은 CPU·cache·주파수·OS 를 공유하므로 실행 비용의 상호 영향까지 제거한 것은 아니다. 마이크로 측정의 흔들림은 측정 도구가 *현실의 캐시·메모리 시스템* 위에서 돈다는 사실의 그림자다.
 
 ### 시나리오 그림
 
 ```mermaid
 flowchart TD
-    A[시나리오 A: SIMD 효과<br/>축: simd] --> R1[frame ms 변동<br/>SoA에서 Scalar→AVX2 ↘<br/>AoS에서는 변하지 않음]
-    B[시나리오 B: branchless<br/>축: branchless] --> R2[frame ms 작은 변동<br/>방향성만 일관하면 OK]
-    C[시나리오 C: allocator<br/>축: allocator] --> R3[alloc ms만 변동<br/>frame/container 평탄]
-    D[시나리오 D: container<br/>축: container] --> R4[container ms만 변동<br/>vector 최하 list 최상]
-    E[시나리오 E: 동시<br/>축: layout] --> R5[세 라인 모두 흔들림<br/>주효과는 frame, 부수 효과는 두 채널]
+    A[시나리오 A: SIMD 효과<br/>축: simd] --> R1[frame wall 변동 관찰<br/>SoA에서 Scalar→AVX2 감소 가능<br/>AoS에서는 토글 무효]
+    B[시나리오 B: branchless<br/>축: branchless] --> R2[frame wall 작은 변동<br/>방향성만 관찰·miss율 미측정]
+    C[시나리오 C: allocator<br/>축: allocator] --> R3[alloc ms 주 변동<br/>frame wall 크게 안 움직임]
+    D[시나리오 D: container<br/>축: container] --> R4[container ms 변동 관찰<br/>예상 순서는 정답 아님]
+    E[시나리오 E: 동시<br/>축: layout] --> R5[세 라인 모두 흔들릴 수 있음<br/>상호 영향은 별도 관측 대상]
 ```
+
+### 측정 절차와 세션
+
+비교는 아래 순서를 목표로 한다. 현재 도구에는 고정 fixture 재로드, 고정 dt·고정 step, warmup 제외, 독립 반복, raw sample 저장·내보내기가 없다. 아래 흐름은 그 목표 절차이며, 미구현 항목은 **보충 구현 목표** 다.
+
+```mermaid
+flowchart TD
+    A[동일 입력과 기능 정확성 확인] --> B[실제 실행 커널과 측정 구간 기록]
+    B --> C[워밍업 제외와 독립 반복]
+    C --> D[raw sample / 환경 / session 저장]
+    D --> E{가설과 일치하는가}
+    E -->|일치| F[이 조건에서 지지됨: 일반화 범위 명시]
+    E -->|불일치| G[공통 버그와 교란 요인을 분리해 추가 실험]
+    G --> B
+```
+
+현재 데모는 wall `GetFrameTime()` 을 그대로 쓰므로, 성능 관련 설정을 바꾸면 시뮬레이션 상태와 분기 분포도 함께 변한다. 인과 비교를 위해서는 고정 fixture 를 다시 로드하고 정확성 검사를 통과한 뒤 warmup 을 제외하고, 같은 step 수를 여러 번 반복하며 구현별 실행 순서를 교차한다. raw sample 과 median/p95, 환경·타이머의 시작·종료 위치를 함께 저장한다(**보충 구현 목표**). 제시할 반복 횟수는 정책의 초기값이지 통계적 충분성을 보장하는 숫자가 아니다.
 
 ## 6. 측정의 정직성 — 이 도구가 알려주지 않는 것
 
@@ -452,17 +512,17 @@ flowchart TD
 
 ### 메모리 단편화의 시간 진행
 
-allocator 토글 중 Pool과 Slab은 *단편화가 발생하지 않게 설계* 되어 있다. Malloc은 OS와 CRT의 일반 allocator라 단편화가 일어날 수 있다. 그러나 도구는 *현재 단편화 정도* 를 시각화하지 않는다.
+Pool 과 Slab 은 일정한 슬롯 계약을 제공하지만 모든 공간 낭비를 제거하지는 않는다. 24 B 요청이 32 B class 로 가면 이미 8 B 내부 낭비가 생기고, 미사용 슬롯·class 별 여유 불균형·예약 backing 도 남는다. Malloc 은 OS 와 CRT 의 일반 allocator 라 단편화가 일어날 수 있다. 그러나 도구는 *현재 단편화 정도* 를 시각화하지 않는다.
 
-`IAllocator`는 라이브 바이트와 누적 할당 횟수 정도만 노출한다. *블록 분포가 어떻게 흩어져 있는가* 는 보이지 않는다. 단편화가 의심되는 시나리오는 *오래 돌린 후 alloc ms가 점진적으로 올라가는가* 로 *간접* 추정해야 한다.
+`IAllocator` 는 requested 기준 논리 live/peak, 실패 횟수, `SlotBytesLive()`, `ReservedBacking()` 정도를 노출한다. HUD 의 `slot/back` 줄이 그중 일부를 보여 준다. *블록 분포가 어떻게 흩어져 있는가*, class 별 여유, RSS 는 보이지 않는다. requested bytes, slot bytes, class 별 여유, backing 용량, RSS 를 나누어 보되, 실행 시간이 느려졌다는 것만으로 단편화가 발생했다고 확정하지 않는다.
 
-이 차원을 채우려면 allocator 내부에 *블록 맵* 을 그리는 시각화를 붙여야 한다 — 별도 패널을 띄우고 각 블록을 색이 다른 사각형으로 그리는 식. 분량이 큰 별도 확장 토픽이다.
+이 차원을 채우려면 allocator 내부에 *블록 맵* 을 그리는 시각화를 붙여야 한다 — 별도 패널을 띄우고 각 블록을 색이 다른 사각형으로 그리는 식. free slot 이 충분해도 필요한 class 가 고갈될 수 있으므로, mixed-size/mixed-lifetime trace 로 그 조건을 재현하고 reason 을 표시하는 것도 **보충 구현 목표** 다.
 
 ### GPU 시간
 
-`sim->Draw`가 그래프의 draw ms 채널에 잡히긴 하지만, 그 안에서 *CPU가 명령을 발행하는 시간* 과 *GPU가 실제로 그리는 시간* 은 분리되지 않는다. 이 구조에서는 HUD와 `EndDrawing`의 present/swap 비용도 draw ms에서 제외된다. raylib가 내부에서 사용하는 OpenGL/DirectX 호출은 *대부분 비동기* 라, 이 도구가 재는 draw ms는 *명령 큐에 던지기* 에 가까운 시간일 수 있다.
+`sim->Draw` 는 HUD 의 `draw`(draw-submit) 구간에 잡히지만, 그 안에서 *CPU가 명령을 발행하는 시간* 과 *GPU가 실제로 그리는 시간* 은 분리되지 않는다. draw-submit 은 `BeginDrawing`/`Clear`/점 그리기 호출 구간이라 HUD 와 `EndDrawing` 을 제외한다. HUD·flush·swap 은 frame wall 에만 포함되고, 그 값도 순수한 GPU 시간이 아니므로 present/GPU 시간이라고 부르지 않는다. raylib 5.0 의 기본 렌더 경로는 OpenGL 계열이고, 이 도구가 재는 draw-submit 은 *명령 큐에 던지기* 에 가까운 시간일 수 있다.
 
-GPU 측 시간은 그래픽 API의 timestamp query로만 잴 수 있다 — `glQueryCounter` / D3D11 `ID3D11Query` / Vulkan `vkCmdWriteTimestamp`. 이 도구는 raylib 추상화 뒤에 있어서 그 layer를 뚫지 않는다.
+GPU 측 시간은 그래픽 API의 timestamp query로만 잴 수 있다 — `glQueryCounter` / D3D11 `ID3D11Query` / Vulkan `vkCmdWriteTimestamp`. 이 도구는 raylib 추상화 뒤에 있어서 그 layer를 뚫지 않는다. D3D11·Vulkan 백엔드용 query 는 별도 확장이며 **보충 구현 목표** 다.
 
 대신 RenderDoc, Nsight Graphics, PIX 같은 GPU 프로파일러로 외부에서 캡처한다.
 
@@ -484,17 +544,17 @@ AVX2가 SSE보다 빨라야 한다고 *예상* 했지만, 일부 노트북 CPU�
 
 ### 의존성 지옥
 
-이 도구는 raylib 5.0 + raygui 4.0을 FetchContent로 끌어다 쓴다. 빌드는 단순하지만, *raylib 내부 변화* 가 측정에 영향을 준다 — 어느 버전이 OpenGL 명령을 다르게 일괄 처리하면 draw ms가 변할 수 있다. CMake 옵션이 SIMD 매크로를 다르게 켜면 빌드별로 frame ms가 달라진다.
+이 도구는 raylib 5.0 + raygui 4.0을 FetchContent로 끌어다 쓴다. 빌드는 단순하지만, *raylib 내부 변화* 가 측정에 영향을 준다 — 어느 버전이 OpenGL 명령을 다르게 일괄 처리하면 draw-submit 과 frame wall 이 변할 수 있다. CMake 옵션이 SIMD 매크로를 다르게 켜면 빌드별로 frame wall 이 달라진다.
 
 대응 가능한 부분: CMakeLists에 빌드 정보(`PERF_LAB_TARGET_X86`, `PERF_LAB_ENABLE_AVX2`)를 명시했고, raylib 버전을 고정했다. 그래도 *완전한 재현* 을 보장하는 건 도구의 책임 너머다.
 
 ### 측정의 *측정 비용*
 
-`std::chrono::steady_clock::now()`는 가볍지만 공짜는 아니다. 매 프레임 `BeginUpdate / EndUpdate / BeginDraw / EndDraw`로 4번, `EventBenchmark::RunFrame` 안에서 2번, `ContainerBenchmark::RunFrame` 안에서 2번 — 한 프레임에 8번 호출된다. 시스템에 따라 한 호출이 수십 ns 단위라 *측정이 측정 대상에 영향* 을 준다.
+`std::chrono::steady_clock::now()`는 가볍지만 공짜는 아니다. 매 프레임 frame wall 의 `BeginFrame`/`EndFrame`, update 의 `BeginUpdate`/`EndUpdate`, draw-submit 의 `BeginDraw`/`EndDraw` 로 6번, `EventBenchmark::RunFrame` 안에서 2번, `ContainerBenchmark::RunFrame` 안에서 2번 — 한 프레임에 10번 호출된다. 시스템에 따라 한 호출이 수십 ns 단위라 *측정이 측정 대상에 영향* 을 준다.
 
-큰 워크로드에서는 무시할 수준이지만, 마이크로 측정(0.1ms 차이를 비교하는 시나리오)에서는 신호 대비 노이즈가 커질 수 있다. 진짜 마이크로 벤치는 *RDTSC* 같은 고해상도 카운터로 직접 사이클을 재거나, Google Benchmark처럼 자동 반복·통계 처리하는 도구를 쓴다.
+큰 워크로드에서는 무시할 수준이지만, 마이크로 측정(0.1ms 차이를 비교하는 시나리오)에서는 신호 대비 노이즈가 커질 수 있다. 진짜 마이크로 벤치는 고정 dt·고정 step 으로 반복하고 timer overhead 를 따로 관찰하거나, Google Benchmark처럼 자동 반복·통계 처리하는 도구를 쓴다(**보충 구현 목표**).
 
-이 도구는 *프레임 단위 측정* 을 ms로 보는 것이 목적이라 이 정도 오차는 허용한다.
+현재 값은 `steady_clock` 이 잰 지정 구간의 경과 시간이다. 단위를 nanoseconds 로 표시한다고 실제 시계 해상도가 1ns 가 되는 것은 아니다. RDTSC 를 쓰더라도 그것이 곧바로 실제 코어 사이클 수를 주는 것은 아니다 — TSC tick 의 의미, clock 에 대한 전제, 실행 순서 보장과 가상화 조건을 함께 밝혀야 한다. CPU cycles 는 지원되는 PMU 로 재고, TSC 실습은 그 전제를 명시한 선택 과제로 둔다(**보충 구현 목표**).
 
 ### 정적 분석은 빠져 있다
 
@@ -521,19 +581,22 @@ parts_perf_lab은 여기서 마무리한다. 여덟 단계에 걸쳐 토글 기�
 도구가 가진 것:
 
 - 여섯 축 토글로 entity 수 / 메모리 layout / SIMD 폭 / 분기 / allocator / container를 *런타임에* 갈아 끼운다.
-- 세 측정 채널(frame · alloc · container)을 *분리해* 재고 *한 그래프에 겹쳐* 그린다.
+- 세 측정 채널(frame wall · alloc · container)을 *분리해* 재고 *한 그래프에 겹쳐* 그린다. HUD 에는 sim·draw-submit·`sim+sub` 도 숫자로 함께 보인다.
 - ring buffer 슬라이딩 윈도우로 600 프레임의 시계열을 본다.
 - 60fps / 30fps 기준선과 자동 스케일로 절대 비교와 상대 비교를 동시에 한다.
 
 도구가 *없는* 것:
 
+- 고정 fixture/고정 dt/고정 step 재생과 독립 반복·warmup·median/p95·JSONL export.
+- 채널별 확대(개별 y 축) 모드.
 - 하드웨어 카운터(캐시 미스·분기 미스·IPC).
 - 메모리 단편화의 시간 진행 시각화.
 - GPU 시간의 분리.
 - ms 분포의 통계 정량화.
 - 정적 분석(disassembly·기계어 검증).
+- 삭제·재삽입을 포함한 alloc/free churn trace.
 
-없는 것은 *외부 도구* 로 보완한다 — perf, VTune, RenderDoc, Compiler Explorer, Google Benchmark. 도구는 만능을 약속하지 않는다. *자기 차원* 만 정직하게 보여주고, 다른 차원이 필요할 때를 *명시적으로 알려주는* 게 도구의 책임이다.
+**보충 구현 목표:** 위 목록은 아직 구현하지 않은 항목이다. 없는 것은 *외부 도구* 로 보완한다 — perf, VTune, RenderDoc, Compiler Explorer, Google Benchmark. 도구는 만능을 약속하지 않는다. *자기 차원* 만 정직하게 보여주고, 다른 차원이 필요할 때를 *명시적으로 알려주는* 게 도구의 책임이다.
 
 그리고 더 중요한 것 — 이 도구는 설계된 가정 안에서만 측정한다. 결과가 가설을 *반박* 할 때 받아들이는가가 도구의 가치다. AVX2가 안 빨라도, branchless가 효과 없어도, vector가 list를 못 이겨도 그게 *이 환경의 진실* 이다. 측정의 정직성은 도구가 아니라 *도구를 쓰는 방식* 에 달려 있다.
 

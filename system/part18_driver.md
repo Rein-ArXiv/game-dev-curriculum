@@ -50,6 +50,7 @@ flowchart TB
     A[애플리케이션] -->|read/write 시스템 콜| V[커널 VFS]
     V -->|file_operations| D[디바이스 드라이버]
     D -->|I/O 명령, 레지스터 접근| H[하드웨어]
+    V -. "character/block 중심 예시" .-> N["모든 network/device I/O의 보편 경로는 아님"]
 ```
 
 애플리케이션은 단순히 `open`, `read`, `write`, `close`를 호출한다. 파일이든, 디스크든, 네트워크 카드든, 프린터든 동일한 인터페이스로 접근한다. UNIX의 "Everything is a file" 철학이다.
@@ -82,7 +83,7 @@ Ritchie와 Thompson은 1974년 논문 "The UNIX Time-Sharing System"에서 입�
 특징은 다음과 같다.
 
 - `read`와 `write`가 커널 버퍼를 거치지 않고 직접 장치에 전달될 수 있다.
-- 데이터를 버퍼링하거나 재배치하지 않는다.
+- 커널이 블록 단위로 재배치하지는 않지만, TTY처럼 드라이버 내부 buffer를 두는 문자 디바이스도 있다.
 - 구조가 단순하다.
 
 ### 블록 디바이스
@@ -240,7 +241,7 @@ typedef u32 dev_t;
 #define MKDEV(ma,mi) (((ma) << MINORBITS) | (mi))
 ```
 
-현재 구현에서는 12비트를 major에, 20비트를 minor에 할당한다. 즉, 최대 4,096개의 드라이버와 각 드라이버당 1,048,576개의 장치를 지원한다.
+현재 구현에서는 12비트를 major에, 20비트를 minor에 할당한다. 즉 `dev_t`의 번호 공간은 major 4,096개, minor 1,048,576개다. major는 드라이버 또는 드라이버 군을 식별하는 번호이며, 하나의 major 아래 여러 driver/device가 공존할 수 있으므로 major 가짓수를 driver 최대 개수와 같은 뜻으로 쓰지 않는다.
 
 드라이버는 다음 함수로 major 번호를 할당받는다.
 
@@ -499,6 +500,7 @@ Bottom Half 메커니즘은 다음과 같다.
 ```c
 struct my_device {
     /* ... */
+    int irq;
     struct work_struct work;
 };
 
@@ -529,9 +531,15 @@ static irqreturn_t my_interrupt_handler(int irq, void *dev_id)
 
 static void my_remove(struct my_device *dev)
 {
-    /* dev를 해제하기 전에 in-flight work와 수명을 합류시킨다. */
+    /* 1. 새 work를 enqueue할 수 있는 IRQ 생산자를 먼저 멈춘다.
+     *    disable_irq()는 진행 중인 핸들러 완료까지 대기하므로,
+     *    이후로는 재진입 enqueue가 생기지 않는다. */
+    disable_irq(dev->irq);
+
+    /* 2. 그 뒤에 in-flight work/timer를 drain한다. */
     cancel_work_sync(&dev->work);
-    /* IRQ/DMA와 나머지 자원도 역순으로 해제한다. */
+
+    /* DMA와 나머지 자원도 producer 차단 → IRQ 동기화 → drain 순으로 해제한다. */
 }
 ```
 
@@ -633,7 +641,7 @@ void dma_unmap_sg(struct device *dev, struct scatterlist *sg,
                   int nents, enum dma_data_direction dir);
 ```
 
-네트워크 패킷이나 파일 I/O에서 자주 사용된다.
+`dma_map_sg()`의 반환값은 device에 실제로 매핑된 segment 수(`mapped_nents`)로, 입력한 원래 개수(`original_nents`)와 다를 수 있다(IOMMU coalescing 등). `dma_unmap_sg()`에는 원래 개수를 넘겨야 하므로 두 값을 따로 보관한다. 네트워크 패킷이나 파일 I/O에서 자주 사용된다.
 
 ## 8. sysfs와 디바이스 모델
 
@@ -1027,21 +1035,29 @@ static int mydev_mmap(struct file *filp, struct vm_area_struct *vma)
 {
     struct my_device *dev = filp->private_data;
     unsigned long size = vma->vm_end - vma->vm_start;
-    unsigned long pfn;
+    unsigned long offset = vma->vm_pgoff << PAGE_SHIFT;
 
-    if (size > dev->buffer_size)
+    /* 요청 길이와 offset이 buffer 범위를 벗어나지 않는지 검사한다. */
+    if (size > dev->buffer_size || offset > dev->buffer_size - size)
         return -EINVAL;
 
-    pfn = virt_to_phys(dev->buffer) >> PAGE_SHIFT;
-
-    if (remap_pfn_range(vma, vma->vm_start, pfn, size, vma->vm_page_prot))
+    /*
+     * dev->buffer는 사용자 공개 전용으로 page-aligned·zeroed page에
+     * 할당돼 있어야 한다. 작은 kmalloc 객체의 물리 주소를 그대로
+     * 매핑하면 같은 물리 페이지의 다른 객체나 padding까지 노출된다.
+     * DMA coherent buffer에는 dma_mmap_coherent(), vmalloc 영역에는
+     * remap_vmalloc_range()처럼 할당 방식에 맞는 mmap API를 쓴다.
+     */
+    if (remap_pfn_range(vma, vma->vm_start,
+                        page_to_pfn(virt_to_page(dev->buffer + offset)),
+                        size, vma->vm_page_prot))
         return -EAGAIN;
 
     return 0;
 }
 ```
 
-`read`/`write` 없이 직접 메모리 접근으로 고성능 전송이 가능하다.
+`read`/`write` 없이 직접 메모리 접근으로 고성능 전송이 가능하다. 이 예는 해당 buffer가 사용자 공개용 전용 물리 페이지이고 매핑 수명이 보장되며, 제거 시 매핑을 분리할 때만 성립한다.
 
 ### 플랫폼 드라이버
 
@@ -1095,6 +1111,8 @@ static int my_suspend(struct device *dev)
 {
     struct my_device *mydev = dev_get_drvdata(dev);
 
+    /* 새 work 생산자(IRQ)를 먼저 멈추고 동기화한 뒤 큐를 drain한다. */
+    disable_irq(mydev->irq);
     flush_workqueue(mydev->workqueue);
     writel(POWER_DOWN, mydev->regs + POWER_REG);
 
@@ -1196,15 +1214,23 @@ static blk_status_t nvme_map_data(struct nvme_dev *dev, struct request *req,
                                   struct nvme_command *cmnd)
 {
     struct nvme_iod *iod = blk_mq_rq_to_pdu(req);
-    int ret;
+    blk_status_t ret;
 
-    /* Scatter-Gather 리스트 매핑 */
-    ret = dma_map_sg(dev->dev, iod->sg, iod->nents, dma_dir);
-    if (ret == 0)
+    /* 원래 segment 수를 보관한다. unmap은 원래 개수로 해야 한다. */
+    iod->original_nents = iod->nents;
+
+    /* 반환값은 실제 매핑된 segment 수(mapped_nents)로 원래 개수와 다를 수 있다. */
+    iod->mapped_nents = dma_map_sg(dev->dev, iod->sg, iod->original_nents, dma_dir);
+    if (iod->mapped_nents == 0)
         return BLK_STS_RESOURCE;
 
     /* PRP(Physical Region Page) 리스트 생성 */
     ret = nvme_setup_prps(dev, req, iod);
+    if (ret != BLK_STS_OK) {
+        /* 실패하면 기존 매핑을 원래 개수 기준으로 되돌리고 제출하지 않는다. */
+        dma_unmap_sg(dev->dev, iod->sg, iod->original_nents, dma_dir);
+        return ret;
+    }
 
     /* 명령 큐에 추가 */
     cmnd->rw.dptr.prp1 = cpu_to_le64(sg_dma_address(iod->sg));
@@ -1254,13 +1280,16 @@ RUNNING
 
 | 자원 | 제거 시 필요한 대표 동작 |
 |---|---|
-| IRQ handler | 장치 IRQ 차단, `free_irq`/`synchronize_irq` |
-| workqueue | 새 enqueue 차단, `cancel_work_sync` 또는 `flush_workqueue` |
+| IRQ handler | 새 I/O 차단 뒤 장치 IRQ 차단, `free_irq`/`synchronize_irq` |
+| workqueue | IRQ 동기화 뒤 새 enqueue 차단, `cancel_work_sync` 또는 `flush_workqueue` |
 | timer | `del_timer_sync`/해당 동기 취소 API |
 | tasklet | kill API로 실행·예약 상태 drain |
-| RCU callback/readers | `synchronize_rcu` 또는 callback barrier |
+| RCU readers only | `synchronize_rcu` (reader grace period 대기) |
+| RCU callbacks | 신규 `call_rcu` 생산 차단 뒤 `rcu_barrier` (게시된 callback 완료 대기) |
 | DMA | 장치 중단, completion 확인, unmap 뒤 buffer free |
 | character device | 새 open 차단, device/cdev unregister, 열린 file reference drain |
+
+`synchronize_rcu()`는 reader grace period를 기다리는 것이고 `rcu_barrier()`는 이미 게시된 callback의 실행 완료를 기다리는 것으로, 서로 대체할 수 없다. module이 정의한 callback을 `call_rcu`로 게시한다면 unload 전에 새 `call_rcu` 생산을 차단한 뒤 `rcu_barrier()`로 게시분 완료를 기다린다. reader 수명만 문제라면 그에 맞는 grace period를 쓴다.
 
 동기 취소 함수를 lock을 잡은 채 호출하면 callback이 같은 lock을 기다리면서 deadlock이 날 수 있다. "취소 전에 어떤 lock을 놓아야 하는가"도 shutdown protocol의 일부다.
 

@@ -144,7 +144,7 @@ float RewardGood(const GameState& g, const GameState& prev) {
 }
 ```
 
-희소 보상(이기거나 지거나)은 정직하지만 학습이 어렵다 — 무작위로 행동하는 초기 에이전트가 "이김"에 닿을 확률이 거의 0이라 학습 신호가 오지 않는다. 형태 보상(reward shaping)은 중간 진척에 작은 신호를 줘 학습을 도울 수 있지만, 잘못 설계하면 위의 reward hacking을 부른다. 할인 MDP에서 *potential-based shaping* 을
+희소 보상(이기거나 지거나)은 정직하지만 학습이 어렵다 — 무작위로 행동하는 초기 에이전트가 "이김"에 닿을 확률이 거의 0이라 학습 신호가 오지 않는다. 형태 보상(reward shaping)은 중간 진척에 작은 신호를 줘 학습을 도울 수 있지만, 잘못 설계하면 위의 reward hacking을 부른다. 위 `RewardGood`의 progress 차분은 $\gamma$가 없고 잠재함수 차분도 아니므로 정책 보존을 보장하지 않는 일반적인 shaping 예제일 뿐이다. 할인 MDP에서 *potential-based shaping* 을
 
 $$F(s,a,s') = \gamma \Phi(s') - \Phi(s)$$
 
@@ -492,7 +492,9 @@ if (step % syncInterval == 0)
 
 DQN은 Q를 학습해 *간접적으로* 정책을 얻는다(argmax). Policy Gradient는 *정책을 직접* 학습한다 — $\pi(a \mid s; \theta)$를 신경망으로 두고, 기대 보상 $J(\theta) = \mathbb{E}_\pi[G_0]$을 높이는 방향으로 $\theta$를 경사 *상승* 시킨다. policy gradient 정리가 그 경사를 준다.
 
-$$\nabla_\theta J(\theta) = \mathbb{E}_\pi\!\left[\, \nabla_\theta \log \pi(a \mid s; \theta)\; A(s, a) \,\right]$$
+$$\nabla_\theta J(\theta) = \mathbb{E}_\pi\!\left[\, \sum_t \gamma^t\, \nabla_\theta \log \pi(a_t \mid s_t; \theta)\; A(s_t, a_t) \,\right]$$
+
+여기서 $\mathbb{E}_\pi$는 궤적과 정책이 만든 (정규화하지 않은) 할인 방문 측도에 대한 기대다. 상태·행동 방문을 확률분포로 정규화해 쓰면 $1/(1-\gamma)$ 정규화 계수가 함께 붙으며, 무할인 방문 평균으로 바꾸면 상태별 가중이 달라진다.
 
 직관은 단순하다. 우위 $A(s, a)$(그 행동이 평균보다 얼마나 나았는가)가 양수면 그 행동의 로그 확률을 *올리고*, 음수면 *내린다*. 좋았던 행동은 더 자주, 나빴던 행동은 덜 하게 정책 분포를 민다. 이산·연속 행동 모두 자연스럽고(연속이면 가우시안 정책의 평균·분산을 출력), 확률적 정책을 직접 표현한다.
 

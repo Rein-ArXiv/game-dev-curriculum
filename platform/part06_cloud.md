@@ -210,22 +210,29 @@ ABR의 추정이 틀리면 *버퍼블로트* 가 생긴다 — 보내는 양이 
 네트워크 지연은 일정하지 않다 — 패킷마다 도착 간격이 출렁인다(지터). 도착하는 대로 바로 디코딩·표시하면 *프레임 간격이 들쭉날쭉* 해 화면이 떨린다. 이를 막으려 *지터 버퍼* 에 패킷을 잠깐 쌓아 *고른 간격으로* 꺼낸다.
 
 ```cpp
-// 지터 버퍼: 지연 안정성 vs 추가 지연의 절충
+// 지터 버퍼: 지연 안정성 vs 추가 지연의 절충.
+// 주의: 도착 간격에서 프레임 간격을 빼면 "패킷 1개 = 프레임 1개"를 가정하게 되어,
+// 한 프레임이 여러 패킷으로 쪼개지는 정상 분할/버스트를 지터로 오인한다.
 class JitterBuffer {
     int targetDepthMs_ = 20;          // 버퍼 목표 깊이
     int64_t prevArrivalUs_ = -1;      // 직전 패킷 도착 시각
+    int64_t prevSendUs_ = -1;         // 직전 패킷 송신 시각(헤더 timestamp)
 public:
-    void OnPacket(Packet p, int64_t arrivalUs) {
-        if (prevArrivalUs_ >= 0) {
-            // 지터 = 도착 간격이 송신 주기(kFrameIntervalUs, 60fps면 ≈16667us)에서 벗어난 정도
-            const int64_t devUs = (arrivalUs - prevArrivalUs_) - kFrameIntervalUs;
-            observedJitter_.Add(std::abs(devUs) / 1000);   // us → ms 로 단위를 통일해 누적
+    void OnPacket(Packet p, int64_t arrivalUs, int64_t sendUs) {
+        // RTP interarrival: 도착 간격에서 송신 timestamp 간격을 빼는 variation.
+        // 두 간격을 같은 clock unit으로 측정한다(us→ms 변환은 누적 시).
+        if (prevArrivalUs_ >= 0 && prevSendUs_ >= 0) {
+            const int64_t devUs =
+                (arrivalUs - prevArrivalUs_) - (sendUs - prevSendUs_);
+            observedJitter_.Add(std::abs(devUs) / 1000);
         }
+        // 시작 직후 빈 표본은 추정하지 않는다(startup empty sample).
         prevArrivalUs_ = arrivalUs;
-        // 지터가 크면 버퍼를 늘려 안정성↑(지연↑)
-        // 지터가 작으면 버퍼를 줄여 지연↓
+        prevSendUs_ = sendUs;
+        // 지터가 크면 버퍼를 늘려 안정성↑(지연↑), 작으면 줄여 지연↓.
+        // 이 P95 버퍼 정책은 표준 RTP의 EWMA 추정기와는 다른 자체 정책이다.
         targetDepthMs_ = Clamp(static_cast<int>(observedJitter_.P95() * 1.5f), kMin, kMax);
-        queue_.Push(std::move(p));
+        queue_.Push(std::move(p));   // reorder/drop 정책은 Pop 계약으로 분리
     }
     bool Pop(Frame& out) { /* targetDepth만큼 찼을 때부터 일정 간격 방출 */ }
 };
@@ -278,14 +285,22 @@ public:
 ```mermaid
 flowchart TB
     GPU[물리 GPU] --> M1{공유 방식}
-    M1 --> P[패스스루<br/>1세션 전용]
+    M1 --> P[패스스루<br/>GPU↔VM 할당]
     M1 --> V[시분할 vGPU<br/>스케줄러가 번갈아]
-    M1 --> S[공간 분할<br/>MIG 등 자원 격리]
+    M1 --> S[공간 분할<br/>MIG 등 자원 격리<br/>profile별 graphics/encoder 확인]
 ```
 
-- **패스스루(passthrough)**: GPU 한 장을 한 가상머신에 *통째로* 할당. 성능 간섭이 없어 가장 안정적이지만 *밀도가 1* 이라 비싸다. 고사양 AAA·경쟁 게임에 쓴다.
+- **패스스루(passthrough)**: GPU 한 장을 한 가상머신에 *통째로* 할당하는 *GPU/VM 할당 방식* 이다. 성능 간섭이 적지만 *본 예제 정책* 에서는 밀도가 1이라 비싸다. 다만 VM과 사용자 세션은 같은 객체가 아니므로, 같은 VM에서 여러 게임 프로세스·스트리밍 세션을 돌리면 밀도를 1보다 높일 수 있다(서비스 배치 정책의 몫).
 - **시분할 vGPU**: 하나의 GPU를 여러 가상 GPU로 쪼개 *스케줄러가 시간순으로 번갈아* 실행. 밀도는 높지만 세션끼리 *서로의 프레임 타이밍에 간섭* 한다. 가벼운 게임·낮은 해상도에 적합.
-- **공간 분할**: GPU의 연산 유닛·메모리를 *물리적으로 분할* 해 세션마다 격리된 조각을 준다. 간섭이 적고 밀도와 안정성의 절충이 좋다.
+- **공간 분할(MIG 등)**: GPU의 연산 유닛·메모리를 *물리적으로 분할* 해 세션마다 격리된 조각을 준다. 간섭이 적고 밀도와 안정성의 절충이 좋다. 다만 *MIG라는 사실만으로 게임 그래픽·인코더 실행이 보장되지 않는다* — SM/VRAM 격리, graphics 기능, encoder 할당, 라이선스 조건을 GPU 모델·driver·profile별로 별도 확인한다.
+
+| 확인 항목 | 질문 |
+|---|---|
+| GPU 모델·세대 | 해당 제품이 MIG/vGPU를 지원하는가 |
+| driver 버전 | 필요한 D3D/Vulkan/OpenGL·presentation 경로가 지원되는가 |
+| graphics profile | 분할 조각에서 그래픽 세션 실행이 허용되는가(예외 profile 여부) |
+| encoder 할당 | NVENC 등 인코더 슬롯을 분할·할당할 수 있는가 |
+| 라이선스 | vGPU/MIG 소프트웨어 라이선스 조건을 충족하는가 |
 
 세션 밀도가 곧 단가다. 밀도를 높이면 사용자당 원가가 내려가지만, *프레임 타임 간섭* 으로 일부 세션이 16ms 마감을 놓치면 끊김으로 직결된다. 그래서 밀도는 *게임 등급별로 다르게* 잡는다 — 가벼운 게임은 빽빽이, 무거운 게임은 듬성듬성.
 
@@ -298,8 +313,10 @@ GPU의 *하드웨어 인코더(NVENC 등)* 도 유한 자원이다. 한 칩의 �
 세션은 컨테이너, VM, 프로세스 격리 중 드라이버·보안·시작 시간 요구에 맞는 단위를 쓴다. 오케스트레이터는 새 세션을 여유 있는 GPU 노드에 배치하고 종료 시 자원을 회수한다. 다만 노드 장애 시 실행 중 세션을 자동으로 다른 노드로 "이동"할 수 있는 것은 아니다. 게임 상태·인코더 상태·연결을 체크포인트하거나 외부화하지 않았다면 세션은 끊기고 새 인스턴스에서 저장 지점부터 복구해야 한다. 장애 목표에 맞춰 재접속 토큰, 주기적 상태 저장, 대기 노드 비용을 설계한다.
 
 ```cpp
-// 세션 배치 결정: 지연·밀도·격리의 균형
-NodeId Scheduler::Place(const SessionRequest& req) {
+// 세션 배치 결정: 지연·밀도·격리의 균형.
+// 선택(candidate)과 실제 GPU/인코더 예약(reservation)을 한 임계 구역에서 원자적으로 처리한다.
+// 반환: 성공 lease 또는 NoCandidate/StaleCapacity — 호출자가 Queue/Reject로 분기한다.
+PlaceResult Scheduler::Place(const SessionRequest& req) {
     // 1. 사용자에게 가까운 지역의 노드만 후보로(지연)
     auto candidates = NodesInRegion(req.userRegion);
 
@@ -311,8 +328,16 @@ NodeId Scheduler::Place(const SessionRequest& req) {
         return n.freeEncoderSlots > 0 && n.freeGpuShare >= req.gpuShare;
     });
 
-    // 4. 가동률을 고르게(빈 노드를 채워 다른 노드를 비워 끄도록)
-    return BestFit(candidates);   // 8절 비용과 직결
+    if (candidates.empty())
+        return {PlaceStatus::NoCandidate, {}};   // 호출자가 Queue 또는 Reject로 분기
+
+    // 4. 노드를 최대한 채워 비워지는 노드를 늘리는 bin-packing(consolidation) 목적.
+    //    분산 균형(load balancing)이 목적이면 정책 이름과 비교 기준을 그에 맞춘다.
+    //    BestFit은 스냅샷 선택이 아니라 lease/reservation을 원자적으로 획득한다.
+    auto lease = BestFitReserve(candidates, req);
+    if (!lease)
+        return {PlaceStatus::StaleCapacity, {}}; // 동시 예약 경쟁·stale capacity → 재시도/큐
+    return {PlaceStatus::Ok, *lease};
 }
 ```
 
@@ -369,15 +394,15 @@ stateDiagram-v2
 
 ### GPU 시간이 지배한다
 
-클라우드 게이밍 원가의 압도적 비중은 *GPU 시간* 이다. 영상 인코딩·세션 관리·네트워크는 모두 무겁지만, 진짜 비싼 것은 *게임을 실제로 렌더하는 GPU* 다. 클라우드 GPU 인스턴스는 시간당 수 달러 규모이고, 한 사용자가 한 세션을 점유하는 *매 분* 이 그 요금을 태운다. 그래서 비용의 두 지렛대는 분명하다 — *세션당 GPU 점유를 줄이거나*(밀도), *유휴 GPU 시간을 줄이거나*(가동률).
+클라우드 게이밍 원가에서 *GPU 시간* 이 큰 비중을 차지한다. 영상 인코딩·세션 관리·네트워크도 무겁지만, 게임을 실제로 렌더하는 GPU 인스턴스는 시간당 수 달러 규모이고, 한 사용자가 한 세션을 점유하는 *매 분* 이 그 요금을 태운다. 다만 실제 비중은 요금 모델·가동률·게임 특성에 따라 달라지므로, 여기서는 GPU 시간이 크다는 모델 가정으로 둔다. 그래서 비용의 두 지렛대는 분명하다 — *세션당 GPU 점유를 줄이거나*(밀도), *유휴 GPU 시간을 줄이거나*(가동률).
 
 ### 세션 밀도 × 가동률
 
 원가를 한 줄로 쓰면 다음 꼴이다.
 
-$$\text{사용자당 원가} \approx \frac{\text{GPU 시간당 비용}}{\text{세션 밀도} \times \text{가동률}}$$
+$$\text{USD/session-hour} \approx \frac{\text{USD/GPU-hour}}{(\text{sessions/GPU}) \times \text{occupancy}}$$
 
-세 변수가 모두 트레이드오프를 품는다.
+이 좌변은 *활성 세션 시간당 GPU 원가* 다 — 사용자 총비용은 여기에 평균 사용 시간(h)을 곱하고, GPU 외 egress·CPU·스토리지·warm pool 비용을 별도 항으로 더해 구한다. 밀도>0, 가동률∈(0,1]로 두고 고정 시간대에서 평균화한다. 세 변수가 모두 트레이드오프를 품는다.
 
 - **세션 밀도**(6절): 높이면 단가가 내려가지만, 간섭으로 일부 세션이 마감을 놓쳐 *품질이 떨어진다*. 품질 보장과 직접 충돌한다.
 - **가동률**(6·7절): warm pool과 오토스케일링의 정확도. 피크에 맞춰 켜두면 *피크 외 시간의 유휴* 가 비용이 되고, 빠듯하게 켜면 대기열이 생긴다. 게임 사용은 *저녁·주말에 몰리는* 강한 주기성이 있어, 평균 가동률을 높이기 어렵다.
@@ -416,9 +441,9 @@ GPU 시간이 곧 원가이므로, *정액 구독* 은 헤비 유저가 많을�
 
 ## 더 읽을거리
 
-- NVIDIA Video Codec SDK(NVENC) 문서 — 저지연 인코딩 프리셋, 인트라-리프레시, 동시 세션 제한.
-- AV1 / SVT-AV1, AOMedia 명세 — 차세대 코덱의 압축 효율과 하드웨어 디코딩 요건.
-- WebRTC 및 GCC(Google Congestion Control) 문서 — 지연 기반 혼잡 제어와 적응 비트레이트의 표준 구현.
+- NVIDIA Video Codec SDK(NVENC) 문서 — 저지연 인코딩 프리셋, 인트라-리프레시, 동시 세션 제한(지원 세대·드라이버 버전은 별도 확인).
+- AOMedia AV1 명세 — 코덱 규격·압축 효율. SVT-AV1 — 소프트웨어 인코더 구현. 특정 칩의 하드웨어 디코딩 지원은 별도 사양표로 확인한다.
+- WebRTC 및 GCC(Google Congestion Control) 문서 — 지연 기반 혼잡 제어와 적응 비트레이트의 구현 자료. RTP 도착 지터 정의는 별도 RFC 3550을 따른다.
 - QUIC(RFC 9000) 명세 — UDP 위 신뢰성·다중화 전송 계층.
-- NVIDIA vGPU / MIG 문서 — GPU 시분할·공간 분할 가상화와 세션 밀도.
-- 주요 클라우드 사업자의 GPU 인스턴스 가격·egress 과금 문서 — 비용 구조의 정량적 근거.
+- NVIDIA vGPU / MIG 문서 — GPU 시분할·공간 분할 가상화와 세션 밀도(지원 GPU 모델·driver·graphics/encoder profile 조건은 별도 확인).
+- 주요 클라우드 사업자의 GPU 인스턴스 가격·egress 과금 문서 — 비용 구조의 정량적 근거(사업자·지역·인스턴스·시점별로 다르므로 본문 수치는 모델 예시이며 특정 요금표 검증이 아님).

@@ -157,7 +157,7 @@ $$
 \Pr_{h\in H}[h(x)=h(y)]\le\frac{1}{m}
 $$
 
-을 보장하면 고정된 적대 키 집합도 선택된 함수에 대해 기대 충돌이 제한된다. 무작위화는 입력을 바꾸지 않고 공격자가 충돌 구조를 예측하기 어렵게 만든다.
+을 보장하면 함수를 선택하기 전에 정해진 고정·독립 키 집합에 대한 기대 충돌이 제한된다. 이는 적응적 공격 내성이 아니다. 함수 선택을 관측하고 후속 키를 고르는 공격자에 대한 보장은 keyed PRF 수준의 별도 모델이며, 해시플러딩 방어는 앞의 일반 hash와 공격 방어 hash처럼 비밀 seed를 가진 keyed hash와 작업량 한도로 다룬다.
 
 ## 3. Chaining과 Open Addressing
 
@@ -189,7 +189,7 @@ Open addressing 조회의 핵심 불변식은 다음과 같다.
 한 번도 사용된 적 없는 slot이 나타나지 않는다.
 ```
 
-조회는 실제 키를 찾거나 never-used slot을 만날 때 종료한다. 이 불변식 때문에 삭제를 단순 empty로 바꾸면 안 된다.
+조회는 실제 키를 찾거나 never-used slot을 만날 때 종료한다. 다만 occupied와 deleted가 테이블을 모두 채우면 never-used slot이 없을 수 있으므로 probe에는 최대 $m$회(또는 전체 순환 1회)의 유한 상한을 두거나 항상 EMPTY slot 하나를 남기는 불변식을 둔다. 이 불변식 때문에 삭제를 단순 empty로 바꾸면 안 된다.
 
 ### Robin Hood hashing
 
@@ -208,6 +208,8 @@ EMPTY: 한 번도 사용되지 않음, 실패 조회 종료
 OCCUPIED: 키가 있음
 DELETED: 과거 사용됨, 조회 계속
 ```
+
+삽입은 처음 만난 DELETED slot을 곧바로 재사용하지 않는다. 그 위치를 기억하되 같은 키를 찾거나 EMPTY에 도달하거나 probe를 한 바퀴 마칠 때까지 계속 탐색해, 뒤쪽에 이미 존재하는 동등 키와 중복되지 않을 때만 재사용한다.
 
 Tombstone이 쌓이면 논리 load factor는 낮아도 probe가 길어진다. 항목 수뿐 아니라 `occupied + deleted` 비율을 재해시 조건에 포함해야 한다.
 
@@ -258,7 +260,7 @@ $$
 
 다.
 
-기본 Bloom filter는 false negative를 만들지 않지만 삭제를 지원하지 않는다. bit 하나를 끄면 다른 키가 공유하던 증거까지 지워진다. Counting Bloom filter는 counter를 사용해 삭제하지만 메모리와 overflow 정책이 필요하다.
+기본 Bloom filter는 false negative를 만들지 않지만 삭제를 지원하지 않는다. bit 하나를 끄면 다른 키가 공유하던 증거까지 지워진다. Counting Bloom filter는 counter를 사용해 삭제하지만 메모리와 overflow 정책이 필요하다. 삭제는 실제로 삽입된 원본 집합에서 존재와 삽입 횟수를 확인한 multiplicity에만 허용한다. 양성 응답만 보고 임의 키를 지우면 false positive 키의 counter를 내려 다른 키에 false negative를 만들 수 있다. saturation으로 counter가 포화된 뒤의 삭제는 원래 multiplicity를 복구할 수 없으므로 별도 정책으로 명시한다.
 
 Bloom filter는 느린 저장소 조회를 피하는 앞단 필터로 유용하다. filter가 “있을 수 있음”이라고 해도 실제 사전 조회를 생략할 수는 없다. false positive가 정확성을 바꾸지 않고 추가 비용만 만드는 위치에 둬야 한다.
 
@@ -318,6 +320,8 @@ std::vector<std::size_t> PrefixFunction(std::string_view p) {
 
 `j`는 증가하거나 prefix chain을 따라 감소한다. 전체 감소 횟수는 증가 횟수에 의해 제한되어 전처리와 탐색이 각각 선형이다.
 
+실제 탐색에서는 `j==m`일 때 일치를 출력한 뒤 `j=pi[m-1]`로 복귀해 겹치는 일치를 계속 찾는다. 빈 패턴 `m=0`은 `pi`가 비어 `p[j]` 접근이 성립하지 않으므로 탐색 전에 별도 정책(보통 입력 오류 또는 모든 위치 일치)으로 고정한다.
+
 ### Z algorithm
 
 Z 배열 `Z[i]`는 문자열 전체 prefix와 `i`에서 시작하는 suffix가 일치하는 최대 길이다. 패턴과 구분자, 텍스트를 연결하면 `Z[i]>=m`인 위치가 일치다.
@@ -338,7 +342,7 @@ Boyer-Moore는 패턴을 오른쪽에서 비교하고 bad-character, good-suffix
 
 패턴이 $p$개일 때 각각 KMP를 실행하면 텍스트를 $p$번 읽는다. Aho-Corasick은 모든 패턴의 trie에 failure link를 추가해 텍스트를 한 번 훑는다.
 
-현재 trie 상태에서 symbol 간선이 없으면 failure link를 따라 “현재 문자열의 suffix이면서 trie prefix인 가장 긴 상태”로 이동한다. 이 상태는 KMP의 prefix fallback을 여러 패턴으로 일반화한 것이다.
+현재 trie 상태에서 symbol 간선이 없으면 failure link를 따라 “현재 문자열의 suffix이면서 trie prefix인 가장 긴 상태”로 이동한다. 이 상태는 KMP의 prefix fallback을 여러 패턴으로 일반화한 것이다. Failure link는 root에서 proper suffix만 대상으로 하고 root에서는 자기 자신으로 돌아오도록 규약한다. 각 상태의 출력은 그 상태에서 끝나는 패턴뿐 아니라 failure link를 따라 올라가며 만나는 모든 terminal 상태의 패턴을 포함하며, 이 output link(또는 failure chain 순회)를 정의해 suffix로 끝나는 패턴을 빠뜨리지 않는다. 출력 목록을 모든 노드에 복사하지 않아도 되어 전처리·공간이 선형으로 유지된다.
 
 ```mermaid
 flowchart LR
@@ -346,6 +350,7 @@ flowchart LR
     F --> A[결정적 automaton 상태]
     X[텍스트 symbol] --> A
     A --> O[일치 패턴 출력]
+    N["출력 = 현재 상태 terminal + failure 경로상 모든 terminal"]
 ```
 
 전처리 후 시간은 alphabet 전이 구현에 따라 대략
@@ -372,7 +377,7 @@ Suffix array는 모든 suffix 시작 인덱스를 사전순으로 정렬한 배�
 
 Suffix tree는 모든 suffix를 압축 trie로 표현해 선형 공간에서 substring 질의를 패턴 길이에 비례해 처리할 수 있다. 이론적 보장은 강하지만 노드와 구현 상수가 크다.
 
-Suffix automaton은 한 문자열의 모든 substring을 인식하는 최소 DFA 성질을 가진 구조다. 서로 다른 substring 수, 반복 구조 질의에 유용하지만 일반 게임 런타임의 기본 사전으로 쓸 이유는 적다.
+Suffix automaton은 한 문자열의 suffix 언어에 대한 표준 최소 부분 DFA이고, 모든 substring은 시작 상태에서의 경로로 인식된다. 이는 substring 언어 자체의 최소 DFA와 같지 않다. 예를 들어 `abb`에서 dead state를 양쪽 모두 생략하면 suffix를 인식하는 DFA는 5개 상태이고 substring(factor) 언어의 최소 DFA는 4개 상태다. 서로 다른 substring 수, 반복 구조 질의에 유용하지만 일반 게임 런타임의 기본 사전으로 쓸 이유는 적다.
 
 Suffix 구조는 정적 대형 텍스트에 반복 질의가 있을 때 가치가 있다. 짧은 설정 문자열 몇 개에는 정렬 배열이나 hash table이 더 단순하다.
 
@@ -426,7 +431,8 @@ hash probe 또는 chain 작업량
 ```text
 Insert 뒤 Find는 같은 값을 반환한다.
 Erase 뒤 Find는 없음이다.
-서로 다른 삽입 순서에서도 논리 key-value 집합은 같다.
+고유 키이거나 같은 키에 같은 값을 삽입한 경우, 서로 다른 삽입 순서에서도 논리 key-value 집합은 같다.
+중복 키의 덮어쓰기 정책이 last-write-wins라면 삽입 순서가 최종 값을 바꾸므로, 중복 키는 그 정책에 맞는 순차 model로 검증한다.
 rehash 전후 모든 key-value가 보존된다.
 모든 키가 같은 hash여도 정확성은 유지된다.
 ```

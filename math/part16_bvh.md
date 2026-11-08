@@ -148,7 +148,7 @@ flowchart LR
     Long --> OBB[OBB: 타이트]
 ```
 
-문제: 객체가 *움직이거나 회전* 할 때 OBB 갱신이 *비쌈*. 회전 행렬 + extents 재계산. 매 프레임 갱신이 부담.
+구분이 필요하다. *강체* 인스턴스는 자세(위치·회전)만 변환하면 되고 OBB 의 *extents 는 불변* 이다. 반면 *변형(deform)* 되는 객체는 경계를 다시 맞춰야 하므로 extents 재계산이 필요하다. 항상 8 코너를 다시 도는 것은 아니다. 매 프레임 갱신이 부담인 것은 변형 객체의 재적합이다.
 
 활용: *드물게 변하는 정적 객체*. 또는 *narrow phase 의 입력* 으로 (다음 단계 SAT 가 OBB 받음).
 
@@ -176,7 +176,7 @@ AABB (6-DOP) 보다 타이트, OBB 보다 빠른 갱신. *중간 트레이드오
 
 - **물리 BVH**: AABB 노드.
 - **렌더 BVH**: AABB 노드.
-- **레이트레이싱**: AABB 노드. RTX 도 AABB 만 직접 가속.
+- **레이트레이싱**: 경계 볼륨은 AABB. RTX 하드웨어는 *BVH 트래버설과 광선-삼각형 교차* 를 가속하며, AABB 는 그 트래버설의 경계 볼륨이지 leaf primitive 자체가 아니다.
 
 *AABB 가 압도적 표준*. OBB·Sphere·K-DOP 는 *특수 상황* 또는 *narrow phase 입력* 으로 등장.
 
@@ -276,10 +276,11 @@ Surface Area Heuristic은 자식 경계 상자의 표면적 비율을 광선이 
 
 ### 3.6 빌드 비용
 
-- *Median 분할*: $O(n \log n)$ 평균 (nth_element 가 $O(n)$ 이지만 재귀 깊이 $\log n$).
-- *SAH*: $O(n^2)$ naive, $O(n \log n)$ binned SAH.
+- *Median 분할*: $O(n \log n)$ 평균 (nth_element 가 $O(n)$ 이지만 재귀 깊이 $\log n$). 객체 중심이 같은 값에 몰리면 분할이 편중돼 *최악 깊이가 $O(n)$* 까지 갈 수 있으므로 leaf/depth 상한을 둔다.
+- *SAH*: $O(n^2)$ naive, $O(n \log n)$ binned SAH. SAH 자체는 *개수 균형을 보장하지 않는다* — 위 $O(n \log n)$ 은 분할이 대체로 균형 잡힌다는 *평균적 가정* 에 기댄다.
+- *binned SAH* 도 후보 수를 고정 bin 으로 제한할 뿐, 트리 깊이의 최악 상한을 보장하지는 않는다.
 
-큰 씬은 *binned SAH*. 작은 씬은 *median* 도 충분.
+큰 씬은 *binned SAH*. 작은 씬은 *median* 도 충분. 실제 비용은 분할 균형과 leaf/depth 상한에 따라 측정한다.
 
 ### 3.7 빌드 품질의 영향
 
@@ -401,7 +402,7 @@ bool EvaluateSplitsBinned(std::vector<int>& objs, int begin, int end,
 
 ### 4.6 PBRT 와 산업
 
-*PBRT* (*Physically Based Rendering: From Theory to Implementation*) 가 *binned SAH* 의 교과서적 구현. NVIDIA OptiX, Embree, RTX BVH 가 모두 *binned SAH* 또는 변형 사용.
+*PBRT* (*Physically Based Rendering: From Theory to Implementation*) 가 *binned SAH* 의 교과서적 구현이다. *공개 구현* 인 PBRT·Embree 는 특정 버전에서 binned SAH 계열을 문서화한다. 반면 OptiX·RTX 드라이버의 *내부 빌드 알고리즘* 은 공개되지 않으므로, API 보장(BLAS/TLAS 빌드·업데이트 동작)만 근거로 삼고 특정 알고리즘을 단정하지 않는다.
 
 게임 엔진의 BVH 빌드는 *binned SAH* 가 거의 표준. *오프라인 빌드* 는 *전체 sweep SAH (naive n², 정렬 + prefix/suffix 로 n log n)*, *런타임 빌드* 는 *binned*.
 
@@ -448,12 +449,12 @@ uint32_t Morton3D(uint32_t x, uint32_t y, uint32_t z) {
 }
 ```
 
-*공간적으로 가까운 점* 이 *Morton code 도 가까움* (Z-order curve). *1D 정렬 = 3D 공간 군집*.
+*공간적으로 가까운 점* 이 *대체로 Morton code 도 가깝다* (Z-order curve). 이것은 등치가 아니라 *공간 국소성 휴리스틱* 이며, 셀 경계를 넘으면 인접한 두 점의 키가 멀어질 수 있다. 그래도 *1D 정렬이 3D 공간 군집을 대체로 회복* 한다.
 
 ```mermaid
 flowchart LR
     P3D[3D 점들] -->|Morton code| K1D[1D 키]
-    K1D -->|정렬| Sorted[공간적으로 인접한 점들이 인접 위치]
+    K1D -->|정렬| Sorted[공간 군집을 대체로 회복<br/>인접 키가 공간 인접을 보장하지는 않음]
 ```
 
 ### 5.3 LBVH 알고리즘
@@ -464,6 +465,8 @@ Lauterbach 외의 *Linear BVH* (2009) 와 Karras 의 완전 병렬 트리 구성
 2. Morton code 순으로 *정렬*.
 3. 정렬된 배열의 *공통 접두사* 로 *트리 구조 결정*.
 4. 박스 *bottom-up 갱신*.
+
+*구성 계약*: 동일 Morton code(예: 같은 셀에 겹친 중심)는 *primitive ID 를 tie-break* 로 써 순서를 확정한다. bounds 의 한 축 extents 가 0 이거나 음수/비유한이어도 키가 안정적으로 나오도록, 좌표를 유효 범위로 clamp 하고 0 extents 는 양자화 전에 고정 규칙(예: 최소 폭)으로 처리한다.
 
 ```text
 Morton 정렬된 배열:
@@ -484,7 +487,7 @@ LBVH 가 *빠르지만 SAH 보다 품질 약간 낮음*. *AAC (Approximate Agglo
 
 ### 5.5 게임에서의 LBVH
 
-동적 레이트레이싱에서는 acceleration structure를 refit/update하거나 rebuild한다. API와 드라이버는 내부 빌드 알고리즘을 공개하지 않을 수 있으므로 BLAS/TLAS가 반드시 LBVH라고 가정하면 안 된다. build/update flag와 실제 시간·trace 성능을 측정한다.
+동적 레이트레이싱에서는 acceleration structure를 refit/update하거나 rebuild한다. 공개 구현은 버전·빌드 옵션을 함께 명시하고, 비공개 RT 가속 구조는 API 보장만 설명한다. API와 드라이버는 내부 빌드 알고리즘을 공개하지 않을 수 있으므로 BLAS/TLAS가 반드시 LBVH라고 가정하면 안 된다. build/update flag와 실제 시간·trace 성능을 측정한다.
 
 ## 6. Refit vs Rebuild
 
@@ -628,6 +631,8 @@ void SelfCollide(int idx, std::vector<std::pair<int,int>>& pairs) {
 
 *같은 자식 안의 쌍 + 좌·우 자식 사이 쌍*. 이중 재귀.
 
+*계약*: `SelfCollide` 는 `nodes`, `objects` 한 트리만 쓰는데, 그 안에서 호출하는 `Collide` 는 `nodesA`/`nodesB`, `objectsA`/`objectsB` 를 참조한다. self 경로에서는 `nodesA == nodesB == nodes`, `objectsA == objectsB == objects` 로 *두 참조가 같은 트리를 가리킴* 을 선언해야 한다. 그렇지 않으면 다른 트리나 미설정 배열을 읽는다. `Collide(treeA, nodeA, treeB, nodeB)` 처럼 트리 참조를 명시적으로 넘기는 형태가 더 안전하다.
+
 ### 7.3 Sweep and Prune (대안)
 
 BVH 의 broad phase 대안. *AABB 의 한 축 (보통 x) 으로 정렬* 후 *겹치는 구간만* 비교.
@@ -686,25 +691,35 @@ DXR / OptiX 의 *TLAS + BLAS* 가 이런 *계층적 가속 구조* 의 대표 �
 광선 $\vec{r}(t) = \vec{o} + t \vec{d}$ 와 AABB 의 교차. *Slab Test*.
 
 ```cpp
-bool RayAABB(vec3 ro, vec3 invRd, AABB box, float& tNear, float& tFar) {
-    vec3 t1 = (box.min - ro) * invRd;
-    vec3 t2 = (box.max - ro) * invRd;
-    vec3 tMin = min(t1, t2);
-    vec3 tMax = max(t1, t2);
+bool RayAABB(vec3 ro, vec3 rd, AABB box, float& tNear, float& tFar) {
+    tNear = -INFINITY;
+    tFar  = +INFINITY;
 
-    tNear = std::max({ tMin.x, tMin.y, tMin.z, 0.0f });
-    tFar  = std::min({ tMax.x, tMax.y, tMax.z });
+    for (int i = 0; i < 3; ++i) {
+        if (std::fabs(rd[i]) < 1e-8f) {
+            // 평행 축: ro[i] 가 slab 밖이면 miss, 안이면 이 축은 구간을 제한하지 않는다.
+            if (ro[i] < box.min[i] || ro[i] > box.max[i]) return false;
+        } else {
+            float invD = 1.0f / rd[i];
+            float t0 = (box.min[i] - ro[i]) * invD;
+            float t1 = (box.max[i] - ro[i]) * invD;
+            if (t0 > t1) std::swap(t0, t1);
+            tNear = std::max(tNear, t0);
+            tFar  = std::min(tFar,  t1);
+            if (tNear > tFar) return false;
+        }
+    }
+    tNear = std::max(tNear, 0.0f);
     return tNear <= tFar;
 }
 ```
 
-*역방향 미리 계산 (`invRd = 1/rd`)* 으로 분기 없는 SIMD 코드를 만들 수 있다.
+이 형태는 축 평행(`rd[i] == 0`) 경계에서 `0 * ±inf` 로 생기는 NaN 을 피한다. 면 위·모서리·축 평행 케이스의 공통 계약은 Part17 §4.5 의 NaN-safe ray-AABB 를 따른다. 반대로 *분기 없는 SIMD* 코드가 필요하면 Part17 §4.3 처럼 `invRd` 를 미리 계산하되, 축 평행과 면 위 케이스는 별도 디버그 가드로 확인한다.
 
 ### 8.2 BVH 광선 트래버설
 
 ```cpp
 bool TraceRay(vec3 ro, vec3 rd, RayHit& bestHit) {
-    vec3 invRd = 1.0f / rd;
     std::stack<int> stack;
     stack.push(rootIdx);
 
@@ -716,7 +731,7 @@ bool TraceRay(vec3 ro, vec3 rd, RayHit& bestHit) {
         BVHNode& node = nodes[idx];
 
         float tNear, tFar;
-        if (!RayAABB(ro, invRd, node.bounds, tNear, tFar)) continue;
+        if (!RayAABB(ro, rd, node.bounds, tNear, tFar)) continue;
         if (tNear > bestHit.t) continue;  // 이미 가까운 hit 가 있음
 
         if (node.leftChild < 0) {
@@ -743,10 +758,10 @@ bool TraceRay(vec3 ro, vec3 rd, RayHit& bestHit) {
 ### 8.3 가까운 자식 우선
 
 ```cpp
-// 두 자식 박스의 t_near 비교 후 가까운 자식부터 push
+// 두 자식 박스의 t_near 비교 후 먼 자식부터 push (가까운 자식이 먼저 pop)
 float tL_near, tL_far, tR_near, tR_far;
-bool hitL = RayAABB(ro, invRd, nodes[left].bounds,  tL_near, tL_far);
-bool hitR = RayAABB(ro, invRd, nodes[right].bounds, tR_near, tR_far);
+bool hitL = RayAABB(ro, rd, nodes[left].bounds,  tL_near, tL_far);
+bool hitR = RayAABB(ro, rd, nodes[right].bounds, tR_near, tR_far);
 
 if (tL_near < tR_near) {
     if (hitR) stack.push(right);
@@ -765,7 +780,7 @@ GPU 의 *워프 단위 실행* 에서 스택 메모리 부담. *Stack-less* 또�
 
 핵심 트릭: 노드에 *parent / sibling 인덱스* 를 저장. 스택 없이 *현재 위치 + 방향* 으로 트래버설.
 
-NVIDIA OptiX, AMD Radeon Rays, RTX 하드웨어가 모두 이 패턴. *상수 메모리* 로 트래버설.
+공개 SDK 인 NVIDIA OptiX, AMD Radeon Rays 는 이 계열의 트래버설을 문서화한다. RTX 하드웨어의 *내부 구현* 은 공개되지 않으므로, 특정 구조를 단정하기보다 *스택 없는/짧은 스택 트래버설을 가능하게 하는 API* 수준에서 이해한다.
 
 ### 8.5 RTX 하드웨어 BVH
 

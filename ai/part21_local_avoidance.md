@@ -334,7 +334,12 @@ flowchart TB
 반평면 교집합에서 속도 원 안의 목적점에 가장 가까운 점을 찾는 것은 고정 차원의 볼록 최적화 문제다. 제약을 무작위 순서로 처리하는 Seidel 계열 증분 LP는 2차원에서 기대 $O(n)$이다. 아래처럼 정해진 순서로 위반 제약마다 앞선 제약을 다시 훑는 구현은 입력 순서에 따라 최악 $O(n^2)$가 될 수 있다. 기대 선형 복잡도를 주장하려면 randomization 또는 그와 동등한 순서 가정을 구현 계약에 포함해야 한다.
 
 ```cpp
-struct Line { Vector2 point; Vector2 dir; };  // dir의 왼쪽이 허용 영역
+struct Line { Vector2 point; Vector2 dir; };  // dir의 왼쪽(Cross(dir, w) ≥ 0)이 허용 영역
+
+// 좌표계: 오른손 2D(x 오른쪽, y 위), Cross(a,b) = a.x*b.y - a.y*b.x.
+// ORCA 반평면의 n은 허용측(outward) 법선이고 허용 조건은 n·(v - point) ≥ 0이다.
+// 이를 Cross(dir, v - point) ≥ 0과 일치시키려면 dir = PerpCW(n) = (n.y, -n.x)여야 한다.
+Vector2 PerpCW(Vector2 n) { return Vector2{n.y, -n.x}; }
 
 // 2D 선형계획: maxSpeed 원 안에서, 모든 Line의 허용쪽을 만족하며 optVel에 최근접
 bool LinearProgram2D(Span<Line> lines, float maxSpeed,
@@ -423,7 +428,7 @@ Line BuildORCALine(const Agent& self, const Agent& other) {
     float w = Responsibility(self, other);          // 절반 대신 비대칭 분배
     Line line;
     line.point = self.velocity + w * u;             // w만큼 내가 이동
-    line.dir   = Perp(n);
+    line.dir   = PerpCW(n);                         // n: 허용측 outward 법선
     return line;
 }
 ```
@@ -464,31 +469,64 @@ flowchart TB
 ```cpp
 struct PassageGate {
     int capacity = 3;
-    std::deque<AgentId> queue;            // 대기열
-    std::unordered_set<AgentId> admitted; // 통과 권한을 받은 에이전트
+    std::deque<AgentId> queue;                        // 대기열
+    std::unordered_map<AgentId, uint32_t> leaseGen;   // id별 lease 세대
+    std::unordered_set<AgentId> admitted;             // 유효 lease를 가진 에이전트
 
     bool TryEnter(AgentId id) {
         if (admitted.count(id)) return true;
         if (std::find(queue.begin(), queue.end(), id) == queue.end())
             queue.push_back(id);
-        Promote();                                  // 새 요청도 기존 대기열 뒤에 선다
+        Promote();                                    // 새 요청도 기존 대기열 뒤에 선다
         return admitted.count(id) != 0;
     }
-    void Leave(AgentId id) {                        // 반대편으로 빠져나감
-        admitted.erase(id);
+
+    uint32_t CurrentGen(AgentId id) const {            // 승인 직후 lease 토큰으로 보관
+        auto it = leaseGen.find(id);
+        return it != leaseGen.end() ? it->second : 0;
+    }
+
+    bool IsCurrent(AgentId id, uint32_t gen) const {   // 실제 사용 전 매 tick 확인
+        return admitted.count(id) != 0 && CurrentGen(id) == gen;
+    }
+
+    void CancelRequest(AgentId id) {                   // 대기 중 취소: 유령 요청 제거
+        auto it = std::find(queue.begin(), queue.end(), id);
+        if (it != queue.end()) queue.erase(it);
+        if (admitted.erase(id)) ++leaseGen[id];        // 이미 승인됐다면 lease 무효화
+    }
+
+    // 강제 슬롯 회수. true를 반환하면 호출자가 그 id의 실제 통과 액션을 취소 통지한다.
+    // 데이터 owner를 비우는 것만으로는 진행 중 사용이 멈췄다고 보장되지 않는다.
+    bool Revoke(AgentId id) {
+        auto it = std::find(queue.begin(), queue.end(), id);
+        if (it != queue.end()) queue.erase(it);
+        if (!admitted.erase(id)) return false;
+        ++leaseGen[id];                                // 기존 lease를 stale로 만든다
+        Promote();
+        return true;
+    }
+
+    void Leave(AgentId id) {                           // 반대편으로 빠져나감
+        if (!admitted.erase(id)) return;
+        ++leaseGen[id];
         Promote();
     }
 private:
     void Promote() {
         while (!queue.empty() && (int)admitted.size() < capacity) {
-            admitted.insert(queue.front());         // 다음 대기자에게 통과 권한
-            queue.pop_front();
+            AgentId id = queue.front();
+            queue.pop_front();                         // 취소되지 않은 요청만 여기 도달
+            admitted.insert(id);
+            ++leaseGen[id];                            // 승인마다 세대 증가 → 이전 lease 무효
         }
     }
 };
 ```
 
 `TryEnter`가 `false`면 그 에이전트의 목표 속도를 *문 앞 대기 위치* 로 돌린다. 그러면 국소 회피는 "문으로 밀고 들어가는 충돌"이 아니라 "대기열에 서는 회피"를 푼다 — 같은 회피 알고리즘이 전혀 다른 거시 행동을 낳는다.
+
+이 게이트가 실제로 안전하려면 데이터 소유권과 *실제 액션* 을 함께 묶는 계약이 필요하다. 대기 중 취소된 요청이 queue에 남으면 자리가 날 때 유령 요청이 승인되므로, 소멸·취소 경로는 `CancelRequest`로 queue에서 제거해야 한다. 승인은 `(id, generation)` lease로 발급하고, 통과 행동은 매 tick `IsCurrent`로 자기 lease가 아직 유효한지 확인한다. 강제 회수(`Revoke`)는 데이터 owner를 비우는 것만으로 끝나지 않는다 — generation을 올려 기존 lease를 stale로 만들고, 호출자가 그 id의 진행 중 액션을 취소 통지해야 새 owner와 실제 사용이 겹치지 않는다. 큐 공정성(선입선출)은 요청이 유효하고 보유 시간이 유한하다는 조건 아래에서만 보장된다.
 
 이런 구조는 국소 회피가 아니다. crowd control이다. 중요한 점은 병목 문제를 속도 회피만으로 해결하려 하지 않는 것이다. 국소 회피는 단기 충돌을 줄이고, 병목의 정책은 별도 시스템이 정한다. 대규모 RTS의 flow field, lane 분리, density control도 같은 발상이다 — 전역에서 흐름을 만들고 국소에서 충돌만 막는다.
 
@@ -604,5 +642,5 @@ steering separation은 현재 거리 중심이라 정면 접근에 늦게 반응
 - Craig Reynolds, "Steering Behaviors For Autonomous Characters" (GDC 1999) — separation을 포함한 steering 회피의 고전.
 - Paolo Fiorini, Zvi Shiller, "Motion Planning in Dynamic Environments Using Velocity Obstacles" (IJRR 1998) — VO 원뿔의 원전.
 - Raimund Seidel, "Small-Dimensional Linear Programming and Convex Hulls Made Easy" (1991) — ORCA가 쓰는 무작위 증분 2D LP.
-- Recast / Detour Crowd 문서 — NavMesh 기반 crowd 이동과 국소 회피·시간 분할의 상용 구현.
+- Recast / Detour Crowd 문서 — NavMesh 기반 crowd 이동과 sampleVelocityGrid/adaptive 속도 샘플링·시간 분할의 상용 구현. 이 구현은 ORCA half-plane LP와 동일하지 않으므로 위 RVO/ORCA 문헌은 이론 비교용으로만 둔다.
 - Ian Millington, *AI for Games*, 3rd Ed. — steering behavior와 collision avoidance 구현 정리.

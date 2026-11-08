@@ -89,7 +89,7 @@ D3D12CreateDevice(adapter.Get(),
 
 `D3D_FEATURE_LEVEL_12_1`은 요구하는 최소 기능 수준(Feature Level)이다. 어댑터가 이 수준을 만족하지 못하면 생성이 실패하므로, 실무에서는 12_1 → 12_0 → 11_1 순으로 폴백을 건다. 기능 수준은 하드웨어가 보장하는 기능 집합을 정의하며, 12_0 이상이면 타일 자원(tiled resource)과 바인딩리스에 가까운 디스크립터 모델이 보장된다.
 
-`EnableDebugLayer`는 모든 API 호출을 검증해 잘못된 인자, 누락된 배리어, 객체 수명 오류를 디버그 출력에 보고한다. 디버그 레이어는 반드시 디바이스 생성 *이전*에 활성화해야 한다. 디바이스가 만들어진 뒤에 켜면 그 디바이스에는 적용되지 않는다.
+`EnableDebugLayer`는 모든 API 호출을 검증해 잘못된 인자, 누락된 배리어, 객체 수명 오류를 디버그 출력에 보고한다. 디버그 레이어는 반드시 디바이스 생성 *이전*에 활성화해야 한다. 디바이스가 만들어진 뒤에 켜면 이미 생성된 디바이스에는 적용되지 않을 뿐 아니라, Microsoft API 문서 기준으로 런타임이 해당 device를 제거(device removal)하므로 반드시 디바이스 생성 전에 켜야 한다.
 
 `SetEnableGPUBasedValidation`은 한 단계 더 깊은 검증이다. CPU 측 검증이 잡지 못하는 GPU 실행 시점 오류 — 배리어 누락, 잘못된 자원 상태에서의 접근, 셰이더의 경계 밖 디스크립터 인덱싱 — 를 GPU에서 직접 검사한다. 셰이더 코드를 계측(instrumentation)하므로 프레임 시간이 수십 배 느려지지만, 화면이 깨지는 원인을 추적할 때는 다른 도구로 대체하기 어렵다.
 
@@ -246,7 +246,7 @@ cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 PSO의 가장 큰 비용은 생성 시 일어나는 셰이더 컴파일과 상태 조합 검증이다. 셰이더 한 비트, 블렌드 모드 한 비트라도 바뀌면 별개의 PSO가 된다. 머티리얼 수가 많은 게임은 수백에서 수천 개의 PSO를 갖는다.
 
-이 비용을 드로우 도중에 치르면 프레임이 끊긴다. 표준 해법은 시작 시점이나 로딩 화면에서 필요한 모든 PSO를 미리 생성하는 것이다. 나아가 한 번 컴파일한 PSO를 `GetCachedBlob`으로 직렬화해 디스크에 저장하고, 다음 실행 시 이 캐시를 `CachedPSO`로 넘기면 컴파일을 건너뛴다. 다만 캐시는 드라이버 버전과 하드웨어에 종속되므로, 검증에 실패하면 자동으로 재컴파일된다.
+이 비용을 드로우 도중에 치르면 프레임이 끊긴다. 표준 해법은 시작 시점이나 로딩 화면에서 필요한 모든 PSO를 미리 생성하는 것이다. 나아가 한 번 컴파일한 PSO를 `GetCachedBlob`으로 직렬화해 디스크에 저장하고, 다음 실행 시 이 캐시를 `CachedPSO`로 넘기면 컴파일을 건너뛴다. 다만 캐시는 드라이버 버전과 하드웨어에 종속되므로, 캐시를 넘긴 PSO 생성이 실패하면 HRESULT를 확인해 cached blob을 비우고 캐시 없이 다시 생성하는 경로를 둬야 한다. API가 무효 캐시를 자동으로 재컴파일해 주지는 않는다.
 
 | 변종을 만드는 요인 | 예시 |
 |---|---|
@@ -281,7 +281,7 @@ PSO의 가장 큰 비용은 생성 시 일어나는 셰이더 컴파일과 상�
 PBR + IBL 셰이더가 필요로 하는 자원을 위 비용 모델에 따라 분배한다. 변경 빈도가 높은 것은 빠른 슬롯에, 낮은 것은 디스크립터 테이블에 둔다.
 
 ```cpp
-D3D12_ROOT_PARAMETER1 params[5];
+D3D12_ROOT_PARAMETER1 params[5]{};   // 미설정 필드가 남지 않도록 영 초기화
 
 // 0: Root Constants (draw 마다 변경) — 4 DWORD
 params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -293,15 +293,19 @@ params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 // 1: Root CBV — Frame CB (per-frame) — 2 DWORD
 params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
 params[1].Descriptor.ShaderRegister = 1;       // b1
+params[1].Descriptor.RegisterSpace = 0;
+params[1].Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_NONE;
 params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
 // 2: Root CBV — Material CB — 2 DWORD
 params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
 params[2].Descriptor.ShaderRegister = 2;       // b2
+params[2].Descriptor.RegisterSpace = 0;
+params[2].Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_NONE;
 params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 ```
 
-처음 세 슬롯은 변경이 잦은 데이터다. 슬롯 0의 루트 상수에는 오브젝트 인덱스나 드로우별 작은 플래그를, 슬롯 1의 Frame CB에는 카메라 행렬과 조명 파라미터를, 슬롯 2의 Material CB에는 거칠기·금속성 같은 머티리얼 스칼라를 담는다.
+처음 세 슬롯은 변경이 잦은 데이터다. 슬롯 0의 루트 상수에는 오브젝트 인덱스나 드로우별 작은 플래그를, 슬롯 1의 Frame CB에는 카메라 행렬과 조명 파라미터를, 슬롯 2의 Material CB에는 거칠기·금속성 같은 머티리얼 스칼라를 담는다. 로컬 `params` 배열은 `{}`로 영 초기화하고, 각 루트 CBV의 `RegisterSpace`와 `Flags`, 3·4번 디스크립터 테이블의 활성 union 멤버까지 명시한 뒤에만 직렬화해야 미설정 필드가 남지 않는다.
 
 `ShaderVisibility`는 이 슬롯이 어느 셰이더 단계에서 보이는지를 제한한다. Material CB는 픽셀 셰이더에서만 읽으므로 `VISIBILITY_PIXEL`로 좁혀, 정점 셰이더 단계에서 이 자원을 바인딩하는 드라이버 작업을 줄인다. `VISIBILITY_ALL`은 모든 단계에 노출하므로 가장 비싸다.
 
@@ -356,12 +360,21 @@ rsDesc.Desc_1_1.Flags =
     D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
 ComPtr<ID3DBlob> rsBlob;
-D3D12SerializeVersionedRootSignature(&rsDesc, rsBlob.GetAddressOf(), nullptr);
+ComPtr<ID3DBlob> rsError;
+HRESULT hr = D3D12SerializeVersionedRootSignature(
+    &rsDesc, rsBlob.GetAddressOf(), rsError.GetAddressOf());
+if (FAILED(hr)) {
+    // 실패 시 rsBlob 은 유효하지 않으므로 역참조하지 않고 error blob 을 출력한 뒤 중단한다.
+    if (rsError) OutputDebugStringA(
+        static_cast<const char*>(rsError->GetBufferPointer()));
+    return false;
+}
 
 ComPtr<ID3D12RootSignature> rootSig;
-device->CreateRootSignature(0,
+hr = device->CreateRootSignature(0,
     rsBlob->GetBufferPointer(), rsBlob->GetBufferSize(),
     IID_PPV_ARGS(&rootSig));
+if (FAILED(hr)) return false;
 ```
 
 루트 시그니처 버전 1.1을 쓰는 이유는 디스크립터 휘발성(volatility) 플래그 때문이다. 1.1은 디스크립터가 드로우 도중 변하지 않는다는 약속을 드라이버에 전달해 추가 최적화를 가능케 한다. `ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT` 플래그는 입력 어셈블러 단계를 쓴다는 표시로, 정점 버퍼를 입력 레이아웃으로 읽는 일반적인 그래픽스 PSO에 필요하다. 컴퓨트 전용 루트 시그니처는 이 플래그를 빼서 미세하게 비용을 줄인다.

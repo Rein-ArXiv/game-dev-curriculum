@@ -31,7 +31,7 @@ void free(void* ptr);        // 크기 정보가 없다!
 
 ### Block Header 구조
 
-대부분의 메모리 할당자는 사용자에게 반환하는 포인터 **직전**에 블록 헤더(block header)를 숨겨둔다. glibc의 `malloc` 구현을 간략화하면 다음과 같다:
+전통적인 glibc 계열 할당자는 사용자에게 반환하는 포인터 **직전**에 블록 헤더(block header)를 숨겨둔다. glibc의 `malloc` 구현을 간략화하면 다음과 같다. 크기 클래스·span 기반 할당자는 이와 달리 side metadata나 pagemap에서 크기를 복구하고, 반환 포인터 앞에 헤더를 두지 않을 수 있다.
 
 ```c
 struct malloc_chunk {
@@ -103,7 +103,7 @@ Address:  0x1000 0x1001 0x1002 ... 0x1007
              경계를 가로지르는 int
 ```
 
-CPU는 두 번의 메모리 읽기를 수행해야 한다:
+이처럼 8바이트 경계를 나누는 단순화 모델에서는 CPU가 두 번의 메모리 읽기를 수행하는 것으로 볼 수 있다:
 1. 0x1000-0x1007 읽기 → AA, BB, CC 획득
 2. 0x1008-0x100F 읽기 → DD 획득
 3. 비트 시프트와 마스킹으로 재조합
@@ -227,20 +227,33 @@ raw = 0x1004 (malloc 반환)
 
 ```c
 void* my_aligned_malloc(size_t size, size_t align) {
-    // 1. 넉넉하게 할당
+    // 0. align은 0이 아니고 2의 거듭제곱이어야 한다.
+    if (align == 0 || (align & (align - 1)) != 0)
+        return NULL;
+
+    // 1. 원본 포인터 저장 공간. header가 align보다 작으면
+    //    저장 공간 자체를 정렬할 수 없으므로 최소 헤더 정렬로 올린다.
+    size_t header = sizeof(void*);
+    if (align < header) align = header;
+
+    // 2. size + align - 1 + header의 overflow 검사
+    if (size > (size_t)-1 - (align - 1) - header)
+        return NULL;
+
+    // 3. 넉넉하게 할당
     //    - size: 실제 데이터
     //    - align - 1: 정렬 맞추기 위한 여유분 (최악의 경우)
-    //    - sizeof(void*): 원본 포인터 저장 공간
-    void* raw = malloc(size + align - 1 + sizeof(void*));
+    //    - header: 원본 포인터 저장 공간
+    void* raw = malloc(size + align - 1 + header);
     if (!raw) return NULL;
 
-    // 2. 정렬된 주소 계산
-    //    - raw + sizeof(void*): 포인터 저장 공간 확보 후
+    // 4. 정렬된 주소 계산 (flat address에서만 비트 마스킹이 유효하다)
+    //    - raw + header: 포인터 저장 공간 확보 후
     //    - + align - 1, & ~(align - 1): 올림하여 align 배수로
-    uintptr_t aligned = ((uintptr_t)raw + sizeof(void*) + align - 1)
+    uintptr_t aligned = ((uintptr_t)raw + header + align - 1)
                         & ~(align - 1);
 
-    // 3. aligned 직전에 원본 포인터 저장
+    // 5. aligned 직전에 원본 포인터 저장
     ((void**)aligned)[-1] = raw;
 
     return (void*)aligned;
@@ -287,8 +300,11 @@ align - 1  = 0b00001111
 long* c1 = malloc(sizeof(long));   // 스레드 1이 갱신
 long* c2 = malloc(sizeof(long));   // 스레드 2가 갱신
 
-printf("%td\n", (char*)c2 - (char*)c1);        // 간격
-printf("%d\n", (uintptr_t)c1 / 64 == (uintptr_t)c2 / 64);  // 같은 라인인가
+uintptr_t a1 = (uintptr_t)c1, a2 = (uintptr_t)c2;
+// flat address 진단: 정수 주소 차이를 본다. 별개 할당의 포인터 뺄셈은
+// 같은 배열 원소라는 전제를 만족하지 않으므로 사용하지 않는다.
+printf("%llu\n", (unsigned long long)(a2 - a1));  // 주소 간격
+printf("%d\n", a1 / 64 == a2 / 64);               // 같은 라인인가
 ```
 
 간격을 정하는 것은 두 가지다.
@@ -296,9 +312,11 @@ printf("%d\n", (uintptr_t)c1 / 64 == (uintptr_t)c2 / 64);  // 같은 라인인�
 | 할당자 구조 | 한 객체가 차지하는 실제 간격 | 64바이트 라인에 들어가는 개수 |
 |---|---|---|
 | 청크 헤더 방식(glibc 계열) | 요청 크기 + 헤더 + 정렬 패딩. 64비트에서 최소 청크가 32바이트 | 2 |
-| size class 방식(span을 헤더 없이 분할) | 요청 크기를 올림한 클래스 크기. 8바이트 요청은 16바이트 클래스 | 4 |
+| size class 방식(span을 헤더 없이 분할) | 요청 크기를 올림한 클래스 크기. 8바이트 요청이 16바이트 클래스에 들어가는 구현도, 8바이트 클래스를 두는 구현도 있다 | 4(예) |
 
 어느 쪽이든 간격이 라인보다 작으므로, **연속해서 할당한 작은 객체가 같은 라인에 놓이는 것이 기본값이다.** 두 카운터를 서로 다른 스레드에 나눠 주는 순간 그 기본값이 그대로 비용이 된다. 할당자는 "누가 이 객체를 만질 것인가"를 모르기 때문에 스스로 이 배치를 피할 수 없다.
+
+이 간격은 할당자·ABI의 size class 정책과 정렬에 따라 달라진다. 정렬이 라인 단위로 올라가 있으면 두 객체의 크기가 작아도 각자 다른 라인 시작을 가질 수 있다. 따라서 두 aligned counter 사이의 격리와, 임의의 이웃 할당까지 같은 라인에 들어오지 못하게 하는 전용 라인 점유는 서로 다른 강도의 계약이다.
 
 ### 계약을 라인 단위로 올리는 두 지점
 
@@ -366,7 +384,7 @@ Microsoft Visual C++ Runtime은 디버그 빌드에서 특정 패턴으로 메�
 2. **초기화 안 된 변수 발견**: `if (value == 0xCDCDCDCD)` 같은 조건이 우연히 참이 될 확률이 매우 낮다.
 3. **버퍼 오버런 감지**: 메모리 블록 앞뒤의 `0xFD` 패턴이 변경되었는지 검사한다.
 
-Microsoft Learn의 [CRT Debug Heap 문서](https://learn.microsoft.com/en-us/visualstudio/debugger/crt-debug-heap-details)는 새로 할당된 객체를 `0xCD`(Clean memory)로, 해제된 객체를 `0xDD`(Dead memory)로 채운다고 명시한다. 해제된 메모리를 읽는 코드는 `0xDDDDDDDD` 같은 값을 보게 되어 use-after-free가 즉시 드러난다.
+Microsoft Learn의 [CRT Debug Heap 문서](https://learn.microsoft.com/en-us/visualstudio/debugger/crt-debug-heap-details)는 새로 할당된 객체를 `0xCD`(Clean memory)로, 해제된 객체를 `0xDD`(Dead memory)로 채운다고 명시한다. 해제된 메모리를 읽는 코드는 `0xDDDDDDDD` 같은 값을 보게 되어 use-after-free를 발견하는 데 도움을 준다. 다만 이는 접근을 막는 trap이 아니고, 디버그 힙이 해제 블록을 재사용 전까지 보존한다는 정책에 의존한다. ASan이 해제 영역을 poison해 접근 자체를 검출하는 것과는 다르다.
 
 실제 구현 예시:
 
@@ -393,6 +411,8 @@ void* debug_malloc(size_t size) {
     return user;
 }
 ```
+
+이 예제는 CRT 내부 구현이 아니라 가드 배치를 보이는 독립 예시다. `NO_MANS_LAND`만큼 prefix를 더하면 반환 주소의 기본 정렬이 깨질 수 있으므로, 실제 디버그 할당자는 (헤더+전·후행 가드) 전체를 기본 정렬의 배수로 올리고 `total` 계산의 overflow를 검사한다.
 
 ### 0xCC의 특별한 의미
 
@@ -476,7 +496,7 @@ int g_alloc_count = 0;
 
 void* debug_malloc(size_t size, const char* file, int line) {
     void* ptr = malloc(size);
-    if (g_alloc_count < MAX_ALLOCS) {
+    if (ptr != NULL && g_alloc_count < MAX_ALLOCS) {
         g_allocs[g_alloc_count++] = (AllocInfo){ptr, size, file, line};
     }
     return ptr;
@@ -501,6 +521,8 @@ void print_leaks() {
 ```
 
 Valgrind와 AddressSanitizer는 이 개념을 극단까지 밀어붙여, 모든 메모리 접근을 추적하고 invalid access를 실시간으로 탐지한다.
+
+이 추적기는 단일 스레드 전제이고, `MAX_ALLOCS`를 넘는 할당은 조용히 누락된다. 실패한 allocation은 기록하지 않으며, 실제 도구는 누락 수를 별도 카운터로 노출하고 전역 상태에 동기화를 둔다.
 
 ## 6. Arena와 String Builder의 유사성
 

@@ -11,11 +11,11 @@ flowchart LR
     Sense[Sensor] --> WM[World Model]
     WM --> Decide[Decision Layer]
     Decide -->|ActionRequest| Arb[Arbiter / Action Queue]
-    Arb --> Action[Active Action]
+    Arb -->|safe point에서 재중재 후 commit| Action[Active Action]
     Action --> Loco[Locomotion]
     Action --> Anim[Animation]
-    Action --> Res[Reservation]
-    Anim -.notify.-> Action
+    Action -->|Start 획득·OnEnd 반납| Res[Reservation]
+    Anim -.notify+generation.-> Action
     Loco -.arrived/blocked.-> Action
     Action -.ActionResult.-> WM
 ```
@@ -134,6 +134,7 @@ public:
 ```cpp
 void AttackAction::Start(Context& ctx) {
     reserved_ = ctx.weapon->Reserve(ctx.self.id);   // 획득
+    animGeneration_ = ctx.anim.CurrentGeneration(); // 이 재생의 세대 — notify 검증용
     ctx.anim.Play("attack", /*blend*/0.1f);
     fired_ = false;
     elapsed_ = 0.0f;
@@ -142,11 +143,13 @@ void AttackAction::Start(Context& ctx) {
 void AttackAction::OnEnd(Context& ctx, ActionStatus, CancelReason) {
     if (reserved_) ctx.weapon->Release(ctx.self.id); // 반납 (대칭)
     reserved_ = false;
+    ctx.weapon->DisableHitbox();                     // 열려 있을 수 있는 히트박스 강제 닫기
+    ++animGeneration_;                               // 이후 도착하는 late notify 무효화
     ctx.anim.Stop("attack", /*blend*/0.15f);
 }
 ```
 
-문제는 반납 지점이 `Cancel` 하나가 아니라는 것이다. 액션은 `Tick`이 `Success`나 `Failure`를 반환하며 스스로 끝날 수도 있다. 같은 정리 코드를 `Cancel`, 성공 종료, 실패 종료에 복제하면 한 곳을 빠뜨리는 순간 자원 누수다. 정리는 멱등적인 한 함수로 모으고, scope guard나 소유 객체의 소멸자를 이용해 모든 종료 경로가 같은 release 경로를 지나게 한다.
+문제는 반납 지점이 `Cancel` 하나가 아니라는 것이다. 액션은 `Tick`이 `Success`나 `Failure`를 반환하며 스스로 끝날 수도 있다. 같은 정리 코드를 `Cancel`, 성공 종료, 실패 종료에 복제하면 한 곳을 빠뜨리는 순간 자원 누수다. 정리는 멱등적인 한 함수로 모으고, scope guard나 소유 객체의 소멸자를 이용해 모든 종료 경로가 같은 release 경로를 지나게 한다. 이때 release의 기준 시점은 *객체 파괴가 아니라 `OnEnd`* 다 — Sequence가 종료한 자식 객체를 계속 보유하면 파괴가 훨씬 늦거나 아예 없을 수 있다. `OnEnd`에서 lease를 반납하고 콜백을 해제하며, 소멸자는 누락 대비 안전망으로 둔다.
 
 컨트롤러는 `Tick`이 `Success`나 `Failure`를 반환하면 `OnEnd`를 호출하고, 외부 선점에는 `Cancel`을 호출한다. 두 경로는 결국 같은 가상 훅으로 모이므로 파생 액션은 정리 로직을 한 곳에만 둔다.
 
@@ -404,7 +407,7 @@ void ActionController::Submit(const ActionRequest& req, Context& ctx) {
         QueuePending(std::move(next));   // 높은 등급 우선, 동률은 최신 요청 우선
         return;
     }
-    SwitchTo(std::move(next), ctx);
+    RequestAction(std::move(next));      // 즉시 교체하지 않고 safe point로 지연
 }
 ```
 
@@ -414,25 +417,34 @@ void ActionController::Submit(const ActionRequest& req, Context& ctx) {
 
 행동을 바꿀 때 `Cancel(old) → Start(new)`가 일어나는데, `Cancel`이나 `Start` *안에서* 또 다른 전환이 트리거되면 상태가 꼬인다. 예컨대 `AttackAction::Start`가 탄약 부족을 발견하고 즉시 Reload로 가려 하면, 전환이 전환 도중에 일어난다. 단순 구현은 여기서 무한 재귀나 자원 이중 반납에 빠진다.
 
-처방은 FSM과 동일하게 *전환을 직렬화* 하는 것이다. 전환 중에 들어온 새 전환은 즉시 처리하지 않고 보류했다가, 현재 전환이 끝난 뒤 순서대로 처리한다.
+처방은 FSM과 동일하게 *전환을 직렬화* 하는 것이다. 다만 직렬화만으로는 부족하다 — `Start`뿐 아니라 `Tick`·`Cancel`·`OnEnd`·애니메이션 notify까지 사용자 콜백 실행 전체를 재진입 구역으로 취급해야 한다. 콜백 안에서 교체를 요청하면 새 요청을 큐에 넣기만 하고 현재 객체는 파괴하지 않는다. 실제 교체는 모든 콜백이 반환해 콜백 깊이가 0이 된 safe point에서, *현재* 액션을 기준으로 CanStart·우선순위·interrupt policy·request generation을 다시 검사한 뒤 commit한다. 이 계약(사용자 콜백은 동기 재진입·즉시 교체를 금지하고, 요청은 반드시 외부 safe point로 지연한다)이 없으면 Tick이 실행 중인 객체가 파괴되어 해제된 멤버를 만지는 use-after-free가 된다. 이는 thread safety나 예외 트랜잭션 보장과는 별개의 계약이다.
 
 ```cpp
-void ActionController::SwitchTo(std::unique_ptr<Action> next, Context& ctx) {
-    if (switching_) { QueuePending(std::move(next)); return; } // 재진입 — 보류
-    switching_ = true;
+// 요청 적재 — 사용자 콜백(Tick/Start/Cancel/OnEnd/notify) 안에서 호출해도
+// current_를 파괴하지 않는다.
+void ActionController::RequestAction(std::unique_ptr<Action> next) {
+    QueuePending(std::move(next));
+}
+
+// safe point(콜백 깊이 0)에서만 호출. 보류 요청을 현재 액션 기준으로 재중재한다.
+void ActionController::CommitPending(Context& ctx) {
     int transitions = 0;
-    do {
-        if (++transitions > kMaxTransitionsPerTick) {                // Start 연쇄의 무한 루프 방어
+    while (auto next = TakePending()) {
+        if (++transitions > kMaxTransitionsPerTick) {   // Start 연쇄의 무한 루프 방어
             ReportTransitionLoop();
             break;
         }
+        // 적재 시점의 허가가 아니라 지금의 current_ 기준으로 다시 검사한다 (AI-055)
+        if (current_ && !ArbiterCanSwitch(*current_, currentTime_, *next)) {
+            QueuePending(std::move(next));               // 우선순위 보존해 다시 보류
+            break;
+        }
+        if (!next->CanStart(ctx)) continue;              // 전제가 지금도 성립하는가 (AI-055)
         if (current_) current_->Cancel(ctx, CancelReason::Replaced); // 정리 (2절)
-        current_   = std::move(next);
+        current_     = std::move(next);
         currentTime_ = 0.0f;
-        current_->Start(ctx);            // 이 안에서 Submit 불리면 pending_ 적재
-        next = TakePending();            // Start 가 또 전환을 요청했나?
-    } while (next);                      // 멈출 때까지 직렬 처리
-    switching_ = false;
+        current_->Start(ctx);            // 이 안의 RequestAction도 pending_ 적재만
+    }
 }
 ```
 
@@ -471,6 +483,8 @@ public:
     void OnEnd(Context& ctx, ActionStatus how,
                CancelReason why = CancelReason::None) override {
         if (!childEnded_ && idx_ < steps_.size()) {
+            // 자식의 lease 반납도 그 자식의 OnEnd 에서 일어난다 — 객체를 steps_ 에
+            // 보유해도 종료 후 예약이 남지 않는다 (AI-058).
             if (how == ActionStatus::Cancelled) steps_[idx_]->Cancel(ctx, why);
             else steps_[idx_]->OnEnd(ctx, how, why);
             childEnded_ = true;
@@ -517,6 +531,7 @@ flowchart TB
 
 ```cpp
 void AttackAction::OnAnimEvent(Context& ctx, AnimEvent e) {
+    if (e.generation != animGeneration_) return;   // 취소/교체 후 늦게 온 notify 무시
     switch (e) {
     case AnimEvent::HitStart: ctx.weapon->EnableHitbox();  break;
     case AnimEvent::HitEnd:   ctx.weapon->DisableHitbox(); break;
@@ -603,7 +618,7 @@ private:
 
 ### 생명주기에 묶기 — RAII
 
-핵심 규칙은 *소유권을 액션 생명주기에 묶는* 것이다. `Start`에서 획득, 모든 종료 경로(`Success`/`Failure`/`Cancelled`)에서 반납. 이 대칭(2절)을 손으로 맞추면 한 경로를 빠뜨려 슬롯이 영영 점유된다. C++의 RAII로 강제하면 *액션 객체가 파괴되기만 하면* 자동 반납이 보장된다.
+핵심 규칙은 *소유권을 액션 생명주기에 묶는* 것이다. `Start`에서 획득, 모든 종료 경로(`Success`/`Failure`/`Cancelled`)에서 반납. 이 대칭(2절)을 손으로 맞추면 한 경로를 빠뜨려 슬롯이 영영 점유된다. RAII로 강제하되 반납의 기준 시점은 *객체 파괴가 아니라 `OnEnd`* 다 — Sequence가 종료한 자식을 보유하면 파괴가 훨씬 늦거나 아예 없을 수 있다. `OnEnd`에서 lease를 reset하고, 소멸자는 누락 대비 안전망으로 둔다. 종료 처리는 멱등이어야 한다.
 
 ```cpp
 class ScopedReservation {                 // 획득과 반납을 객체 수명에 묶는다
@@ -613,6 +628,9 @@ public:
     ~ScopedReservation() { if (held_ && r_) r_->Release(owner_); } // 어떤 경로로 죽든 반납
     bool Held() const { return held_; }
     ScopedReservation(const ScopedReservation&) = delete;
+    ScopedReservation& operator=(const ScopedReservation&) = delete; // x = y 는 lease 누수
+    ScopedReservation(ScopedReservation&&) = delete;                // 이동이 필요하면
+    ScopedReservation& operator=(ScopedReservation&&) = delete;     // 반납·소유권 이전을 명시 구현
 private:
     Reservation* r_; EntityId owner_; bool held_;
 };
@@ -624,7 +642,10 @@ void UseCoverAction::Start(Context& ctx) {
     lease_ = std::make_unique<ScopedReservation>(cover_, ctx.self.id);
     if (!lease_->Held()) { failed_ = true; }   // 시작 직전 누가 채감 — 실패 예약
 }
-// lease_ 가 멤버이므로 액션이 파괴되면 엄폐물이 자동 반납된다
+void UseCoverAction::OnEnd(Context&, ActionStatus, CancelReason) {
+    lease_.reset();                            // 모든 종료 경로에서 즉시 반납 (멱등)
+}
+// lease_ 는 Start 에서 잡고 OnEnd 에서 reset 한다 — 파괴자는 누락 대비용 안전망
 ```
 
 `CanStart`에서 비었는지 확인했어도 `Start` 시점엔 다른 NPC가 먼저 잡았을 수 있다(TOCTOU). 그래서 `Start`의 실제 `TryAcquire` 결과까지 확인하고, 실패하면 깔끔히 실패 처리한다.
@@ -641,22 +662,37 @@ public:
             return;
         waiting_.push_back(who);                     // FIFO: 중복 없는 대기열
     }
+    void CancelRequest(EntityId who) {
+        std::erase(waiting_, who);                   // 대기 중 취소는 큐에서 제거 (유령 요청 방지)
+        if (owner_ == who) Revoke(CancelReason::Requested);  // 점유 중 취소는 강제 회수 통보
+    }
     void Tick(float dt) {
-        if (owner_ != kInvalid) { holdTime_ += dt; if (holdTime_ > kMaxHold) Evict(); }
+        if (owner_ != kInvalid) { holdTime_ += dt; if (holdTime_ > kMaxHold) Revoke(CancelReason::Timeout); }
         if (owner_ == kInvalid && !waiting_.empty()) {
-            owner_ = waiting_.front();               // 먼저 기다린 요청부터
+            owner_ = waiting_.front();               // 유효하게 남은 먼저 기다린 요청부터
             waiting_.pop_front();
             holdTime_ = 0.0f;
+            ++generation_;                           // 새 점유의 lease 세대
         }
     }
+    // 실제 점유 효력은 액션이 이 lease 세대를 검증할 때만 생긴다 (AI-039).
+    std::optional<Lease> TryStart(EntityId who) const {
+        if (owner_ != who) return std::nullopt;
+        return Lease{who, generation_};
+    }
 private:
-    void Evict() { owner_ = kInvalid; holdTime_ = 0.0f; }  // timeout 으로 강제 회수
+    // 데이터 owner 만 비우지 않고 기존 액션에 취소/lease 무효화를 통보한다.
+    void Revoke(CancelReason why) {
+        if (owner_ != kInvalid) NotifyRevoke(owner_, generation_, why);
+        owner_ = kInvalid; holdTime_ = 0.0f; ++generation_;
+    }
     std::deque<EntityId> waiting_;
     EntityId owner_ = kInvalid; float holdTime_ = 0.0f;
+    uint32_t generation_ = 0;
 };
 ```
 
-예제는 중복 없는 FIFO와 *최대 보유 시간(timeout)* 으로 기아와 무한 점유를 막는다. 거리 우선이 더 자연스러운 자원이라면 대기 시간에 따라 우선순위를 올리는 aging을 함께 넣어 먼 NPC도 결국 선택되게 해야 한다. 어느 정책이 맞는지는 게임에 따라 다르지만, 공정성 계약 없이 매 틱 가장 가까운 요청만 고르면 먼 요청은 영원히 굶을 수 있다.
+예제는 중복 없는 FIFO와 *최대 보유 시간(timeout)* 으로 기아와 무한 점유를 막는다. 강제 회수는 `owner_`를 비우는 데 그치지 않고 기존 액션에 revoke를 통보하고 lease 세대를 올려, 늦게 도착한 사용·콜백이 새 점유와 겹치지 않게 한다. 공정성은 *유효한 요청*과 *유한 보유시간* 조건 아래에서만 보장된다 — 취소·회수를 generation/lease token으로 실제 액션에 전달하지 않으면 큐 순서는 지켜도 새 점유와 기존 사용이 겹칠 수 있다. 거리 우선이 더 자연스러운 자원이라면 대기 시간에 따라 우선순위를 올리는 aging을 함께 넣어 먼 NPC도 결국 선택되게 해야 한다. 어느 정책이 맞는지는 게임에 따라 다르지만, 공정성 계약 없이 매 틱 가장 가까운 요청만 고르면 먼 요청은 영원히 굶을 수 있다.
 
 ### 데드락과 다중 자원
 
@@ -672,17 +708,22 @@ bool TryAcquireAll(Context& ctx, std::initializer_list<Reservation*> rs) {
         return false;                          // 같은 자원을 두 번 요청한 계약 오류
 
     std::vector<Reservation*> got;
+    got.reserve(ordered.size());               // 획득 *전에* 저장 공간 확보 (T21)
+    auto releaseNew = ScopeGuard([&] {         // 중간 실패/예외 모두 이번에 얻은 것만 역순 반납
+        for (auto it = got.rbegin(); it != got.rend(); ++it)
+            (*it)->Release(ctx.self.id);
+    });
     for (Reservation* r : ordered) {           // 전역 stable id 순서로만 획득
-        if (r->TryAcquire(ctx.self.id)) got.push_back(r);
-        else {
-            for (auto it = got.rbegin(); it != got.rend(); ++it)
-                (*it)->Release(ctx.self.id);   // 획득의 역순으로 롤백
-            return false;
-        }
+        if (r->IsOwnedBy(ctx.self.id)) continue;   // 기존 점유는 이번 lease 와 구분
+        if (r->TryAcquire(ctx.self.id)) got.push_back(r); // reserve 후 — 재할당 없음
+        else return false;                     // ScopeGuard 가 새로 얻은 것만 롤백
     }
+    releaseNew.dismiss();
     return true;
 }
 ```
+
+`got.reserve`를 획득 전에 끝내고 `TryAcquire`와 `push_back`이 throw하지 않는 계약을 명시해야 강한 예외 보장이 성립한다. `TryAcquire`가 할당·콜백 때문에 throw할 수 있다면 이미 획득한 lease를 `ScopeGuard`로 역순 반납해야 하며, 같은 owner의 기존 점유는 이번 호출이 새로 얻은 lease와 구분한다.
 
 대부분의 게임은 행동을 *단일 자원* 으로 설계해 이 복잡성을 피하지만, 분대 협동·동시 진입 연출에서는 다중 자원이 불가피하고, 그때 위 순서화/롤백이 데드락을 막는다.
 
@@ -785,26 +826,21 @@ void ActionController::OnActionFailed(ActionType t, FailureReason r, float now) 
 중재·정리·직렬화를 한곳에 모은 컨트롤러 코어는 다음과 같다.
 
 ```cpp
-void ActionController::SetAction(std::unique_ptr<Action> next, Context& ctx) {
-    if (current_ && !ArbiterCanSwitch(*current_, currentTime_, *next)) {
-        QueuePending(std::move(next));       // 못 바꾸면 우선순위를 보존해 보류
-        return;
-    }
-    SwitchTo(std::move(next), ctx);          // Cancel→Start 직렬화 (5절)
-}
-
 void ActionController::Update(Context& ctx, float dt) {
-    if (!current_) { TryStartPending(ctx); return; }
-    currentTime_ += dt;
-    ActionStatus s = current_->Tick(ctx, dt);
-    if (s != ActionStatus::Running) {
-        current_->OnEnd(ctx, s);             // 자원 반납 보장 (2·7절)
-        if (s == ActionStatus::Failure) OnActionFailed(current_->Type(), current_->Reason(), Now());
-        log_.push_back({Now(), current_->RequestId(), current_->Type(),
-                        s, current_->Reason()});                     // 트레이스
-        current_.reset();
-        TryStartPending(ctx);                // 보류된 요청 처리
+    if (current_) {
+        ++callbackDepth_;                    // 사용자 콜백 구역 진입
+        currentTime_ += dt;
+        ActionStatus s = current_->Tick(ctx, dt);   // 콜백 안 교체 요청은 적재만 (AI-054)
+        if (s != ActionStatus::Running) {
+            current_->OnEnd(ctx, s);         // 자원 반납 보장 (2·7절)
+            if (s == ActionStatus::Failure) OnActionFailed(current_->Type(), current_->Reason(), Now());
+            log_.push_back({Now(), current_->RequestId(), current_->Type(),
+                            s, current_->Reason()});                 // 트레이스
+            current_.reset();
+        }
+        --callbackDepth_;                    // 콜백 깊이 0 복귀
     }
+    if (callbackDepth_ == 0) CommitPending(ctx);   // safe point — 여기서만 교체
 }
 ```
 

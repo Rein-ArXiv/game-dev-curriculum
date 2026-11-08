@@ -2,7 +2,7 @@
 
 게임 물리의 출발점. 모든 동역학 (힘·충돌·관절) 이 *운동학 (Kinematics)* 위에 올라간다. 운동학은 *힘은 다루지 않고 운동만 기술* — *위치 $\vec{x}$, 속도 $\vec{v}$, 가속도 $\vec{a}$* 라는 세 양과 시간 적분의 관계.
 
-이 단계가 가볍게 보이지만, 실제 게임 엔진의 *많은 안정성 문제* 가 여기서 결정된다. *Explicit Euler* 와 *Semi-implicit Euler* 의 코드 차이는 한 줄이지만 *시뮬레이션이 발산하는가 vs 안정한가* 가 갈린다. *가변 dt* 와 *고정 dt* 의 차이는 *프레임 드랍 시 캐릭터가 벽을 통과하는가 안 하는가* 를 결정한다.
+이 단계가 가볍게 보이지만, 실제 게임 엔진의 *많은 안정성 문제* 가 여기서 결정된다. *Explicit Euler* 와 *Semi-implicit Euler* 의 코드 차이는 한 줄이지만 *시뮬레이션의 발산 여부* 에 큰 영향을 준다. *가변 dt* 와 *고정 dt* 의 차이는 *프레임 드랍 시 결과와 재현성* 을 크게 바꾼다. 다만 이 선택들이 *충분조건은 아니다* — 고정 dt + semi-implicit 도 step 대비 이동량이 크면 얇은 장애물을 discrete collision 으로 놓치고 (15절 CCD), spring 고유진동수에 비해 step 이 크면 발산한다 (Part02 §6.4).
 
 이 글의 목표.
 
@@ -226,10 +226,11 @@ void StepRK4(Particle& p, /* ... */, float dt) {
 | 개념 | 의미 |
 |---|---|
 | **정확도** (accuracy) | 한 step 의 오차가 작음. 작은 dt 에서 진짜 답에 수렴. |
-| **안정성** (stability) | 큰 dt 에서도 *발산 안 함*. 진동 시스템의 *에너지 손익* 통제. |
+| **안정성** (stability) | 선택한 문제·step 에서 *오차·섭동이 증폭하지 않음*. 조화진동자는 semi-implicit Euler 에서 $h\omega < 2$ 일 때만 bounded. |
 
-Explicit Euler 는 *정확도는 1차, 안정성 매우 약함* — 큰 dt 에서 발산.
-Semi-implicit Euler 는 *정확도 1차 같은데 안정성 우수* — 게임의 *기본 선택* 이유.
+Explicit Euler 는 *정확도는 1차, 조화진동자에서 안정 영역이 없는* 방법 — 어떤 양의 dt 에서도 에너지가 증가한다.
+Semi-implicit Euler 는 *정확도는 1차지만 $h\omega < 2$ 의 안정 영역* 을 가진다 — 게임의 *기본 선택* 이유.
+안정성은 *위치 정확도와 독립적인* 개념이며, 같은 적분기도 문제와 step 에 따라 안정 영역이 달라진다.
 
 정량 분석은 닫힌 해 오차와 에너지 곡선을 함께 봐야 한다.
 
@@ -263,16 +264,17 @@ while (running) {
 표준 패턴.
 
 ```cpp
-const float kFixedDt         = 1.0f / 60.0f;
-const int   kMaxStepsPerFrame = 8;
-float accumulator             = 0.0f;
-float prevTime                = GetTime();
+const double kFixedDt          = 1.0 / 60.0;
+const int    kMaxStepsPerFrame = 8;
+double accumulator             = 0.0;
+double prevTime                = GetTime();   // monotonic clock duration (double 초) — float 절대 시계는 장시간에서 해상도 손실
 
 while (running) {
-    float now       = GetTime();
-    float frameTime = now - prevTime;
+    double now       = GetTime();
+    double frameTime = now - prevTime;
     prevTime        = now;
-    frameTime = std::min(frameTime, 0.25f);  // 긴 정지 시간을 버리는 명시적 정책
+    if (!std::isfinite(frameTime) || frameTime < 0.0) frameTime = 0.0;  // 유한·비음수 계약
+    frameTime = std::min(frameTime, 0.25);  // 긴 정지 시간을 버리는 명시적 정책
 
     accumulator += frameTime;
     int steps = 0;
@@ -287,13 +289,14 @@ while (running) {
         accumulator = std::fmod(accumulator, kFixedDt);
     }
 
-    float alpha = accumulator / kFixedDt;
+    double alpha = accumulator / kFixedDt;
     Render(alpha);                // 부분 보간으로 부드럽게
 }
 ```
 
 - *프레임 드랍* 시 한 프레임에 *여러 Step* 호출하되, 최대 횟수로 spiral of death를 막는다.
 - *시뮬레이션이 항상 같은 dt* — 입력 시간 이산화와 적분기의 안정성 분석이 일정해진다. 이것만으로 bit-exact 결정론이 생기지는 않는다.
+- *wall-clock 정밀도* — 절대 경과 시간을 `float` 로 저장해 차분하면 장시간 실행에서 frameTime 해상도가 무너진다. monotonic clock 의 duration 또는 `double` 을 쓰고, 매 프레임 `finite`·비음수 계약을 검사한다.
 - *큰 dt clamp (0.25s)* 와 최대 step 초과 시 부채 폐기 — 디버깅 일시정지·알트탭·지속 과부하에서 게임 시간이 느려지는 것을 택한 정책이다. 서버처럼 시간을 버릴 수 없는 시스템은 입장 제한, 시뮬레이션 품질 저하, 작업 분산 같은 별도 정책이 필요하다.
 - *Render 보간* — 60fps 시뮬레이션 + 120fps 렌더가 *부드럽게* 가능.
 
@@ -386,13 +389,14 @@ x += v * dt;        // 새 v 로 x
 
 ### 5.3 Symplectic Integrator 의 직관
 
-Semi-implicit Euler 는 *수학적으로 symplectic* — 위상 공간 (phase space) 의 *부피를 보존*. 진동 시스템의 *에너지가 평균적으로 보존* 되는 토대.
+Semi-implicit Euler 는 *수학적으로 symplectic* — 이산 step map 이 Hamiltonian 계의 *symplectic form* 을 보존한다. 그 결과 (exact arithmetic 에서) 위상 공간 (phase space) 의 *부피도 보존* 되고, 진동 시스템의 *에너지가 평균적으로 제한* 되는 토대가 된다. 단 *symplectic form 보존이 부피 보존을 함의* 할 뿐, 부피 보존만으로 symplectic 이라고 말할 수는 없다. 정의와 한정은 Part02 §5.3 이 소유한다.
 
 ```mermaid
 flowchart LR
     Explicit[Explicit Euler] -->|위상 부피 팽창| EnergyGain[에너지 발산]
-    SemiImpl[Semi-implicit] -->|위상 부피 보존| EnergyStable[에너지 안정]
-    Verlet[Verlet] -->|위상 부피 보존| EnergyStable
+    SemiImpl[Semi-implicit<br/>symplectic] -->|위상 부피 보존| EnergyStable[에너지 안정<br/>경험적 경향]
+    Verlet[Verlet<br/>symplectic] -->|위상 부피 보존| EnergyStable
+    VolumeOnly[위상 부피 보존만으로는<br/>symplectic·에너지 안정 보장 아님] -.-> EnergyStable
 ```
 
 분자 동역학·천체 시뮬레이션의 *수십억 년 시뮬레이션* 이 *Verlet* 또는 *symplectic integrator* 로 안정한 이유.
@@ -444,12 +448,14 @@ struct Particle {
 void Step(Particle& p, vec3 force, float dt) {
     if (p.invMass <= 0.0f) return;     // immovable
     if (!std::isfinite(force.x) || !std::isfinite(force.y) || !std::isfinite(force.z))
-        return;                          // 입력 NaN 차단
+        return;                          // force 입력 NaN 차단 (invMass/dt/기존 상태는 별도 계약)
     vec3 acc = force * p.invMass;
     p.velocity += acc * dt;
     p.position += p.velocity * dt;
 }
 ```
+
+이 가드는 *force 입력의 NaN/Inf 만 차단* 한다. `invMass` 가 NaN 이면 `<= 0` 비교가 false 라 통과하고, `dt` 나 기존 `position`/`velocity` 의 NaN/Inf 는 그대로 전파된다. 유한 입력의 곱셈 overflow 도 막지 않는다. body 생성·step 입구에서 `invMass` 유한성, `dt > 0`, 상태 유한성을 별도 계약으로 검증해야 완전하다.
 
 `invMass` 패턴 (1/m 저장) 이 게임 엔진 표준 — *immovable (mass = ∞)* 객체를 `invMass = 0` 으로 표현. 나눗셈 회피.
 
@@ -459,17 +465,21 @@ void Step(Particle& p, vec3 force, float dt) {
 
 ```cpp
 const float kMaxSpeed = 1000.0f;
-float speedSq = dot(p.velocity, p.velocity);
-if (speedSq > kMaxSpeed * kMaxSpeed) {
-    p.velocity *= kMaxSpeed / std::sqrt(speedSq);
+if (!std::isfinite(p.velocity.x) || !std::isfinite(p.velocity.y) || !std::isfinite(p.velocity.z)) {
+    p.velocity = {0, 0, 0};               // 비유한 속도 차단 — Inf*0 NaN 회피
+} else {
+    float speed = std::hypot(p.velocity.x, p.velocity.y, p.velocity.z);  // 제곱합 overflow 없이 크기 계산
+    if (speed > kMaxSpeed) {
+        p.velocity *= kMaxSpeed / speed;
+    }
 }
 ```
 
-게임 엔진의 *Rigidbody.maxLinearVelocity* 같은 설정.
+`dot(v, v)` 로 크기를 재면 큰 유한 속도에서 제곱합이 먼저 Inf 가 되어 scale 이 0이 되고, Inf 성분이 있으면 `Inf * 0` 이 NaN 이 된다. 위처럼 유한성 검사 후 `std::hypot` 기반으로 정규화하면 overflow 없이 cap 이 적용된다. 게임 엔진의 *Rigidbody.maxLinearVelocity* 같은 설정이며, *수치 안전장치이지 tunneling (CCD) 의 대체가 아니다* — 얇은 장애물 통과는 연속 충돌 검사(CCD)로 다룬다.
 
 ### 6.4 dt clamp (재강조)
 
-4.2 절의 `frameTime > 0.25f → 0.25f`. 디버깅 일시정지 / 알트탭 후 큰 dt 가 들어와도 *시뮬레이션 폭주 회피*.
+4.2 절의 `frameTime > 0.25 → 0.25`. 디버깅 일시정지 / 알트탭 후 큰 dt 가 들어와도 *시뮬레이션 폭주 회피*.
 
 ### 6.5 디버그 assert
 
@@ -516,14 +526,14 @@ $$
 - *Explicit Euler*: 매 step $E_{n+1} \approx E_n (1 + \tfrac{k}{m} \Delta t^2)$ — 지수 증가.
 - *Semi-implicit Euler / Verlet*: 평균적으로 일정, 미세 진동.
 
-긴 시뮬에서 *E(t) 곡선* 이 적분기의 안정성을 *정량적으로 드러내는* 신호. 곡선이 *상승* 하면 발산, *bounded* 면 symplectic 동작.
+긴 시뮬에서 *E(t) 곡선* 이 적분기의 안정성을 *정량적으로 드러내는* 신호. 곡선이 *상승* 하면 발산, *bounded* 면 *이 테스트에서 에너지 오차가 제한됨* 을 뜻한다. 다만 bounded energy 만으로 그 적분기가 symplectic 이라고 판정할 수는 없다 (§5.3).
 
 ### 7.3 가변 dt vs 고정 dt 의 행동 차이
 
 같은 초기 상태에서 *프레임 dt 가 불규칙* 한 경우와 *고정 + accumulator* 가 catch-up 하는 경우의 *최종 위치 비교*.
 
-- 가변 dt: 큰 dt 한 번이 *시뮬을 멀리 보냄*. 같은 시각에 *다른 결과*. 결정론 불가.
-- 고정 dt + accumulator: 큰 frame time 이 와도 *여러 step 으로 분할*. 같은 누적 시간에 *같은 결과*.
+- 가변 dt: 큰 dt 한 번이 *시뮬을 멀리 보냄*. 같은 wall time 에서도 *다른 결과*. dt 시퀀스까지 그대로 재생하면 재현할 수 있지만, 렌더 프레임 타이밍에 따라 dt 시퀀스 자체가 달라져 *결정론이 깨진다*.
+- 고정 dt + accumulator: 큰 frame time 이 와도 *여러 step 으로 분할*. 같은 *tick 입력·같은 dt 시퀀스* 에서는 *같은 결과*. 단 위 예제처럼 frame clamp·step debt 폐기가 있으면 *같은 wall time* 이라도 렌더 프레임 분할에 따라 실행 tick 수가 달라진다. 비교 기준은 *wall time* 이 아니라 *simulation tick 시간* 이다.
 
 이 차이가 *재현성 (reproducibility)* 의 기본 신호. 같은 시드·같은 입력 시퀀스를 두 번 돌렸을 때 *위치가 같은가* 가 검증의 핵심.
 
@@ -547,7 +557,7 @@ $$
 
 이 글에서 정리한 핵심.
 
-1. **운동학 vs 동역학** — 힘이 없는 운동 / 힘이 있는 운동. 게임의 많은 케이스가 운동학만으로 충분.
+1. **운동학 vs 동역학** — 운동의 *원인을 묻지 않고 기술* / *힘과 운동의 관계를 기술*. 게임의 많은 케이스가 운동학만으로 충분.
 2. **미적분 관계의 이산화** — $\vec{x}_{n+1} = \vec{x}_n + \vec{v}_n \Delta t$ + $\vec{v}_{n+1} = \vec{v}_n + \vec{a}_n \Delta t$ — *순서* 가 적분기를 가른다.
 3. **시간 적분 종류** — Explicit / Semi-implicit / Verlet / RK4. 게임은 *semi-implicit Euler* 가 표준.
 4. **고정 timestep + accumulator** — Glenn Fiedler 의 표준 패턴. 안정성과 결정론의 토대.

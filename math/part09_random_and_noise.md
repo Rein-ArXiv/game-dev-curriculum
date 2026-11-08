@@ -1,8 +1,8 @@
 ## 들어가며
 
-게임의 *무작위성* 은 *진짜 무작위가 아니다*. 시드 (Seed) 에서 출발해 *결정론적 알고리즘* 으로 만들어지는 *유사 난수 (Pseudo-Random)* 다. 이 결정성이 *멀티플레이어 동기화·리플레이·치트 탐지·디버깅* 의 토대다. 같은 시드를 두 클라이언트가 사용하면 *같은 적이 같은 위치에 등장* 하고 *같은 드롭이 떨어진다*.
+게임의 *무작위성* 은 *진짜 무작위가 아니다*. 시드 (Seed) 에서 출발해 *결정론적 알고리즘* 으로 만들어지는 *유사 난수 (Pseudo-Random)* 다. 이 결정성이 *멀티플레이어 동기화·리플레이·치트 탐지·디버깅* 의 토대다. *같은 알고리즘·버전·초기화와 같은 호출 순서* 에서 같은 시드를 두 클라이언트가 사용하면 *같은 적이 같은 위치에 등장* 하고 *같은 드롭이 떨어진다*. 분포 변환과 스케줄링까지 같아야 한다는 조건은 별도의 재현성 계약이다.
 
-게임 PRNG는 *통계적 균일성* 과 *결정론적 재현성* 을 동시에 요구한다. 암호용 난수 (`/dev/urandom`, `std::random_device`) 만큼의 보안성은 필요 없지만, *분포가 균일하고*, *시드만 같으면 같은 수열* 이 나와야 한다. 이 두 요구를 만족하는 *경량 PRNG* 가 게임의 표준 도구.
+게임 PRNG는 *통계적 균일성* 과 *결정론적 재현성* 을 동시에 요구한다. 암호용 난수 (`/dev/urandom`, `std::random_device`) 만큼의 보안성은 필요 없지만, *분포가 균일하고*, *같은 알고리즘·초기화에서 같은 호출 순서* 라면 같은 수열이 나와야 한다. 분포 변환과 스레드 스케줄링은 이 수열 위에 *별도의 재현성 계약* 을 더한다. 이 두 요구를 만족하는 *경량 PRNG* 가 게임의 표준 도구.
 
 이 글의 목표는 다음 다섯 가지다.
 
@@ -65,11 +65,11 @@ PRNG의 품질을 평가하는 다섯 축.
 게임의 PRNG 요구는 *상황별로 갈린다*.
 
 - **클라이언트 시뮬용**: 결정론이 핵심. 예측 불가능성은 *보통 필요 없다*. 시각 효과·AI 흔들림·로컬 시뮬에 PCG/xoshiro 충분.
-- **보상·드롭·가챠**: *보안성* 이 필요. 서버 권위 또는 CSPRNG. 클라이언트가 시드를 예측해 *유리한 결과* 를 강제하면 안 된다.
-- **PvP 매치 결과·핵심 판정**: *서버 권위* 모델. 클라이언트는 입력만 보내고 서버가 권위적 판정.
+- **보상·드롭·가챠**: *보안성* 이 필요. 서버가 출력을 관측·선택할 수 있는 위협 모형이라면 *예측 불가능성* 이 필요하고, 중요 보상에는 *검증된 CSPRNG (서버 측)* 를 쓴다. 클라이언트가 시드를 예측해 *유리한 결과* 를 강제하면 안 된다.
+- **PvP 매치 결과·핵심 판정**: *서버 권위* 모델. 클라이언트는 입력만 보내고 서버가 권위적 판정. 서버 권위는 *누가 계산하는가* 를 정하는 것이고, 예측 불가능성은 *관측자가 결과를 미리 알 수 있는가* 를 정하는 별개 축이다.
 - **암호 (인증·세션 토큰)**: *CSPRNG 필수*. 운영체제의 보안 난수 API 또는 이를 올바르게 감싼 검증된 암호 라이브러리를 사용한다. C++ 표준은 `std::random_device`가 항상 비결정적 OS CSPRNG라고 보장하지 않으므로 구현 문서를 확인하지 않은 채 보안 경계에 쓰면 안 된다.
 
-이 글이 다루는 PRNG 셋 (Xorshift, PCG, MT19937) 은 *클라이언트 시뮬용*. 보상·서버 판정에 쓰면 안 된다.
+이 글이 다루는 PRNG 셋 (Xorshift, PCG, MT19937) 은 *결정론적 시뮬레이션용* 이다. 서버가 계산 주체라는 사실(서버 권위)만으로 *예측 불가능성* 이 확보되지는 않는다. 예측 불가능성·보안이 필요한 보상·보안 판정에는 CSPRNG를 쓴다. 반대로 서버의 결정론적 시뮬레이션 자체는 이 PRNG들로 충분하다.
 
 ### 1.3 통계 품질 검증
 
@@ -178,6 +178,17 @@ struct Xoshiro256pp {
 
     uint64_t rotl(uint64_t x, int k) { return (x << k) | (x >> (64 - k)); }
 
+    // 64비트 시드를 splitmix64로 4워드로 확장. state 전체가 0이 되지 않게 한다.
+    void Seed(uint64_t seed) {
+        for (int i = 0; i < 4; ++i) {
+            seed += 0x9E3779B97F4A7C15ULL;
+            uint64_t z = seed;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+            state[i] = z ^ (z >> 31);
+        }
+    }
+
     uint64_t Next() {
         uint64_t result = rotl(state[0] + state[3], 23) + state[0];
         uint64_t t = state[1] << 17;
@@ -193,6 +204,8 @@ struct Xoshiro256pp {
 ```
 
 상태 32 byte. 한 호출 비용은 xorshift64보다 약간 비싸지만 *통계가 우월*.
+
+xorshift32와 마찬가지로 *256비트 상태가 모두 0이면 영원히 0만 출력* 하므로 *all-zero state 는 금지* 다. `state[4]` 를 직접 채울 때는 적어도 한 워드가 0이 아니어야 하고, 64비트 시드 하나는 위 `Seed` 처럼 splitmix64로 4워드로 확장하는 계약을 붙인다.
 
 ## 3. PCG
 
@@ -299,27 +312,32 @@ C++ 표준 라이브러리에 포함. 시뮬레이션·통계 용도의 표준.
 | 상태 | 2.5 KB (게임에 부담될 수 있음) |
 | 시드 초기화 | 큰 내부 상태를 작은 seed 공간에서 채우는 정책을 별도로 설계해야 함 |
 
-MT의 큰 상태를 작은 seed 공간에서 초기화하면 도달 가능한 초기 상태가 제한되고, 선형 generator 특성도 남는다. 앞의 출력을 임의 개수 버리는 “워밍업”은 이를 일반적으로 해결하지 않는다. 재현 가능한 seed expander로 필요한 entropy를 상태에 분산하고, application seed 공간과 stream 분리 요구를 별도로 설계한다.
+MT의 큰 상태를 작은 seed 공간에서 초기화하면 도달 가능한 초기 상태가 제한되고, 선형 generator 특성도 남는다. 앞의 출력을 임의 개수 버리는 “워밍업”은 이를 일반적으로 해결하지 않는다.
+
+여기서 구분해야 할 것은 *재현용 application seed 공간* 과 *암호적 entropy* 다. `std::seed_seq` 를 비롯한 seed expansion 은 *주어진 seed 비트를 상태에 분산* 하는 초기화·분산 방법이지, 없는 entropy 를 만들어 내는 생성기가 아니다. 64비트 seed 로 초기화한 MT는 도달 가능한 상태가 여전히 $2^{64}$개로 제한되지만, 이는 작은 seed 라서 잘못된 것이 아니라 *재현 가능한 시뮬레이션 seed 로는 정상* 인 계약이다. 보안 경계에는 이와 별도로 CSPRNG 를 쓴다.
 
 ```cpp
-// 잘못된 패턴: 32비트 시드 하나 → 도달 가능한 초기 상태가 2^32개뿐
-std::mt19937 rng(seed);
-
-// 옳음: seed_seq로 전체 상태를 풍부하게 채움
-std::seed_seq seq{seed, seed >> 32, /*...*/};
+// 작은 application seed: 재현 가능한 초기화. 상태 공간이 seed 수만큼인 것은 의도된 계약이다.
+std::seed_seq seq{seed, seed >> 32};
 std::mt19937 rng(seq);
 
-// 또는 MMIX 계열 64비트 LCG로 624워드 직접 채움
+// 표준에는 배열을 직접 받는 생성자가 없으므로, seed_seq 나 엔진의 seed 함수를 거친다.
+std::array<uint32_t, 624> words = /* ... */;
+std::seed_seq seq2(words.begin(), words.end());
+std::mt19937 rng2(seq2);
+
+// 또는 MMIX 계열 64비트 LCG로 624워드를 채운 뒤 seed_seq로 초기화
 uint64_t s = seed;
 std::array<uint32_t, 624> state;
 for (auto& w : state) {
     s = s * 6364136223846793005ULL + 1442695040888963407ULL;
     w = uint32_t(s >> 32);
 }
-// state로 mt19937 직접 초기화
+std::seed_seq seq3(state.begin(), state.end());
+std::mt19937 rng3(seq3);
 ```
 
-*워밍업 (몇 번의 출력 버리기)* 은 *엔트로피를 늘리지 못한다* — 시드 자체가 부족하면 워밍업 후에도 부족. 핵심은 *시드 시퀀스* 의 풍부함.
+*워밍업 (몇 번의 출력 버리기)* 은 *엔트로피를 늘리지 못한다* — 시드 자체가 부족하면 워밍업 후에도 부족. 핵심은 *시드 분산* 이며, 보안이 필요하면 별도 CSPRNG 를 쓴다.
 
 ### 4.3 게임에서의 위치
 
@@ -379,12 +397,17 @@ uint32_t UniformIntFixed(uint32_t (*nextBits)(), uint32_t n) {
 ### 5.3 부동소수점 [a, b)
 
 ```cpp
+// [a, b) 반열림 계약. a + u*(b-a) 의 반올림으로 b 가 나오지 않도록 상한을 제한한다.
 float UniformFloatRange(uint32_t bits, float a, float b) {
-    return a + UniformFloat(bits) * (b - a);
+    if (!(a < b)) return a;              // 빈/역전 범위는 별도 계약으로 거부해도 된다
+    float u  = UniformFloat(bits);       // [0, 1)
+    float r  = a + u * (b - a);
+    float hi = std::nextafter(b, a);     // b 바로 아래 표현 가능한 값
+    return r > hi ? hi : r;              // 결과가 [a, b) 임을 보장
 }
 ```
 
-*$a$와 $b$의 부호 차이* 또는 *큰 차이* 에서 부동소수점 정밀도 함정. 큰 범위에서 작은 변화를 원하면 *정수 균일 후 정수 산술* 이 더 안전.
+원래 구현은 $a=1, b=2, \text{bits}=\text{UINT32\_MAX}$ 처럼 $a + u(b-a)$ 가 반올림되면 $b$ 자체를 돌려줄 수 있어 $[a,b)$ 계약이 깨진다. 위 구현은 `nextafter(b, a)` 로 최댓값을 제한해 끝점을 막지만, 이 한 줄이 *모든 부동소수점 값에 대한 균등성 증명은 아니다* — `UniformFloat(bits)` 는 24비트 격자의 균등 표본이므로 $[a,b)$ 안의 실수 전체가 균등해지는 것은 아니다. 또한 $a + u(b-a)$ 자체의 중간 overflow 도 별도로 점검해야 한다. *$a$와 $b$의 부호 차이* 또는 *큰 차이* 에서는 정밀도도 잃는다. 큰 범위에서 작은 변화를 원하면 *정수 균일 후 정수 산술* 이 더 안전.
 
 ### 5.4 게임 응용
 
@@ -400,21 +423,27 @@ float UniformFloatRange(uint32_t bits, float a, float b) {
 각 항목에 *가중치* 가 있을 때.
 
 ```cpp
+// 계약: weights 는 비음수 유한값이고 total > 0 이며 u ∈ [0,1). 빈 배열은 실패.
 int WeightedSample(const std::vector<float>& weights, float u) {
+    if (weights.empty()) return -1;  // 호출 계약 위반 — 유효 인덱스 없음
     float total = 0;
-    for (float w : weights) total += w;
+    for (float w : weights) {
+        if (!(w >= 0.0f) || !std::isfinite(w)) return -1;  // 음수/NaN/∞ 거부
+        total += w;
+    }
+    if (!(total > 0.0f)) return -1;  // 모두 0이면 확률 분포가 아님
 
     float r = u * total;
     float acc = 0;
-    for (int i = 0; i < weights.size(); ++i) {
+    for (int i = 0; i < int(weights.size()); ++i) {
         acc += weights[i];
         if (r < acc) return i;
     }
-    return int(weights.size()) - 1;
+    return int(weights.size()) - 1;  // 부동소수점 누적 오차로 남은 경계 fallback
 }
 ```
 
-*가중합 → 균일 표본 r → 누적합과 비교*. $O(N)$ 이지만 *드문 호출* 이라 일반적으로 OK.
+*가중합 → 균일 표본 r → 누적합과 비교*. $O(N)$ 이지만 *드문 호출* 이라 일반적으로 OK. *비음수 유한 가중치와 양의 total* 이 계약이다. 빈 배열·음수·NaN·total 0 은 유효한 확률 분포가 아니므로 실패(`-1`)로 돌려준다. 큰 가중치가 많으면 float 누적에서 정밀도가 손실되어 경계가 흔들릴 수 있고, 마지막 항목 반환은 그 fallback 이다.
 
 자주 호출하는 케이스는 *Alias method* — *전처리 $O(N)$ + 호출 $O(1)$*. 큰 가중 풀에 효율적.
 
@@ -454,7 +483,7 @@ struct BoxMuller {
         }
         float u1 = uniform();
         float u2 = uniform();
-        if (u1 < 1e-10f) u1 = 1e-10f;  // log(0) 방지
+        while (u1 <= 0.0f) u1 = uniform();  // log(0) 방지: 0은 재추출 (1e-10 clamp 아님)
         float r = std::sqrt(-2.0f * std::log(u1));
         float theta = 2.0f * 3.14159265f * u2;
         cached = r * std::sin(theta);
@@ -464,7 +493,7 @@ struct BoxMuller {
 };
 ```
 
-`log` 와 `sin`/`cos` 두 비싼 함수 호출. 두 표본을 *하나는 반환, 하나는 캐시*. 호출당 평균 *log 0.5번 + sin/cos 0.5번씩*.
+`log` 와 `sin`/`cos` 두 비싼 함수 호출. 두 표본을 *하나는 반환, 하나는 캐시*. 호출당 평균 *log 0.5번 + sin/cos 0.5번씩*. u1=0 을 `1e-10` 으로 clamp 하면 *그 반경에 인공적인 확률 질량* 이 생겨 꼬리가 왜곡된다. 0 은 재추출하거나 (0,1] 매핑을 쓰고, 근사 tail cutoff 가 있으면 명시한다. 또 `cached` 는 *분포 상태* 이므로 PRNG를 재시드하거나 상태를 저장·복원할 때 함께 초기화·직렬화해야 재현성이 유지된다.
 
 ### 6.3 Marsaglia polar method
 
@@ -505,15 +534,19 @@ struct PolarNormal {
 코드가 *복잡* 하고 *table 빌드* 가 필요. 게임에서는 *고성능 Normal 표본이 핫 패스* 인 경우 (입자 시스템 등) 도입.
 
 ```cpp
-// 의사 코드
+// 의사 코드. scale/limit 테이블은 양수 크기용이고, 부호는 비트에서 분리한다.
 float Ziggurat(uint32_t bits) {
-    int idx = bits & 0x7F;  // 128 박스
-    float x = bits * scale[idx];
-    if (std::fabs(x) < limit[idx]) return x;
+    int      idx  = bits & 0x7F;                          // 하위 7비트: 128 박스 선택
+    uint32_t mag  = (bits >> 7) & 0x00FFFFFFu;            // 나머지 비트: 박스 내부 위치(크기)
+    float    sign = (bits & 0x80000000u) ? -1.0f : 1.0f;  // 최상위 비트: 부호
+    float    x    = mag * scale[idx];                     // scale 테이블은 양수
+    if (x < limit[idx]) return sign * x;
     // 꼬리 처리 (별도 알고리즘)
     return TailHandling(bits, idx);
 }
 ```
+
+일반적인 양수 scale/limit 테이블을 그대로 쓰면 `bits * scale[idx]` 는 음수 표본을 만들지 못한다. 표준 구현은 부호 있는 정수를 쓰거나 위처럼 *부호 비트와 크기 비트를 분리* 한다. 테이블 구성·layer 선택·tail 처리는 생략해도, *부호와 잔여 비트의 역할* 은 계약으로 명시한다.
 
 C++ 표준은 `std::normal_distribution`의 내부 알고리즘과 같은 엔진·시드에 대한 구현 간 동일 출력까지 규정하지 않는다. 구현은 polar, Ziggurat 또는 다른 방법을 선택할 수 있다. 비트 단위 재현성이 계약이면 분포 변환까지 직접 버전 고정해야 한다.
 
@@ -588,7 +621,7 @@ int PoissonSample(float lambda, float (*uniform)()) {
 }
 ```
 
-*Knuth의 알고리즘*. $\lambda$ 가 작으면 빠르고, 크면 느리다 ($\lambda$ 에 비례). 큰 $\lambda$ 는 Normal 근사 ($\mu = \sigma^2 = \lambda$).
+*Knuth의 알고리즘*. $\lambda$ 가 작으면 빠르고, 크면 느리다 ($\lambda$ 에 비례). 그런데 더 심각한 것은 *underflow* 다. `float` 에서 $\lambda$ 가 대략 $88$ 을 넘으면 `std::exp(-lambda)` 가 $0$ 이 되어, `p` 도 underflow 할 때까지 곱한 뒤 $\lambda$ 와 무관한 값에 갇힌다. 예를 들어 $\lambda = 1000, u = 0.5$ 에서 $149$ 부근을 돌려주는데 이는 $\lambda$ 의 함수가 아니다. 따라서 이 코드는 *작은 $\lambda$ (대략 $\lambda \lesssim 10$, 늦어도 $\exp(-\lambda)$ 가 정규 `float` 로 표현되는 범위)* 전용으로 명시하고, 큰 $\lambda$ 에는 검증된 rejection 알고리즘 (예: PTRS/PTRD)이나 로그 영역의 별도 처리를 쓴다. Normal 근사 ($\mu = \sigma^2 = \lambda$) 는 음이 아닌 정수 support 와 근사 오차를 함께 명시할 때만 대안이 된다.
 
 게임 응용:
 
@@ -606,12 +639,13 @@ $$
 샘플:
 
 ```cpp
+// 계약: lambda > 0, u ∈ [0,1). 작은 u 에서 1-u 의 상쇄를 피한다.
 float ExponentialSample(float lambda, float u) {
-    return -std::log(1.0f - u) / lambda;  // u != 1 가정
+    return -std::log1p(-u) / lambda;
 }
 ```
 
-`log` 호출 한 번. *다음 이벤트까지 대기 시간*.
+`log` 호출 한 번. *다음 이벤트까지 대기 시간*. u 가 `float` epsilon 보다 작으면 `1.0f - u` 가 `1.0f` 로 반올림되어 $0$ 대기 시간이 나온다. `log1p(-u)` 는 $1-u$ 를 명시적으로 만들지 않아 이 상쇄를 피한다. `lambda > 0, u \in [0,1)` 계약을 명시한다. 앞 절의 24비트 균등 표본만 쓰면 최소 양수 표본이 $2^{-24}$ 라 영향이 제한되지만, 함수 일반 계약은 더 넓다.
 
 게임 응용:
 
@@ -641,13 +675,22 @@ float TriangularSample(float a, float b, float c, float u) {
 정수 $a$ 부터 $b$ 까지 균일.
 
 ```cpp
+// 계약: a <= b 이고 범위 크기 0 < n <= 2^32. n = 2^32 (전체 int32)는 별도로 매핑한다.
 int DiscreteUniform(int a, int b, uint32_t (*nextBits)()) {
-    uint32_t n = b - a + 1;
-    return a + int(UniformIntFixed(nextBits, n));
+    if (a > b) return a;  // 잘못된 범위는 호출 계약 위반 (실패 정책은 선택)
+    uint64_t n = uint64_t(int64_t(b) - int64_t(a)) + 1ULL;
+
+    uint32_t r;
+    if (n == 0x100000000ULL) {
+        r = nextBits();                 // 2^32 전체는 32비트 값 자체가 균등
+    } else {
+        r = UniformIntFixed(nextBits, uint32_t(n));
+    }
+    return int(int64_t(a) + int64_t(r));
 }
 ```
 
-modulo bias 회피 (5.2절) 결합. *주사위 굴리기*, *적 종류 선택*, *카드 뽑기*.
+modulo bias 회피 (5.2절) 결합. *주사위 굴리기*, *적 종류 선택*, *카드 뽑기*. `b - a + 1` 을 `int` 로 계산하면 `[-INT_MAX, INT_MAX]` 같은 유효 범위에서 signed overflow (UB) 다. 범위는 `int64`/`uint64` 로 계산하고, 전체 int32 범위처럼 $n = 2^{32}$ 인 경우는 `uint32_t` 로 표현할 수 없으므로 ($0$ 으로 wrap) 별도로 매핑한다. $0 < n \le 2^{32}$ 를 계약으로 두고 잘못된 범위는 실패로 돌려준다. 반환의 `int` cast 와 덧셈도 `int64` 중간값으로 처리해 overflow 를 피한다.
 
 ## 8. 시드 관리와 결정론
 
@@ -690,22 +733,27 @@ flowchart TD
 부모 시드 + 자식 ID 로 *결정론적 해시*.
 
 ```cpp
-uint64_t DeriveSeed(uint64_t parentSeed, uint64_t childId) {
-    // splitmix64
-    uint64_t z = parentSeed + childId * 0x9E3779B97F4A7C15ULL;
+// domainTag 는 AI/drop/chunk 같은 시스템 종류를 구분하는 고정 tag.
+// (parentSeed, domainTag, childId) 를 고정 폭으로 packing 한다.
+uint64_t DeriveSeed(uint64_t parentSeed, uint32_t domainTag, uint64_t childId) {
+    // splitmix64. tag 를 비영으로 섞어 DeriveSeed(0,0,0)=0 을 피한다.
+    uint64_t z = parentSeed
+               + (uint64_t(domainTag) + 1) * 0x9E3779B97F4A7C15ULL
+               + childId * 0xBF58476D1CE4E5B9ULL;
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
     return z ^ (z >> 31);
 }
 ```
 
-`splitmix64` 가 가벼운 hash. 시드 비트의 *작은 차이* 가 *출력에 잘 퍼진다*.
+`splitmix64` 가 가벼운 hash. 시드 비트의 *작은 차이* 가 *출력에 잘 퍼진다*. 같은 `(parentSeed, childId)` 라도 *시스템 tag* 가 다르면 다른 seed 가 나와야 한다. tag/좌표 packing/버전을 고정하지 않으면 AI·drop·chunk 가 같은 seed 를 공유할 수 있다. `DeriveSeed(0, 0, 0)` 처럼 0이 나오지 않도록 domain tag 를 비영으로 섞고, 생성기별 seed 정책 (예: xorshift 계열은 0 state 금지) 을 연결한다.
 
 ```cpp
 // 사용 예
+enum SeedDomain : uint32_t { DomainTerrain = 1, DomainDrop = 2, DomainAI = 3 };
 uint64_t worldSeed = 12345;
-uint64_t chunkSeed = DeriveSeed(worldSeed, ChunkHash(chunkX, chunkY));
-uint64_t treeSeed  = DeriveSeed(chunkSeed, treeIndex);
+uint64_t chunkSeed = DeriveSeed(worldSeed, DomainTerrain, ChunkHash(chunkX, chunkY));
+uint64_t treeSeed  = DeriveSeed(chunkSeed, DomainTerrain, treeIndex);
 PCG32 treeRng;
 treeRng.Seed(treeSeed);
 ```

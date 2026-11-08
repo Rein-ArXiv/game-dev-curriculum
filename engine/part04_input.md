@@ -47,7 +47,7 @@ flowchart LR
 
 게임 엔진이 다루는 입력은 결국 OS와 드라이버가 만든 신호다. 그 신호가 게임에 도달하는 형태는 크게 둘이다. 하나는 *이벤트(event)* — OS가 메시지 큐에 "키 1번이 눌림", "마우스가 (x,y)로 이동"을 *밀어 넣는다*. 다른 하나는 *폴링(polling)* — 게임이 매 프레임 "지금 1번 키 상태가 뭐냐", "스틱 좌표가 얼마냐"를 *직접 묻는다*.
 
-Windows의 경우 키보드·마우스의 표준 메시지(`WM_KEYDOWN`, `WM_MOUSEMOVE`)는 이벤트 모델이고, Raw Input(`WM_INPUT`)도 메시지로 도착하지만 가속·탄도 곡선이 적용되지 않은 원시 델타를 준다. 게임패드의 XInput은 *폴링 전용* 이다 — `XInputGetState`로 매 프레임 패드 상태 전체를 한 번에 긁어온다. 즉 현실의 엔진은 두 모델을 *동시에* 다룬다.
+Windows의 경우 키보드·마우스의 표준 메시지(`WM_KEYDOWN`, `WM_MOUSEMOVE`)는 이벤트 모델이고, Raw Input(`WM_INPUT`)도 메시지로 도착하지만 가속·탄도 곡선이 적용되지 않은 원시 값을 준다. `RAWMOUSE`의 `usFlags`는 *상대 이동(`MOUSE_MOVE_RELATIVE`)* 과 *절대 이동(`MOUSE_MOVE_ABSOLUTE`)* 을 구분하며, 절대 이동은 가상 데스크톱 좌표(장치에 따라 정규화 범위일 수 있음)를 보고한다 — 상대 카운트와 화면 좌표를 같은 필드로 섞으면 안 된다. 게임패드의 XInput은 *폴링 전용* 이다 — `XInputGetState`로 매 프레임 패드 상태 전체를 한 번에 긁어온다. 즉 현실의 엔진은 두 모델을 *동시에* 다룬다.
 
 ### 두 모델의 트레이드오프
 
@@ -103,6 +103,8 @@ void BeginFrame(InputState& s) {
 ```
 
 핵심은 *세 가지 질의* 를 모두 답할 수 있게 만드는 것이다 — "지금 눌려 있나(`down`)", "방금 눌렸나(`pressedEdge`)", "방금 떼졌나(`releasedEdge`)". 점프는 눌린 *엣지* 에, 조준은 눌린 *상태* 에, 차징 해제는 떼진 *엣지* 에 반응한다. 엣지 정보를 잃으면 이 구분이 무너진다.
+
+이 집계는 *정상적인 key up이 도착한다* 는 가정 위에서만 성립한다. 창 포커스 상실, 장치 분리, 컨텍스트 전환에서는 up 이벤트가 오지 않을 수 있어 `down`이 눌린 채 남는다(sticky input). 플랫폼의 취소·포커스 상실 알림을 받으면 장치 상태를 neutral로 되돌리고 `down`을 지운 뒤 진행 중인 action을 *취소* 해야 한다 — 취소→중립화→action cancel의 이 수명 경계는 UI(Part06)와 공유한다. 정상 경로에서 일부 key 이벤트가 단순 생략되는 것과는 구분한다.
 
 ### 입력 수집을 언제 돌리나
 
@@ -166,13 +168,19 @@ $$L \sim \mathrm{Uniform}(0, T),\qquad \mathbb{E}[L]=\frac{T}{2},\qquad L_{\max}
 
 나머지 단계는 상수가 아니라 일반 확률변수 $X_j$로 두는 편이 안전하다. CPU 작업 시간, GPU 실행 시간, OS 스케줄링, 패널 응답이 여기에 속한다. 고정 주사율의 FIFO 큐가 포화되어 입력을 담은 프레임 앞에 완성 프레임이 정확히 $q$개 있다면 큐 항을 근사적으로 $qT_{\text{present}}$로 쓸 수 있다. mailbox, immediate, VRR, 프레임 생성에서는 이 등식이 성립하지 않는다.
 
-독립성을 추가로 가정하면 평균은 선형성으로 더할 수 있다.
+기댓값은 선형성이므로 *독립성 없이* 더할 수 있다.
 
 $$\mathbb{E}[L_{\text{total}}]\approx qT_{\text{present}}+\sum_i\frac{T_i}{2}+\sum_j\mathbb{E}[X_j].$$
 
-경계와 일반 항이 서로 독립일 때만 분산도 더해진다.
+분산은 일반적으로 각 항의 분산과 *공분산* 을 함께 더한다.
+
+$$\mathrm{Var}\Big(\sum_k Y_k\Big)=\sum_k\mathrm{Var}(Y_k)+2\sum_{k<l}\mathrm{Cov}(Y_k,Y_l).$$
+
+경계와 일반 항이 서로 *무상관* 이면 모든 공분산이 0이라 단순 합으로 줄어든다. 독립은 공분산을 0으로 만드는 *충분조건* 중 하나일 뿐, 필요조건이 아니다.
 
 $$\mathrm{Var}(L_{\text{total}})\approx\sum_i\frac{T_i^2}{12}+\sum_j\mathrm{Var}(X_j).$$
+
+종속이면서 공분산이 0인 대조 예로 $X\in\{-1,0,1\}$이 각각 $\frac13$ 확률이고 $Y=X^2$인 경우가 있다. $Y$는 $X$에 완전히 종속이지만 $\mathbb{E}[X]=0$, $\mathbb{E}[XY]=\mathbb{E}[X^3]=0$이라 $\mathrm{Cov}(X,Y)=0$이므로 $X$와 $Y$의 분산은 공분산 항 없이 더해진다.
 
 예를 들어 장치 보고 1ms, 게임 샘플링 16.67ms, FIFO 표시 경계 16.67ms를 서로 독립인 주기 경계로 *가정* 하면, 이 세 경계의 평균 대기만 $0.5+8.34+8.34\approx17.2$ms다. 여기에 실제 CPU·GPU 실행, 큐, 스캔 위치와 패널 응답이 더해진다. 이 계산은 특정 시스템의 총지연 예측이 아니라, 무엇을 측정해야 하는지 보여 주는 예다.
 
@@ -283,16 +291,20 @@ void OnAnyInput(int code) {
 가장 단순한 *축별 데드존* 은 각 축을 독립적으로 자른다. 문제는 *대각선* 이다 — 두 축을 따로 자르면 중립 영역이 *사각형* 이 되어, 수직·수평 방향으로는 입력이 축에 스냅되어 쉬운 반면 대각선이 어색하다. 실무 표준은 *방사형 데드존(radial dead zone)* 이다 — 벡터의 *크기* 로 자르고, 남은 구간을 0~1로 *재정규화* 한다.
 
 ```cpp
-// 방사형 데드존 + 재스케일 (스틱 권장)
-float2 ApplyRadialDeadzone(float2 stick, float inner, float outer) {
+// 방사형 데드존 + 재스케일. 0 <= inner < outer, 유한값 전제
+std::optional<float2> ApplyRadialDeadzone(float2 stick, float inner, float outer) {
+    if (!isfinite(stick.x) || !isfinite(stick.y) ||
+        !isfinite(inner) || !isfinite(outer) || inner < 0 || outer <= inner)
+        return std::nullopt;                         // 잘못된 범위·비유한 입력 거부
     float mag = length(stick);
-    if (mag < inner) return {0, 0};                  // 안쪽 데드존 → 0
-    if (mag > outer) mag = outer;                    // 바깥 포화
-    float2 dir = stick / length(stick);
-    float t = (mag - inner) / (outer - inner);       // 0~1 재정규화
-    return dir * t;                                  // 방향 보존, 크기만 리매핑
+    if (mag <= inner || mag == 0) return float2{0, 0};  // 원점·안쪽 데드존 → 0
+    float clamped = std::min(mag, outer);            // 바깥 포화
+    float t = (clamped - inner) / (outer - inner);   // 0~1 재정규화
+    return stick * (t / mag);                        // 방향 보존, 크기만 리매핑
 }
 ```
+
+`inner = 0`이어도 원점에서 0을 안전하게 반환하고, `inner < 0`이거나 `outer <= inner`, 비유한 파라미터는 `std::nullopt`로 거부한다 — 입력을 조용히 다른 유효 범위로 바꾸지 않는다.
 
 재정규화가 핵심이다. 데드존만 자르고 재스케일을 안 하면, 스틱을 살짝 기울였을 때 갑자기 데드존 경계의 값(예: 0.25)이 튀어나와 *입력이 점프* 한다. 재정규화는 데드존 직후를 0에서 부드럽게 시작하게 만든다.
 
@@ -342,11 +354,11 @@ flowchart LR
     MS[마우스<br/>상대 델타] --> Norm
     PAD[패드<br/>절대 축] --> Norm
     TOUCH[터치<br/>다점 좌표] --> Norm
-    Norm --> Act[공통 액션<br/>버튼/축 -1~1]
+    Norm --> Act[공통 액션<br/>버튼/축 -1~1]; Act -.-> UnitNote[공통 범위라도 단위 다름<br/>마우스 델타=프레임 변위·dt 미곱, 스틱=비율·dt 곱]
     Act --> Game[게임 로직]
 ```
 
-버튼은 모두 *눌림/엣지* 로, 방향은 모두 *-1~+1 축* 으로 정규화한다. 키보드 WASD는 두 쌍의 버튼을 합쳐 2D 축을 만들고, 마우스 델타는 조준 축으로, 패드 스틱은 그대로 축으로 들어간다. 게임은 `AxisValue(MoveX)`만 묻고 어느 장치인지 모른다.
+버튼은 모두 *눌림/엣지* 로, 방향은 모두 *-1~+1 축* 으로 정규화한다. 키보드 WASD는 두 쌍의 버튼을 합쳐 2D 축을 만들고, 마우스 델타는 조준 축으로, 패드 스틱은 그대로 축으로 들어간다. 게임은 `AxisValue(MoveX)`만 묻고 어느 장치인지 모른다. 다만 *장치 독립* 은 단위와 소비 빈도까지 같게 만든다는 뜻이 아니다 — 마우스 *델타* 는 프레임 사이 *변위*(`dt`를 곱하지 않음)이고 패드 스틱 *기울기* 는 *비율*(`dt`를 곱함)이다. 2절의 구분처럼 `MoveAxis`·`LookDelta`·`LookRate`처럼 소비 단위가 다른 축은 이름과 경로를 분리해, 카메라 코드가 둘을 혼동하지 않게 한다.
 
 ### 활성 장치 추적
 
@@ -387,9 +399,16 @@ void OnDeviceDisconnected(DeviceId id) {
 터치는 *버튼이 없다* — 화면 위 좌표뿐이다. 그래서 *가상 컨트롤* 을 화면에 그려 매핑한다. 가상 조이스틱은 첫 터치 지점을 중심으로 삼고, 드래그 벡터를 스틱 축으로 변환한다. *멀티터치* 추적이 필수다 — 왼쪽 엄지의 이동 조이스틱과 오른쪽 엄지의 조준이 동시에 움직이므로, 각 터치 포인트를 *고유 ID로 추적* 해 섞이지 않게 한다.
 
 ```cpp
-// 가상 조이스틱: 첫 터치를 원점으로, 드래그를 축으로
+// 가상 조이스틱: 첫 터치를 원점으로 잡고 그 포인터를 캡처한다
 void UpdateVirtualStick(TouchPoint t) {
-    if (t.phase == Began) origin_ = t.pos;
+    if (t.phase == Began) { activeId_ = t.id; origin_ = t.pos; }  // owner ID 캡처
+    if (t.id != activeId_) return;                                // 다른 손가락 무시
+    if (t.phase == Ended || t.phase == Cancelled) {               // 끝·취소(포커스 상실 포함)
+        SetAxis(Action::MoveX, 0.0f);                             // 중립화
+        SetAxis(Action::MoveY, 0.0f);
+        activeId_ = kNoTouch;                                     // capture 해제
+        return;
+    }
     float2 delta = t.pos - origin_;
     float2 axis  = clampLength(delta / kStickRadius, 1.0f);
     SetAxis(Action::MoveX, axis.x);
@@ -397,7 +416,7 @@ void UpdateVirtualStick(TouchPoint t) {
 }
 ```
 
-손가락은 마우스보다 *굵고 부정확* 하다 — 터치 타깃은 최소 권장 크기(약 9mm, 화면 밀도에 따라 44~48px)를 확보하고, 손가락이 버튼을 가리는 *오클루전* 을 감안해 중요한 피드백은 손가락 밖에 표시한다.
+손가락은 마우스보다 *굵고 부정확* 하다 — 터치 타깃은 플랫폼 권장 크기를 확보한다. Apple은 44×44 *포인트(pt, 논리 단위)* 를, Android는 48×48 *dp(밀도 독립 픽셀)* 를 권장한다. 포인트·dp는 물리 mm나 물리 픽셀과 같지 않으며, 실제 물리 크기는 화면 scale/DPI에 따라 달라진다 — 논리 단위를 '44~48px'처럼 물리 크기·물리 픽셀과 동일시하면 고DPI 기기에서 타깃이 지나치게 작아진다. 손가락이 버튼을 가리는 *오클루전* 을 감안해 중요한 피드백은 손가락 밖에 표시한다.
 
 ## 6. 입력 버퍼링과 인식
 
@@ -434,18 +453,25 @@ bool ConsumeBuffered(Action a, double now) {
 1절에서 만든 `pressedEdge`/`releasedEdge`가 여기서 다시 쓰인다. *눌린 순간* 에만 발화해야 하는 액션(점프, 메뉴 선택)은 엣지로 판정한다. 그렇지 않으면 버튼을 누르고 있는 동안 매 프레임 발화한다. *길게 누르기(hold)* 와 *짧게 누르기(tap)* 의 구분도 엣지에 시간을 결합해 만든다.
 
 ```cpp
-// 탭 vs 홀드 구분
+// 탭 vs 홀드 구분: release 시점에도 duration으로 완결 판정
 void UpdateButton(bool down, bool pressedEdge, bool releasedEdge, double now) {
-    if (pressedEdge) pressStart_ = now;
-    if (down && now - pressStart_ > kHoldThreshold && !holdFired_) {
-        OnHold();  holdFired_ = true;          // 길게 누름 발동
-    }
+    if (pressedEdge) { active_ = true; holdFired_ = false; pressStart_ = now; }
+    if (!active_) return;
+    double duration = now - pressStart_;
     if (releasedEdge) {
-        if (!holdFired_ && now - pressStart_ < kHoldThreshold) OnTap();  // 짧게 누름
-        holdFired_ = false;
+        active_ = false;
+        if (holdFired_) { holdFired_ = false; return; }   // 이미 홀드 발행 → 중복 없음
+        if (duration >= kHoldThreshold) OnHold();         // 임계 경계 포함
+        else OnTap();
+        return;
+    }
+    if (down && !holdFired_ && duration >= kHoldThreshold) {
+        OnHold();  holdFired_ = true;                     // 임계 통과 시 1회
     }
 }
 ```
+
+`now`는 단조 증가해야 하고 각 엣지는 시간순으로 한 번만 전달한다. 임계값을 넘긴 채 떼면 홀드이고, release 시점의 `duration`이 임계값과 *같으면* 이 예제에서는 홀드로 정한다(제품 정책에 따라 탭으로 둘 수도 있다). 이미 홀드를 발행했으면 release에서 중복 발행하지 않으며, 포커스 상실·장치 분리는 이 판정과 별도로 `Cancel`로 상태를 중립화한다.
 
 ### 시퀀스 인식
 
@@ -484,13 +510,17 @@ bool MatchMotion(const std::vector<int>& pattern, double maxGap, double now) {
 ```cpp
 // 틱당 입력 명령: 시뮬레이션이 보는 유일한 입력
 struct InputCommand {
-    uint16_t buttons;        // 비트마스크
+    uint16_t held;           // 눌린 채 유지된 버튼
+    uint16_t pressed;        // 이 틱에 새로 눌린 엣지
+    uint16_t released;       // 이 틱에 떼진 엣지
     int8_t   moveX, moveY;   // 양자화된 축 (-127~127)
     int8_t   aimX,  aimY;
 };   // 고정 크기 → 틱당 일정 바이트로 직렬화 가능
 ```
 
 축을 *정수로 양자화* 하는 이유가 있다. 부동소수 값을 그대로 저장하면 플랫폼·컴파일러 간 미세한 비트 차이가 결과를 갈라놓을 수 있다. 입력을 작은 정수로 양자화하면 직렬화가 작고 결정론에 유리하다.
+
+`held`만 직렬화하면 같은 틱 안의 down+up이 '입력 없음'과 구별되지 않는다. 그래서 `held`(지속 상태)와 `pressed`/`released`(엣지)를 분리한다. 여러 엣지의 *순서* 까지 필요한 액션(예: 시퀀스 인식)에는 작은 ordered event 배열을 덧붙인다.
 
 ### 리플레이: 입력만 저장한다
 
@@ -509,7 +539,7 @@ void PlaybackTick(uint32_t tick) {
 }
 ```
 
-위 예제 구조가 패딩 없이 6바이트로 직렬화된다고 가정하면 60Hz 입력 본문은 초당 360바이트, 시간당 약 1.3MB다. 실제 포맷에는 헤더, 체크포인트, 외부 이벤트, 무결성 정보가 추가된다. 더 줄이려면 *변화 없는 틱을 델타 압축* (버튼 상태가 안 바뀐 구간은 카운트로)한다.
+위 예제 구조가 패딩 없이 10바이트로 직렬화된다고 가정하면 60Hz 입력 본문은 초당 600바이트, 시간당 약 2.2MB다. 실제 포맷에는 헤더, 체크포인트, 외부 이벤트, 무결성 정보가 추가된다. 더 줄이려면 *변화 없는 틱을 델타 압축* (버튼 상태가 안 바뀐 구간은 카운트로)한다.
 
 ### 디싱크 진단
 
@@ -592,6 +622,8 @@ void InjectScripted(uint32_t tick, const std::vector<ScriptedInput>& script) {
         if (s.tick == tick) OverrideInput(s.cmd);   // 실제 입력 대체
 }
 ```
+
+다만 `InjectScripted`는 이미 *양자화된* `InputCommand`를 주입하므로 raw timestamp 순서, focus/device 전환, 컨텍스트 라우팅, IME 처리는 우회한다. raw 이벤트 어댑터(수집→상태→명령) 테스트와 tick 명령 재생 테스트를 분리하고, 0틱·다중틱 구간과 같은 프레임 안의 down/up 같은 경계는 *앞단 어댑터* 에서 검증한다.
 
 ### 접근성: 입력의 또 다른 일관성
 

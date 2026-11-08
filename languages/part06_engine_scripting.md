@@ -111,17 +111,24 @@ DSL의 이득은 *표현력과 검증 가능성* 이다. 위 스크립트는 임
 
 ```cpp
 class ScriptVM {
-    lua_State* L_;
+    lua_State* L_ = nullptr;
 public:
     ScriptVM() {
         L_ = luaL_newstate();      // VM 인스턴스 생성
+        if (!L_) return;           // 할당 실패 — 라이브러리를 열지 않는다
         OpenSafeLibraries(L_);     // 표준 라이브러리 선별 등록 (6절 샌드박싱)
         RegisterEngineAPI(L_);     // 네이티브 함수 바인딩 (3절)
     }
-    ~ScriptVM() { lua_close(L_); }  // VM과 그 안의 모든 GC 객체 해제
+    ScriptVM(const ScriptVM&) = delete;             // 같은 상태를 소유하는 두 객체 방지
+    ScriptVM& operator=(const ScriptVM&) = delete;
+    ScriptVM(ScriptVM&&) = delete;                  // 이동이 필요하면 source.L_ = nullptr로 비운다
+    ScriptVM& operator=(ScriptVM&&) = delete;
+    ~ScriptVM() { if (L_) lua_close(L_); }  // VM과 그 안의 모든 GC 객체 해제 — 단일 소유
 
     bool DoFile(const char* path) {
-        if (luaL_loadfile(L_, path) != LUA_OK) {   // 컴파일
+        if (!L_) return false;
+        // 비신뢰 진입 파일은 text-only — 기본 loadfile은 binary chunk(악성 bytecode)도 받는다
+        if (luaL_loadfilex(L_, path, "t") != LUA_OK) {   // 컴파일
             LogError(lua_tostring(L_, -1));
             lua_pop(L_, 1);
             return false;
@@ -136,7 +143,7 @@ public:
 };
 ```
 
-핵심은 *`lua_pcall` 같은 보호 호출* 이다. 스크립트 안의 에러(`nil` 접근, 잘못된 인덱스)가 *호스트 프로세스를 죽이지 않고* C++로 에러 코드로 돌아온다. 스크립트 오류로 게임 전체가 크래시하면 스크립팅의 안전성 이점이 사라진다. 모든 스크립트 진입점은 보호 호출로 감싼다.
+핵심은 *`lua_pcall` 같은 보호 호출* 이다. 스크립트 안의 에러(`nil` 접근, 잘못된 인덱스)가 *호스트 프로세스를 죽이지 않고* C++로 에러 코드로 돌아온다. 스크립트 오류로 게임 전체가 크래시하면 스크립팅의 안전성 이점이 사라진다. 모든 스크립트 진입점은 보호 호출로 감싼다. `ScriptVM` 은 `lua_State*` 를 단독 소유하므로 복사·이동을 금지하고, 모든 `ScriptCallback` 은 해당 VM보다 먼저 소멸(등록 해제)해야 한다 — 콜백 해제 → VM close 순서가 수명 계약이다. `DoFile` 은 text-only 로더로 binary chunk 적재를 막지만, 파일 경로 권한·허용 native API·메모리/실행 예산은 별도 계약으로 남는다.
 
 ### VM 인스턴스 모델
 
@@ -153,7 +160,7 @@ flowchart TB
     end
 ```
 
-단일 VM은 *전역 상태를 공유* 해 스크립트끼리 직접 통신하기 쉽지만, 한 스크립트가 전역을 오염시키면 전부가 영향받는다. 다중 VM은 *서로를 모르게 격리* 해 안전하고, 서로 다른 스레드에 배치하기 좋지만(아래), 인스턴스마다 메모리·바인딩 등록 비용이 든다. 흔한 절충은 *서브시스템별 VM* 이다 — UI, 게임플레이, 모드(mod) 스크립트를 분리해 모드의 무한 루프가 코어 UI를 멈추지 않게 한다.
+단일 VM은 *전역 상태를 공유* 해 스크립트끼리 직접 통신하기 쉽지만, 한 스크립트가 전역을 오염시키면 전부가 영향받는다. 다중 VM은 *서로를 모르게 격리* 해 안전하고, 서로 다른 스레드에 배치하기 좋지만(아래), 인스턴스마다 메모리·바인딩 등록 비용이 든다. 흔한 절충은 *서브시스템별 VM* 이다 — UI, 게임플레이, 모드(mod) 스크립트를 분리해 모드의 무한 루프가 코어 UI를 멈추지 않게 한다. 다만 위 도식의 state 분리와 화살표는 *상태 격리* 를 나타낼 뿐, CPU·메모리 강제 격리를 보장하지 않는다 — 같은 프로세스의 별도 state에도 실행 시간·할당량 제한을 따로 걸어야 한다(L04).
 
 ### 메모리 소유권 — 누가 객체를 소유하는가
 
@@ -169,6 +176,8 @@ flowchart TB
 | 약한 참조 | 스크립트는 약한 핸들, 죽으면 무효화 | 매 접근 유효성 검사 |
 
 게임 엔진에서 가장 안전한 선택은 *핸들·ID* 다. 스크립트는 `Entity*` 가 아니라 `EntityId`(정수)를 들고, 네이티브 함수가 매번 ID를 실제 객체로 조회한다. 죽은 엔티티의 ID를 조회하면 `nil` 이 돌아와 스크립트가 *우아하게 처리* 할 수 있다. 생 포인터를 스크립트에 넘기는 것은 *크래시를 스크립트 작성자에게 위임* 하는 것과 같으므로 피한다.
+
+조회가 `nil` 을 돌려주는 것만으로 dangling handle의 의미 안전성이 완성되지는 않는다. ID를 재사용하면 슬롯 7의 A가 파괴된 뒤 B가 슬롯 7에 들어갔을 때 옛 핸들 7이 B를 가리킬 수 있으므로, 핸들 테이블은 ① ID를 프로세스 수명 동안 재사용하지 않거나 ② index와 generation을 함께 담아 조회 시 generation이 일치할 때만 유효로 보는 정책을 계약으로 둔다. 조회 직후 객체가 파괴되는 동시성도 고려해야 한다 — 반환한 포인터/참조의 사용 기간 동안 생존을 보장하려면 같은 스레드에서 조회→사용을 한 단계로 묶거나 borrow·핀·참조 카운트를 쓰고, 핸들 테이블 접근을 직렬화한다.
 
 ### GC 대 수동 관리
 
@@ -266,31 +275,50 @@ vm.Register("play_sound",  AutoBind<&Audio::Play>);
 
 ### 콜백과 이벤트
 
-반대 방향 — *네이티브가 스크립트를 부르는* 콜백 — 은 수명 관리가 까다롭다. 스크립트가 `on_collision` 핸들러를 등록하면, 네이티브는 그 스크립트 함수에 대한 참조를 들고 있어야 충돌 시 부를 수 있다. 이 참조가 *GC로부터 함수를 보호* 해야 하고, 핸들러가 등록 해제되면 *참조를 풀어* GC가 회수하게 해야 한다.
+반대 방향 — *네이티브가 스크립트를 부르는* 콜백 — 은 수명 관리가 까다롭다. 스크립트가 `on_collision` 핸들러를 등록하면, 네이티브는 그 스크립트 함수에 대한 참조를 들고 있어야 충돌 시 부를 수 있다. 이 참조가 *GC로부터 함수를 보호* 해야 하고, 핸들러가 등록 해제되면 *참조를 풀어* GC가 회수하게 해야 한다. `Set` 을 다시 호출해 콜백을 교체할 때는 새 참조를 얻은 뒤 *옛 `L_`/ref 쌍을 먼저 해제* 해야, 옛 함수와 그 함수가 붙잡은 객체가 GC 루트로 남지 않는다.
 
 ```cpp
 // 스크립트 콜백을 GC로부터 보호하며 보관 (Lua registry 참조)
 class ScriptCallback {
-    lua_State* L_;
+    lua_State* L_ = nullptr;         // borrowed: ScriptVM이 이 객체보다 오래 산다
     int ref_ = LUA_NOREF;
 public:
-    void Set(lua_State* L, int stackIdx) {
-        L_ = L;
-        lua_pushvalue(L, stackIdx);              // 콜백 함수를 복제
-        ref_ = luaL_ref(L, LUA_REGISTRYINDEX);   // registry에 고정 → GC 안 됨
+    ScriptCallback() = default;
+    ScriptCallback(const ScriptCallback&) = delete;
+    ScriptCallback& operator=(const ScriptCallback&) = delete;
+    ScriptCallback(ScriptCallback&&) = delete;
+    ScriptCallback& operator=(ScriptCallback&&) = delete;
+
+    void Reset() {
+        if (L_ && ref_ != LUA_NOREF && ref_ != LUA_REFNIL)
+            luaL_unref(L_, LUA_REGISTRYINDEX, ref_); // 옛 참조 해제 → GC가 회수 가능
+        L_ = nullptr;
+        ref_ = LUA_NOREF;
     }
-    void Invoke(int collisionEntity) {
+    void Set(lua_State* L, int stackIdx) {
+        lua_pushvalue(L, stackIdx);              // 새 콜백 함수를 복제
+        int nextRef = luaL_ref(L, LUA_REGISTRYINDEX); // registry에 고정 → GC 안 됨
+        Reset();                                 // 새 참조 확보 뒤 옛 VM/ref 쌍을 해제·교체
+        L_ = L;
+        ref_ = nextRef;
+    }
+    int Invoke(int collisionEntity) {
+        if (!L_ || ref_ == LUA_NOREF || ref_ == LUA_REFNIL) return LUA_ERRRUN;
+        int top = lua_gettop(L_);                // 호출 전 스택 높이 보관
         lua_rawgeti(L_, LUA_REGISTRYINDEX, ref_); // 보관한 함수 꺼냄
         lua_pushinteger(L_, collisionEntity);
-        lua_pcall(L_, 1, 0, 0);                   // 보호 호출 — 콜백 에러 격리
+        int status = lua_pcall(L_, 1, 0, 0);     // 보호 호출 — 콜백 에러 격리
+        if (status != LUA_OK) {
+            ReportLuaErrorWithoutThrowing(L_);   // 문자열 가정 없이 보고 (throw 금지)
+        }
+        lua_settop(L_, top);                     // 성공·실패 모두 오류 객체 포함해 복원
+        return status;
     }
-    ~ScriptCallback() {
-        if (ref_ != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, ref_); // 참조 해제
-    }
+    ~ScriptCallback() { Reset(); }
 };
 ```
 
-콜백 호출도 *반드시 보호 호출* 로 감싼다 — 충돌 콜백 안의 스크립트 에러가 물리 엔진을 멈추면 안 된다. 그리고 콜백 호출은 *경계를 건너는 빈번한 지점* 이므로, 프레임마다 수천 번 불리는 이벤트(매 충돌, 매 틱)를 스크립트 콜백으로 만들면 4절의 경계 비용이 쌓인다. 고빈도 이벤트는 *네이티브에서 모았다가 묶음으로* 스크립트에 전달한다.
+콜백 호출도 *반드시 보호 호출* 로 감싼다 — 충돌 콜백 안의 스크립트 에러가 물리 엔진을 멈추면 안 된다. 호출은 호출 전 스택 높이를 저장하고 성공·실패 모두 `lua_settop` 으로 복원하며, 실패 시 오류 객체를 문자열로 가정하지 않고 보고한 뒤 상태 코드를 호출자에게 돌려준다. 그리고 콜백 호출은 *경계를 건너는 빈번한 지점* 이므로, 프레임마다 수천 번 불리는 이벤트(매 충돌, 매 틱)를 스크립트 콜백으로 만들면 4절의 경계 비용이 쌓인다. 고빈도 이벤트는 *네이티브에서 모았다가 묶음으로* 스크립트에 전달한다.
 
 ## 4. 네이티브 경계 비용
 
@@ -377,30 +405,48 @@ vm.Register("ai_can_see_target", AutoBind<&AISystem::CanSeeTarget>);
 ### 상태 보존 전략
 
 ```mermaid
-flowchart TB
-    Detect[파일 변경 감지] --> Save[기존 상태 직렬화]
-    Save --> Reload[새 스크립트 로드·컴파일]
-    Reload --> Err{컴파일<br/>성공?}
-    Err -->|실패| Keep[기존 상태 유지·에러 표시]
-    Err -->|성공| Restore[상태 복원·새 코드에 주입]
-    Restore --> Run[새 코드로 계속 실행]
+flowchart TD
+    Detect[파일 변경 감지] --> Compile[후보 소스 로드·컴파일]
+    Compile --> Err{컴파일 성공?}
+    Err -->|아니오| Keep[기존 active 모듈 유지·오류 표시]
+    Err -->|예| Eval[격리된 환경에서 후보 평가·상태 migration 검증]
+    Eval --> Verify{검증 성공?}
+    Verify -->|아니오| Keep
+    Verify -->|예| Commit[안전 지점에서 active 참조 commit]
+    Commit --> Policy[관련 cache·callback 교체 정책 적용]
+    Policy --> Run[새 active 모듈로 계속 실행]
+```
+
+교체는 여러 단계를 분리해 *트랜잭션처럼* 진행한다.
+
+```text
+소스 로드/compile
+→ 후보 모듈을 별도 환경에서 평가
+→ 모듈 인터페이스·상태 migration 검증
+→ 안전 지점에서 active module 참조를 commit
+→ 실패 시 active module을 그대로 유지
 ```
 
 상태 보존의 핵심은 *코드와 데이터를 분리* 하는 것이다. Lua에서는 *함수(코드)는 새 청크로 교체하되, 테이블(데이터)은 유지* 하는 패턴이 흔하다.
 
 ```lua
--- 모듈이 이미 로드되어 있으면, 데이터 테이블은 보존하고 함수만 교체
-local M = package.loaded["enemy_ai"] or { state = {} }  -- 기존 state 유지
+-- 후보 모듈을 먼저 정의하고, 검증을 통과한 뒤에만 active 참조를 교체
+local M = package.loaded["enemy_ai"] or { state = {} }  -- 기존 state(데이터)는 유지
+local candidate = { state = M.state }  -- 데이터는 공유, 함수는 후보에 새로 정의
 
-function M.update(dt)   -- 함수는 새 정의로 덮어씀 (핫 리로드된 코드)
-    -- M.state.health 등 기존 데이터는 그대로 살아있음
+function candidate.update(dt)   -- 새 정의는 후보에만 쓴다 (기존 M은 아직 그대로)
+    -- candidate.state.health 등 기존 데이터는 그대로 살아있음
 end
 
-package.loaded["enemy_ai"] = M
-return M
+-- 인터페이스·상태 migration 검증: 필수 함수 존재, state 호환성 확인 등
+if VerifyModule(candidate) then
+    package.loaded["enemy_ai"] = candidate   -- 안전 지점에서 commit
+    return candidate
+end
+return M   -- 검증 실패 시 기존 active 모듈 유지
 ```
 
-원칙은 *지속되어야 할 상태는 명시적으로 데이터에 두고, 코드는 언제든 버려질 수 있게* 짠다. 함수 안의 로컬 변수에 중요한 상태를 가두면 리로드 시 사라진다. 게임 객체의 상태를 *직렬화 가능한 데이터 구조* 에 모아두면, 리로드 시 그것을 보존하고 새 코드에 다시 주입할 수 있다.
+원칙은 *지속되어야 할 상태는 명시적으로 데이터에 두고, 코드는 언제든 버려질 수 있게* 짠다. 함수 안의 로컬 변수에 중요한 상태를 가두면 리로드 시 사라진다. 게임 객체의 상태를 *직렬화 가능한 데이터 구조* 에 모아두면, 리로드 시 그것을 보존하고 새 코드에 다시 주입할 수 있다. 후보를 별도 테이블·환경에서 평가하더라도 기존 nested table을 공유하거나 world를 바꾸는 C binding을 호출하면 부작용이 원본으로 새어 나갈 수 있으므로, 후보 검증 중 host side effect를 금지·지연하거나 rollback 범위를 명시한다.
 
 ### 의존성 추적과 증분 리로드
 
@@ -423,8 +469,10 @@ return M
 안전한 핫 리로드는 *트랜잭션처럼* 동작한다.
 
 1. 새 스크립트를 *컴파일만* 해본다. 문법 오류면 *적용하지 않고* 에러만 표시 — 기존 코드가 계속 돈다.
-2. 컴파일 성공이면 새 코드를 적용하되, 첫 실행을 *보호 호출* 로 감싼다. 런타임 오류가 나면 *이전 버전으로 롤백* 하거나 에러를 격리한다.
+2. 컴파일 성공이면 후보를 *별도 환경에서 평가·검증* 한다(인터페이스·상태 migration, 부작용 유무). 검증을 통과한 뒤에만 *안전 지점에서* active 참조를 commit한다. `lua_pcall` 은 transaction이 아니므로, 이미 기존 테이블을 수정한 뒤 실행 중 오류가 나면 자동으로 되돌아가지 않는다 — 부분 변경을 피하려면 commit 전에 검증해야 한다.
 3. 어느 경우든 *게임은 멈추지 않는다*. 개발자는 에러 메시지를 보고 고친 뒤 다시 저장한다.
+
+commit 시 기존 함수 포인터·callback registry ref·진행 중 coroutine·IC cache의 무효화 여부도 같은 교체 계약에 포함한다.
 
 이 "실패해도 기존 상태 유지" 원칙이 핫 리로드를 *안심하고 쓸 수 있는* 도구로 만든다. 저장할 때마다 게임이 죽을까 두려우면 아무도 핫 리로드를 켜지 않는다. 핫 리로드는 디버거 세션과도 공존해야 한다(7절) — 리로드 후에도 브레이크포인트·워치가 유지되어야 디버깅 흐름이 끊기지 않는다.
 
@@ -471,19 +519,30 @@ void OpenSafeLibraries(lua_State* L) {
 기능을 빼앗아도 *자원 고갈* 공격은 남는다 — 무한 루프, 메모리 무한 할당. 이건 *런타임 제한* 으로 막는다.
 
 ```cpp
-// 명령 수 제한 — VM이 일정 명령마다 훅을 호출, 초과 시 중단
+// 실행 한도는 host-owned 상태에 기록한다 — 스크립트 pcall이 오류를 잡아도 남는다.
+static bool g_execution_exhausted = false;
+
+// 같은 lua_State에는 hook이 하나뿐이다. count(명령 수)와 line(디버거) 이벤트를
+// 한 dispatcher로 분기한다 — lua_sethook을 다시 호출하면 앞 hook을 교체한다.
 void InstallExecutionLimit(lua_State* L, int maxInstructions) {
-    lua_sethook(L, [](lua_State* L, lua_Debug*) {
-        luaL_error(L, "스크립트 실행 한도 초과 — 무한 루프 의심");  // 강제 중단
-    }, LUA_MASKCOUNT, maxInstructions);
+    lua_sethook(L, [](lua_State* L, lua_Debug* ar) {
+        if (ar->event == LUA_HOOKCOUNT) {
+            g_execution_exhausted = true;          // 초과를 host-owned 상태에 영구 기록
+            luaL_error(L, "스크립트 실행 한도 초과 — 무한 루프 의심");  // 중단 통지
+        } else if (ar->event == LUA_HOOKLINE) {
+            HandleDebugLine(L, ar);                // 디버거 줄 이벤트 (7절)
+        }
+    }, LUA_MASKCOUNT | LUA_MASKLINE, maxInstructions);
 }
 ```
 
-- *명령 수 제한*: VM이 일정 바이트코드 명령마다 훅을 부르게 해, 정해진 명령 수를 넘으면 강제 중단. 무한 루프를 잡는다. 카운터는 호출 경계에서 리셋되지 않으므로 호출당 예산을 원하면 진입점마다 훅을 다시 건다.
+- *명령 수 제한*: VM이 일정 바이트코드 명령마다 훅을 부르게 해, 정해진 명령 수를 넘으면 중단 *통지* 를 보낸다. 카운터는 호출 경계에서 리셋되지 않으므로 호출당 예산을 원하면 진입점마다 훅을 다시 건다.
 - *메모리 제한*: VM의 할당자를 가로채 누적 할당이 상한을 넘으면 할당을 거부. 메모리 폭탄을 막는다.
 - *시간 예산*: 스크립트 한 틱이 프레임 예산의 일부를 넘으면 다음 프레임으로 미룬다(협조적 양보가 가능한 경우).
 
-이 제한들이 *한 스크립트가 게임 전체를 멈추거나 메모리를 고갈시키는* 것을 막는다. 다중 VM 모델(2절)과 결합하면, 문제 있는 모드 하나가 코어 시스템을 건드리지 못하게 완전히 격리할 수 있다.
+주의: count hook이 던진 오류는 *base 라이브러리에 노출된 `pcall` 이 잡을 수 있다* — 실측에서 내부 pcall이 hook 오류를 5회 잡았고 outer status=0이었다. 따라서 count hook은 *OS 시간 격리나 강제 kill이 아니라 중단 통지* 다. 한도 초과를 host-owned 상태에 영구 기록하고 호출 완료 후 반드시 검사하며, 호출 후 flag만 확인하는 것으로는 무한 catch 루프를 멈출 수 없다. 비신뢰 코드에는 pcall로 잡히지 않는 host-owned exhausted 상태와 native callback의 작업량·메모리 한도를 함께 두고, 필요하면 프로세스 수준 강제 종료 경계를 별도로 설계한다.
+
+이 제한들이 *한 스크립트가 게임 전체를 멈추거나 메모리를 고갈시키는* 것을 막는다. 다만 다중 VM 모델(2절)은 상태 분리일 뿐이므로, CPU·메모리 강제 격리는 위 실행·할당 한도와 프로세스 경계가 함께 있어야 성립한다.
 
 ### 결정성 — 멀티플레이어의 추가 요구
 
@@ -499,15 +558,18 @@ void InstallExecutionLimit(lua_State* L, int maxInstructions) {
 
 ```cpp
 // 디버그 훅: VM이 각 줄 실행·함수 진입·복귀 시 콜백
-void InstallDebugHook(lua_State* L) {
-    lua_sethook(L, [](lua_State* L, lua_Debug* ar) {
-        lua_getinfo(L, "nSl", ar);   // 함수명·소스·현재 줄 정보 채움
-        if (BreakpointHit(ar->source, ar->currentline)) {
-            EnterDebugBreak(L, ar);  // 브레이크포인트 — 실행 멈추고 상태 검사
-        }
-    }, LUA_MASKLINE, 0);             // 매 줄마다 훅
+// 6절의 명령 수 제한과 같은 state에서 함께 쓰려면 하나의 dispatcher가
+// count/line 이벤트를 분기하고, 이 함수는 line 이벤트만 처리한다.
+// (lua_sethook을 따로 다시 호출하면 앞서 설치한 hook을 교체한다.)
+void HandleDebugLine(lua_State* L, lua_Debug* ar) {
+    lua_getinfo(L, "nSl", ar);   // 함수명·소스·현재 줄 정보 채움
+    if (BreakpointHit(ar->source, ar->currentline)) {
+        EnterDebugBreak(L, ar);  // 브레이크포인트 — 실행 멈추고 상태 검사
+    }
 }
 ```
+
+명령 수 제한과 디버거 훅을 같은 state에서 동시에 켜려면 두 기능을 하나의 dispatcher로 합쳐 `LUA_MASKCOUNT | LUA_MASKLINE` 을 등록해야 하며, 별도 `lua_sethook` 호출이 서로를 교체한다고 가정하지 않는다.
 
 ### 브레이크포인트와 상태 검사
 

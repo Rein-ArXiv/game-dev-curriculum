@@ -120,16 +120,27 @@ Delta가 "보낼 필드를 줄인다"면 quantization은 "필드당 비트를 �
 **위치**: 맵 크기와 허용 오차로 비트 수가 결정된다. 4km 맵, 1cm 정밀도면 축당 `log2(400000) ≈ 19비트`, 3축 57비트 — float3 96비트의 60%다. 실내 게임(100m, 1cm)이면 축당 14비트로 42비트까지 내려간다.
 
 ```cpp
-// 범위 기반 양자화: [min, max] 를 2^bits 단계로. 전제: max > min, 1 <= bits <= 32.
-uint32_t QuantizeFloat(float v, float min, float max, int bits) {
-    assert(max > min && bits >= 1 && bits <= 32);
-    float t = Clamp((v - min) / (max - min), 0.0f, 1.0f);
-    uint64_t levels = (uint64_t{1} << bits) - 1;
-    return (uint32_t)(t * double(levels) + 0.5);
+// 범위 기반 양자화: [min, max] 를 2^bits 단계로. 실패하면 nullopt.
+// float 입력이 finite여도 (max-min)이나 (v-min)이 float 범위를 넘을 수 있으므로
+// 차분을 처음부터 double로 올린다.
+std::optional<std::uint32_t> QuantizeFloatChecked(
+    float v, float min, float max, int bits) {
+    if (bits < 1 || bits > 32 ||
+        !std::isfinite(v) || !std::isfinite(min) ||
+        !std::isfinite(max) || !(min < max)) {
+        return std::nullopt;
+    }
+    const double dMin = min;
+    const double dMax = max;
+    const double x = std::clamp(static_cast<double>(v), dMin, dMax);
+    const double t = std::clamp((x - dMin) / (dMax - dMin), 0.0, 1.0);
+    const double maxCode = std::ldexp(1.0, bits) - 1.0;
+    const double q = std::clamp(std::round(t * maxCode), 0.0, maxCode);
+    return static_cast<std::uint32_t>(q);
 }
 ```
 
-`1u << bits`는 `bits == 32`에서 정의되지 않으므로 단계 수 계산은 64비트로 올린다. 실제 구현은 NaN·무한대 입력, 범위 밖 값의 clamp 정책, 복호화 오차까지 함께 테스트해야 한다.
+`1u << bits`는 `bits == 32`에서 정의되지 않으므로 단계 수 계산은 `std::ldexp`나 64비트로 올린다. 위 예제는 유한한 범위 밖 `v`를 clamp하고, NaN·무한대나 `bits` 범위 오류처럼 정의되지 않은 입력은 오류로 돌려준다. float 자체의 정밀도 때문에 32비트 코드 수가 불가능한 것이 아니라 중간 차분의 범위가 문제다. wire 호환이 필요하면 반올림 규칙, 허용 오차, 역양자화 식과 범위 밖 입력의 실패 규약을 함께 고정하고 복호화 오차까지 테스트한다.
 
 범위 폭을 $W$, round-to-nearest 양자화의 최대 허용 오차를 $\varepsilon$라 하면 step $\Delta=W/(2^b-1)$가 $2\varepsilon$ 이하여야 한다.
 
@@ -243,23 +254,33 @@ $$
 
 로 둘 수 있다. 이 식은 capacity plan의 출발점이지 reset-to-zero accumulator의 정리나 실제 packet packing 결과가 아니다. $f_i>1$인 entity는 1로 clamp하고 남은 budget을 다시 배분해야 하며, $s_i>B$인 record는 chunk·schema 변경 없이는 보낼 수 없다.
 
-byte cost를 반영한 장기 service share가 필요하면 deficit round-robin 계열을 명시적으로 구현할 수 있다.
+byte cost를 반영한 장기 service share가 필요하면 deficit round-robin 계열을 명시적으로 구현할 수 있다. 아래는 매 packet마다 첫 flow에서 시작하지 않고 지속 커서로 순회를 회전시키며, quantum은 논리 라운드가 새로 시작될 때만 보충하는 축약형이다.
 
 ```cpp
 void ScheduleRound(ClientRepState& c, PacketWriter& w) {
-    for (RepFlow& f : c.flows) {
-        f.deficit = std::min(f.deficit + f.quantum, f.maxDeficit);
-        if (!f.dirty) continue;
+    const size_t n = c.flows.size();
+    for (size_t visited = 0; visited < n && w.Remaining() > 0; ++visited) {
+        if (c.cursor >= n) {                 // 새 논리 라운드 진입 → quantum 보충
+            c.cursor = 0;
+            for (RepFlow& f : c.flows)
+                if (f.dirty) f.deficit = std::min(f.deficit + f.quantum, f.maxDeficit);
+        }
+        RepFlow& f = c.flows[c.cursor++];
+        if (!f.dirty) { f.deficit = 0.0f; continue; }   // 비활성 전이 시 남은 deficit 폐기
 
         size_t bytes = MeasureNextUpdate(f);
-        if (bytes > f.deficit || bytes > w.Remaining()) continue;
+        if (bytes > f.deficit) continue;     // 이번 라운드 deficit 부족 → 다음 flow
+        if (bytes > w.Remaining()) {         // packet 예산 부족 → 다음 packet에서 이어감
+            --c.cursor;
+            break;
+        }
         WriteNextUpdate(w, f);
-        f.deficit -= bytes;       // reset하지 않고 실제 service cost만 차감
+        f.deficit -= bytes;                  // reset하지 않고 실제 service cost만 차감
     }
 }
 ```
 
-DRR의 fairness는 active flow, bounded record size와 round traversal 같은 가정 아래 quantum에 비례한 **byte service**에 관한 것이다. entity update frequency 자체를 보장하려면 target interval·deadline scheduler를 별도로 둔다. 예를 들어 각 entity에 `nextDueTick`, 최대 stale age와 value-per-byte를 기록하고, overdue entity를 먼저 처리하되 hard deadline을 놓친 횟수를 계측한다.
+DRR의 fairness는 persistent 활성 목록·cursor, bounded record size와 논리 라운드가 실제 packet 작성 호출과 무조건 같지는 않다는 가정 아래 quantum에 비례한 **byte service**로 성립한다. 위 구현은 학습용 축약이므로 active-set 전이, record가 deficit이나 packet 예산을 넘을 때의 이어가기/건너뛰기, 비활성 전환 시 남은 deficit 처리와 한 record가 quantum보다 클 때의 상한을 실제 정책으로 고정해야 한다. entity update frequency 자체를 보장하려면 target interval·deadline scheduler를 별도로 둔다. 예를 들어 각 entity에 `nextDueTick`, 최대 stale age와 value-per-byte를 기록하고, overdue entity를 먼저 처리하되 hard deadline을 놓친 횟수를 계측한다.
 
 동적 combat relevance에는 단순 accumulator가 더 자연스러울 수 있고, periodic objective에는 deadline이 낫고, large reliable transfer에는 deficit queue가 낫다. 하나의 score가 freshness·importance·byte fairness를 모두 수학적으로 보장한다고 가정하지 않는다.
 
@@ -296,7 +317,7 @@ acknowledged baseline 방식은 server가 client possession을 추측하지 않�
 |---|---|---|
 | 스냅샷 크기 분포 (P50/P99) | 손실률에 따라 완만히 증가 | full 비율 급증 — ack 경로 점검 |
 | full snapshot 비율 | workload baseline 안에서 안정 | 급증 — ack/history/AOI 원인 분해 |
-| 엔티티별 전송 간격 | priority에 반비례 | 특정 엔티티 기아 — starvation 항 점검 |
+| 엔티티별 전송 간격 | priority와 대략 반비례 | 특정 엔티티 기아 — starvation 항 점검 |
 | change mask 적중률 | 필드별로 안정 | 모든 필드 매번 변화 — 양자화 전 비교 버그(4절) |
 | budget 사용률 | 품질 SLO와 함께 안정 | 포화 지속 + stale-age 증가 — budget 과소 |
 
@@ -387,7 +408,7 @@ AOI는 집합의 *순간값* 이 아니라 *전이* 가 일을 만든다. 클라
 
 **이탈(앎 → 잊음)**: 두 가지 의미론이 있다. *despawn* — 클라이언트가 엔티티를 완전히 파괴(메모리 회수, 다시 만나면 full 재전송). *dormancy(휴면)* — 클라이언트가 마지막 상태를 보존한 채 갱신만 중단(다시 만나면 그 상태 기준 delta 재개). 자주 재진입하는 엔티티(경계 근처 배회)는 dormancy가 진입 비용을 없애 주고, 영영 안 볼 엔티티는 despawn이 클라이언트 메모리를 지킨다. 거리 기반 단계화 — 가까운 이탈은 dormancy, 먼 이탈은 despawn — 가 실용적이다.
 
-서버 측 자료구조도 이 수명에 묶인다 — 클라이언트별 "알고 있는 엔티티 집합 + 엔티티별 마지막 ack 상태"가 delta 복제의 전제이고, AOI 전이는 그 집합의 삽입/삭제다. 이 집합의 크기가 곧 클라이언트별 서버 메모리이므로, AOI 상한(최대 N개)이 메모리 상한이기도 하다.
+서버 측 자료구조도 이 수명에 묶인다 — 클라이언트별 "알고 있는 엔티티 집합 + 엔티티별 마지막 ack 상태"가 delta 복제의 전제이고, AOI 전이는 그 집합의 삽입/삭제다. 클라이언트별 메모리 예산은 active·dormant·retained baseline을 모두 포함해야 한다. 활성 AOI 상한(최대 N개)은 매 순간 활성인 엔티티 수만 제한하고, dormancy로 보존한 entry는 서로 겹치지 않는 지역 k곳을 방문하면 kN까지 쌓일 수 있다. 따라서 dormant entry의 개수·수명과 eviction/full-refresh 규칙을 별도로 정해야 메모리 상한이 된다.
 
 ## 14. Priority와 Update Rate
 
@@ -401,7 +422,7 @@ AOI에 포함된 엔티티도 모두 같은 빈도로 보낼 필요가 없다.
 | 정적 오브젝트 | 변화 시 |
 | 맵 objective | 낮지만 reliable event 병행 |
 
-Priority accumulator 방식은 starvation을 막는다.
+Priority accumulator 방식은 starvation 위험을 줄인다.
 
 ```cpp
 void AccumulatePriority(EntityRepState& r, float basePriority) {
@@ -433,7 +454,7 @@ exit radius = 110m
 
 90m 안으로 들어오면 AOI에 추가하고, 110m 밖으로 나가야 제거한다. 경계 사이에서는 기존 상태를 유지한다. 이렇게 하면 작은 위치 흔들림으로 subscribe/unsubscribe가 반복되지 않는다.
 
-AOI 변경 이벤트도 비용이 있다. 새 entity는 initial state가 필요하고 제거에는 despawn 또는 dormancy 의미가 필요하다. spatial hysteresis에 time hysteresis를 더할 수 있지만 시간은 고정 1~2초가 아니라 경계 속도, 정보 노출 budget과 재진입 비용으로 정한다. 너무 길면 client가 이미 멀어진 entity의 정보를 오래 보유하고 server memory도 늘어난다.
+AOI 변경 이벤트도 비용이 있다. 새 entity는 initial state가 필요하고 제거에는 despawn 또는 dormancy 의미가 필요하다. spatial hysteresis에 time hysteresis를 더할 수 있지만 시간은 고정 1~2초가 아니라 경계 속도, 정보 노출 budget과 재진입 비용으로 정한다. 너무 길면 client가 이미 멀어진 entity의 정보를 오래 보유하고 server memory도 늘어난다. dormant entry도 무한정 보관하지 않고 수명·개수 상한과 evict 기준을 정하며, evict된 entity는 재진입 시 full state로 다시 보낸다.
 
 [13절의 dormancy](#13-aoi-전이의-수명-주기)와 합치면 경계 배회의 비용 구조가 완성된다 — hysteresis가 전이 *횟수* 를 줄이고, dormancy가 전이 *단가* 를 줄인다.
 

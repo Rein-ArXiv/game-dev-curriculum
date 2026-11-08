@@ -48,7 +48,7 @@
 
 여기에 *스테이트리스 백엔드* 가 붙는다 — Auth, Profile, Matchmaking, Voice. 백엔드 사이징은 *CCU 가 아니라 RPS* 로 한다. CCU 100만이 *평균 0.5 req/s* 를 만들면 *500,000 RPS*. 인스턴스당 *2,000 RPS* 처리면 *250 인스턴스*. *피크 RPS 는 평균의 3~5배* 로 잡는다 — 로그인 러시·이벤트 시작 순간이 평탄하지 않다.
 
-핵심 — *모든 사이징은 CCU 하나로 끝나지 않는다*. 게임 서버는 *CCU/매치크기*, 백엔드는 *피크 RPS*, DB 는 *쓰기 QPS + 데이터 크기*, 캐시는 *작업 집합(working set) 크기* 로 따로 계산한다.
+핵심 — *모든 사이징은 CCU 하나로 끝나지 않는다*. 게임 서버는 *CCU/매치크기*, 백엔드는 *피크 RPS*, DB 는 *쓰기 QPS + 데이터 크기*, 캐시는 *작업 집합(working set) 크기* 로 따로 계산한다. 노드당 인스턴스 수는 *노드 capacity 가 아니라 allocatable* 을 pod별 총 request로 나눈 `floor(allocatable / totalPodRequest)` 로 계산한다 — system/kubelet/DaemonSet·Agones sidecar 예약분은 제외하고, 메모리·포트·network/PPS·성능 headroom은 별도로 검증한다.
 
 ### 수평 vs 수직 확장
 
@@ -134,12 +134,12 @@ flowchart LR
     EUAPI --> EUSVC[EU Services]
     NAAPI --> NASVC[NA Services]
     KRAPI --> KRSVC[KR Services]
-    EUSVC <-->|Replication| GLOB[Global DB Cluster]
+    EUSVC <-->|Replication| GLOB[Global DB Cluster<br/>복제=수렴 구조 — 업무 불변식은 소유권/강한 transaction 경계로 별도 보장]
     NASVC <-->|Replication| GLOB
     KRSVC <-->|Replication| GLOB
 ```
 
-*Active-Active* — 모든 지역이 *읽기/쓰기 둘 다*. 장점 — *지역 장애 시 다른 지역이 흡수*. 비용 — *교차 리전 복제 지연(수십~수백 ms) + 쓰기 충돌*. 충돌 해결은 *Last-Write-Wins (단순, 데이터 손실 가능)* 또는 *CRDT (Conflict-free Replicated Data Type)* — 카운터·집합처럼 *수학적으로 병합 가능한 자료형* 만 무손실. 게임은 *전역 쓰기를 최소화* 해 충돌 표면을 줄인다 — 닉네임·결제처럼 강한 일관성이 필요한 것은 *단일 쓰기 리전(Active-Passive)* 으로 떨어뜨린다.
+*Active-Active* — 모든 지역이 *읽기/쓰기 둘 다*. 장점 — *지역 장애 시 다른 지역이 흡수*. 비용 — *교차 리전 복제 지연(수십~수백 ms) + 쓰기 충돌*. 충돌 해결은 *Last-Write-Wins (단순, 데이터 손실 가능)* 또는 *CRDT (Conflict-free Replicated Data Type)* — 카운터·집합처럼 *수학적으로 병합 가능한 자료형* 만 해당 CRDT가 정의한 병합 의미에서 무손실이다. 이 무손실은 수렴과 업데이트 표현 보존을 뜻할 뿐이며, 잔액 ≥ 0·중복 소비 금지 같은 업무 불변식은 자원별 권위(owner)·에스크로 예약·직렬화 같은 별도 계약으로 보장해야 한다. 게임은 *전역 쓰기를 최소화* 해 충돌 표면을 줄인다 — 닉네임·결제처럼 강한 일관성이 필요한 것은 *단일 쓰기 리전(Active-Passive)* 으로 떨어뜨린다.
 
 ## 2. 로드 밸런싱 전략
 
@@ -150,11 +150,11 @@ flowchart LR
 | 프로토콜 | TCP / UDP | HTTP / gRPC |
 | 처리량 | 매우 높음 | 보통 |
 | 라우팅 기준 | IP / Port | URL / Header / Cookie |
-| TLS 처리 | Pass-through | Termination |
+| TLS 처리 | Pass-through (termination도 선택) | Termination (HTTP 의미 해석과 독립) |
 | 패킷당 비용 | 낮음 | 높음 (페이로드 파싱) |
 | 적용 | 게임 UDP 트래픽 | API 게이트웨이 |
 
-게임 서버는 *L4 (UDP) + 세션 어피니티*. L7 은 *모든 패킷을 파싱* 하므로 *60Hz UDP 스트림에 부적합* — 매 패킷 HTTP 헤더 파싱 비용을 감당 못 한다. 단, 매치 접속은 보통 *직접 IP:포트* (Agones Allocation 이 IP 를 돌려줌, 5절) 라 게임 트래픽이 LB 를 우회하기도 한다. API/로비는 *L7* — URL·헤더 기반 라우팅, TLS termination, 인증 위임.
+게임 서버는 *L4 (UDP) + 세션 어피니티*. L7 은 *모든 패킷을 파싱* 하므로 *60Hz UDP 스트림에 부적합* — 매 패킷 HTTP 헤더 파싱 비용을 감당 못 한다. 단, 매치 접속은 보통 *직접 IP:포트* (Agones Allocation 이 IP 를 돌려줌, 5절) 라 게임 트래픽이 LB 를 우회하기도 한다. API/로비는 *L7* — URL·헤더 기반 라우팅, HTTP 의미 해석, 인증 위임. TLS termination은 L4/L7 분류와 독립 축이다 — L4 로드 밸런서도 TLS listener로 종료할 수 있고, L7의 구분점은 HTTP 의미 해석·라우팅이다.
 
 ### 일관 해시(Consistent Hashing)와 어피니티
 
@@ -170,7 +170,8 @@ struct HashRing {
         for (int v = 0; v < VNODES; ++v)
             ring[Hash(s, v)] = s;                // 한 서버를 링에 160점 흩뿌림
     }
-    ServerId Locate(SessionId sid) {
+    std::optional<ServerId> Locate(SessionId sid) {
+        if (ring.empty()) return std::nullopt;   // 빈 링 → NoCapacity (자동 무제한 재시도 금지)
         uint64_t h = Hash(sid);
         auto it = ring.lower_bound(h);           // 시계방향 첫 서버
         if (it == ring.end()) it = ring.begin(); // 링 끝 → 처음으로 wrap
@@ -179,7 +180,7 @@ struct HashRing {
 };
 ```
 
-균등 hash와 동등 capacity라는 모델에서 서버 10대에 1대를 추가하면 modulo mapping은 약 10/11, consistent-hash ring은 기대 1/11의 key ownership이 바뀐다. virtual node는 ring 구간 합의 분산을 줄이지만 metadata와 이동 단위를 늘린다. Cassandra token과 일부 Memcached client가 이 계열을 사용한다. Redis Cluster는 고정 hash slot을 node에 할당하는 별도 방식이므로 classic consistent-hash ring과 동일시하지 않는다.
+균등 hash와 동등 capacity라는 모델에서 서버 10대에 1대를 추가하면 modulo mapping은 약 10/11, consistent-hash ring은 기대 1/11의 key ownership이 바뀐다. virtual node는 ring 구간 합의 분산을 줄이지만 metadata와 이동 단위를 늘린다. Cassandra token과 일부 Memcached client가 이 계열을 사용한다. Redis Cluster는 고정 hash slot을 node에 할당하는 별도 방식이므로 classic consistent-hash ring과 동일시하지 않는다. 빈 링이나 eligible 후보가 없으면 `Locate`·할당 경로는 NoCapacity·NoAcceptableRegion 같은 명시적 실패를 반환하고, 자동 무제한 재시도 대신 유한 횟수·백오프로 제한한다. ring snapshot은 교체 중에도 유효한 lifetime을 보장해야 한다. 또한 key ownership 변화는 stateless 조회나 external state에만 곧바로 적용된다 — 매치·세션 상태가 서버 RAM에 있으면 기존 세션은 pin/drain하고 owner epoch·state transfer(또는 재접속)를 거쳐야 하며, 신규 세션만 새 ring을 사용한다. hash 재배치는 메모리 상태 이전을 대신하지 않는다.
 
 ### 일관 해시의 정량 근거 — 이동량과 부하 균형
 
@@ -282,7 +283,9 @@ ReadResult Read(PlayerId pid, Key k) {
 
 ```cpp
 ShardId GetShardForPlayer(PlayerId pid) {
-    return ring.Locate(pid);     // 2절의 일관 해시 링 재사용 (가상 노드 포함)
+    auto shard = ring.Locate(pid);   // 2절의 일관 해시 링 재사용 (가상 노드 포함)
+    if (!shard) throw NoCapacity{};  // 빈 링 → NoCapacity로 전파
+    return *shard;
 }
 ```
 
@@ -306,7 +309,7 @@ ShardId GetShardForPlayer(PlayerId pid) {
 ```mermaid
 flowchart LR
     UI -->|Command| W[Write DB<br/>정규화]
-    W -->|Event| MQ[Message Queue]
+    W -->|"Event (outbox/durable retry)"| MQ[Message Queue]
     MQ --> ReadModel[Read View<br/>비정규화]
     UI -->|Query| ReadModel
 ```
@@ -340,7 +343,19 @@ class DBPool {
         std::unique_lock<std::mutex> lk(mtx_);
         for (;;) {
             if (!idle_.empty()) { auto* c = idle_.front(); idle_.pop(); return c; }
-            if (live_ < maxSize_) { ++live_; return CreateNewConnection(); }
+            if (live_ < maxSize_) {
+                ++live_; // 생성 중인 연결의 슬롯도 포함
+                try {
+                    Connection* c = CreateNewConnection();
+                    if (c == nullptr)
+                        throw std::runtime_error("connection creation failed");
+                    return c;
+                } catch (...) {
+                    --live_;                   // 생성 실패·nullptr → 예약 슬롯 반납
+                    cv_.notify_one();
+                    throw;
+                }
+            }
             cv_.wait(lk);                      // 풀 고갈 — 반납을 기다린다 (무한 생성 금지)
         }
     }
@@ -351,7 +366,7 @@ class DBPool {
 };
 ```
 
-함정 — *연결 폭발(connection storm)*. 앱 인스턴스 *250대 × 풀 100* = *25,000 연결* 을 DB 마스터가 동시에 받으면 *DB 가 연결 관리만으로 죽는다*. 그래서 *PgBouncer / ProxySQL* 같은 *외부 풀러* 를 DB 앞에 둔다 — 앱은 풀러에, 풀러가 DB 에 *소수 연결* 만 유지(connection multiplexing). 무한 생성을 막는 위 코드의 `cv_.wait` 가 인스턴스 단위 방어, 외부 풀러가 클러스터 단위 방어다.
+함정 — *연결 폭발(connection storm)*. 앱 인스턴스 *250대 × 풀 100* = *25,000 연결* 을 DB 마스터가 동시에 받으면 *DB 가 연결 관리만으로 죽는다*. 그래서 *PgBouncer / ProxySQL* 같은 *외부 풀러* 를 DB 앞에 둔다 — 앱은 풀러에, 풀러가 DB 에 *소수 연결* 만 유지(connection multiplexing). 무한 생성을 막는 위 코드의 `cv_.wait` 가 인스턴스 단위 방어, 외부 풀러가 클러스터 단위 방어다. 생성 실패·nullptr에서는 예약한 `live_` 슬롯을 되돌리고 대기자를 깨워야 한다(위 try/catch). 생성 permit은 RAII로 관리해 반납이 정확히 한 번 실행되게 하고, 풀은 모든 borrower보다 오래 살아야 하며 timeout/cancellation, 깨진 연결 폐기, 소멸 시 대기자 깨우기 계약도 별도로 둔다.
 
 ## 4. 캐싱과 메시지 큐
 
@@ -362,7 +377,7 @@ flowchart LR
     C[Client] --> CDN[CDN Edge]
     CDN --> APIC[API L1 Cache<br/>local in-memory]
     APIC --> Redis[Redis L2]
-    Redis --> DB[Database]
+    Redis -->|cache miss| DB[Database]
 ```
 
 | 층 | 위치 | 대표 비용 | 용량 경향 | 무효화 난이도 |
@@ -388,7 +403,7 @@ miss도 먼저 cache를 조회하므로 `h·Lc + (1-h)·Lo`로 쓰면 cache look
 | 스레드 | 단일 (v6+ 멀티 IO) | 멀티 스레드 |
 | 사용 | 매칭 큐, 리더보드, 세션 | 단순 캐시 |
 
-게임에서 *Redis 우세* — *Sorted Set* 으로 MMR 정렬 큐·리더보드를 자료구조 하나로 구현. `ZADD board <mmr> <player>` 로 넣고 `ZRANGEBYSCORE` 로 *MMR 근처 상대* 를 O(log n) 에 뽑는다. Memcached 는 이걸 못 한다 — 앱이 전부 끌어와 정렬해야 한다.
+게임에서 *Redis 우세* — *Sorted Set* 으로 MMR 정렬 큐·리더보드를 자료구조 하나로 구현. `ZADD board <mmr> <player>` 로 넣고 `ZRANGEBYSCORE` 로 *MMR 근처 상대* 를 O(log N+M)(N은 집합 크기, M은 반환 원소 수)에 뽑는다. 페이지 크기와 offset은 별도 선형 비용을 만들 수 있으므로 상한을 둔다. Memcached 는 이걸 못 한다 — 앱이 전부 끌어와 정렬해야 한다.
 
 ### 캐시 무효화와 세 가지 함정
 
@@ -410,7 +425,7 @@ void UpdatePlayerProfile(PlayerId pid, ProfileData data) {
 - *Cache Stampede on cold start* — 캐시가 빈 채로 배포되면 첫 트래픽이 전부 DB 로. 대응 — *워밍업(미리 적재)* 후 트래픽 투입.
 - *Stale-forever* — `Publish` 가 유실되면 일부 인스턴스가 *영원히 옛 값*. 대응 — *짧은 TTL 을 안전망* 으로 깔아 pub/sub 유실을 시간으로 덮는다.
 
-`cache.Delete` 가 `cache.Set` 보다 안전한 이유 — *Set 은 경합 시 옛 값을 다시 쓸 수 있다* (느린 쓰기가 빠른 쓰기를 덮음). *삭제 후 다음 읽기에 재적재* 가 경합에 강하다.
+`cache.Delete` 가 `cache.Set` 보다 안전한 이유 — *Set 은 경합 시 옛 값을 다시 쓸 수 있다* (느린 쓰기가 빠른 쓰기를 덮음). *삭제 후 다음 읽기에 재적재* 가 경합에 강하다. 다만 DB commit + cache delete는 stale refill을 완전히 막지 못한다 — reader가 이전 값을 읽고 writer가 commit·delete한 뒤 reader가 뒤늦게 그 값을 set하면 stale cache가 되살아난다. 따라서 허용 가능한 stale window(예: TTL)를 명시하고, strong/read-your-writes가 필요한 데이터에만 version CAS·causal token·owner 직렬화를 추가한다.
 
 ### CDN과 패치 트래픽
 
@@ -460,25 +475,32 @@ Kafka의 핵심은 retention된 partition log를 여러 consumer group이 독립
 
 ```cpp
 void PublishEvent(Event e) {
-    if (queue.Depth() > MAX_QUEUE_DEPTH) {
+    if (queue.Depth() >= MAX_QUEUE_DEPTH) {
         if (e.priority < Priority::High) {
             metrics.Inc("event_dropped");
             return;                              // 저우선 이벤트 폐기 (load shedding)
         }
-        // 고우선은 막지 않되, 알람으로 운영에 알림
+        // 업무 이벤트도 메모리 큐에 무한 적재하지 않는다 — durable outbox에 보존하고
+        // 포화 시 admission 실패/backpressure을 생산자에게 반환한다 (bounded memory)
+        outbox.Append(e);
+        return;
     }
     queue.Push(e);
 }
 ```
 
-대응 — *소비자 수평 확장(파티션 추가)*, *생산자 속도 제한*, *저우선 이벤트 drop(load shedding)*. 분석 이벤트 1%를 버려도 통계는 무너지지 않지만 *보상 이벤트는 한 개도 못 버린다* — 우선순위 분리가 핵심.
+대응 — *소비자 수평 확장(파티션 추가)*, *생산자 속도 제한*, *저우선 이벤트 drop(load shedding)*. 이 drop은 의도한 sampling과 전송·과부하로 인한 loss를 구분해 이유·구간을 계측해야 한다. 분석 이벤트도 '1%라서 통계가 무너지지 않는다'고 단정할 수 없다 — 장애 시간대·특정 사용자·퍼널 마지막 단계에 편향된 유실은 추정을 왜곡하므로 inclusion probability를 알거나 추정량을 보정하고, per-user 분석은 일관된 사용자 샘플을 쓴다. 반면 *보상 이벤트는 한 개도 못 버린다* — 업무 이벤트는 durable outbox/queue에 보존하고 프로세스 큐는 bounded로 유지해 admission 실패·backpressure·quota를 반환한다. 우선순위 분리가 핵심이다.
 
-함정 — *재시도가 만드는 중복*. 큐는 보통 *at-least-once* (최소 한 번, 즉 *중복 가능*) 전달이다. 보상 이벤트가 두 번 처리되면 *아이템 2배 지급*. 그래서 소비자는 *멱등(idempotent)* 해야 한다 — *이벤트 ID 를 키로 "이미 처리함"* 을 기록하고 중복을 무시.
+함정 — *재시도가 만드는 중복*. 큐는 보통 *at-least-once* (최소 한 번, 즉 *중복 가능*) 전달이다. 보상 이벤트가 두 번 처리되면 *아이템 2배 지급*. 그래서 소비자는 *멱등(idempotent)* 해야 한다 — *이벤트 ID 를 키로 "이미 처리함"* 을 기록하고 중복을 무시. 마커 기록과 지급 효과가 서로 다른 저장소·transaction에 있으면 마커만 남고 지급이 누락될 수 있으므로 둘을 같은 transaction에 commit하고, 외부 효과는 outbox+수신자 멱등으로 처리한다(T24는 조건이 깨진 helper, T26은 원자적 정상 모형).
 
 ```cpp
 void HandleReward(const Event& e) {
-    if (!processed.TryInsert(e.id)) return;      // 이미 처리한 이벤트 — 무시 (멱등)
-    GrantReward(e.playerId, e.reward);
+    auto tx = db.Begin();
+    if (!tx.TryInsert(e.id)) return;             // 이미 commit된 키 — 저장된 결과로 동일 응답
+    tx.GrantReward(e.playerId, e.reward);        // 마커·효과·결과를 같은 transaction에 commit
+    tx.Commit();
+    queue.Ack(e);                                // ACK는 durable commit 뒤에
+    // 효과가 외부 시스템이면 outbox에 기록하고 수신자 멱등 처리로 재시도한다.
 }
 ```
 
@@ -519,9 +541,10 @@ stateDiagram-v2
     Allocated --> Shutdown: 매치 종료 SDK.Shutdown()
     Shutdown --> [*]
     Ready --> Shutdown: 스케일다운 대상
+    note right of Allocated: 일반 fleet scale-down에서만 보호 — 강제 종료·노드 실패·SIGKILL 면제 아님
 ```
 
-*Ready* — 빈 서버, 풀에서 대기. *Allocated* — 매치 배정됨, *스케일다운 대상에서 제외*. 이 구분이 핵심 — 오토스케일러가 풀을 줄일 때 *Ready 만 죽이고 Allocated(진행 중 매치)는 절대 안 건드린다*. 매치가 끝나면 게임 프로세스가 `SDK.Shutdown` 으로 자신을 정리 대상으로 표시한다.
+*Ready* — 빈 서버, 풀에서 대기. *Allocated* — 매치 배정됨, *일반 scale-down 후보에서 제외*. 이 구분이 핵심 — 오토스케일러의 *일반 scale-down* 에서 *Ready 만 후보로 삼고 Allocated(진행 중 매치)는 후보에서 제외* 한다 — 이는 controller 정책이며 노드 장애·강제 삭제·eviction 면역을 뜻하지 않는다. 매치가 끝나면 게임 프로세스가 `SDK.Shutdown` 으로 자신을 정리 대상으로 표시한다.
 
 ### Fleet — 자동 풀 관리
 
@@ -529,7 +552,7 @@ stateDiagram-v2
 apiVersion: agones.dev/v1
 kind: Fleet
 spec:
-  replicas: 100              # 항상 100개 Ready 유지
+  replicas: 100              # Ready 또는 Allocated GameServer 총 목표 (Ready 여유는 FAS buffer)
   scheduling: Packed         # 노드를 가능한 한 채워 빈 노드를 비움 (스케일다운 유리)
   strategy: { type: RollingUpdate }
   template:
@@ -537,7 +560,7 @@ spec:
     spec: { /* GameServer spec */ }
 ```
 
-Fleet 이 *Ready 인스턴스 N개 항시 유지* + *Allocated 되면 자동 보충*. `scheduling: Packed` 는 *적은 노드에 빽빽이* — 빈 노드를 만들어 스케일다운 시 통째로 반납하기 좋다. 반대 모드 `Distributed` 는 *노드 장애 시 손실 분산* 을 노려 흩뿌린다 — *비용 vs 가용성* 다이얼.
+Fleet의 `replicas` 는 *Ready 또는 Allocated GameServer의 총 목표 수* 다 — Ready 여유분은 *FleetAutoscaler Buffer policy* 로 따로 목표화하며, minReplicas/maxReplicas·cold start·스케줄링 지연 때문에 목표가 항상 즉시 만족되지는 않는다. `scheduling: Packed` 는 *적은 노드에 빽빽이* — 빈 노드를 만들어 스케일다운 시 통째로 반납하기 좋다. 반대 모드 `Distributed` 는 *노드 장애 시 손실 분산* 을 노려 흩뿌린다 — *비용 vs 가용성* 다이얼.
 
 ### Allocation (할당)
 
@@ -549,7 +572,7 @@ spec:
     - matchLabels: { game: shooter, region: na }
 ```
 
-매치메이커가 *Allocation 요청* → Agones 가 *Ready 인스턴스 하나를 Allocated 로 전환* + *그 IP:포트 반환*. 플레이어는 *그 주소로 직접 접속*(L4 LB 우회, 2절). 핵심 — *할당은 풀에서 꺼내는 O(1) 연산* 이라 *cold start(컨테이너 부팅 수 초)를 매치 시작 경로에서 제거*. 미리 데워둔 서버를 즉시 배정하는 것이 Fleet 의 존재 이유.
+매치메이커가 *Allocation 요청* → Agones 가 *Ready 인스턴스 하나를 Allocated 로 전환* + *그 IP:포트 반환*. 플레이어는 *그 주소로 직접 접속*(L4 LB 우회, 2절). 핵심 — *할당은 이미 Ready인 후보를 selector로 고르는 연산* 이라 *컨테이너 부팅(수 초)을 매치 시작 경로에서 줄인다*. 범용 O(1)/즉시 완료를 보장하지는 않으며, 준비된 후보가 없으면 시작 지연이 남는다. 미리 데워둔 서버를 배정하는 것이 Fleet 의 존재 이유이며, 목표는 *목표 buffer* 를 유지하는 것이다.
 
 ### Auto-Scaling — Buffer policy
 
@@ -561,33 +584,36 @@ spec:
   policy:
     type: Buffer
     buffer:
-      bufferSize: 20         # 항상 Ready 20개 여유
+      bufferSize: 20         # Ready 여유 목표 (즉시 보장 아님)
       minReplicas: 50
       maxReplicas: 1000
 ```
 
-*Buffer policy* — *Ready 여유분 N개* 유지, 할당돼 줄면 새로 채움. 수치 트레이스 — Ready 20개 중 5개가 동시에 할당되면 Ready 가 15로 떨어지고, 오토스케일러가 *5개를 새로 부팅* 해 20으로 복원. *bufferSize 가 동시 매치 시작률(매치/초) × cold start 시간(초)* 보다 작으면 *플레이어가 빈 서버를 기다린다*. 피크 매치 시작률이 초당 10, 부팅이 3초면 *최소 버퍼 30* 이 필요하다. 버퍼가 클수록 대기 0 에 가깝지만 *Ready 서버는 매치 없이도 과금* — 안전과 비용의 다이얼.
+*Buffer policy* — *Ready 여유분 N개* 유지, 할당돼 줄면 새로 채움. 수치 트레이스 — Ready 20개 중 5개가 동시에 할당되면 Ready 가 15로 떨어지고, 오토스케일러가 *5개를 새로 부팅* 해 20으로 복원. 이 보충은 비동기이며 minReplicas 50·maxReplicas 1000 상하한과 cold start·스케줄링 지연 때문에 목표 buffer가 항상 즉시 만족되지는 않는다. *bufferSize 가 동시 매치 시작률(매치/초) × cold start 시간(초)* 보다 작으면 *플레이어가 빈 서버를 기다린다*. 피크 매치 시작률이 초당 10, 부팅이 3초면 *최소 버퍼 30* 이 필요하다. 버퍼가 클수록 대기 0 에 가깝지만 *Ready 서버는 매치 없이도 과금* — 안전과 비용의 다이얼.
 
 ### Graceful Shutdown
 
 게임이 끝나거나 노드를 반납해도 *진행 중 매치를 끊으면 안 된다*. K8s 가 SIGTERM 을 보내고 `terminationGracePeriodSeconds` 동안 기다린다.
 
 ```cpp
-void OnSIGTERM() {
+void OnSIGTERM() {                               // raw signal handler가 아니라 안전한 shutdown worker에서 실행
     isShuttingDown_ = true;
-    StopAcceptingNewMatches();                 // 새 할당 거부
+    StopAcceptingNewMatches();                   // 새 할당 거부
 
-    auto deadline = Now() + Minutes(5);
-    while (HasActiveMatches() && Now() < deadline)   // 진행 매치 끝나길 대기
-        Sleep(Seconds(5));
+    // 전체 grace 예산 = 시작 지연/preStop + 매치 drain + disconnect/flush + SDK 종료 + 안전 여유
+    // 단조 증가(monotonic) 시계로 남은 시간을 관리하고, 단계별 deadline을 둔다.
+    auto drainDeadline = SteadyNow() + (kGraceBudget - kCleanupReserve);
+    while (HasActiveMatches() && SteadyNow() < drainDeadline)
+        Sleep(Seconds(5));                       // bounded wait (polling overshoot 포함)
 
-    DisconnectAll("Server shutting down");      // 데드라인 초과 시 강제 종료
-    sdk.Shutdown();                             // Agones 에 정리 완료 보고
+    DisconnectAll("Server shutting down");       // drain deadline 초과 시
+    FlushAndClose();                             // 로그·상태 flush
+    sdk.Shutdown();                              // 남은 예산 안에서 Agones 정리 보고
     exit(0);
 }
 ```
 
-K8s `terminationGracePeriodSeconds: 300` 으로 *5분 graceful* 을 준다. 함정 — *grace 가 매치 길이보다 짧으면* 막판에 매치가 강제 종료된다. 그래서 *grace ≥ 최대 매치 길이* 가 이상이지만, 30분 매치를 30분 grace 로 두면 *노드 반납이 30분 지연* 돼 비용이 샌다. 절충 — *새 매치만 막고 진행 매치는 자연 종료* 시키되, *Allocated 서버는 스케일다운에서 제외*(생명주기 절) 해 애초에 진행 중 매치가 종료 대상이 되지 않게 한다.
+K8s `terminationGracePeriodSeconds: 300` 으로 *5분 graceful* 을 준다. 함정 — *grace 가 매치 길이보다 짧으면* 막판에 매치가 강제 종료된다. 그래서 *grace ≥ 최대 매치 길이* 가 이상이지만, 30분 매치를 30분 grace 로 두면 *노드 반납이 30분 지연* 돼 비용이 샌다. 절충 — *새 매치만 막고 진행 매치는 자연 종료* 시키되, *Allocated 서버는 스케일다운에서 제외*(생명주기 절) 해 애초에 진행 중 매치가 종료 대상이 되지 않게 한다. 300초는 매치 대기 전용이 아니라 *전체 종료 예산* 이다 — preStop/시작 지연, 매치 drain, disconnect/flush, SDK 종료와 안전 여유를 모두 포함해야 하며 monotonic clock과 단계별 deadline으로 남은 시간을 관리한다. `OnSIGTERM` 은 raw signal handler가 아니라 안전한 shutdown worker에서 실행한다. 또 Allocated의 *일반 scale-down 제외* 는 노드 장애·eviction·SIGKILL까지 막아준다는 뜻이 아니다.
 
 ### 서버 밀도 최적화
 
@@ -602,7 +628,7 @@ K8s `terminationGracePeriodSeconds: 300` 으로 *5분 graceful* 을 준다. 함�
 #   - 같은 인스턴스당 예산, 네트워크 PPS·egress·allocator stall 동반 측정
 ```
 
-밀도 ↑ = *비용 ↓* 그러나 *노이즈 이웃(noisy neighbor)* — 한 인스턴스의 GC/스파이크가 같은 노드의 다른 match tick을 밀어낸다. 최종 밀도는 instance 수가 아니라 tick-time distribution, deadline miss, CPU steal·run-queue delay, network PPS와 memory headroom으로 정한다. tick P99가 20ms라는 말은 관측 tick의 약 99%가 그 값 이하라는 뜻이지 “100명 중 한 명이 매초 끊긴다”는 사용자 확률이 아니다. 한 사용자가 경험하는 hitch는 tick miss의 시간 상관, match 배치와 client buffer에 달려 있다.
+밀도 ↑ = *비용 ↓* 그러나 *노이즈 이웃(noisy neighbor)* — 한 인스턴스의 GC/스파이크가 같은 노드의 다른 match tick을 밀어낸다. 최종 밀도는 instance 수가 아니라 tick-time distribution, deadline miss, CPU steal·run-queue delay, network PPS와 memory headroom으로 정한다. tick P99가 20ms라는 말은 관측 tick의 약 99%가 그 값 이하라는 뜻이지 “100명 중 한 명이 매초 끊긴다”는 사용자 확률이 아니다. 한 사용자가 경험하는 hitch는 tick miss의 시간 상관, match 배치와 client buffer에 달려 있다. 노드당 인스턴스 상한은 위 allocatable 계산과 memory·port·network headroom을 함께 만족해야 하며, 실제 process peak를 측정하기 전에는 OOM 여부를 단정하지 않는다.
 
 ## 6. 비용 최적화 전략
 
@@ -724,14 +750,14 @@ class LoginQueue {
         }
         return EnterResult::Queued{ IssueTicket(u) };  // 대기열 진입 (위치 추적용 티켓)
     }
-    void OnUserLeft() {
+    void OnUserLeft() {                           // permit당 정확히 1회 반납
         active_.fetch_sub(1);
-        AdmitNextFromQueue();                     // 한 자리 나면 대기열 선두 입장
+        AdmitNextFromQueue();                     // 한 자리 나면 대기열 선두 입장 (같은 CAS 예약)
     }
 };
 ```
 
-위 코드의 함정 수정 — 원본의 `fetch_add` 후 초과 시 `fetch_sub` 패턴은 *경합 중 카운터가 일시 초과* 한다. *CAS 루프* 로 *한계를 절대 넘지 않게* 보장하는 것이 안전하다. *FFXIV / WoW* 의 대기열이 표준 — 점진 입장 후 *수 시간~수 일에 걸쳐 정상화*. 대기열은 *불편하지만 정직* 하다 — "지금 못 들어옴, N분 후" 가 *로그인 시도마다 실패* 보다 낫다.
+위 코드의 함정 수정 — 원본의 `fetch_add` 후 초과 시 `fetch_sub` 패턴은 *경합 중 카운터가 일시 초과* 한다. *CAS 루프* 로 *한계를 절대 넘지 않게* 보장하는 것이 안전하다. *FFXIV / WoW* 의 대기열이 표준 — 점진 입장 후 *수 시간~수 일에 걸쳐 정상화*. 대기열은 *불편하지만 정직* 하다 — "지금 못 들어옴, N분 후" 가 *로그인 시도마다 실패* 보다 낫다. 이 카운터는 scope가 *프로세스 로컬* 이면 전체 서비스 CCU 상한을 보장하지 않으므로 scope(프로세스/샤드/전역)를 명시하고, leave는 permit당 정확히 한 번만 반납한다. `AdmitNextFromQueue` 도 같은 CAS로 자리를 예약한다.
 
 ### 기능 플래그(Feature Flag)
 
@@ -768,23 +794,28 @@ void OnLoadLevel(LoadLevel lvl) {
 ```cpp
 enum class UserPriority { Normal, Premium, VIP };
 
-bool TryConnect(UserId u, UserPriority p) {
-    int cur = currentUsers.load(), cap = capacity;
-    int normalCap = static_cast<int>(cap * 0.98);  // 상위 2%는 예약분
-    if (cur < normalCap) return true;            // 여유 — 누구나 입장
-    // 포화 — 상위 등급에 소량의 예약 슬롯만 허용 (전부는 아님)
-    if (p >= UserPriority::Premium && cur < cap) return true;
-    return false;
+// 판정과 자리 예약을 한 CAS로 묶는다 — 반환 후 caller가 따로 증가시키면 정원을 초과한다 (T29)
+std::optional<Permit> TryConnect(UserId u, UserPriority p) {
+    int cur = currentUsers.load();
+    for (;;) {
+        int cap = capacity;
+        int normalCap = static_cast<int>(cap * 0.98);  // 상위 2%는 예약분
+        bool allowed = cur < normalCap ||
+                       (p >= UserPriority::Premium && cur < cap);
+        if (!allowed) return std::nullopt;             // 포화 — 대기열로
+        if (currentUsers.compare_exchange_weak(cur, cur + 1))
+            return Permit{ u };                        // RAII — permit당 정확히 1회 반납
+    }
 }
 ```
 
-논란 — *평등성*. 무료 사용자가 *영원히 대기* 하면 이탈한다. 그래서 *예약 슬롯은 소량(여기선 2%)* 으로 제한하고, *정책을 명시·공지* 한다. 우선순위는 *대기열을 없애는 게 아니라 대기열 안에서 가중치* 를 주는 것에 가깝다 — 무료 사용자도 *느리지만 결국 입장* 해야 한다.
+논란 — *평등성*. 무료 사용자가 *영원히 대기* 하면 이탈한다. 그래서 *예약 슬롯은 소량(여기선 2%)* 으로 제한하고, *정책을 명시·공지* 한다. 우선순위는 *대기열을 없애는 게 아니라 대기열 안에서 가중치* 를 주는 것에 가깝다 — 무료 사용자도 *느리지만 결국 입장* 해야 한다. 판정과 자리 예약은 같은 CAS permit으로 묶어야 하며, 프로세스 로컬 atomic이 전역 CCU 한도와 같다는 가정은 두지 않는다 — 전역 한도가 필요하면 공유 admission owner나 CAS permit을 쓴다.
 
 ### 비상 용량 — 멀티 클라우드
 
 ```mermaid
 flowchart LR
-    Users[Users] --> CF[Cloudflare]
+    Users[Users] --> CF[Cloudflare<br/>DNS/LB 전환만으로 기존 세션 state는 이전되지 않음 — 재접속·RPO 계약 필요]
     CF -->|Primary| AWS[AWS us-east-1]
     CF -->|Failover| GCP[GCP us-central1]
     CF -->|Failover| Azure[Azure eastus]
@@ -823,12 +854,13 @@ Google SRE 의 4가지 핵심. *수백 개 지표를 다 보지 말고 이 4개�
 
 ```cpp
 auto span = tracer->StartSpan("ProfileLookup");
+auto scope = tracer->WithActiveSpan(span);        // StartSpan만으로는 현재 context가 활성화되지 않는다
 span->SetAttribute("player.id", playerId);       // 쿼리에 컨텍스트 부착
 auto profile = db.GetProfile(playerId);
-span->End();                                      // 부모 span 에 자동 연결
+span->End();                                      // scope 종료 뒤 부모 span 에 연결
 ```
 
-함정 — *추적 비용*. 모든 요청을 추적하면 *추적 데이터가 본 트래픽만큼* 쏟아진다. *샘플링* 한다 — 정상 요청은 *1%만*, *에러·느린 요청(tail-based sampling)은 100%* 잡아, 문제 있는 trace 를 놓치지 않으면서 비용을 줄인다.
+함정 — *추적 비용*. 모든 요청을 추적하면 *추적 데이터가 본 트래픽만큼* 쏟아진다. *샘플링* 한다 — 정상 요청은 *1%만*, *에러·느린 요청(tail-based sampling)은 100%* 잡아, 문제 있는 trace 를 놓치지 않으면서 비용을 줄인다. 이 100%는 *전제*(tail buffer 보존·export 용량·upstream 전파)가 갖춰졌을 때의 *목표* 이며 drop counter로 실제 보존율을 계측한다. head에서 이미 버려진 span은 tail sampling으로 복구할 수 없다.
 
 ### 알람 체계
 
@@ -854,15 +886,17 @@ spec:
       steps:
         - setWeight: 1
         - pause: { duration: 10m }
-        - analysis: { templates: [{ templateName: error-rate }] }  # 자동 분석
+        - analysis: { templates: [{ templateName: error-rate }] }  # 배치된 step에서만 실행
         - setWeight: 5
         - pause: { duration: 30m }
+        - analysis: { templates: [{ templateName: error-rate }] }
         - setWeight: 25
         - pause: { duration: 1h }
+        - analysis: { templates: [{ templateName: error-rate }] }
         - setWeight: 100
 ```
 
-각 단계에서 *카나리 vs 기존 버전의 에러율·지연 비교*. 카나리가 나쁘면 *자동 롤백*. 핵심 — *blast radius(폭발 반경) 제한*. 버그가 있어도 *1% 만 영향*, 99% 는 안전. 함정 — *느린 누수 버그*. 메모리 누수·커넥션 누수는 *10분 카나리로 안 잡힌다* — 그래서 단계마다 *충분한 pause* 와 *Saturation 추세* 를 함께 본다.
+각 단계에서 *카나리 vs 기존 버전의 에러율·지연 비교*. 카나리가 나쁘면 *자동 롤백*. 핵심 — *blast radius(폭발 반경) 제한*. 버그가 있어도 *1% 만 영향*, 99% 는 안전. 함정 — *느린 누수 버그*. 메모리 누수·커넥션 누수는 *10분 카나리로 안 잡힌다* — 그래서 단계마다 *충분한 pause* 와 *Saturation 추세* 를 함께 본다. inline analysis는 배치된 step에서만 실행되므로 각 승급 앞에 analysis를 두거나 명시적 background analysis와 시작·종료 수명 정책을 쓴다. 공유 DB를 바꾸는 배포는 트래픽 1%가 곧 blast radius 1%가 아니다.
 
 ### Blue-Green과 스테이트풀의 한계
 
@@ -896,15 +930,19 @@ spec:
 *인위적 장애 주입 + 복원력 검증*. Netflix 의 *Chaos Monkey* — 운영 중 *랜덤 인스턴스 종료*.
 
 ```python
-def chaos_action():
-    # 업무 시간에만, 낮은 확률로, 스테이트리스 풀에 한정
-    if not is_business_hours(): return
-    pool = [i for i in running_instances if i.is_stateless]   # 매치 중 서버 제외
-    if pool and random.random() < 0.001:
+def chaos_action(experiment):
+    # 명시적 가설·대상 subset·최대 동시 피해·회복 대기·중단 기준·실행 권한을 가진 실험만 수행
+    if not experiment.authorized or not is_business_hours(): return
+    if experiment.abort_condition_met(): return
+    if experiment.active_kills() >= experiment.max_concurrent: return
+    pool = [i for i in running_instances
+            if i.is_stateless and i in experiment.target_subset]   # 매치 중 서버 제외
+    if pool and random.random() < experiment.rate:
         terminate(random.choice(pool))
+        experiment.wait_for_recovery()                 # 회복 확인 전 추가 kill 금지
 ```
 
-핵심 안전장치 — *업무 시간 한정(대응 가능할 때)*, *스테이트풀 제외(진행 매치 보호)*, *낮은 확률(blast radius 제한)*. 목적은 *장애를 일으키는 게 아니라 "인스턴스 하나 죽어도 무중단" 가설을 검증* 하는 것. *Game Day* — 의도적 대규모 장애 시뮬레이션으로 *팀의 대응 절차(runbook)* 를 평시에 훈련한다. 진짜 장애 때 처음 해보는 일이 없게 한다.
+핵심 안전장치 — *업무 시간 한정(대응 가능할 때)*, *스테이트풀 제외(진행 매치 보호)*, *낮은 확률(blast radius 제한)*. 목적은 *장애를 일으키는 게 아니라 "인스턴스 하나 죽어도 무중단" 가설을 검증* 하는 것. *Game Day* — 의도적 대규모 장애 시뮬레이션으로 *팀의 대응 절차(runbook)* 를 평시에 훈련한다. 진짜 장애 때 처음 해보는 일이 없게 한다. 호출별 낮은 확률은 kill 횟수·동시 피해를 제한하지 못한다 — 기대 kill은 호출 수 × 확률이므로 실험 단위(가설·대상 subset·최대 동시·회복 대기·중단 기준)로 상한을 두고 실행 권한을 확인한다.
 
 
 ---
@@ -919,8 +957,7 @@ def chaos_action():
 
 ## 더 읽을거리
 
-- [Agones 공식 문서](https://agones.dev/site/) — Kubernetes 위 전용 게임 서버 Fleet 관리의 표준 오픈소스.
-- Paul Bettner, Mark Terrano, ["1500 Archers on a 28.8: Network Programming in Age of Empires and Beyond"](https://www.gamedeveloper.com/programming/1500-archers-on-a-28-8-network-programming-in-age-of-empires-and-beyond) (GDC 2001) — 제약에서 출발하는 확장 설계의 고전.
-- Google, [Site Reliability Engineering](https://sre.google/sre-book/table-of-contents/) — Golden Signals·에러 버짓·포스트모텀의 원전(무료 공개).
-- Martin Kleppmann, *Designing Data-Intensive Applications* (O'Reilly, 2017) — 샤딩·복제·스트림 처리의 체계적 기초.
-- David Karger, Eric Lehman, Tom Leighton, Matthew Levine, Daniel Lewin, Rina Panigrahy, ["Consistent Hashing and Random Trees: Distributed Caching Protocols for Relieving Hot Spots on the World Wide Web"](https://dl.acm.org/doi/10.1145/258533.258660) (STOC 1997) — 일관 해시의 원전. 가상 노드(virtual copies)로 부하 균형을 잡는 spread·load 정리의 출처.
+- [Agones Fleet specification](https://agones.dev/site/docs/reference/fleet/)·[FleetAutoscaler specification](https://agones.dev/site/docs/reference/fleetautoscaler/)·[GameServerAllocation specification](https://agones.dev/site/docs/reference/gameserverallocation/) — Kubernetes 위 전용 게임 서버 Fleet 관리와 할당 API의 표준 reference.
+- Google, [Site Reliability Engineering](https://sre.google/sre-book/table-of-contents/) — Golden Signals·에러 버짓·포스트모텀의 원전(무료 공개). 특히 'Monitoring Distributed Systems'(Golden Signals)·'Embracing Risk'(에러 버짓)·'Postmortem Culture' 장.
+- Martin Kleppmann, *Designing Data-Intensive Applications* (O'Reilly, 2017) — 샤딩·복제·스트림 처리의 체계적 기초. 특히 5장(Replication)·6장(Partitioning)·11장(Stream Processing).
+- David Karger, Eric Lehman, Tom Leighton, Matthew Levine, Daniel Lewin, Rina Panigrahy, ["Consistent Hashing and Random Trees: Distributed Caching Protocols for Relieving Hot Spots on the World Wide Web"](https://dl.acm.org/doi/10.1145/258533.258660) (STOC 1997) — 일관 해시의 원전. 가상 노드(virtual copies)로 부하 균형을 잡는 spread·load 정리의 출처. 논문은 특정 가상 노드 수(예: 160)의 보편 최적성이나 stateful 세션의 자동 이전을 보장하지 않는다.

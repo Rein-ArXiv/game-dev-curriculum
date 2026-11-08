@@ -51,14 +51,14 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    Peak[피크 전력<br/>8~10W, 수 초] -->|발열 누적| Throttle[스로틀링 시작<br/>클럭 하강]
-    Throttle --> Sustained[지속 전력<br/>3~5W, 정상 상태]
+    Peak[피크 전력<br/>예: 8~10W, 수 초] -->|발열 누적| Throttle[스로틀링 시작<br/>클럭 하강]
+    Throttle --> Sustained[지속 전력<br/>예: 3~5W, 정상 상태]
     Sustained -->|게임의 실제 예산| Budget[프레임 예산은<br/>여기서 정해진다]
 ```
 
 ### 타일 기반 렌더링(Tile-Based Rendering)
 
-거의 모든 모바일 GPU — ARM Mali, Qualcomm Adreno, Imagination PowerVR, Apple GPU — 는 *타일 기반(tile-based)* 이다. 데스크톱의 *즉시 모드(immediate mode)* 렌더러가 삼각형을 곧바로 프레임버퍼에 그리는 것과 달리, 타일 렌더러는 화면을 *작은 타일(예: 16×16 또는 32×32 픽셀)* 로 나눠 한 타일씩 처리한다.
+모바일의 대표적인 GPU 계열 — ARM Mali, Qualcomm Adreno, Imagination PowerVR, Apple GPU — 은 *타일 기반(tile-based)* 으로 분류된다(모든 모바일 GPU가 같은 메모리 경로를 쓰는 것은 아니다). 전통적인 *즉시 모드(immediate mode)* 렌더러가 삼각형을 곧바로 프레임버퍼에 그리는 것과 달리, 이상화된 타일 렌더러는 화면을 *작은 타일(예: 16×16 또는 32×32 픽셀)* 로 나눠 한 타일씩 처리한다.
 
 이유는 *메모리 대역폭* 이다. 모바일은 외부 DRAM 대역폭이 좁고(예: 데스크톱 GPU의 1/10 수준), DRAM 접근은 *전력을 가장 많이 먹는 동작* 중 하나다. 타일 렌더러는 *타일 크기의 작은 온칩 메모리(tile memory)* 안에서 색·깊이·스텐실을 처리하고, 타일이 완성되면 *한 번만* 외부 메모리에 쓴다. 픽셀마다 프레임버퍼를 들락거리는 대신, 타일당 한 번의 외부 쓰기로 대역폭을 절약한다.
 
@@ -67,10 +67,10 @@ flowchart LR
     Geo[지오메트리<br/>버텍스 처리] --> Bin[비닝<br/>타일별 삼각형 목록]
     Bin --> TileLoop[각 타일 순회]
     TileLoop --> OnChip[온칩 타일 메모리에서<br/>색·깊이 처리]
-    OnChip --> Resolve[완성된 타일만<br/>외부 메모리에 쓰기]
+    OnChip --> Resolve["완성된 타일만<br/>외부 메모리에 쓰기<br/>(대표적 모델)"]
 ```
 
-이 구조는 두 가지 실무 함정을 만든다. 첫째, *지오메트리는 두 번 읽힌다* — 비닝 단계에서 한 번(어느 타일에 속하는지), 래스터 단계에서 한 번. 그래서 *과도한 버텍스* 는 모바일에서 데스크톱보다 더 비싸다. 둘째, *프레임버퍼를 중간에 읽으면(예: 후처리에서 이전 결과 샘플링)* 타일 메모리를 외부로 내보냈다 다시 들여와야 해서 대역폭 이득이 날아간다. 디퍼드 렌더링이 모바일에서 불리한 핵심 이유다(4절).
+이 구조는 대표적인 tile-based renderer의 이상화 모델이며, 실제 비용은 타일 storage/load/store·spill·render pass 구조에 따라 달라진다. 이 모델은 두 가지 실무 함정을 만든다. 첫째, *지오메트리는 두 번 읽힌다* — 비닝 단계에서 한 번(어느 타일에 속하는지), 래스터 단계에서 한 번. 그래서 *과도한 버텍스* 는 모바일에서 데스크톱보다 더 비싸다. 둘째, *프레임버퍼를 중간에 읽으면(예: 후처리에서 이전 결과 샘플링)* 타일 메모리를 외부로 내보냈다 다시 들여와야 해서 대역폭 이득이 날아간다. 디퍼드 렌더링이 모바일에서 불리한 핵심 이유다(4절).
 
 ### 기기 파편화(Fragmentation)
 
@@ -103,6 +103,11 @@ stateDiagram-v2
     Serious --> Fair: 냉각
     Fair --> Nominal: 충분히 식음
     Critical --> [*]: 강제 종료/셧다운
+    note right of Critical
+        단순화: 상태가 항상 순차 진행하지는 않으며,
+        critical이 반드시 종료를 뜻하지도 않는다.
+        이름·중간 단계 생략은 플랫폼별로 다르다.
+    end note
 ```
 
 각 단계에서 시스템이 취하는 조치와 게임이 받는 영향은 다르다.
@@ -116,7 +121,7 @@ stateDiagram-v2
 
 ### 서멀 상태를 읽는다
 
-게임은 *서멀 상태를 직접 조회* 해서 능동적으로 대응할 수 있다. iOS는 `ProcessInfo.thermalState`(nominal/fair/serious/critical)를, 안드로이드는 `PowerManager`의 *thermal status* 와 *thermal headroom* API를 제공한다. headroom은 "임계까지 얼마나 남았는가"를 0~1로 주는 *예측적 신호* 라 특히 유용하다 — 이미 뜨거워진 뒤가 아니라, *뜨거워지기 전에* 부하를 낮출 수 있다.
+게임은 *서멀 상태를 직접 조회* 해서 능동적으로 대응할 수 있다. iOS는 `ProcessInfo.thermalState`(nominal/fair/serious/critical)를, 안드로이드는 `PowerManager`의 *thermal status* 와 *thermal headroom* API를 제공한다. headroom은 "임계까지 얼마나 남았는가"를 0~1로 주는 *예측적 신호* 라 특히 유용하다 — 이미 뜨거워진 뒤가 아니라, *뜨거워지기 전에* 부하를 낮출 수 있다. 다만 원시 값은 1을 넘거나 미지원 시 NaN일 수 있으므로, 래퍼가 유한성 검사와 정규화(clamp)를 책임져야 한다.
 
 ```cpp
 // 서멀 상태를 추상화해 품질 컨트롤러에 입력으로 넣는다
@@ -124,18 +129,23 @@ enum class ThermalState { Nominal, Fair, Serious, Critical };
 
 struct ThermalSignal {
     ThermalState state;
+    bool         headroomValid; // raw API가 유한값을 줬는지. false면 headroom은 미정
     float        headroom;     // 0.0=임계, 1.0=여유 충분 (주의: 안드로이드 getThermalHeadroom은
                                //  반대로 1.0=심각 임계·클수록 위험이므로, 래핑 시 1-x로 뒤집어 통일한다)
 };
 
 ThermalSignal QueryThermal();  // 플랫폼별 API 래핑
+// 래핑 계약: raw가 finite일 때만 clamp(1-raw, 0.0f, 1.0f)로 정규화하고 headroomValid=true로 둔다.
+// raw가 NaN/미지원이거나 1을 넘으면 유한성 검사 후 clamp하고, 유한하지 않으면 state나 보수적 품질 정책으로 처리한다.
 
 // 매 초 폴링(매 프레임은 과함). 상태 변화에 히스테리시스를 둔다.
 void UpdateQualityFromThermal(const ThermalSignal& t) {
-    if (t.state >= ThermalState::Serious || t.headroom < 0.2f)
+    if (t.state >= ThermalState::Serious || (t.headroomValid && t.headroom < 0.2f))
         qualityController.RequestLevel(QualityLevel::Reduced);
-    else if (t.state == ThermalState::Nominal && t.headroom > 0.5f)
+    else if (t.state == ThermalState::Nominal && t.headroomValid && t.headroom > 0.5f)
         qualityController.AllowLevel(QualityLevel::Full);
+    else if (!t.headroomValid)
+        qualityController.RequestLevel(QualityLevel::Reduced);  // raw 미지 → 보수적으로
 }
 ```
 
@@ -147,14 +157,17 @@ void UpdateQualityFromThermal(const ThermalSignal& t) {
 
 ```cpp
 // 목표 프레임 시간을 발열에 따라 조정 (프레임 페이싱)
+// targetFrameMs는 지원 refresh의 정수 divisor(또는 해당 범위 VRR)로 고른다.
+// 고정 60Hz에서 45fps는 균등 22.2ms가 아니라 1/2 refresh 간격이 섞이므로,
+// 60/30 같은 divisor나 90Hz 2 refresh·VRR에서만 균등 표시가 보장된다.
 struct FramePacer {
     float targetFrameMs = 33.3f;   // 30fps 기본
 
     void OnThermal(ThermalState s) {
         switch (s) {
-            case ThermalState::Nominal: targetFrameMs = 16.6f; break;  // 60 허용
-            case ThermalState::Fair:    targetFrameMs = 22.2f; break;  // 45
-            default:                    targetFrameMs = 33.3f; break;  // 30으로 후퇴
+            case ThermalState::Nominal: targetFrameMs = 16.6f; break;  // 60 허용 (60Hz 1 divisor)
+            case ThermalState::Fair:    targetFrameMs = 22.2f; break;  // 45: 90Hz 2 divisor 또는 VRR 한정
+            default:                    targetFrameMs = 33.3f; break;  // 30으로 후퇴 (60Hz 2 divisor)
         }
     }
 };
@@ -221,7 +234,7 @@ struct DynamicResolution {
 | 4 | 파티클·이펙트 밀도 축소 | ~15% |
 | 5 (최저) | 그림자 끔, 해상도 0.6배 | 누적 최대 |
 
-조절 항목의 순서가 중요하다. *눈에 덜 띄는 것부터* 깎는다 — 멀리 있는 그림자 해상도나 후처리는 게임플레이에 영향이 적지만, 캐릭터 모델 LOD나 입력 반응성은 마지막까지 지킨다. 그리고 *프레임 페이싱(frame pacing)* 을 함께 본다. 평균 60fps라도 *간헐적 스파이크* 로 끊기면 체감이 나쁘다 — 평균보다 *99 퍼센타일 프레임 시간(가장 느린 1%)* 을 관리하는 편이 부드러움에 직결된다.
+조절 항목의 순서가 중요하다. *눈에 덜 띄는 것부터* 깎는다 — 멀리 있는 그림자 해상도나 후처리는 게임플레이에 영향이 적지만, 캐릭터 모델 LOD나 입력 반응성은 마지막까지 지킨다. 그리고 *프레임 페이싱(frame pacing)* 을 함께 본다. 평균 60fps라도 *간헐적 스파이크* 로 끊기면 체감이 나쁘다 — 평균보다 *꼬리(tail)* 를 관리하는 편이 부드러움에 직결된다. 다만 집계 정의를 명시해야 한다. *p99 프레임 시간(nearest-rank percentile)* 과 *1% low FPS(가장 느린 1% 프레임 시간 평균의 역수)* 는 같은 값이 아니며, p99의 역수를 1% low FPS로 쓰면 안 된다. 표본 window와 프레임 제외 규칙도 함께 고정한다.
 
 ## 4. 모바일 렌더링 최적화
 
@@ -250,6 +263,9 @@ void DrawTrees(const Mesh& treeMesh, const std::vector<InstanceData>& instances)
 
 ```cpp
 // 프러스텀 컬링: 바운딩 구가 절두체 안인지 검사 (드로우 전 단계)
+// 계약: Plane::Distance는 노멀이 unit length이고 내부(양의 반공간)가 양수인 signed geometric
+// distance를 반환한다. n·p+d 형태의 일반식이라면 |n|으로 나눈 뒤 써야 하며 zero normal은 거부한다.
+// bounds.center·radius와 평면은 같은 월드 좌표계·같은 단위여야 하고 radius >= 0이어야 한다.
 bool InFrustum(const Sphere& bounds, const Plane planes[6]) {
     for (int i = 0; i < 6; ++i)
         if (planes[i].Distance(bounds.center) < -bounds.radius)
@@ -277,7 +293,7 @@ bool InFrustum(const Sphere& bounds, const Plane planes[6]) {
 
 데스크톱에서 인기 있는 *디퍼드 렌더링(deferred rendering)* 은 모바일에서 보통 *불리* 하다. 디퍼드는 G-버퍼(여러 장의 전체 화면 텍스처)를 외부 메모리에 쓰고 다시 읽는데, 이것이 1절의 *타일 메모리 이점을 무너뜨린다* — 대역폭이 폭증한다. 그래서 모바일은 주로 *포워드(forward) 또는 포워드+* 를 쓴다.
 
-타일 렌더러의 강점을 살린 변종도 있다. *타일 기반 디퍼드(tile-based deferred)* 나 *서브패스(subpass)* 를 이용해 G-버퍼를 *외부로 내보내지 않고 타일 메모리 안에서* 라이팅까지 끝내는 방식이다. 최신 모바일 API(Vulkan의 서브패스, Metal의 메모리리스 어태치먼트)가 이를 지원한다. 핵심 원칙은 변하지 않는다 — *전체 화면 텍스처를 외부 메모리로 왕복시키지 마라*.
+타일 렌더러의 강점을 살린 변종도 있다. *타일 기반 디퍼드(tile-based deferred)* 나 *서브패스(subpass)* 를 이용해 G-버퍼를 *외부로 내보내지 않고 타일 메모리 안에서* 라이팅까지 끝내는 방식이다. 최신 모바일 API(Vulkan의 서브패스, Metal의 메모리리스 어태치먼트)가 이를 지원한다. 다만 render pass 경계·load/store action·attachment 보존 여부에 따라 외부 메모리 접근 횟수는 달라진다. 어느 경우든 핵심 원칙은 같다 — *전체 화면 텍스처를 불필요하게 외부 메모리로 왕복시키지 마라*.
 
 ## 5. 텍스처 압축과 메모리
 
@@ -290,7 +306,7 @@ bool InFrustum(const Sphere& bounds, const Plane planes[6]) {
 | 포맷 | 지원 | 비트/픽셀(대략) | 특성 |
 |---|---|---|---|
 | ETC2 | 모든 OpenGL ES 3.0+ (안드로이드 기준) | 4 또는 8 | 호환성 최고, 품질 보통 |
-| ASTC | 최신 안드로이드·iOS | 가변(8×8~4×4) | 품질·크기 조절 자유, 권장 |
+| ASTC | 최신 안드로이드·iOS | 2–8 bpp (8×8–4×4 blocks) | 품질·크기 조절 자유, 권장 |
 | PVRTC | 구형 iOS·PowerVR | 2 또는 4 | 레거시, 신규 회피 |
 | BCn(S3TC) | 데스크톱, 일부 모바일 | 4~8 | 데스크톱 표준, 모바일 지원 제한적 |
 
@@ -329,10 +345,12 @@ struct StreamableTexture {
 
 void UpdateStreaming(std::vector<StreamableTexture>& texs, size_t budget) {
     for (auto& t : texs) t.desiredMip = ComputeDesiredMip(t);  // 거리 기반
-    // 예산 초과 시 desiredMip이 큰(낮은 품질로 충분한) 것부터 고밉 해제
-    while (CurrentUsage(texs) > budget)
-        EvictHighestMip(LeastImportant(texs));
-    LoadMissingMips(texs);    // 백그라운드 I/O로 부족한 밉 채움
+    // 예산 초과 시 desiredMip이 큰(낮은 품질로 충분한) 것부터 고밉 해제.
+    // eviction이 매회 진전하지 못하면(모두 pinned/in-flight) while을 빠져나와 적재를 보류한다.
+    while (CurrentUsageIncludingPending(texs) > budget)
+        if (!EvictHighestMip(LeastImportant(texs))) break;   // 공간을 못 줄임 → 실패/보류
+    LoadMissingMips(texs);    // committed+pending+신규 bytes를 검사해 예산 안에서만 채움
+    // 필수 밉까지 합쳐 budget보다 크면 품질 강등 또는 적재 실패 정책을 명시한다.
 }
 ```
 
@@ -358,11 +376,12 @@ sequenceDiagram
     participant G as 게임 로직
     participant D as 디스플레이
     F->>T: 접촉
-    T->>OS: 샘플링(수십 ms)
+    T->>OS: 샘플링(예시: 수십 ms 주기)
     OS->>G: 터치 이벤트
     G->>G: 처리(프레임 경계 대기)
     G->>D: 렌더 결과
     D->>F: 표시(vsync)
+    Note over F,D: 수십 ms는 샘플 주기·프레임 대기·총 입력 지연의 예시 범위다.
 ```
 
 총 지연을 줄이는 레버는 여러 곳에 있다. *입력을 프레임 경계가 아니라 가능한 늦게 읽기*(렌더 직전에 최신 터치를 반영), *높은 터치 샘플링·디스플레이 갱신률 활용*(120Hz 화면은 입력 지연도 함께 줄인다), *불필요한 입력 버퍼링 제거* 다. 액션·리듬 게임에서는 이 지연이 *조작감의 핵심* 이라, 입력→화면 지연을 *실측* 해서 관리한다(고속 카메라로 손가락과 화면 반응의 프레임 차를 센다).
@@ -372,22 +391,27 @@ sequenceDiagram
 모바일 입력은 *멀티터치* 가 기본이다 — 여러 손가락이 동시에 닿고, 각 터치는 *고유 ID* 로 추적된다(begin/move/end). 가상 조이스틱·핀치 줌·회전 같은 제스처는 이 다중 포인터를 *상태 머신* 으로 해석한다.
 
 ```cpp
-// 터치를 ID로 추적. 가상 조이스틱은 첫 터치를 고정점으로 잡는다
+// 터치를 ID로 추적. 가상 조이스틱은 첫 터치를 고정점으로 잡는다.
+// 계약: touches가 활성 터치만 담는 snapshot이면 아래 active 검사는 방어적이다.
+// ended/canceled 터치가 같은 ID로 남는 모델에서는 active=false를 즉시 중립으로 처리하고,
+// focus loss·ID 재사용 시에는 추적 상태를 초기화한다.
 struct Touch { int id; Vec2 pos, startPos; bool active; };
 
 struct VirtualStick {
     int   trackingId = -1;
     Vec2  center;
     float maxRadius = 120.0f;
+    void  Reset() { trackingId = -1; center = Vec2(0, 0); }   // focus loss·취소 시
     Vec2  Output(const std::vector<Touch>& touches) {
         for (auto& t : touches) {
             if (trackingId == -1 && t.active) { trackingId = t.id; center = t.pos; }
             if (t.id == trackingId) {
+                if (!t.active) { Reset(); return Vec2(0, 0); }    // ended/canceled → 중립
                 Vec2 v = (t.pos - center) / maxRadius;
                 return Vec2(std::clamp(v.x, -1.0f, 1.0f), std::clamp(v.y, -1.0f, 1.0f));
             }
         }
-        trackingId = -1;             // 추적하던 터치가 떨어짐 → 중립
+        Reset();                     // 추적하던 터치가 떨어짐 → 중립
         return Vec2(0, 0);
     }
 };
@@ -409,15 +433,15 @@ struct VirtualStick {
 
 ```mermaid
 flowchart TB
-    Install[설치 시점] --> Base[기본 패키지<br/>실행 코드 + 첫 화면]
+    Install[설치 시점<br/>Android/Google Play] --> Base[기본 패키지<br/>실행 코드 + 첫 화면]
     Base --> Play[게임 시작]
-    Play --> OnDemand[온디맨드 다운로드<br/>레벨·고해상도 에셋]
+    Play --> OnDemand[온디맨드 다운로드<br/>Play Asset Delivery]
     Play --> Tier[기기별 에셋<br/>ASTC 또는 ETC2만]
 ```
 
 ### 앱 번들과 기기별 분할
 
-현대 스토어는 *앱 번들(app bundle)* 형식을 권장한다 — 개발자는 모든 변종을 담은 번들을 올리고, 스토어가 *각 기기에 맞는 부분만 잘라* 내려보낸다. 이로써 한 기기는 *자기 화면 밀도·CPU 아키텍처·텍스처 포맷에 해당하는 에셋만* 받는다.
+Google Play 등 Android 스토어는 *앱 번들(app bundle)* 형식을 권장한다 — 개발자는 모든 변종을 담은 번들을 올리고, 스토어가 *각 기기에 맞는 부분만 잘라* 내려보낸다. 이로써 한 기기는 *자기 화면 밀도·CPU 아키텍처·텍스처 포맷에 해당하는 에셋만* 받는다. 이 절의 ASTC/ETC2 선택과 배포 모드는 Android 배포 맥락이며, iOS/Metal 산출물과 같은 규칙으로 일반화하지 않는다.
 
 | 분할 축 | 변종 | 효과 |
 |---|---|---|
@@ -430,7 +454,7 @@ flowchart TB
 
 ### 에셋 분할과 온디맨드
 
-코드와 첫 진입에 필요한 에셋만 *기본 패키지* 에 넣고, 나머지 레벨·컷신·고해상도 텍스처는 *에셋 팩(asset pack)* 으로 분리해 *필요할 때 다운로드* 한다. 분할 전략은 *접근 패턴* 을 따른다.
+코드와 첫 진입에 필요한 에셋만 *기본 패키지* 에 넣고, 나머지 레벨·컷신·고해상도 텍스처는 *에셋 팩(asset pack)* 으로 분리해 *필요할 때 다운로드* 한다. 아래 세 모드는 Google Play Asset Delivery의 분류다. 분할 전략은 *접근 패턴* 을 따른다.
 
 | 에셋 팩 유형 | 다운로드 시점 | 예 |
 |---|---|---|
@@ -518,9 +542,9 @@ flowchart LR
 
 ## 더 읽을거리
 
-- Arm Mali GPU Best Practices — 타일 렌더링·대역폭·셰이더 정밀도의 공식 가이드.
-- Qualcomm Adreno GPU 개발자 문서 — Snapdragon Profiler와 모바일 GPU 캡처.
-- Android Performance / Adaptability 문서 — thermal API, ANGLE, 게임 모드, 동적 성능.
-- Apple Developer: Optimizing for Metal / ProcessInfo.thermalState — iOS 서멀·전력 가이드.
-- Khronos ASTC 명세 및 ARM ASTC Encoder — 블록 크기와 품질 트레이드오프.
-- Android App Bundle / Play Asset Delivery 문서 — 기기별 분할과 온디맨드 다운로드.
+- Arm Mali GPU Best Practices — 타일 렌더링·대역폭·셰이더 정밀도의 공식 가이드(개별 문서·절은 미확인).
+- Qualcomm Adreno GPU 문서 — Snapdragon Profiler와 모바일 GPU 캡처 도구(정확한 현행 문서는 미확인).
+- Android Developers — `PowerManager.getThermalHeadroom`과 Frame Pacing library 문서 — thermal 신호와 페이싱 계약의 직접 근거.
+- Apple Developer — `ProcessInfo.thermalState` — iOS 서멀 상태(상태 전이 순서·성능 수치 전체의 근거는 아님).
+- Khronos `KHR_texture_compression_astc_hdr` 명세 및 ARM astc-encoder — 2D 128-bit 블록 산술과 블록 크기 범위.
+- Android App Bundle / Google Play Asset Delivery 문서 — Android 기기별 분할과 온디맨드 다운로드(PAD 배포 모드 한정).

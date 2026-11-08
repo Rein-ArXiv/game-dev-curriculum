@@ -104,7 +104,7 @@ $$
 =\operatorname{support}_{core}(d)+m\hat d
 $$
 
-margin을 거리 결과에서 빼 원래 도형 separation을 복원한다. 구·캡슐처럼 radius가 의미 있는 도형에서 margin과 실제 radius를 중복 적용하지 않는다.
+margin을 어떻게 반영했는지에 따라 거리 복원 경로가 둘로 나뉜다. core support로 GJK를 돌린 *core query*라면 결과가 core distance이므로 여기서 두 margin을 빼 surface distance를 만든다. expanded support로 돌린 *expanded query*라면 결과가 이미 surface distance이므로 margin을 다시 빼지 않는다. 두 경로를 섞으면 margin이 이중 차감되거나 반대 부호로 적용된다. 반환 witness는 core query일 때 $A \mathrel{+}= \hat n\,m_A$, $B \mathrel{-}= \hat n\,m_B$로 skin 표면에 맞추거나, 필드 이름에 core witness임을 드러낸다. 구·캡슐처럼 radius가 의미 있는 도형에서 margin과 실제 radius를 중복 적용하지 않는다.
 
 ### Compound와 concave
 
@@ -154,6 +154,8 @@ $$
 
 이면 수렴으로 본다. scale에 독립적인 절대 epsilon 하나만 쓰지 않는다.
 
+simplex까지의 현재 거리는 전체 Minkowski 차까지 거리의 *상계*일 뿐이다. 감소량이 작거나 반복 상한에 도달했다는 사실만으로 양의 현재 거리에서 분리를 확정할 수 없다. support 평면에서 얻는 lower bound/dual gap과 simplex upper bound를 함께 기록한다. 수렴 실패는 오류 범위 없이 Separated로 승격하지 않고 불확실 상태로 남긴다. 부정확한 support tie도 progress 판정에 영향을 준다.
+
 ### Duplicate support
 
 새 support가 simplex의 기존 점과 거의 같으면 더 진행하지 못한다.
@@ -163,7 +165,7 @@ $$
 \le\epsilon_{\text{duplicate}}^2
 $$
 
-feature pair가 같으면 위치 tolerance보다 더 강한 duplicate 신호가 된다. duplicate에서 현재 closest point가 contact slop 안이면 Touching, 충분히 멀면 Separated, 애매하면 별도 실패 상태로 남긴다.
+feature pair의 ID 동일성이 위치 tolerance보다 강한 duplicate 신호가 되는 것은 유한 vertex polytope의 vertex pair에서만이다. 구·캡슐처럼 원형 표면이 있는 smooth shape는 방향이 바뀌면 support 위치가 달라져도 같은 shape/feature ID를 가질 수 있으므로 ID 동일성으로 duplicate를 판정하지 않는다. smooth/margin 지원은 위치·방향 기준을 쓰고, cache 복원에는 local witness 또는 support direction도 함께 보관한다. duplicate에서 현재 closest point가 contact slop 안이면 Touching, 충분히 멀면 Separated, 애매하면 별도 실패 상태로 남긴다.
 
 ### Iteration cap
 
@@ -420,10 +422,10 @@ GJK simplex cache와 solver manifold cache는 목적이 다르다.
 
 `IterationLimit`이나 `InvalidSeed`에서 선택 가능한 정책:
 
-1. 이전 안정 manifold를 짧은 기간 유지한다.
+1. 이전 안정 manifold를 짧은 기간 유지한다(contact validity 검사와 결합).
 2. box/polytope라면 SAT로 다시 검사한다.
-3. distance best estimate가 slop보다 크면 분리로 처리한다.
-4. 매우 가까운 애매한 경우 speculative contact를 만든다.
+3. 분리 하계(lower bound)가 slop보다 큰 경우에만 분리로 확정한다. 반복이 중단된 best distance가 slop보다 크다는 사실은 아직 교차하지 않는다는 증거가 아니다.
+4. 그렇지 않으면 독립 detector로 넘기거나 보수적 후보를 유지하고, 매우 가까운 애매한 경우 speculative contact를 만든다.
 5. 오류 telemetry와 재현 seed를 저장한다.
 
 무조건 hit로 처리하면 유령 벽이 생기고, 무조건 miss로 처리하면 빠른 물체가 통과한다. fallback은 shape pair와 gameplay 위험에 따라 달라야 한다.

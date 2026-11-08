@@ -66,11 +66,11 @@ flowchart TB
 
 | 방식 | 도구 예 | 의존성 출처 | 정확성 | 속도 |
 |---|---|---|---|---|
-| 명시적 선언 | Bazel, Buck | 빌드 파일에 직접 기술 | 높음 (강제) | 빠름 (분석 불필요) |
+| 명시적 선언 | Bazel, Buck | 빌드 파일에 직접 기술 | 높음 (강제) | 빠름 (증분 분석·캐시로 비용 절감) |
 | 자동 발견 | Make + `-MMD`, MSBuild | 컴파일러가 출력 | 중간 | 중간 |
 | 혼합 | CMake → Ninja | 선언 + 컴파일러 발견 | 중간~높음 | 빠름 |
 
-명시적 그래프는 *모든 입력을 선언* 하도록 강제한다. Bazel은 선언되지 않은 파일에 접근하면 *샌드박스가 막아* 빌드를 실패시킨다. 덕분에 그래프가 항상 완전하지만, 빌드 파일 작성 비용이 크다. 자동 발견은 편하지만 *숨은 의존성* 을 놓치기 쉽다 — 컴파일러가 읽은 헤더는 잡아도, 코드가 런타임에 읽는 데이터 파일이나 환경 변수는 그래프에 안 들어간다.
+명시적 그래프는 *모든 입력을 선언* 하도록 강제한다. Bazel도 loading·analysis·execution 단계를 거쳐 *rule/target을 분석한 뒤 액션 그래프를 만든다* — 선언이 analysis 자체를 없애지는 않지만, 증분 분석·캐시로 비용을 줄일 수 있다. Bazel은 선언되지 않은 파일에 접근하면 *샌드박스가 막아* 빌드를 실패시키지만, 절대 경로·샌드박스 전략·fallback 한계 때문에 그래프 완전성이 자동 보증되지는 않는다(F22). 빌드 파일 작성 비용은 크다. 자동 발견은 편하지만 *숨은 의존성* 을 놓치기 쉽다 — 컴파일러가 읽은 헤더는 잡아도, 코드가 런타임에 읽는 데이터 파일이나 환경 변수는 그래프에 안 들어간다.
 
 ### 헤더 의존성의 함정
 
@@ -81,13 +81,13 @@ C++ 빌드에서 가장 흔한 그래프 오류는 *헤더 의존성 누락* 이
 ```make
 # 컴파일과 동시에 .d 의존성 파일 생성
 %.o: %.cpp
-	$(CXX) -MMD -MF $(@:.o=.d) -c $< -o $@
+	$(CXX) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
 
 # 다음 빌드에서 .d를 읽어 헤더 변경을 그래프에 반영
 -include $(OBJS:.o=.d)
 ```
 
-`.d` 파일에는 `player.o: player.cpp player.h config.h...` 형태로 *컴파일러가 읽은 사용자 헤더* 가 들어간다 — `-MMD`는 시스템 헤더를 제외하므로, 표준 헤더까지 포함하려면 `-MD`를 쓴다. 첫 빌드 후 이 파일을 그래프에 합치면, 다음부터는 헤더 변경이 정확히 추적된다. 이 "컴파일하며 의존성을 발견하는" 패턴이 자동 발견 빌드의 핵심이다.
+`.d` 파일에는 `player.o: player.cpp player.h config.h...` 형태로 *컴파일러가 읽은 사용자 헤더* 가 들어간다 — `-MMD`는 시스템 헤더를 제외하므로, 표준 헤더까지 포함하려면 `-MD`를 쓴다. 첫 빌드 후 이 파일을 그래프에 합치면, 다음부터는 헤더 변경이 정확히 추적된다. 이 "컴파일하며 의존성을 발견하는" 패턴이 자동 발견 빌드의 핵심이다. `-MP`는 삭제된 헤더에 대한 phony target을 생성해, 헤더와 include를 함께 지운 정상 리팩터링에서 stale `.d`가 "No rule to make target"으로 make를 막는 것을 방지한다.
 
 ### 모듈은 그래프를 먼저 알아야 한다
 
@@ -152,13 +152,13 @@ bool NeedsRebuild(const Node& n) {
     bool any_newer = false;
     for (auto& in : n.inputs)
         if (mtime(in) > n.output_mtime) { any_newer = true; break; }
-    if (!any_newer) return false;                    // mtime상 변화 없음 → 스킵
+    if (!any_newer) return false;                    // 전제: 내용 변경은 항상 mtime을 갱신한다
     // mtime은 최신이지만 내용은 같을 수 있다 → 해시로 재확인
     return ContentHash(n.inputs) != n.cached_input_hash;
 }
 ```
 
-실무에서는 *mtime을 1차 필터, 해시를 2차 확정* 으로 쓰는 혼합 전략이 흔하다. mtime이 옛것이면 즉시 스킵(빠름), mtime이 최신일 때만 해시를 계산해 *내용이 진짜 바뀌었는지* 확인한다. Git 브랜치 전환 후 "mtime은 다 최신이지만 내용은 동일"한 경우, 해시 단계가 *전체 재빌드를 막아준다*.
+실무에서는 *mtime을 1차 필터, 해시를 2차 확정* 으로 쓰는 혼합 전략이 흔하다. mtime이 옛것이면 즉시 스킵(빠름), mtime이 최신일 때만 해시를 계산해 *내용이 진짜 바뀌었는지* 확인한다. Git 브랜치 전환 후 "mtime은 다 최신이지만 내용은 동일"한 경우, 해시 단계가 *전체 재빌드를 막아준다*. 이 최적화는 "입력 변경이 반드시 산출물보다 새로운 mtime으로 드러난다"는 전제에 기댄다 — 내용이 바뀌었는데 mtime을 보존·과거화하면(일부 동기화 도구) mtime 필터가 변경을 놓친다. 그 전제를 보장할 수 없으면 신뢰 가능한 change journal·metadata identity·digest cache를 쓰고, 정확한 content 기반 판단이 필요하면 보존 mtime만을 이유로 해시 확인을 생략하지 않는다.
 
 ### 빌드 로그와 명령 변경 추적
 
@@ -235,6 +235,7 @@ flowchart TB
     W2 --> Cache
     W3 --> Cache
     Coord --> Cache
+    Cache -.-> Atomic[같은 키 동시 게시<br/>원자적 insert-or-compare]
 ```
 
 분산이 가능한 전제는 *액션의 격리* 다 — 각 컴파일은 *선언된 입력만 읽고, 선언된 출력만 쓰는* 순수 함수여야 다른 머신에서 실행 가능하다. 1절에서 입력을 완전히 명세하는 일이 여기서 보상받는다. 입력이 누락되면 워커가 그 파일을 못 받아 빌드가 실패하거나, 더 나쁘게는 *워커마다 다른 결과* 가 나온다.
@@ -244,20 +245,24 @@ flowchart TB
 분산보다 더 큰 이득은 *원격 캐시* 다. 액션의 *완전한 입력 해시* 를 키로, 산출물을 값으로 저장한다. 누군가 이미 같은 입력으로 컴파일했다면, *다시 컴파일하지 않고 캐시에서 산출물을 내려받는다*.
 
 ```cpp
-// 캐시 키 = 액션의 모든 입력을 해시
+// 캐시 키 = 액션의 모든 입력을 canonical serialization
 std::string CacheKey(const BuildAction& a) {
     Hasher h;
     h.Update(a.tool);
-    h.Update(ToolVersion(a.tool));        // 컴파일러 버전 (필수)
-    for (auto& in : SortedInputs(a))      // 정렬: 순서 무관하게
-        h.Update(ContentHash(in));        // 내용 해시 (경로 아님)
-    for (auto& arg : a.args) h.Update(arg);
-    for (auto& [k,v] : a.env) h.Update(k + "=" + v);
+    h.Update(ToolchainIdentity(a.tool));  // 버전 문자열이 아니라 toolchain/실행 환경 identity
+    for (auto& in : SortedInputs(a)) {    // 논리 경로로 정렬
+        h.Update(NormalizeLogicalPath(in)); // 머신 prefix는 제거, 논리 경로는 보존
+        h.Update(ContentHash(in));        // 내용 해시
+    }
+    for (auto& arg : a.args) h.UpdateFrame(arg);  // 순서를 보존한 길이 프레이밍
+    for (auto& [k,v] : SortedEnv(a.env)) h.Update(k + "=" + v);
     return h.Finalize();
 }
 ```
 
 캐시 키 설계가 캐시의 *정확성과 적중률* 을 동시에 좌우한다. *키에 빠진 입력* 이 있으면 잘못된 산출물을 돌려준다(정확성 사고). 반대로 *산출물에 영향을 안 주는 것을 키에 넣으면* 적중률이 떨어진다 — 예를 들어 입력 파일의 *절대 경로* 를 키에 넣으면, 다른 머신의 다른 작업 디렉토리에서는 같은 코드인데도 캐시가 안 맞는다. 그래서 키에는 *내용 해시* 를 쓰고 경로는 정규화한다.
+
+머신별 절대 prefix는 제거할 수 있지만 *의미를 가진 논리 경로·파일명* 은 제거하면 안 된다 — `__has_include("a.h")`처럼 이름 자체가 결과를 바꾸는 경우가 있다(T26). args 순서를 보존하고 env는 정렬·프레이밍하며, 버전 문자열만 아니라 toolchain/실행 환경의 신뢰 가능한 identity와 작업 디렉터리 의미도 포함한다.
 
 ### CI와 로컬의 캐시 공유
 
@@ -271,25 +276,25 @@ std::string CacheKey(const BuildAction& a) {
   컴파일러 버전 업그레이드:              적중 0%   → 키 전부 무효 (정상)
 ```
 
-마지막 줄이 중요하다. 컴파일러 업그레이드는 *캐시 전체를 무효화* 하는데, 이것이 *올바른 동작* 이다. 툴 버전이 키에 들어 있어 다른 산출물을 만들어내기 때문이다. 만약 업그레이드 후에도 캐시가 적중한다면, 그것은 키에 툴 버전이 빠진 *재현성 버그* 다.
+마지막 줄이 중요하다. 컴파일러 업그레이드는 *컴파일 action의 캐시를 무효화* 하는데, 이것이 *올바른 동작* 이다. 툴 버전이 키에 들어 있어 다른 산출물을 만들어내기 때문이다. 만약 *컴파일 action* 이 업그레이드 후에도 적중한다면, 그것은 키에 툴 버전이 빠진 *재현성 버그* 다. 다만 컴파일러를 쓰지 않는 복사·다른 tool action은 여전히 hit할 수 있다.
 
 ### 캐시 오염과 신뢰성
 
 원격 캐시는 *공유 자원* 이라 오염되면 *전 팀에 전파* 된다. 비결정적 빌드(4절)가 캐시에 올라가면, 입력이 같은데 산출물이 다른 *모순된 항목* 이 쌓인다. 방어책으로 *캐시 쓰기 검증* 을 둔다 — 같은 키로 두 번 빌드해 산출물이 다르면 그 액션을 *캐시 불가(uncacheable)* 로 표시하고 경고한다.
 
 ```cpp
-// 캐시 쓰기 전 결정성 검증 (샘플링)
+// 저장소의 원자적 insert-if-absent로 같은 키의 동시 writer를 비교한다
 void WriteToCacheChecked(const std::string& key, const Artifact& art) {
-    if (auto existing = cache.Get(key)) {
-        if (existing->content_hash != art.content_hash) {
-            LogError("비결정적 산출물: " + key);   // 4절 원인 추적
-            cache.MarkPoisoned(key);                // 적중 차단
-            return;
-        }
+    auto inserted = cache.InsertIfAbsent(key, art);   // {wrote, existing}
+    if (inserted.wrote) return;                        // 새로 저장 성공
+    if (inserted.existing->content_hash != art.content_hash) {
+        LogError("비결정적 산출물: " + key);   // 4절 원인 추적
+        cache.MarkPoisoned(key);                // 적중 차단 — poisoned 동시성도 저장소가 보장
     }
-    cache.Put(key, art);
 }
 ```
+
+공유 cache write는 `Get -> Put`의 외부 두 호출로는 같은 키의 동시 writer를 비교하지 못한다. `InsertIfAbsent`가 기존 immutable digest를 반환하게 하고 서로 다르면 poison/uncacheable로 처리하는 방식 등 저장소 차원의 동시성 계약이 필요하다 — hash 검증과 poisoned 상태의 동시성도 함께 계약화한다.
 
 원격 캐시의 신뢰성은 *액션의 결정성에 전적으로 의존* 한다. 비결정적 액션 하나가 캐시에 들어가면, 그 키를 적중한 모든 빌드가 *무작위로 다른 결과* 를 받는다 — 디버깅이 거의 불가능한 종류의 버그다. 그래서 분산·캐시를 도입하기 전에 *결정성을 먼저 확보* 해야 한다. 4절의 주제다.
 
@@ -332,14 +337,14 @@ const char* kBuildTime = BUILD_EPOCH_STR;   // -D로 고정 주입
 경로는 컴파일러 플래그로 정규화한다. 디버그 정보(`DWARF`)에 박히는 빌드 머신의 절대 경로를 *상대 경로나 고정 접두사로* 바꾼다.
 
 ```bash
-# 빌드 머신마다 다른 절대 경로를 고정 접두사로 치환
-clang++ -ffile-prefix-map=$(pwd)=/build \
-        -fdebug-prefix-map=$(pwd)=/build \
+# 빌드 머신마다 다른 절대 경로를 고정 접두사로 치환 (값을 인용)
+clang++ -ffile-prefix-map="$(pwd)"=/build \
+        -fdebug-prefix-map="$(pwd)"=/build \
         -c player.cpp -o player.o
 # 이제 /home/alice/proj 든 /home/bob/proj 든 디버그 정보는 /build로 동일
 ```
 
-`SOURCE_DATE_EPOCH`(타임스탬프 표준화)와 `-ffile-prefix-map`(경로 표준화)은 재현 가능 빌드의 *두 기본 도구* 다. 이 둘만으로 비결정성의 큰 부분이 사라진다.
+`SOURCE_DATE_EPOCH`(타임스탬프 표준화)와 `-ffile-prefix-map`(경로 표준화)은 재현 가능 빌드의 *두 기본 도구* 다. 이 둘만으로 비결정성의 큰 부분이 사라진다. 작업 경로에 공백이 있어도 shell word splitting으로 옵션이 쪼개지지 않도록 값을 인용하고, prefix-map의 지원 범위는 compiler/OS별 해당 toolchain 문서에 한정한다.
 
 ### 순서 결정성
 
@@ -365,13 +370,30 @@ for (auto& s : sorted) EmitSymbol(s.name, s.addr);
 재현성은 *주장이 아니라 검증* 으로 보장한다. 같은 커밋을 *두 번, 가능하면 다른 머신·다른 시각에* 빌드해 산출물 해시를 비교한다.
 
 ```bash
-# 두 번 빌드해 모든 산출물 해시 비교
-git checkout $COMMIT && ./build.sh && find out -type f -exec sha256sum {} \; | sort > a.txt
-rm -rf out && ./build.sh && find out -type f -exec sha256sum {} \; | sort > b.txt
-diff a.txt b.txt && echo "재현 가능" || echo "비결정적 산출물 존재"
+set -euo pipefail
+
+# 두 번 모두 독립 clean 작업공간·고정 입력으로, cache hit로 재컴파일을 생략하지 않게 실행한다.
+required=(game.pak)
+for workspace in build-a build-b; do
+    ./build.sh --workspace "$workspace" --cache-bypass
+    test -d "$workspace/out" || { echo "산출물 디렉터리 없음: $workspace/out" >&2; exit 1; }
+    for f in "${required[@]}"; do
+        test -s "$workspace/out/$f" || { echo "누락/빈 산출물: $workspace/out/$f" >&2; exit 1; }
+    done
+    # 해시 계산 실패(읽기 오류)도 pipefail을 통해 전체 실패로 전파된다.
+    ( cd "$workspace/out" && find . -type f -print0 | sort -z | xargs -0 sha256sum ) > "$workspace.manifest"
+    test -s "$workspace.manifest" || { echo "빈 manifest: $workspace" >&2; exit 1; }
+done
+
+if diff -u build-a.manifest build-b.manifest; then
+    echo "두 관측이 동일함 (모든 compiler/CPU/환경 재현성 보장은 아님)"
+else
+    echo "비결정적 산출물 존재" >&2
+    exit 1
+fi
 ```
 
-`diff`가 비면 재현 가능, 차이가 나면 *어느 파일이 흔들리는지* 가 바로 드러난다. 이 검증을 CI에 *정기적으로* 돌리면, 누군가 새 비결정성(예: 새 코드가 `__TIME__`을 박음)을 들여올 때 즉시 잡힌다. 재현성은 한 번 달성하고 끝나는 것이 아니라 *지속적으로 지켜야 하는 불변식* 이다.
+`diff`가 비면 재현 가능, 차이가 나면 *어느 파일이 흔들리는지* 가 바로 드러난다. 이 검증을 CI에 *정기적으로* 돌리면, 누군가 새 비결정성(예: 새 코드가 `__TIME__`을 박음)을 들여올 때 즉시 잡힌다. 두 번 같았다는 것은 *두 관측이 같았다* 는 뜻이지 모든 compiler/CPU/환경에서 재현 가능함을 증명하지는 않는다 — 파일명·크기·내용을 대상으로 하며, 실행 권한·소유자·타임스탬프도 배포 결과의 일부인 프로젝트는 manifest에 canonical metadata를 추가한다. 재현성은 한 번 달성하고 끝나는 것이 아니라 *지속적으로 지켜야 하는 불변식* 이다.
 
 ## 5. 쿠킹과 패키징
 
@@ -386,7 +408,7 @@ flowchart LR
     Cook --> ASTC[hero.astc<br/>모바일]
     FBX[hero.fbx] --> MeshCook[메시 쿠커]
     MeshCook --> Mesh[hero.mesh]
-    BC7 --> Pak[(콘텐츠 팩<br/>game.pak)]
+    BC7 --> Pak[(PC 콘텐츠 팩<br/>game.pak)]
     Mesh --> Pak
 ```
 
@@ -476,6 +498,12 @@ flowchart LR
     Canary -->|지표 정상| Ramp[점진 확대<br/>10% → 50%]
     Ramp -->|정상| Full[전체 배포]
     Canary -->|이상 감지| Rollback[즉시 롤백]
+    Ramp -->|이상 감지| Rollback
+    Full -->|이상 감지| Rollback
+    Mon[모니터링·중단/롤백 정책<br/>전 구간 지속]
+    Mon -.-> Canary
+    Mon -.-> Ramp
+    Mon -.-> Full
 ```
 
 *카나리 릴리스* 는 새 빌드를 *소수에게 먼저* 보내 크래시율·지표를 관찰하고, 정상이면 점진 확대한다. 이상이 보이면 *전체 확산 전에 롤백* 한다. 게임에서는 *서버(매치메이킹·경제)* 와 *클라이언트* 의 배포 결합이 까다롭다 — 클라이언트 버전과 서버 프로토콜이 *호환되어야* 하므로, 서버를 *구·신 프로토콜 모두 수용* 하도록 먼저 배포하고 클라이언트를 점진 전환한다. 롤백 가능성은 *아티팩트가 보관* 되어 있어야 성립한다(8절).
@@ -504,8 +532,9 @@ ENV SOURCE_DATE_EPOCH=0                              # 재현성(4절)
 // 테스트 결과를 입력 해시로 캐시
 struct TestAction {
     std::string name;
+    std::string environment;           // platform/config/env — canonical test-action ID의 일부
     std::vector<std::string> inputs;   // 테스트 바이너리 + 데이터
-    // 키 = hash(테스트 코드, 대상 바이너리, 테스트 데이터)
+    // 키 = hash(테스트 코드, 대상 바이너리, 테스트 데이터, 환경)
     // 캐시에 PASS가 있으면 재실행 생략
 };
 ```
@@ -531,18 +560,19 @@ struct TestAction {
 *플레이키(flaky) 테스트* 는 코드 변경 없이 *때로 통과, 때로 실패* 하는 테스트다. 이것이 CI의 신뢰를 무너뜨린다 — 실패가 진짜인지 플레이키인지 모르면, 개발자가 *모든 실패를 무시* 하기 시작한다. "재시도하면 통과하니까"가 굳어지면 테스트는 게이트로서 죽는다.
 
 ```cpp
-// 플레이키 탐지: 같은 커밋에서 결과가 흔들리는 테스트 격리
-void RecordResult(const std::string& test, const std::string& commit, bool pass) {
-    auto& hist = history[test][commit];
+// 플레이키 탐지: 같은 test action·환경·입력 조건 안에서 결과가 흔들리는 테스트 격리
+void RecordResult(const std::string& action, const std::string& env,
+                  const std::string& commit, bool pass) {
+    auto& hist = history[action][env][commit];
     hist.push_back(pass);
-    if (HasBothPassAndFail(hist)) {       // 같은 커밋에 PASS·FAIL 공존
-        MarkFlaky(test);                  // 격리: 게이트에서 제외, 별도 추적
-        Alert("플레이키 테스트: " + test);
+    if (HasBothPassAndFail(hist)) {       // 같은 action·환경·커밋에 PASS·FAIL 공존
+        MarkFlaky(action, env);           // 격리: 게이트에서 제외, 별도 추적
+        Alert("플레이키 테스트: " + action);
     }
 }
 ```
 
-플레이키의 원인은 대개 *비결정성* 이다 — 타이밍 의존(`sleep`으로 동기화), 테스트 간 *상태 누출*, 난수 미고정, 부동소수점 차이. 대응은 두 단계다. *격리* — 플레이키로 판명된 테스트를 게이트에서 빼 *신뢰를 보존* 하되 별도로 추적한다. *근본 수정* — 원인(공유 상태·타이밍·난수)을 제거한다. 플레이키를 방치하면 *재시도 횟수만 늘려* CI 시간이 부풀고 진짜 회귀를 놓친다.
+플레이키의 원인은 대개 *비결정성* 이다 — 타이밍 의존(`sleep`으로 동기화), 테스트 간 *상태 누출*, 난수 미고정, 부동소수점 차이. 대응은 두 단계다. *격리* — 플레이키로 판명된 테스트를 게이트에서 빼 *신뢰를 보존* 하되 별도로 추적한다. *근본 수정* — 원인(공유 상태·타이밍·난수)을 제거한다. 같은 test action·환경·입력 조건 안에서만 결과 변동을 판정하고, 플랫폼별 확정 회귀를 다른 플랫폼의 성공과 섞어 flaky로 자동 면제하지 않는다. 자동 격리에는 증거·담당자·만료/재검증 정책을 둔다. 플레이키를 방치하면 *재시도 횟수만 늘려* CI 시간이 부풀고 진짜 회귀를 놓친다.
 
 ### 테스트 분할과 병렬화
 
@@ -584,13 +614,14 @@ struct Artifact {
 버전 번호는 *사람이 읽는 식별자* 이자 *호환성 신호* 다. 시맨틱 버전(`MAJOR.MINOR.PATCH`)에 *빌드 메타데이터* 를 붙인다.
 
 ```bash
-# 커밋에서 버전을 결정론적으로 유도 (수동 입력 최소화)
-VERSION=$(git describe --tags --long)   # v1.2.3-45-gabc1234
-#         태그 v1.2.3 + 그 후 45개 커밋 + SHA abc1234
+# 커밋·태그에서 버전을 유도 (수동 입력 최소화)
+# 개발용은 dirty 표시를 붙이고, 공식 빌드는 clean checkout을 강제한다
+VERSION=$(git describe --tags --long --dirty)   # v1.2.3-45-gabc1234-dirty
+#         태그 v1.2.3 + 그 후 45개 커밋 + SHA abc1234 (+ tracked dirty)
 # → 1.2.3+build.45.gabc1234
 ```
 
-버전을 *커밋에서 유도* 하면 *수동 증가의 실수* 가 사라지고, 버전이 *정확한 소스 상태* 를 가리킨다. `MAJOR`는 호환성 깨짐(세이브 포맷·프로토콜 변경), `MINOR`는 기능 추가, `PATCH`는 버그 수정으로 약속한다. 게임에서 *클라이언트-서버 프로토콜 버전* 은 별도로 관리하기도 한다 — 콘텐츠 버전과 프로토콜 호환성은 다른 축이라(6절의 배포 결합), 섞으면 *호환되는데 막히거나 안 호환되는데 통과* 하는 사고가 난다.
+버전을 *커밋·태그에서 유도* 하면 *수동 증가의 실수* 가 사라지지만, `git describe`는 *커밋과 태그 집합의 함수* 이지 전체 소스 상태가 아니다 — 같은 커밋의 tracked dirty working tree는 `--dirty`로만 드러나고 untracked 파일·외부 도구·mutable dependency까지 포함하지는 않는다. 공식 빌드는 clean 상태를 강제하고 commit+dependency manifest를 별도로 보관하며, 개발용은 dirty 표시를 붙인다. 아래의 SemVer 문자열 변환은 실제로 구현해야 하는 전제이고, tag metadata도 재현 입력으로 취급한다. `MAJOR`는 호환성 깨짐(세이브 포맷·프로토콜 변경), `MINOR`는 기능 추가, `PATCH`는 버그 수정으로 약속한다. 게임에서 *클라이언트-서버 프로토콜 버전* 은 별도로 관리하기도 한다 — 콘텐츠 버전과 프로토콜 호환성은 다른 축이라(6절의 배포 결합), 섞으면 *호환되는데 막히거나 안 호환되는데 통과* 하는 사고가 난다.
 
 ### 빌드 시간 추적과 병목 분석
 
@@ -601,10 +632,10 @@ VERSION=$(git describe --tags --long)   # v1.2.3-45-gabc1234
 | 풀 빌드 시간 | 캐시 없는 최악 | 주마다 증가 → 빌드 부패 |
 | 증분 빌드 중앙값·p95 | 일상 반복 비용 | 팀이 정한 피드백 SLO 초과 |
 | 캐시 적중률 | 재사용 효율 | 하락 → 키 설계·비결정성 의심 |
-| 임계 경로 길이 | 병렬화 한계 | 길어짐 → 의존성 직렬화 |
+| 임계 경로 (duration 합) | 병렬화 한계(자원·총 work 병기) | 길어짐 → 의존성 직렬화 |
 | 큐 대기 시간 | 빌드 팜 포화 | 증가 → 워커 부족 |
 
-가장 진단력 있는 지표는 *캐시 적중률* 과 *임계 경로* 다. 적중률이 떨어지면 *키에 불필요한 입력이 들었거나 비결정성이 끼어든* 신호다(3·4절). 임계 경로 — 그래프에서 가장 긴 의존 사슬 — 가 길어지면 *코어를 더 줘도 빨라지지 않는다*. 무거운 공통 헤더나 *순차 의존* 이 경로를 늘리는 주범이라, 그 의존을 끊는 것(전방 선언·모듈 분리)이 코어 추가보다 효과가 크다.
+가장 진단력 있는 지표는 *캐시 적중률* 과 *임계 경로* 다. 적중률이 떨어지면 *키에 불필요한 입력이 들었거나 비결정성이 끼어든* 신호다(3·4절). 임계 경로 — 그래프상 *action duration 합* 이 최대인 경로 — 가 길어지면 *코어를 더 줘도 빨라지지 않는다*; 다만 이는 자원 제약과 *총 work* 를 함께 봐야 하는 근사다. 무거운 공통 헤더나 *순차 의존* 이 경로를 늘리는 주범이라, 그 의존을 끊는 것(전방 선언·모듈 분리)이 코어 추가보다 효과가 크다.
 
 ### 빌드 부패와 회귀 방지
 
@@ -636,9 +667,9 @@ void CheckBuildTimeRegression(double pr_time,
 
 ## 더 읽을거리
 
-- Bazel 공식 문서 — 명시적 의존성 그래프, 원격 캐시·원격 실행, 액션 샌드박싱의 산업 표준 모델.
-- Ninja 빌드 시스템 매뉴얼 — 최소 빌드 그래프, 명령·의존성 추적, 빌드 로그의 단순한 설계.
-- Reproducible Builds 프로젝트(reproducible-builds.org) — `SOURCE_DATE_EPOCH`, 경로·타임스탬프 정규화, 비결정성 원천 카탈로그.
-- "Build Systems à la Carte" (Mokhov, Mitchell, Peyton Jones) — 빌드 시스템을 그래프·스케줄러·리빌더로 분해한 이론적 정리.
-- Unreal Engine 빌드·쿠킹 문서 — 에셋 쿠킹 파이프라인, 플랫폼별 변환, 패치·DLC 청크화의 실무.
-- Martin Fowler, "Continuous Integration" / "Continuous Delivery" — 파이프라인 단계 분리, 빌드 게이트, 배포 전략의 원론.
+- Bazel 공식 문서(https://bazel.build/docs/sandboxing; https://bazel.build/extending/concepts; https://bazel.build/remote/caching) — 명시적 의존성 그래프·action graph, 원격 캐시·실행, 샌드박싱. F22/F37 문장을 문서가 모두 보장하지는 않는다.
+- Ninja 매뉴얼(https://ninja-build.org/manual.html) — 최소 빌드 그래프, 명령·의존성 추적, 빌드 로그의 설계.
+- Reproducible Builds 프로젝트(https://reproducible-builds.org/docs/source-date-epoch/) — `SOURCE_DATE_EPOCH`, 경로·타임스탬프 정규화, 비결정성 원천 카탈로그. 원문 Bash 검사 구현은 별도 검증 대상이다.
+- "Build Systems à la Carte" (Mokhov, Mitchell, Peyton Jones, ICFP 2018, https://www.microsoft.com/en-us/research/publication/build-systems-la-carte/) — 그래프·스케줄러·리빌더 분해. 논문 전문 대조는 부분 확인이다.
+- Unreal Engine Cooking Content 문서(https://dev.epicgames.com/documentation/en-us/unreal-engine/cooking-content-in-unreal-engine) — 에셋 쿠킹·플랫폼별 변환. 패치·DLC 청크화 전체는 별도 확인이다.
+- Martin Fowler의 웹 에세이 "Continuous Integration"(https://martinfowler.com/articles/continuousIntegration.html) / "Continuous Delivery"(https://martinfowler.com/bliki/ContinuousDelivery.html) — 같은 제목 책(Humble/Farley)과 구분되는 웹 에세이이며, canary·게임 patch 구현은 직접 근거가 아니다.

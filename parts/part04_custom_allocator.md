@@ -198,6 +198,8 @@ void* arena_alloc_aligned(Arena* a, size_t size, size_t align) {
 #define arena_alloc(a, size) arena_alloc_aligned(a, size, DEFAULT_ALIGNMENT)
 ```
 
+이 함수들은 위 `Arena` 정의와 함께 하나의 번역 단위(.c/.h)에 두어야 컴파일된다. C11 기준으로 `malloc`/`free`에는 `<stdlib.h>`, `uintptr_t`에는 `<stdint.h>`, `DEBUG`에서 `memset`에는 `<string.h>`가 필요하다. 여기서는 init·use·shutdown 구간을 호출자가 직접 관리하며, 예제에 등장하는 game 타입은 독립 C 프로그램의 문법 오류가 아니라 도메인 타입을 생략한 것이다.
+
 ### Temporary Arena Memory Pattern
 
 Arena의 진정한 힘은 **중첩된 스코프 관리**에서 나타난다. Savepoint 패턴을 사용하면 부분적인 해제가 가능하다.
@@ -225,8 +227,10 @@ Savepoint는 같은 arena에서 **엄격한 LIFO 순서**로 끝나야 한다. S
 이 패턴의 강력함을 실제 예제로 확인해보자.
 
 ```c
-/* 프레임 단위 할당: 게임 엔진의 전형적인 패턴 */
-void game_frame_update(Arena* frame_arena, Arena* permanent_arena) {
+/* 프레임 단위 할당: 게임 엔진의 전형적인 패턴
+   command_arena는 커맨드 제출이 끝날 때까지, 비동기 렌더링이면
+   frames-in-flight 수만큼 유지되는 별도 arena다. */
+void game_frame_update(Arena* frame_arena, Arena* command_arena) {
     /* 프레임 시작: 이전 프레임 데이터 전체 삭제 */
     arena_reset(frame_arena);
 
@@ -242,15 +246,16 @@ void game_frame_update(Arena* frame_arena, Arena* permanent_arena) {
     Frustum* frustum = arena_alloc(frame_arena, sizeof(Frustum));
     build_frustum(view_matrix, proj_matrix, frustum);
 
-    /* 보이는 객체만 렌더링 리스트에 추가 */
+    /* 보이는 객체만 렌더링 리스트에 추가. 영구 arena에 매 프레임 누적하면
+       회수 경로가 없으므로, 제출까지 살아 있어야 하는 command_arena에 둔다. */
     RenderCommand* commands =
-        arena_alloc(permanent_arena, MAX_OBJECTS * sizeof(RenderCommand));
+        arena_alloc(command_arena, MAX_OBJECTS * sizeof(RenderCommand));
     int command_count = cull_and_build_commands(frustum, commands);
 
     /* 계산 완료: frustum, 행렬 메모리 즉시 해제 */
     temp_arena_end(temp);
 
-    /* 렌더링 커맨드는 permanent에 있으므로 살아있음 */
+    /* 렌더링 커맨드는 command_arena에 있으므로 살아있음 */
     submit_render_commands(commands, command_count);
 }
 ```
@@ -258,25 +263,25 @@ void game_frame_update(Arena* frame_arena, Arena* permanent_arena) {
 이 패턴을 파싱에 적용하면 더욱 명확해진다.
 
 ```c
-/* 컴파일러 프론트엔드 예제 */
-AST* parse_file(const char* filename, Arena* arena) {
-    Temp_Arena_Memory temp = temp_arena_begin(arena);
+/* 컴파일러 프론트엔드 예제: 토큰은 scratch, AST는 permanent에 둔다. */
+AST* parse_file(const char* filename, Arena* permanent, Arena* scratch) {
+    Temp_Arena_Memory temp = temp_arena_begin(scratch);
 
     /* 토큰 버퍼: 파싱 중에만 필요 */
-    Token* tokens = arena_alloc(arena, MAX_TOKENS * sizeof(Token));
+    Token* tokens = arena_alloc(scratch, MAX_TOKENS * sizeof(Token));
     int token_count = tokenize(filename, tokens);
 
-    /* AST 노드들: 파싱 후에도 유지되어야 함 */
-    AST* ast = parse_tokens(tokens, token_count, arena);
+    /* AST 노드들: 파싱 후에도 유지되어야 하므로 permanent에 할당 */
+    AST* ast = parse_tokens(tokens, token_count, permanent);
 
-    /* 토큰 버퍼만 해제, AST는 유지 */
+    /* scratch만 해제, permanent의 AST는 유지 */
     temp_arena_end(temp);
 
     return ast;
 }
 ```
 
-**핵심 통찰**: `temp_arena_end`는 offset을 복원한다. temp 이전에 할당된 AST는 영향을 받지 않고, temp 이후에 할당된 tokens만 해제된다.
+**핵심 통찰**: `temp_arena_end`는 해당 arena의 offset을 복원한다. scratch에 할당한 tokens는 회수되고, permanent에 할당한 AST는 영향을 받지 않는다. 하나의 arena에 tokens와 AST를 함께 할당하면 이 복원이 AST까지 되감으므로 두 arena를 분리해야 한다. AST가 토큰 문자열을 `string_view`나 포인터로 참조한다면 토큰 버퍼 회수 뒤 dangling이 되므로, 필요한 문자열은 permanent에 복사하거나 AST가 소유해야 한다.
 
 ### 언제 Arena를 사용할까?
 
@@ -560,6 +565,10 @@ bool stack_free_to_marker(Stack_Allocator* sa, Stack_Marker marker) {
     if (sa == NULL || marker.offset > sa->offset)
         return false;
 
+    /* 이 검사는 offset이 현재보다 크지 않은지만 본다. 다른 arena의
+       marker나 reset 전의 marker도 우연히 통과할 수 있으므로, 자동
+       검증이 필요하면 owner pointer·generation·depth를 담은 checked
+       marker를 별도 타입으로 구현해야 한다. */
     /* marker 뒤에 생성한 비-trivial 객체와 외부 자원은 이미 정리되어야 한다. */
     sa->offset = marker.offset;
     sa->top_header = marker.top_header;
@@ -1417,7 +1426,7 @@ allocator가 trait를 직접 정의하지 않으면 세 propagation trait는 `fa
 
 `propagate_on_container_swap`이 `false`이면 allocator는 swap되지 않는다. 이때 두 allocator가 `operator==`로 같지 않으면 표준 container의 swap은 undefined behavior다. `is_always_equal == false`는 “반드시 다르다”가 아니라 instance별 비교가 필요하다는 뜻이므로, 실제 `get_allocator() == other.get_allocator()` 조건을 확인해야 한다.
 
-`std::pmr::polymorphic_allocator`는 propagation trait와 `is_always_equal`이 `false_type`이다. 복사 대입은 대상 resource를 유지하고, allocator가 다른 move assignment는 원소별 이동이 필요할 수 있다. 서로 동등하지 않은 resource를 사용하는 두 PMR container를 그대로 swap하는 것은 허용되지 않는다. resource lifetime과 equality가 컨테이너 연산의 전제조건이 된다.
+`std::pmr::polymorphic_allocator`는 propagation trait와 `is_always_equal`이 `false_type`이다. 복사 대입은 대상 resource를 유지하고, allocator가 다른 move assignment는 원소별 이동이 필요할 수 있다. 복사 생성은 allocator_traits의 `select_on_container_copy_construction`을 거치는데, `polymorphic_allocator`의 이 함수는 default-constructed allocator를 반환한다. 따라서 PMR container의 복사 생성은 원본과 같은 resource가 아니라 default resource를 사용할 수 있으므로, "allocator를 복사하면 같은 resource"라는 규칙을 container copy construction에 그대로 적용하면 안 된다. 같은 resource를 유지하려면 allocator를 인자로 받는 allocator-extended 생성자를 사용한다. 서로 동등하지 않은 resource를 사용하는 두 PMR container를 그대로 swap하는 것은 허용되지 않는다. resource lifetime과 equality가 컨테이너 연산의 전제조건이 된다.
 
 ### scoped_allocator_adaptor
 
@@ -1766,11 +1775,11 @@ public:
         : permanent_(permanent_buffer_, PERMANENT_SIZE),
           frame_(frame_buffer_, FRAME_SIZE) {}
 
-    void* operator new(size_t) = delete;   // malloc 사용 금지
+    void* operator new(size_t) = delete;   // 이 클래스의 일반 new-expression 금지
 };
 ```
 
-64MB RAM 임베디드 환경에서는 `malloc`을 아예 봉인한다. 모든 메모리가 정적 버퍼에 잡히므로 사용량을 컴파일 타임에 검증할 수 있다.
+`operator new` 삭제는 이 클래스의 일반 new-expression 일부를 막을 뿐, `malloc`이나 다른 타입의 new를 봉인하지 않는다. 인스턴스를 static/global storage에 두어야 멤버 배열도 정적 영역에 잡히고, automatic storage로 만들면 stack에 놓인다. 64MB급 객체를 automatic storage에 두는 것은 위험하므로 allocation 정책은 linker/wrapper/정적 분석 같은 별도 계층에서 강제한다.
 
 ### Unreal Engine 스타일 통합
 
@@ -1778,7 +1787,7 @@ public:
 class FMemoryManager {
 public:
     FMallocBinned2 binned_malloc;             // jemalloc 스타일
-    thread_local FMemStack thread_stack;      // 스레드 임시
+    inline static thread_local FMemStack thread_stack;  // 스레드 임시
     TObjectPool<AActor>    actor_pool;
     TObjectPool<UComponent> component_pool;
     FMallocAnsi platform_malloc;              // 플랫폼 C allocator 래퍼
@@ -1798,6 +1807,7 @@ public:
 | 핫 타입 | 전용 pool |
 | 대용량 (>1MB) | 플랫폼 allocator로 위임하는 예시. 실제 OS 매핑 여부는 그 구현과 임계값에 달림 |
 
+이 클래스는 Unreal의 실제 메모리·GC 규약이 아니라 패턴을 보이는 개념적 가상 엔진 예시다. `AActor`/`UObject`를 일반 pool new/delete로 다뤄도 된다는 뜻이 아니다. `thread_local`은 비정적 데이터 멤버에는 붙일 수 없으므로 C++17의 `inline static thread_local`로 선언하거나 클래스 밖 TLS로 둔다.
 
 ## 11. 디버깅 도구
 
@@ -1852,7 +1862,15 @@ template <class Allocator>
 void* tracked_alloc(Allocator& allocator, size_t size,
                     const char* file, int line) {
     void* p = allocator.allocate(size);
-    g_tracker.record(p, size, file, line);
+    /* tracker의 vector/map/string도 동적 할당한다. 전역 new/malloc hook을
+       같은 tracker로 계측하면 내부 할당이 재진입하거나 비재귀 mutex에서
+       교착한다. 이 예제는 제한된 명시적 wrapper 전용이며, 전역 계측에는
+       thread-local recursion guard와 독립 allocator가 필요하다. */
+    try {
+        g_tracker.record(p, size, file, line);
+    } catch (...) {
+        /* record 실패는 별도 누락 카운터로 처리하고 p는 잃지 않는다. */
+    }
     return p;
 }
 
@@ -1878,13 +1896,23 @@ public:
     }
 
     void render_ascii(size_t total_capacity) {
-        constexpr int WIDTH = 80;
+        constexpr size_t WIDTH = 80;
         std::string line(WIDTH, '.');
+        if (total_capacity == 0) {          // division by zero 방지
+            printf("[%s]\n", line.c_str());
+            return;
+        }
         for (const auto& b : blocks_) {
-            int s = (b.offset * WIDTH) / total_capacity;
-            int e = ((b.offset + b.size) * WIDTH) / total_capacity;
+            // 입력을 [0, capacity]로 clamp한다. b.offset + b.size는
+            // overflow할 수 있으므로 차감 후 더하는 형태로 계산한다.
+            size_t off = b.offset < total_capacity ? b.offset : total_capacity;
+            size_t room = total_capacity - off;
+            size_t len = b.size < room ? b.size : room;
+            size_t end = off + len;
+            size_t s = (off * WIDTH) / total_capacity;
+            size_t e = (end * WIDTH) / total_capacity;
             char ch = b.is_free ? '.' : '#';
-            for (int i = s; i < e && i < WIDTH; i++) line[i] = ch;
+            for (size_t i = s; i < e && i < WIDTH; i++) line[i] = ch;
         }
         printf("[%s]\n", line.c_str());
     }
@@ -1907,7 +1935,7 @@ Breakdown:
 
 ### Debug 패턴 채우기
 
-해제된 메모리를 0xDD로, 가드 영역을 0xFD로, 새로 할당된 영역을 0xCD로 채우면 use-after-free와 버퍼 오버런을 즉시 잡을 수 있다.
+해제된 메모리를 0xDD로, 가드 영역을 0xFD로, 새로 할당된 영역을 0xCD로 채우면 use-after-free와 버퍼 오버런을 발견하는 데 도움을 준다. 접근을 막는 trap이 아니라 눈에 띄는 값에 의한 진단 보조다.
 
 ```c
 #ifdef DEBUG
@@ -1917,9 +1945,11 @@ void pool_free_debug(SizeClassPool* pool, void* ptr) {
         fprintf(stderr, "ERROR: Double free at %p\n", ptr);
         abort();
     }
-    memset(ptr, 0xDD, PAYLOAD_SIZE);   // dead pattern
-    h->next_free = pool->free_head;
-    pool->free_head = h;
+    // 전역 PAYLOAD_SIZE(64B 기준)를 쓰면 더 작은 class에서 다음 블록을
+    // 침범하고, 더 큰 class에서는 일부만 채운다. 해당 pool의 payload
+    // 용량만큼만 덮는다.
+    memset(ptr, 0xDD, pool->block_size - HEADER_BYTES);   // dead pattern
+    size_class_free(pool, ptr);   // 공통 해제 경로로 state/generation 갱신
 }
 #endif
 ```
@@ -1963,7 +1993,7 @@ Particle pool: 12,789 / 1,000,000 used
 | 프레임 단위 생성/삭제 | Arena | $O(1)$ 할당, $O(1)$ 리셋 | 정렬 패딩과 미사용 꼬리 공간 |
 | 같은 크기 빈번한 재사용 | Pool | 보통 $O(1)$ 할당/해제 | free-list 표현과 페이지 단위 여유 공간 |
 | 스코프 기반 LIFO | Stack | $O(1)$ 할당/롤백 | 정렬 패딩과 선택적 마커 |
-| 다양한 크기, 병합 필요 | Buddy | 보통 $O(\log n)$ 또는 크기 클래스 수에 비례 | 요청을 다음 블록 크기로 올리는 내부 단편화 |
+| 다양한 크기, 병합 필요 | Buddy | 현재 구현: order별 free list 선형 검색으로 검색한 list 길이의 합에 비례. bitmap/index형은 order 수에 비례 | 요청을 다음 블록 크기로 올리는 내부 단편화 |
 | 동일 크기 객체의 raw storage 재사용 | Slab | 보통 $O(1)$ fast path | slab 메타데이터와 비어 있는 슬롯 |
 | 예측하기 어려운 범용 패턴 | 범용 힙 / PMR 자원 | 구현과 경합에 따라 달라짐 | 구현별 청크 메타데이터와 크기 클래스 여유 |
 

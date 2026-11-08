@@ -300,16 +300,17 @@ void Agent::OnDeath(SlotManager& mgr) {
 // 방어: manager가 끊긴 점유를 주기적으로 회수
 void SlotManager::ReclaimOrphans(float now) {
     for (AttackSlot& s : slots_) {
-        Agent* a = Resolve(s.occupantHandle); // generation이 포함된 안정 handle
+        if (!s.occupantHandle.IsValid()) continue; // 이미 빈 슬롯은 건드리지 않는다
+        Agent* a = Resolve(s.occupantHandle);      // generation이 포함된 안정 handle
         if (!a || a->IsPermanentlyRemoved() || s.leaseDeadline < now) {
-            s.occupantHandle = {};
+            s.occupantHandle = {};                 // 점유 → 빈 전이에서만 쿨다운 설정
             s.cooldownUntil = now + kSlotReuseCooldown;
         }
     }
 }
 ```
 
-raw pointer를 저장한 채 대상이 파괴되면 유효성 검사 자체가 use-after-free가 될 수 있으므로 generation이 있는 entity handle이나 중앙 registry를 사용한다. 또한 `CanAttack()==false`는 재장전·경직·공격 애니메이션 중에도 일시적으로 참일 수 있어 orphan 판정으로 부적절하다. 영구 제거 상태와 갱신 가능한 lease 만료를 구분한다. 정상 경로는 명시적 release로, 빠진 경로는 회수 스윕으로 막는다.
+raw pointer를 저장한 채 대상이 파괴되면 유효성 검사 자체가 use-after-free가 될 수 있으므로 generation이 있는 entity handle이나 중앙 registry를 사용한다. 또한 `CanAttack()==false`는 재장전·경직·공격 애니메이션 중에도 일시적으로 참일 수 있어 orphan 판정으로 부적절하다. 영구 제거 상태와 갱신 가능한 lease 만료를 구분한다. 빈 `occupantHandle`은 회수 대상이 아니므로 건너뛰고, 쿨다운은 실제 *점유 → 빈* 전이에서만 설정해 재회수가 멱등이 되게 한다. `IsValid`는 구조 예시 helper로, 비어 있는 handle과 generation이 만료된 비어 있지 않은 handle을 구분해 빈 슬롯을 다시 건드리지 않게 한다. 정상 경로는 명시적 release로, 빠진 경로는 회수 스윕으로 막는다.
 
 이 쿨다운과 회수가 합쳐져 *공격자 순환* 을 만든다. 한 적이 공격하고 물러나면 슬롯이 비고, 대기하던 다른 적이 들어와 공격한다. 플레이어 입장에서는 "여러 적이 번갈아 덤비는" 자연스러운 전투가 된다 — 같은 적만 계속 치지 않는다.
 
@@ -392,14 +393,19 @@ void SlotManager::AssignGlobally(std::vector<Agent*>& contenders, float now) {
 
 ### starvation 방지
 
-마지막 함정은 *기아(starvation)* 다. 점수 함수가 "위협적 적 우선"이거나 "가까운 적 우선"이면, 약하거나 먼 적은 영원히 슬롯을 못 받고 평생 대기자로 남는다. 한 NPC가 30초째 한 번도 공격을 못 했다면 플레이어는 그 적을 "장식"으로 인식한다. 해법은 운영체제 스케줄러의 *나이 먹이기(aging)* 와 같다 — 대기 시간이 길수록 점수에 보너스를 더해, 오래 기다린 적이 결국 우선권을 얻게 한다.
+마지막 함정은 *기아(starvation)* 다. 점수 함수가 "위협적 적 우선"이거나 "가까운 적 우선"이면, 약하거나 먼 적은 영원히 슬롯을 못 받고 평생 대기자로 남는다. 한 NPC가 30초째 한 번도 공격을 못 했다면 플레이어는 그 적을 "장식"으로 인식한다. 해법은 운영체제 스케줄러의 *나이 먹이기(aging)* 와 같다 — 대기 시간이 길수록 우선권을 얻게 한다.
+
+주의할 점은 aging을 *슬롯 적합도 함수 안* 에 더하는 것으로는 요청자 사이의 중재 순서가 바뀌지 않는다는 것이다. 한 요청자의 후보 슬롯 평가는 $\arg\max_{\text{slot}}(f(\text{slot},\text{agent})+c(\text{agent}))=\arg\max_{\text{slot}} f(\text{slot},\text{agent})$이므로, 요청자 공통 상수 $c$는 그 요청자의 슬롯 선택만 바꾸지 않고 요청자 간 순서에는 영향을 주지 않는다. aging은 *요청 큐와 agent-slot 중재 사이* 단계에서 적용해, 먼저 처리할 요청자를 정하는 데 써야 한다.
 
 ```cpp
-float SlotManager::ScoreSlotFor(const AttackSlot& s, Agent* a) {
-    float base = /* 거리·무기·위협 기반 점수 */;
-    base += a->WaitingTime() * kAgingWeight;   // 오래 대기할수록 가산
-    return base;
+// 요청 큐에서 처리 우선순위를 정한다 — 슬롯 적합도와 분리된 단계.
+void SlotManager::ArbitrateQueue(std::vector<Agent*>& queue) {
+    std::stable_sort(queue.begin(), queue.end(), [](const Agent* x, const Agent* y) {
+        return x->WaitingTime() * kAgingWeight + x->BasePriority()
+             > y->WaitingTime() * kAgingWeight + y->BasePriority();
+    });
 }
+// 이후 정렬된 순서대로 각 요청자의 최적 슬롯을 배정한다.
 ```
 
 aging 가중치가 너무 크면 전술 적합도를 압도하고, 너무 작으면 기아가 남는다. 최대 대기시간을 넘긴 적에게는 *자격 조건을 만족하는 다음 슬롯* 의 우선권을 줄 수 있다. 도달 불가능·공격 금지·안전 토큰 충돌까지 무시하는 강제 배정은 불변식을 깨므로, 공정성도 eligibility 경계 안에서 적용한다.
@@ -498,14 +504,15 @@ std::optional<float> SlotManager::ScoreSlotFor(
     float score = 0.0f;
     score += DistanceUtility(agent, slot) * weights_.distance;
     score += DirectionDiversity(slot) * weights_.direction;
-    score += WaitUtility(agent.WaitingTime()) * weights_.aging;
+    // 대기 시간(aging)은 요청자 공통 상수라 슬롯 간 비교를 바꾸지 않으므로
+    // 여기서 더하지 않고 요청 큐 중재 단계(4절 ArbitrateQueue)에서 적용한다.
     score += TacticalPriority(agent) * weights_.tactical;
     score += NarrativePriority(agent) * weights_.narrative;
     return score;
 }
 ```
 
-점수 항은 단위를 그대로 더하지 않고 정의역을 정규화한다. 미터 단위 거리와 초 단위 대기 시간, 임의 범위의 서사 점수를 그대로 합하면 레벨 크기나 콘텐츠 데이터 범위가 바뀔 때 정책이 무너진다. 각 utility를 $[0,1]$ 같은 공통 범위로 매핑하고, 항별 기여도와 최종 선택 이유를 디버그 UI에 기록한다.
+점수 항은 단위를 그대로 더하지 않고 정의역을 정규화한다. 미터 단위 거리와 임의 범위의 서사 점수, 큐 중재에 쓰는 대기 시간을 그대로 합하면 레벨 크기나 콘텐츠 데이터 범위가 바뀔 때 정책이 무너진다. 각 utility를 $[0,1]$ 같은 공통 범위로 매핑하고, 항별 기여도와 최종 선택 이유를 디버그 UI에 기록한다.
 
 ### 정책 우선순위와 공정성
 
@@ -517,6 +524,22 @@ std::optional<float> SlotManager::ScoreSlotFor(
 4. 거리, 무기 궁합, 전술 역할과 서사 신호를 이용한 품질 최적화.
 
 정책 변경은 평균 공격 횟수만 보지 않는다. agent별 대기 시간 분포, 방향별 동시 텔레그래프, 같은 agent의 연속 선택률, 토큰 활용률과 공격 취소 이유를 함께 비교한다. 이 계측이 있어야 “중요한 적을 우선한다”가 다른 적의 영구 대기나 회피 불가능한 방향 중첩으로 바뀌지 않았음을 확인할 수 있다.
+
+큐 fairness는 *유효한 요청* 과 *유한한 보유 시간* 을 전제로만 보장된다. 대기 중 요청이 취소되면 큐에서 제거되어야 하고, 승인 후 강제 회수(eviction)되면 이전 owner의 lease generation을 올려 토큰을 무효화하고 실제 액션 취소를 통보해야 한다. 그렇지 않으면 자리가 났을 때 유령 요청이 승인되거나, 회수된 owner가 새 owner와 자원을 겹쳐 사용한다.
+
+```cpp
+// 대기 요청 취소: 큐에서 제거하고, 승인된 lease 라면 generation 을 무효화한다.
+void SlotManager::CancelRequest(RequestId id) {
+    waiting_.erase(id);                         // 유령 요청 방지
+    if (Lease* lease = FindLease(id); lease && lease->generation == currentGen_)
+        Revoke(lease);
+}
+// 강제 회수: generation 을 올려 기존 토큰을 무효화하고 owner 에게 취소를 통보한다.
+void SlotManager::Revoke(Lease* lease) {
+    lease->generation = ++generationCounter_;
+    NotifyOwner(lease->owner, LeaseRevoked{lease->slotId, lease->generation});
+}
+```
 
 ## 7. Encircle vs Stagger
 
@@ -537,6 +560,7 @@ flowchart LR
     P2 -.멀리.- B2[중간 적]
     P2 -.더 멀리.- B3[뒤쪽 적]
     end
+    Fair[대기 순환 공정성: 유효 요청·유한 보유에서만<br/>취소·강제 회수 시 generation/lease 무효화]
 ```
 
 - *Encircle(포위)*: 대기자들이 플레이어를 *둥글게 둘러싼다*. 시각적으로 위협적이고 "포위당했다"는 압박을 준다. 대기자들은 원을 유지하며 슬롯이 비기를 기다린다. 플레이어가 도망갈 곳이 없다는 인상.
@@ -635,13 +659,14 @@ void SlotManager::DebugDraw(DebugRenderer& dr) const {
 
 ```cpp
 struct CombatTelemetry {
-    void Sample(float now, int attacking, int waiting) {
+    // 함수명을 Sample 에서 분리하고 자료형은 전역 ::Sample 로 한정한다
+    void RecordSample(float now, int attacking, int waiting) {
         samples_.push_back({now, attacking, waiting});
         peakConcurrent_ = std::max(peakConcurrent_, attacking);
     }
     // 출력: 시간축 동시 공격자 수, 피크, 평균 대기열 길이
     int   peakConcurrent_ = 0;
-    std::vector<Sample> samples_;
+    std::vector<::Sample> samples_;
 };
 ```
 

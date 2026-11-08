@@ -158,9 +158,9 @@ struct ServerTimeSync {
 |---|---|---|---|
 | 서버 고정 시각 | UTC 또는 본사 시각 자정 | 단순, 전 유저 동시 | 일부 지역은 한밤중에 리셋 |
 | 플레이어 로컬 자정 | 유저 타임존 자정 | 공정한 체감 | 타임존 변경 악용, 구현 복잡 |
-| 가입 시각 기준 롤링 | 마지막 수령 + 24시간 | 조작 내성 강함 | "자정 리셋" 직관과 안 맞음 |
+| 가입 시각 기준 고정 창 | 가입 시각 + 24시간 (매일 같은 시각) | 계정별 기준 고정, 조작 내성 강함 | "자정 리셋" 직관과 안 맞음 |
 
-대부분의 글로벌 게임은 *서버 고정 시각* 을 기본으로 하되, 지역별 서버(샤드)를 두면 각 샤드의 대표 타임존을 쓴다. *플레이어 로컬 자정* 은 공정해 보이지만, 유저가 타임존을 바꿔 하루에 출석을 두 번 먹는 악용이 가능해 *마지막 수령 시각 + 24시간 롤링* 으로 보강하는 경우가 많다. 어느 쪽이든 *기준을 서버에서 단일하게 계산* 하고 클라이언트는 그 결과만 표시한다.
+대부분의 글로벌 게임은 *서버 고정 시각* 을 기본으로 하되, 지역별 서버(샤드)를 두면 각 샤드의 대표 타임존을 쓴다. *플레이어 로컬 자정* 은 공정해 보이지만, 유저가 타임존을 바꿔 하루에 출석을 두 번 먹는 악용이 가능해 *마지막 수령 시각 + 24시간 쿨다운* 으로 보강하는 경우가 많다. 표의 가입 시각 기준 고정 창(매일 가입 시각에 창이 열림)과 마지막 수령 기준 쿨다운(수령 시점부터 24시간)은 서로 다른 정책이다. 어느 쪽이든 *기준을 서버에서 단일하게 계산* 하고 클라이언트는 그 결과만 표시한다.
 
 ### 겹침 검출과 스케줄 검증
 
@@ -196,9 +196,10 @@ std::vector<ScheduleWarning> ValidateSchedule(const std::vector<EventDef>& event
 flowchart LR
     Admin[운영 어드민] -->|편집·승인| Store[구성 저장소<br/>버전드]
     Store -->|배포| CDN[배포 채널<br/>CDN/Config 서버]
-    CDN -->|폴링/푸시| Client[클라이언트]
+    CDN -->|폴링/푸시| Client[클라이언트<br/>구성 fetch·표시]
     CDN -->|로드| Server[게임 서버]
-    Server -->|진행도 검증| Reward[보상 지급]
+    Store -->|kill generation/status| Server
+    Server -->|commit 직전 kill 검증| Reward[보상 지급]
 ```
 
 여기서 *클라이언트와 서버가 같은 구성을 본다* 는 것이 핵심이다. 클라이언트만 이벤트가 켜졌다고 믿고 서버는 모르면, 유저가 진행은 하는데 보상이 안 나간다. 그래서 구성 배포는 *서버 우선 적용 후 클라이언트* 순서로 하거나, 구성에 *버전* 을 박아 양쪽 버전이 맞을 때만 이벤트를 유효로 친다.
@@ -253,7 +254,7 @@ bool IsInRollout(UserId user, EventId event, uint32_t rolloutBasisPoints) {
 라이브 이벤트는 *언제든 즉시 멈출 수 있어야 한다*. 드롭률 버그로 한정 아이템이 쏟아지거나, 익스플로잇이 발견되거나, 보상 지급이 폭주하면 *분 단위* 로 막아야 한다. 이걸 위해 *킬 스위치(kill switch)* 를 둔다.
 
 ```cpp
-// 정상 종료와 별개의 즉시 비활성. 클라이언트 폴링 주기 내 전파.
+// 정상 종료와 별개의 즉시 비활성. 전파는 클라이언트 폴링(표시)과 서버 commit 검증(권위) 두 경로다.
 struct KillSwitch {
     EventId event;
     enum Mode {
@@ -261,11 +262,12 @@ struct KillSwitch {
         HardStop,    // 즉시 전면 차단, 진행도 동결
         RewardFreeze // 진행은 허용하되 보상 지급만 중단 (조사용)
     } mode;
+    int64_t     generation;      // 서버 권위. 진행 변경·보상 commit 직전에 상태/version 검증
     std::string reason;          // 감사 로그
 };
 ```
 
-킬 스위치는 *정상 종료 스케줄과 독립* 적이다. `SoftStop`은 새 참여만 막고 진행 중이던 유저는 보호한다. `HardStop`은 익스플로잇처럼 즉시 막아야 할 때 쓴다. `RewardFreeze`는 보상 지급만 멈춰, 진행은 계속 쌓되 *지급은 조사 후 일괄* 하게 한다 — 잘못 지급한 걸 회수하는 것보다 지급을 미루는 게 훨씬 싸다. 킬 스위치의 전파 지연(클라 폴링 주기)이 곧 *사고 노출 시간* 이므로, 긴급 구성은 일반 구성보다 *짧은 폴링 또는 푸시* 로 전달한다.
+킬 스위치는 *정상 종료 스케줄과 독립* 적이다. `SoftStop`은 새 참여만 막고 진행 중이던 유저는 보호한다. `HardStop`은 익스플로잇처럼 즉시 막아야 할 때 쓴다. `RewardFreeze`는 보상 지급만 멈춰, 진행은 계속 쌓되 *지급은 조사 후 일괄* 하게 한다 — 잘못 지급한 걸 회수하는 것보다 지급을 미루는 게 훨씬 싸다. 서버 권위 차단은 모든 진행 변경·보상 commit 직전에 kill generation/status를 검증하는 것이고, 클라이언트 폴링은 그 결과를 표시로 갱신하는 별개 경로다 — 클라이언트 폴링만으로는 이전 구성이나 변조 클라이언트의 in-flight 요청을 막지 못한다. 클라이언트 전파 지연(클라 폴링 주기)은 사고 노출 시간을 줄이는 수단이므로, 긴급 구성은 일반 구성보다 *짧은 폴링 또는 푸시* 로 전달한다.
 
 ## 4. A/B 테스트와 세그먼트
 
@@ -274,8 +276,11 @@ struct KillSwitch {
 이벤트의 신선함을 데이터로 빠르게 회전시킬 수 있게 되면, 다음 질문은 *무엇이 더 효과적인가* 다. 드롭률 0.5%와 0.8% 중 어느 쪽이 참여를 높이는가? 보상을 스킨으로 줄까 통화로 줄까? 이걸 추측이 아니라 *측정* 으로 답하는 것이 *A/B 테스트* 다. 같은 이벤트의 변형(variant)을 플레이어 그룹에 나눠 내보내고 지표를 비교한다.
 
 ```cpp
+// config load 시 명시적 오류로 검증한다(assert 아님): variants 비어 있지 않음,
+// weights.size() == variants.size(), 모든 weight ≥ 0 정수, checked wide 합 > 0.
 struct Experiment {
     ExperimentId id;
+    int64_t  assignmentVersion;          // hash salt에 포함. 설정이 바뀌어도 배정 안정
     std::vector<Variant> variants;       // control + treatment(들)
     std::vector<int>     weights;         // 트래픽 분배 비율 (예: 50/50)
     Filter   audience;                    // 대상 세그먼트 (예: 신규 7일 이내)
@@ -283,12 +288,13 @@ struct Experiment {
 };
 
 // 안정 해시로 변형 할당. 같은 유저는 실험 내내 같은 변형.
+// 전제: config load가 빈 weights·개수 불일치·음수·overflow를 거부했다(checked 합 > 0).
 int AssignVariant(UserId user, const Experiment& exp) {
-    uint64_t h = Hash64(user, exp.id);    // 다른 실험과 독립
-    int total = std::accumulate(exp.weights.begin(), exp.weights.end(), 0);
-    int bucket = h % total;
+    uint64_t h = Hash64(user, exp.id, exp.assignmentVersion);  // 다른 실험·설정 버전과 독립
+    int64_t total = std::accumulate(exp.weights.begin(), exp.weights.end(), int64_t{0});
+    int64_t bucket = static_cast<int64_t>(h % static_cast<uint64_t>(total));
     for (size_t i = 0; i < exp.weights.size(); ++i) {
-        if (bucket < exp.weights[i]) return i;
+        if (bucket < exp.weights[i]) return static_cast<int>(i);
         bucket -= exp.weights[i];
     }
     return 0;
@@ -305,7 +311,7 @@ experiment ID를 salt에 넣으면 서로 다른 실험의 bucket이 좋은 hash
 
 A/B 결과를 읽을 때의 함정이 여럿이다.
 
-- *조기 종료*: 며칠치 데이터로 "treatment가 5% 높다"고 결론 내리면 안 된다. *통계적 유의성* 에 도달하기 전엔 노이즈다. 표본 크기와 신뢰구간을 먼저 정한다.
+- *조기 종료*: 며칠치 데이터로 "treatment가 5% 높다"고 결론 내리면 안 된다. *통계적 유의성* 에 도달하기 전엔 판단을 보류(Pending)하고, 표본 크기·검정력과 신뢰구간을 먼저 정한다. 충분한 증거가 모여야 Pass로 결론낼 수 있으며, 유의하지 않다는 결과를 곧 "차이 없음"이나 "안전"으로 단정하지 않는다 — 검정력이 부족하면 실제 악화(Fail)조차 검출되지 않을 수 있다.
 - *지표 선택*: 단기 참여율만 보면 *장기 이탈* 을 놓친다. 과한 보상은 단기 지표를 올리지만 경제를 망가뜨려 장기적으로 손해다. 단기·장기·수익·리텐션을 함께 본다.
 - *세그먼트 혼합*: 신규와 고래(고과금) 유저를 한 실험에 섞으면 평균이 둘을 가린다. 세그먼트별로 효과가 반대일 수 있다.
 - *상호작용*: 동시에 도는 다른 실험과 간섭하면 효과를 분리할 수 없다. 겹치는 실험은 *상호 배타 레이어* 로 격리한다.
@@ -342,6 +348,8 @@ struct RewardEntry {
     int      tier;               // 등급 (희귀도)
 };
 
+// Weighted kind는 config load 시 entries 비어 있지 않음, 비음수 정수 weight,
+// checked wide 합 > 0을 명시적 오류로 검증한다(assert 아님).
 struct RewardTable {
     RewardTableId id;
     enum Kind { Fixed, Weighted, Tiered } kind;
@@ -355,15 +363,18 @@ struct RewardTable {
 
 ```cpp
 // 서버 권위 가중 추첨. 클라이언트는 이 결과를 연출할 뿐이다.
+// 전제(config load 검증): entries 비어 있지 않음, 모든 weight ≥ 0, checked wide 합 > 0.
+// rng.NextInt(total)의 계약은 [0, total) 균일 난수다. 반환 reference는 t가 살아 있고
+// entries가 재할당되지 않는 동안만 유효하다.
 const RewardEntry& WeightedRoll(const RewardTable& t, Rng& rng) {
-    int total = 0;
-    for (auto& e : t.entries) total += e.weight;
-    int r = rng.NextInt(total);              // 서버 RNG, 시드 비공개
+    int64_t total = 0;
+    for (auto& e : t.entries) total += e.weight;   // config load에서 checked wide 합 > 0 검증
+    int r = rng.NextInt(static_cast<int>(total));  // 서버 RNG, 시드 비공개. [0, total)
     for (auto& e : t.entries) {
         if (r < e.weight) return e;
         r -= e.weight;
     }
-    return t.entries.back();
+    return t.entries.back();                       // 합 > 0이면 도달하지 않음
 }
 ```
 
@@ -409,6 +420,7 @@ sequenceDiagram
     S->>DB: 멱등성 키 중복 검사
     alt 이미 지급됨
         DB-->>S: 기존 결과
+        Note over S,DB: 이미 지급됨 분기도 helper 안에서 transaction을 종료(commit/rollback)한 뒤 응답한다
         S-->>C: 동일 결과 (재지급 없음)
     else 최초 청구
         S->>DB: 진행도 검증 (서버 권위)
@@ -473,15 +485,15 @@ struct DifficultyTuning {
 
 전제는 별도로 다루는 두 가지다. 이탈을 시간의 함수로 보는 리텐션 곡선의 적분 관점, 그리고 시간 권위가 서버에 있다는 원칙(2절)이다. 여기서는 그 위에서 *마감이 참여 분포를 어떻게 재편하는가* 만 유도한다.
 
-*널 모델 — 마감이 없으면 "언젠가"는 "영영"으로 샌다.* 마감 없는 상시 보상을 받는 한 플레이어를 보자. 아직 완주하지 않은 상태에서 단위 시간당 완주 해저드 $h$, 이탈 해저드 $\mu$로 둘이 경쟁한다. 미완주 생존 확률 $S(t)$는
+*널 모델 — 마감이 없으면 "언젠가"는 "영영"으로 샌다.* 마감 없는 상시 보상을 받는 한 플레이어를 보자. 아직 완주하지 않은 상태에서 하루 단위 완주 확률 $h$, 이탈 확률 $\mu$로 둘이 경쟁한다(완주를 먼저 시도하고, 완주하지 못한 잔여자에게만 이탈을 적용하는 순서로 고정한다). 미완주 생존 확률 $S_n$은
 
-$$\dot S = -(h+\mu)\,S,\qquad S(t)=e^{-(h+\mu)t}.$$
+$$S_n=r^{\,n},\qquad r=(1-h)(1-\mu).$$
 
-완주 펄스(신규 완주 흐름)는 $f(t)=hS(t)=h\,e^{-(h+\mu)t}$로, *마감 없이는 단조 감소* — 어떤 마감 직전 봉우리도 없다. 최종 완주율과 영영 미완주율은 경쟁 위험의 표준 분해로
+완주 펄스(신규 완주 흐름)는 $f_n=h\,r^{\,n-1}$로, *마감 없이는 단조 감소* — 어떤 마감 직전 봉우리도 없다. $T$일 안에 완주할 확률과 무한 시간 완주율은 경쟁 위험의 이산 분해로
 
-$$P(\text{완주})=\int_0^\infty f\,dt=\frac{h}{h+\mu},\qquad P(\text{영영 미완주})=\frac{\mu}{h+\mu}.$$
+$$P_{\text{완주}}(T)=\frac{h\,(1-r^{\,T})}{1-r},\qquad P_{\text{완주}}(\infty)=\frac{h}{h+(1-h)\mu}.$$
 
-이것이 "언젠가 하지" 의 정량적 함정이다. 미루는 성향($h$ 작음)이 강하면 *완주하기도 전에 이탈* 하는 비율 $\mu/(h+\mu)$가 영구히 샌다. $h$가 아무리 양수여도 마감이 없으면 이 누설은 메워지지 않는다.
+이것이 "언젠가 하지" 의 정량적 함정이다. 미루는 성향($h$ 작음)이 강하면 *완주하기도 전에 이탈* 하는 비율 $(1-h)\mu/\bigl(h+(1-h)\mu\bigr)$가 영구히 샌다. $h$가 아무리 양수여도 마감이 없으면 이 누설은 메워지지 않는다.
 
 *마감 = 상승 해저드(합리적 최적 정지).* 마감을 박으면 합리적 플레이어조차 행동이 바뀐다. 매일 *오늘 처리하는 비용* $c_t\sim\mathrm{Uniform}(0,1)$(기분·바쁨)을 뽑고, 마감 $T$ 전에 한 번 완주하면 보상 $V\ge1$을 받는다(보상은 완주일과 무관하게 마감에 지급). 합리적 플레이어는 "오늘 비용이 충분히 싸면 처리, 아니면 더 싼 날을 기다림" 의 *예약 임계(reservation threshold)* $\tau_n$을 쓴다($n$=남은 날 수). 미완주 시 기대 최소 비용 $G$의 벨만 재귀에서
 
@@ -491,23 +503,23 @@ $$G(0)=\tfrac12,\qquad \tau_n=G(n-1),\qquad G(n)=G(n-1)-\tfrac12\,G(n-1)^2.$$
 
 $$\tau_n=g(n-1)\approx\frac{2}{n+3}.$$
 
-해저드(미완주자의 일일 완주 확률) $\tau_n$은 마감에서 멀 때 $\approx 2/n$로 낮다가 마감에서 $1$로 *상승* 한다. 이 *상승 해저드* 가 마감의 구조적 서명이다 — 널 모델의 상수 해저드와 정반대다. 다만 흐름 $f_n=\tau_n S_n$ 자체는 생존자 풀이 고갈되어 *앞쪽이 두텁다*(합리적 플레이어는 싼 날을 *기회적으로* 일찍 잡을 뿐, 마감에 몰리지 않는다).
+해저드(미완주자의 일일 완주 확률) $\tau_n$은 마감에서 멀 때 $\approx 2/n$로 낮다가 마감에서 $1$로 *상승* 한다. 이 *상승 해저드* 가 마감의 구조적 서명이다 — 널 모델의 상수 해저드와 정반대다. 다만 흐름 $f_n=\tau_n S_n$ 자체는 생존자 풀이 고갈되어 *앞쪽이 두텁다*(합리적 플레이어는 싼 날을 *기회적으로* 일찍 잡을 뿐, 마감에 몰리지 않는다). 이 재귀는 이탈 $\mu$와 보상 수령 시점을 넣지 않은 모델이므로, $\mu>0$에서의 최적 정지나 수령 조건을 반영한 최적성을 주장하려면 $\mu$와 보상 타이밍을 포함한 벨만식을 다시 세워야 한다.
 
 *FOMO 리프트 — 마감이 누설을 회수한다.* 같은 $T$일 창·같은 이탈 $\mu$에서 두 체제를 비교하면 마감의 효과가 숫자로 나온다. $T=14$, $\mu=0.03$/일, 마감 없는 체제의 미루기 해저드를 마감-원거리 값 $h_0=2/(T+3)\approx0.118$로 두면
 
-$$\text{마감 없음: 완주 }0.724,\ \text{영영 미완주 }0.203\quad\Longrightarrow\quad\text{마감 있음: 완주 }0.863,\ \text{미완주 }0.137.$$
+$$\text{마감 없음(이산, }T{=}14\text{): 완주 }0.724,\ \text{무한 시간 누설 }0.184;\qquad \text{마감 있음(상승 해저드): 14일 완주 }0.863.$$
 
-절대 +14%p, 배수 $\times1.19$다. 마감이 한 일은 새 동기 부여가 아니라 *상승 해저드로 "언젠가→영영" 누설($\mu/(h_0+\mu)\approx0.20$)을 회수* 한 것이다. 이것이 한정 보상이 작동하는 1차 메커니즘이다.
+마감이 한 일은 새 동기 부여가 아니라 *상승 해저드로 "언젠가→영영" 누설* 을 회수한 것으로 읽을 수 있다. 다만 위 수치는 이산 단위와 특정 $h_0$·$T$·$\mu$ 가정의 모델 계산이며, 실제 게임에서 FOMO가 어느 정도 완주를 올리는지는 별도 관찰·실험으로 확인해야 한다.
 
 *마감 절벽 — 현재 편향이 만드는 막판 펄스.* 합리적 모델은 막판 *절벽* 을 만들지 않는다. 현실의 마감 직전 폭주는 *현재 편향(present bias)* 의 서명이다. 준쌍곡 할인(quasi-hyperbolic $\beta$-$\delta$)의 순진한 플레이어가 비용 $c$를 오늘 치를지 내일 치를지 비교하면(보상은 어차피 $T$에 고정),
 
 $$(\text{오늘})-(\text{내일})=\big(-c+\beta\delta^{T-t}V\big)-\big(-\beta\delta c+\beta\delta^{T-t}V\big)=-c\,(1-\beta\delta)<0.$$
 
-보상 항이 상쇄되어 *비용을 미루는 쪽이 언제나 이긴다* — 마지막으로 가능한 날까지 미룬다. 여기에 *접속 가능성* 마찰을 더하면 펄스가 닫힌 형태로 나온다. 하루 접속 확률 $q$인 플레이어가 "가능한 마지막 날"에 처리하면
+보상 항이 상쇄되어 *비용을 미루는 쪽이 언제나 이긴다* — 마지막으로 가능한 날까지 미룬다. 여기에 *접속 가능성* 마찰을 더한 분포는 전체 기간을 본 뒤 **마지막 접속일을 사후 선택**한 것으로 해석해야 한다. 하루 접속 확률 $q$인 플레이어의 마지막 접속일 분포는
 
-$$P(\text{day }t\text{에 처리})=q\,(1-q)^{\,T-1-t},\qquad P(\text{영영})=(1-q)^T.$$
+$$P(\text{마지막 접속일}=t)=q\,(1-q)^{\,T-1-t},\qquad P(\text{영영 미접속})=(1-q)^T.$$
 
-이는 *마감에 집중된 기하 분포* 다. 마지막 날 비율 $=q$, 영영 미완주 $=(1-q)^T$. $q=0.4$, $T=14$이면 완주 $0.999$, 완주자의 *마지막 3일 78.5%·마지막 날 40%* 가 몰린다(앞 3일 0.3%). 실제 참여 펄스는 *출시 신선함 봉우리(2절 teaser)* 와 *이 마감 절벽* 의 합으로 읽어야 하고, 절벽의 가파름은 모집단의 $q$와 현재 편향 $\beta$ 분산이 정한다.
+이는 *마감 직전에 접속이 집중된 기하 분포* 다. 마지막 날 비율 $=q$, 영영 미접속 $=(1-q)^T$. $q=0.4$, $T=14$이면 *마지막 3일 78.5%·마지막 날 40%* 가 몰린다(앞 3일 0.3%). 다만 이것은 미래 접속 스케줄을 사후에 선택한 분포의 모양이며, 오늘 관측 가능한 상태에서 결정하는 온라인 정책의 행동 확률은 아니다. 실제 참여 펄스는 *출시 신선함 봉우리(2절 teaser)* 와 *이 마감 절벽* 의 합으로 읽어야 하고, 절벽의 가파름은 모집단의 $q$와 현재 편향 $\beta$ 분산이 정한다.
 
 ```python
 import numpy as np
@@ -525,16 +537,17 @@ def deadline_run(T,mu):
 T,mu=14,0.03
 pulse,comp=deadline_run(T,mu)                      # 합리적: 완주 0.863, 앞 3일 두터움
 h0=2/(T+3)                                         # 마감-원거리 해저드
+r=(1-h0)*(1-mu)                                    # 이산 단위: 완주→이탈 순서
 print(round(comp,3))                               # 0.863
-print(round(h0/(h0+mu),3), round(mu/(h0+mu),3))    # 널 최종: 0.797 0.203
+print(round(h0*(1-r**T)/(1-r),3), round(1-h0/(h0+(1-h0)*mu),3))  # 널 이산 14일 0.724 / 누설 0.184
 q=0.4
-p=q*(1-q)**(T-1-np.arange(T))                      # 마감 절벽 (현재 편향)
-print(round(1-(1-q)**T,3), round(p[-3:].sum()/p.sum(),3))  # 0.999  0.785
+p=q*(1-q)**(T-1-np.arange(T))                      # 마지막 접속일 사후 분포 (현재 편향)
+print(round(p[-3:].sum()/p.sum(),3))                # 0.785 (조건부 모양)
 ```
 
-*운영 귀결과 실패 경계.* 마감 절벽은 곧 *용량* 문제다. $N{=}10^6$, $q{=}0.4$면 약 40만 명이 마지막 날에 청구하고, 이것이 마지막 한 시간에 몰리면 초당 $\approx111$건의 보상 청구가 보상 파이프라인(5절)과 정산(2절)을 친다. 마감 직전 첨두를 견디는 멱등·트랜잭션 처리량과, 절벽이 종료 컷오프와 충돌하지 않게 흡수하는 *유예(grace period, 2절)* 가 이 모델의 직접 귀결이다. 마감 리마인더(2절 teaser의 대칭)는 절벽을 앞으로 당겨 첨두를 평탄화하고, *재등장(rerun) 약속* 은 FOMO 압력을 낮춰 절벽을 완화하는 대신 이번 이벤트 완주를 진지 참여 비율 $f_{\text{serious}}$만큼으로 줄인다 — 막판 첨두를 피로(이 절 위)와 맞바꾸는 손잡이다.
+*운영 귀결과 실패 경계.* 마감 절벽은 곧 *용량* 문제다. 다만 위 $q$ 분포는 사후 선택 분포이므로 실제 온라인 청구는 이보다 분산될 수 있다. 이 분포로 마지막 날 규모를 가늠하면 $N{=}10^6$, $q{=}0.4$에서 약 40만 명분이 몰리고, 그것이 마지막 한 시간에 집중되면 초당 $\approx111$건의 보상 청구가 보상 파이프라인(5절)과 정산(2절)을 친다. 마감 직전 첨두를 견디는 멱등·트랜잭션 처리량과, 절벽이 종료 컷오프와 충돌하지 않게 흡수하는 *유예(grace period, 2절)* 가 이 모델의 직접 귀결이다. 마감 리마인더(2절 teaser의 대칭)는 절벽을 앞으로 당겨 첨두를 평탄화하고, *재등장(rerun) 약속* 은 FOMO 압력을 낮춰 절벽을 완화하는 대신 이번 이벤트 완주를 진지 참여 비율 $f_{\text{serious}}$만큼으로 줄인다 — 막판 첨두를 피로(이 절 위)와 맞바꾸는 손잡이다.
 
-실패 경계가 넷이다. (1) *상시 보상* 은 누설 $\mu/(h+\mu)$를 영구화한다 — "언제든 받을 수 있음" 이 "끝내 안 받음" 으로 샌다. (2) *유예 없는 하드 컷오프* 는 절벽 질량과 마지막 초 판정이 충돌해 "끝나는 순간 완주했는데 못 받음" CS를 보장한다(2절 생명주기의 grace가 필수). (3) *잦은 하드 마감* 은 절벽을 매번 만들지만 FOMO 압력이 누적되어 피로·이탈로 돌아온다(이 절의 피로도) — 단기 참여 펄스와 장기 리텐션이 반대로 움직이는 전형. (4) *클라이언트 시간으로 마감을 판정* 하면 절벽 전체가 위조 표적이 된다 — 마감 판정은 서버 권위(2절)가 전제다.
+실패 경계가 넷이다. (1) *상시 보상* 은 누설 $(1-h)\mu/(h+(1-h)\mu)$를 영구화한다 — "언제든 받을 수 있음" 이 "끝내 안 받음" 으로 샌다. (2) *유예 없는 하드 컷오프* 는 절벽 질량과 마지막 초 판정이 충돌해 "끝나는 순간 완주했는데 못 받음" CS를 보장한다(2절 생명주기의 grace가 필수). (3) *잦은 하드 마감* 은 절벽을 매번 만들지만 FOMO 압력이 누적되어 피로·이탈로 돌아온다(이 절의 피로도) — 단기 참여 펄스와 장기 리텐션이 반대로 움직이는 전형. (4) *클라이언트 시간으로 마감을 판정* 하면 절벽 전체가 위조 표적이 된다 — 마감 판정은 서버 권위(2절)가 전제다.
 
 ## 7. 부정 행위 방지
 
@@ -674,14 +687,10 @@ struct EventReport {
 
 ## 더 읽을거리
 
-- Google Remote Config / Firebase 문서 — 원격 구성·점진 롤아웃·A/B의 산업 표준 워크플로.
-- "Game Server Programming" 계열 자료 — 서버 권위·멱등 보상 지급·트랜잭션 처리의 실무.
-- Riot Games / Supercell 엔지니어링 블로그의 라이브 이벤트·실험 플랫폼 사례.
-- "Designing Data-Intensive Applications" (Martin Kleppmann) — 멱등성·트랜잭션·아웃박스 패턴의 원리.
-- GDC 라이브 서비스·라이브옵스 트랙 발표들 — 시즌 패스·세그먼트·피로도 관리 사례.
-- Dan Ariely, Klaus Wertenbroch, "Procrastination, Deadlines, and Performance: Self-Control by Precommitment," *Psychological Science* 13(3), 2002 — 마감 효과(deadline effect)의 실증.
+- Google Remote Config / Firebase 문서 — 클라이언트 원격 구성의 fetch·activate 범위. 원격 구성·점진 롤아웃·A/B의 산업 표준 워크플로이나, 서버 권위 kill barrier 자체를 제공하는 것은 아니다.
+- "Designing Data-Intensive Applications" (Martin Kleppmann), 1판(O'Reilly, 2017) — 멱등성·트랜잭션·아웃박스 패턴의 원리. 책의 존재가 다른 예제의 원자성을 자동으로 증명하지는 않는다.
+- Dan Ariely, Klaus Wertenbroch, "Procrastination, Deadlines, and Performance: Self-Control by Precommitment," *Psychological Science* 13(3), 2002 — 2026-09-02 철회. 현재 실증 근거로 쓰지 않고 연구사적 언급으로만 남긴다.
 - David Laibson, "Golden Eggs and Hyperbolic Discounting," *Quarterly Journal of Economics* 112(2), 1997 — 준쌍곡($\beta$-$\delta$) 할인의 표준 정식화.
 - Ted O'Donoghue, Matthew Rabin, "Doing It Now or Later," *American Economic Review* 89(1), 1999 — 순진한 미루기와 마감 행동의 모델.
 - Y. S. Chow, Herbert Robbins, David Siegmund, *Great Expectations: The Theory of Optimal Stopping*, Houghton Mifflin, 1971 — 예약 임계·최적 정지의 원전.
 - John D. Kalbfleisch, Ross L. Prentice, *The Statistical Analysis of Failure Time Data*, 2nd ed., Wiley, 2002 — 경쟁 위험(competing risks)과 해저드의 표준 교과서.
-- 통계적 A/B 테스트 기초 자료 — 유의성·표본 크기·다중 실험 격리의 함정.

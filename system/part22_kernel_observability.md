@@ -535,6 +535,6 @@ Memory corruption과 race는 KASAN·KMSAN·KCSAN·lockdep처럼 오류 조건을
 - Linux kernel, [Lockdep design](https://docs.kernel.org/locking/lockdep-design.html)
 - Linux kernel, [Using kgdb, kdb and the kernel debugger internals](https://docs.kernel.org/process/debugging/kgdb.html)
 - Linux kernel, [Kdump](https://docs.kernel.org/admin-guide/kdump/kdump.html)
-- Steven McCanne, Van Jacobson, ["The BSD Packet Filter"](https://www.tcpdump.org/papers/bpf-usenix93.pdf)
-- Toke Høiland-Jørgensen et al., ["The eXpress Data Path"](https://dl.acm.org/doi/10.1145/3281411.3281443)
-- Jonathan Corbet, Alessandro Rubini, Greg Kroah-Hartman, *Linux Device Drivers*, 3rd ed.
+- Steven McCanne, Van Jacobson, ["The BSD Packet Filter"](https://www.tcpdump.org/papers/bpf-usenix93.pdf) — classic BPF 역사적 배경; 현대 eBPF verifier/CO-RE의 직접 근거는 아님
+- Toke Høiland-Jørgensen et al., ["The eXpress Data Path"](https://dl.acm.org/doi/10.1145/3281411.3281443) — 본문 XDP 문장의 추가 읽을거리
+- Jonathan Corbet, Alessandro Rubini, Greg Kroah-Hartman, *Linux Device Drivers*, 3rd ed. — 고전 드라이버 디버깅 추가 읽을거리; 현대 eBPF/BTF/CO-RE 규약의 직접 근거는 아님

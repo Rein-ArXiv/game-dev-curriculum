@@ -2,11 +2,24 @@
 
 #include "ui/toggles.h"
 
+#include <cmath>
 #include <cstddef>
 #include <memory>
 #include <vector>
 
 namespace ppl {
+
+// 입력 계약: 유효한 dt는 음이 아닌 유한값이다. NaN/inf/음수는 시각적 성능 실험을
+// 깨뜨리므로 0으로 취급한다(0으로 만들면 유효 상태가 변하지 않는다). 물리적으로
+// 정확한 다중 반사가 아니라 "한 step 후 clamp + 부호 반전"이라는 이산 경계 규칙이다.
+inline float SanitizeDt(float dt) {
+    return (dt >= 0.0f && std::isfinite(dt)) ? dt : 0.0f;
+}
+
+// 입력 계약: viewport는 W,H >= 2다. 더 작은 값은 2로 올린다.
+inline int SanitizeViewport(int v) {
+    return v < 2 ? 2 : v;
+}
 
 // 모든 레이아웃 변종이 구현하는 추상 인터페이스.
 //

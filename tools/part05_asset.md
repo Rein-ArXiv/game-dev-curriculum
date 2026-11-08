@@ -176,11 +176,11 @@ public:
 };
 ```
 
-핵심은 *프로세서가 파일을 직접 열지 못하게* 막고 모든 읽기를 이 레코더로 강제하는 것이다. 그러면 의존성 누락이 구조적으로 불가능해진다 — 읽은 것은 곧 기록된 것이다. 셰이더 컴파일러처럼 외부 도구가 include를 처리하는 경우, 그 도구의 *의존성 출력*(예: 컴파일러의 `-MD` 같은 의존성 덤프)을 파싱해 그래프에 합친다.
+레코더는 *선언된 경로로 수행한 파일 읽기* 의 누락을 줄이는 데 도움을 준다 — 읽은 것은 곧 기록된다. 다만 단일 API wrapper만으로 의미적 입력이 모두 잡히지는 않는다. *파일/경로 존재 검사*, *directory listing*, *환경 변수*, *툴체인·실행 파일*, *자식 프로세스가 읽는 파일* 도 결과를 바꾸면 입력 경계에 포함해야 한다. 그래야 hermetic 실행 환경에서 목표한 완전성에 가까워진다. 셰이더 컴파일러처럼 외부 도구가 include를 처리하는 경우, 그 도구의 *의존성 출력*(예: 컴파일러의 `-MD` 같은 의존성 덤프)을 파싱해 그래프에 합친다.
 
 ### 순환과 무효화 전파
 
-그래프는 *방향 비순환 그래프(DAG)* 여야 한다. 순환 — A가 B를, B가 A를 참조 — 이 생기면 순진한(방문 표시 없는) 무효화가 무한 루프에 빠진다. cook 시점에 순환을 탐지해 명확한 에러로 거부한다.
+이 절의 그래프는 *build action의 선후행 관계* 를 표현한다 — 런타임 에셋 참조 그래프 전체나 엔진 오브젝트 수명 그래프와 같은 대상이 아니다. 이 그래프는 *방향 비순환 그래프(DAG)* 여야 한다. 순환 — A가 B를, B가 A를 참조 — 이 생기면 순진한(방문 표시 없는) 무효화가 무한 루프에 빠진다. cook 시점에 순환을 탐지해 명확한 에러로 거부한다.
 
 ```cpp
 // 무효화: 바뀐 에셋에서 시작해 역방향으로 전파
@@ -202,19 +202,22 @@ void Invalidate(AssetId changed, DependencyGraph& g, std::set<AssetId>& dirty) {
 견고한 답은 *콘텐츠 해시* 다. cook의 출력은 *입력 전체의 해시* 로 키가 정해진다. 입력에는 원본 내용뿐 아니라 *모든 빌드 의존성, 임포트 설정, 프로세서 버전, 타깃 플랫폼* 이 들어간다.
 
 ```cpp
-// cook 키 = 이 출력을 결정하는 모든 입력의 해시
+// cook 키 = 이 출력을 결정하는 모든 의미적 입력의 해시
 Hash ComputeCookKey(const AssetId& asset, const DependencyGraph& g,
                    const ImportSettings& settings, Platform target) {
     Hasher h;
-    h.Add(ContentHash(asset));            // 원본 내용
+    h.Add(ContentHash(asset));                 // 원본 내용
     for (AssetId dep : g.Dependencies(asset))  // 정렬된 순서로
-        h.Add(ContentHash(dep));          // 모든 빌드 의존성 내용
-    h.Add(settings.Serialize());          // 임포트 설정
-    h.Add(ProcessorVersion(asset.type));  // 프로세서 코드 버전
-    h.Add(target);                        // 플랫폼
+        h.Add(DependencyInputDigest(dep, target)); // 원본 또는 종속 cooked 산출물 digest
+    h.Add(settings.Serialize());               // 임포트 설정 — quality 포함
+    h.Add(ProfileRevision(target));            // 플랫폼 프로파일 revision
+    h.Add(ProcessorChainVersion(asset));       // 프로세서 chain/버전
+    h.Add(target);                             // 플랫폼
     return h.Finalize();
 }
 ```
+
+키를 만드는 필드와 실제 cook의 *모든 의미적 입력* 을 대응시켜야 한다 — 품질(`QualityLevel`)·프로파일 revision·프로세서 chain/버전·필요하면 종속 cooked 산출물 digest까지 포함한다. 그래야 Preview 결과가 Release hit가 되지 않는다. 또한 실패 결과나 placeholder를 성공 release 산출물처럼 캐시·공유에 게시하지 않는다.
 
 이 키가 바뀌지 않으면 출력도 바뀌지 않는다(결정론 덕분, 1절). 키가 같으면 *재빌드를 건너뛴다*. 프로세서 코드 자체를 해시에 넣는 점이 중요하다 — 압축 알고리즘을 개선하면 코드 버전이 바뀌고, 그것에 영향받는 모든 에셋이 자동으로 무효화된다. 이게 빠지면 "코드는 고쳤는데 옛날 출력이 캐시에 남아" 추적 불가능한 버그가 된다.
 
@@ -230,12 +233,14 @@ flowchart TB
     Loop --> Key[cook 키 계산]
     Key --> Hit{캐시에 있나?}
     Hit -->|예| Copy[캐시에서 복사]
-    Hit -->|아니오| Cook[cook 후 캐시에 저장]
+    Hit -->|아니오| Cook[cook]
     Copy --> Loop
     Cook --> Loop
+    Loop -->|모든 자산 완료| Publish[검증 통과분만 게시]
+    Cook -.->|실패| Fail[cook 실패는 게시 금지<br/>상위로 전파]
 ```
 
-dirty 집합을 *위상 정렬* 하는 이유는, 어떤 에셋의 cook이 다른 에셋의 출력을 입력으로 쓸 수 있기 때문이다(아틀라스는 개별 텍스처 cook 결과를 합칠 수 있다). 의존성이 먼저 구워져야 그 키가 확정된다. 이 순서 덕분에 *한 번의 변경이 그래프를 따라 정확히 필요한 만큼만* 전파된다 — 100만 에셋 프로젝트에서 텍스처 하나를 고치면 그 텍스처와 그것을 쓰는 머티리얼 몇 개만 다시 구워진다.
+dirty 집합을 *위상 정렬* 하는 이유는, 어떤 에셋의 cook이 다른 에셋의 출력을 입력으로 쓸 수 있기 때문이다(아틀라스는 개별 텍스처 cook 결과를 합칠 수 있다). 의존성이 먼저 구워져야 그 키가 확정되고, 이때 소비한 종속 cooked 산출물의 digest도 키에 포함된다. 이 순서 덕분에 *한 번의 변경이 그래프를 따라 정확히 필요한 만큼만* 전파된다 — 100만 에셋 프로젝트에서 텍스처 하나를 고치면 그 텍스처와 그것을 쓰는 머티리얼 몇 개만 다시 구워진다.
 
 ### 로컬 캐시와 공유 캐시
 
@@ -254,6 +259,7 @@ CookResult GetOrCook(const AssetId& asset, Hash key) {
         return *shared;
     }
     CookResult result = RunCook(asset, key); // 3. 진짜 굽기
+    if (!result.ok) return result;           // 실패·placeholder는 게시하지 않는다
     localCache_.Put(key, result);
     sharedCache_.Put(key, result);           // 남을 위해 올림
     return result;
@@ -274,32 +280,32 @@ CookResult GetOrCook(const AssetId& asset, Hash key) {
 
 ### 텍스처 — 압축이 곧 트레이드오프
 
-텍스처 cook의 핵심은 *GPU 블록 압축* 이다. 원본 PNG/PSD는 비압축 RGBA지만, GPU는 *블록 압축 포맷*(BC7, ASTC, ETC2)을 직접 샘플링한다 — VRAM과 대역폭을 4~8배 아낀다. 압축은 *손실* 이고, 압축 *시간* 과 *품질* 이 반비례한다.
+텍스처 cook의 핵심은 *GPU 블록 압축* 이다. 원본 PNG/PSD는 *압축·컨테이너 형식* 이고, 임포터가 이를 디코딩해 *중간 픽셀 버퍼*(예: RGBA8)로 만들면, cook이 그 버퍼를 GPU용 *블록 압축 출력*(BC/ASTC)으로 변환한다. GPU는 이 압축 포맷을 직접 샘플링해 원본 대비 VRAM과 대역폭을 크게 아낀다. 압축은 *손실* 이며, 고품질 인코더일수록 *더 많은 시간* 을 쓴다 — '시간↑/품질↑'의 비용 trade-off와 '속도↑/품질↓'의 인코더 선택을 구분한다.
 
 | 포맷 | 플랫폼 | 압축률 | 품질 | 인코딩 비용 |
 |---|---|---|---|---|
-| BC1 | PC/콘솔 | 6:1 | 낮음(1bit 알파) | 낮음 |
-| BC7 | PC/콘솔 | 4:1 | 높음 | 높음(느림) |
+| BC1 | PC/콘솔 | 6:1 (4bpp / RGB24 기준) | 낮음(1bit 알파) | 낮음 |
+| BC7 | PC/콘솔 | 4:1 (8bpp / RGBA32 기준) | 높음 | 높음(느림) |
 | ASTC | 모바일 중심, 일부 PC/GPU/API | 가변 | 높음 | 매우 높음 |
 | ETC2 | 모바일 | 4:1 | 중간 | 중간 |
 | 비압축 | 전부 | 1:1 | 무손실 | 없음 |
 
-BC7·ASTC 같은 고품질 인코더는 블록마다 여러 모드를 시도해 최적을 고르므로 *느리다* — 4K 텍스처 하나에 수 초가 걸릴 수 있다. 여기서 반복 속도와 품질이 정면충돌한다. 해법은 1절의 `QualityLevel`이다.
+BC7·ASTC 같은 고품질 인코더는 블록마다 여러 모드를 시도해 최적을 고르므로 *느리다* — 4K 텍스처 하나에 수 초가 걸릴 수 있다(예시; 실제 값은 인코더·하드웨어·입력에 따라 다르다). 여기서 반복 속도와 품질이 정면충돌한다. 해법은 1절의 `QualityLevel`이다.
 
 ```cpp
-TextureFormat ChooseEncoder(QualityLevel q, Platform p) {
-    if (p == Platform::Mobile) {
-        if (q == QualityLevel::Preview)
-            return TextureFormat::ASTC_6x6_Fast;  // 빠른 미리보기, 품질 양보
-        return TextureFormat::ASTC_4x4_Slow;      // 출시: 최고 품질
-    }
-    if (q == QualityLevel::Preview)
-        return TextureFormat::BC1_Fast;    // 빠른 미리보기, 품질 양보
-    return TextureFormat::BC7_Slow;
+TextureFormat ChooseEncoder(const PlatformProfile& profile, TextureUsage usage,
+                            ChannelLayout channels, bool hdr, QualityLevel q) {
+    // 프로파일이 실제 지원하는 포맷 후보 중에서, 용도가 요구하는 채널/색공간/HDR을
+    // 보존하는 것만 고른다. 품질은 그 안에서 인코딩 속도와 압축 품질의 선택이다.
+    const TextureFormatSet candidates =
+        profile.SupportedFormats(usage, channels, hdr);
+    if (candidates.empty())
+        return TextureFormat::Uncompressed;   // 의미를 잃는 압축은 하지 않는다
+    return profile.PickEncoder(candidates, q); // Preview도 후보 안에서만
 }
 ```
 
-작업 중에는 빠른 인코더로 즉시 결과를 보고, CI 출시 빌드만 느린 고품질 인코더를 돌린다. 캐시(3절)가 출시 인코딩을 한 번만 치르게 보장한다. 추가로 *밉맵 생성*(다운샘플 체인), *노멀맵 처리*(원본 노멀은 특수 압축·재정규화 필요), *아틀라싱*(작은 텍스처들을 한 장으로 패킹해 드로우콜 절감)이 텍스처 프로세서 체인에 들어간다.
+플랫폼·품질만으로 포맷을 정하지 않는다 — BC1은 일반 다단계 알파를 대체하지 못하므로 단순 품질 감소가 아니라 데이터 의미 손실일 수 있다. Preview도 알파/HDR/노멀 의미를 보존하는 포맷 집합 안에서 인코딩 속도와 품질을 고른다. 품질이 cache key에 포함되어야 Preview 결과가 Release hit가 되지 않는다(F21). 작업 중에는 빠른 인코더로 즉시 결과를 보고, CI 출시 빌드만 느린 고품질 인코더를 돌린다. 캐시(3절)가 출시 인코딩을 한 번만 치르게 보장한다. 추가로 *밉맵 생성*(다운샘플 체인), *노멀맵 처리*(원본 노멀은 특수 압축·재정규화 필요), *아틀라싱*(작은 텍스처들을 한 장으로 패킹해 드로우콜 절감)이 텍스처 프로세서 체인에 들어간다.
 
 ### 메시 — 최적화와 LOD
 
@@ -330,10 +336,10 @@ struct ShaderVariantKey {
 
 ### 에러 리포팅 — cook은 실패할 수 있다
 
-변환은 실패한다 — 셰이더 컴파일 에러, 깨진 fbx, 알파 채널 없는 노멀맵. cook 실패의 처리가 파이프라인 사용성을 좌우한다.
+변환은 실패한다 — 셰이더 컴파일 에러, 깨진 fbx, 선택한 노멀맵 인코딩(DXT5nm 등)이 요구하는 채널이 없는 경우. cook 실패의 처리가 파이프라인 사용성을 좌우한다.
 
 - *원본 위치로 매핑*: 셰이더 컴파일 에러는 *원본 파일·줄 번호* 로 보고되어야 한다 — include 전개 후 줄 번호가 아니라. 컴파일러 출력을 파싱해 원본 좌표로 되돌린다.
-- *부분 실패 격리*: 한 에셋의 cook 실패가 빌드 전체를 멈추면 안 된다. 실패한 에셋은 *플레이스홀더*(자홍색 텍스처, 빈 메시)로 대체하고 빌드를 계속하되, 검증 단계(7절)에서 빌드를 게이트한다.
+- *부분 실패 격리*: 한 에셋의 cook 실패가 빌드 전체를 멈추면 안 된다. 실패한 에셋은 *플레이스홀더*(자홍색 텍스처, 빈 메시)로 대체해 빌드를 계속하되, 그 placeholder는 release 게시·공유 캐시에서 제외하고 검증 단계(7절)에서 빌드를 게이트한다.
 - *명확한 메시지*: "cook failed" 대신 "albedo.psd: 알파 채널 없음, 이 머티리얼은 알파를 요구함"처럼 *무엇을·왜·어디서* 를 담는다.
 
 ## 5. 플랫폼별 변환
@@ -345,9 +351,9 @@ struct ShaderVariantKey {
 ```mermaid
 flowchart TB
     Src[albedo.psd] --> Imp[임포트<br/>플랫폼 무관 IR]
-    Imp --> PC[PC: BC7]
-    Imp --> Mob[Mobile: ASTC]
-    Imp --> Con[Console: 스위즐 BC]
+    Imp --> PC["PC profile: BC7<br/>capability 예시"]
+    Imp --> Mob["Mobile profile: ASTC<br/>capability 예시"]
+    Imp --> Con["Console profile: 스위즐 BC<br/>capability 예시"]
 ```
 
 핵심 설계는 *임포트를 플랫폼 무관으로, 프로세서 뒷단만 플랫폼별로* 가르는 것이다(1절). PSD 디코딩·레이어 병합은 한 번만 하고, 그 IR을 N개 플랫폼 인코더가 공유한다. 임포트까지 플랫폼별로 반복하면 콜드 빌드 시간이 플랫폼 수에 곱해진다.
@@ -413,7 +419,7 @@ struct AssetRef {
 - *Git LFS*: 바이너리를 별도 서버에 두고 git에는 포인터만. 텍스트 코드와 같은 워크플로를 유지하되 대용량은 분리.
 - *전용 에셋 VCS*: Perforce 같은 중앙집중 VCS는 *대용량 바이너리·독점 잠금(exclusive lock)* 에 강하다. 두 아티스트가 같은 PSD를 동시에 편집해 충돌(머지 불가능한 바이너리)나는 것을 *잠금* 으로 막는다.
 
-바이너리는 *머지가 불가능* 하다는 게 텍스트 코드와 근본적으로 다른 점이다. 텍스트는 충돌나도 손으로 합치지만, PSD 두 버전은 합칠 수 없다 — 한쪽을 버려야 한다. 그래서 에셋 워크플로는 *선잠금(lock-before-edit)* 모델을 자주 쓴다.
+바이너리는 *기본 line-based merge에 불리하다* — 텍스트처럼 줄 단위로 나눠 자동 병합하기 어렵고, PSD 두 버전은 일반 diff로 합칠 수 없어 한쪽을 버려야 한다. 다만 태그·길이 기반 binary schema나 도메인 전용 merge driver를 두면 *의미론적 병합* 이 가능하며, 그 경우에는 전용 도구가 필요하다. 텍스트라도 opaque ID·순서 변경이 심하면 의미 검증 없이 안전하지 않은 것은 마찬가지다. 그래서 에셋 워크플로는 *선잠금(lock-before-edit)* 모델을 자주 쓴다.
 
 ### 무엇을 버전 관리에 넣는가
 
@@ -423,7 +429,7 @@ struct AssetRef {
 
 ### 망가진 에셋을 자동으로 막는다
 
-에셋은 다양한 방식으로 망가진다 — 압축 못 받는 해상도, 음수 스케일 메시, 알파 없는 노멀맵, 예산 초과 텍스처, 규칙 위반 이름. 사람이 매번 눈으로 잡으면 반드시 새어나간다. *검증(validation)·린트(lint)* 는 이걸 *자동 규칙* 으로 막는다.
+에셋은 다양한 방식으로 망가진다 — 압축 못 받는 해상도, 음수 스케일 메시, 노멀맵 인코딩이 요구하는 채널 부재, 예산 초과 텍스처, 규칙 위반 이름. 사람이 매번 눈으로 잡으면 반드시 새어나간다. *검증(validation)·린트(lint)* 는 이걸 *자동 규칙* 으로 막는다. 일반 RGB 노멀맵에서 알파가 없다는 사실만으로 실패시키지 않는다 — 부호·tangent basis·sRGB 금지·채널 재구성과 정규화는 선택한 인코딩의 포맷별 규칙으로 검사한다.
 
 ```cpp
 struct ValidationIssue {
@@ -437,22 +443,28 @@ class TextureValidator : public AssetValidator {
 public:
     void Validate(const Asset& a, IssueSink& sink) override {
         const auto& tex = a.AsTexture();
-        if (tex.width % 4 != 0 || tex.height % 4 != 0)   // BCn·ETC2는 4x4 블록
-            sink.Error(a.id, "texture.block_multiple",
-                       "압축은 블록 크기의 배수를 요구한다(BCn·ETC2는 4, ASTC는 블록 풋프린트)");
-        if (tex.width > profile_.maxTextureSize)
+        if (tex.width <= 0 || tex.height <= 0)
+            sink.Error(a.id, "texture.dimensions", "폭·높이는 양수여야 한다");
+        if (tex.width > profile_.maxTextureSize || tex.height > profile_.maxTextureSize)
             sink.Error(a.id, "texture.size", "플랫폼 최대 해상도를 초과한다");
-        if (tex.isNormalMap && !tex.hasFullPrecisionChannels)
-            sink.Warn(a.id, "texture.normal", "노멀맵 압축이 정밀도를 잃을 수 있다");
+        if (!profile_.SupportsFormat(tex.format, tex.usage))
+            sink.Error(a.id, "texture.format", "프로파일이 선택한 포맷·용도를 지원하지 않는다");
+        CheckBlockFootprint(tex, profile_, sink);        // BCn·ETC2 4x4 / ASTC 가변 footprint
+        CheckLogicalExtentAndMips(tex, profile_, sink);  // 논리 extent·mip chain
+        CheckPaddingAndCopyRegions(tex, profile_, sink); // 저장 블록 padding·copy 영역
+        if (tex.isNormalMap && !EncodingChannelsSatisfied(tex))
+            sink.Warn(a.id, "texture.normal", "선택한 노멀 인코딩이 요구하는 채널이 없다");
     }
 };
 ```
+
+블록 footprint(BCn·ETC2는 4×4, ASTC는 가변)와 논리 extent는 포맷/API 규칙으로 판단하는 별도 함수로 분리한다. 논리 크기를 무조건 footprint의 배수로 요구하면 API별 edge/padding 처리를 무시한다. 단순히 `%4`를 `%blockWidth`로 바꾸는 것도 모든 API의 완전한 해결이 아니다.
 
 검증 규칙의 종류는 다음과 같다.
 
 | 범주 | 예시 규칙 | 심각도 |
 |---|---|---|
-| 형식 | 블록 크기의 배수, 지원 픽셀 포맷 | Error |
+| 형식 | 블록 footprint(API별), 지원 픽셀 포맷 | Error |
 | 명명 | `T_` 접두사 텍스처, `SM_` 스태틱 메시 | Warning |
 | 예산 | 텍스처 메모리, 메시 삼각형 수, 본 수 | Error/Warning |
 | 무결성 | 깨진 참조, 고아 사이드카, 순환 의존 | Error |
@@ -467,8 +479,8 @@ flowchart LR
     PR[에셋 변경 PR] --> Cook[증분 cook<br/>바뀐 에셋만]
     Cook --> Val[검증 규칙 실행]
     Val --> Gate{Error 있나?}
-    Gate -->|예| Block[머지 차단<br/>리포트 첨부]
-    Gate -->|아니오| Pass[통과 + 공유 캐시 갱신]
+    Gate -->|예| Block[머지 차단<br/>실패분은 게시하지 않음]
+    Gate -->|아니오| Pass[통과분만 공유 캐시·release 게시]
 ```
 
 CI 게이트가 *반복 속도를 지키면서 품질을 강제* 하는 지점이다. 개발자는 로컬에서 빠르게 반복하고, 머지 전 CI가 증분 cook(바뀐 에셋만, 3절)으로 검증을 돌려 Error를 차단한다. 통과한 빌드는 공유 캐시를 갱신해 다음 사람의 반복을 빠르게 한다 — 검증과 캐시가 같은 파이프라인에서 맞물린다.
@@ -489,11 +501,12 @@ sequenceDiagram
     participant Watcher as 파일 와처
     participant Cook as 증분 cook
     participant Game as 실행 중 게임
-    Artist->>Watcher: albedo.psd 저장
-    Watcher->>Cook: 변경 감지
-    Cook->>Cook: 바뀐 에셋만 cook
-    Cook->>Game: 리로드 알림 (GUID)
-    Game->>Game: GPU 리소스 교체, 참조 갱신
+    Artist->>Watcher: albedo.psd 저장 (임시 파일+rename)
+    Watcher->>Cook: 저장 완료 확인 후 변경 감지
+    Cook->>Cook: 바뀐 에셋만 cook·검증
+    Cook->>Game: 검증 성공 시 새 generation 게시 (GUID)
+    Game->>Game: 소유 스레드에서 GPU 리소스 게시
+    Game->>Game: 기존 CPU 참조·GPU fence 완료 후 이전 버전 회수
 ```
 
 이 루프가 닫히면 아티스트는 *도구에서 저장 → 1초 내 게임에 반영* 을 본다. 이것이 반복 속도의 최종 형태다 — cook·캐시·검증 모두 이 1초를 위한 토대다.
@@ -517,7 +530,7 @@ class AssetWatcher {
 };
 ```
 
-함정은 *저장 중 다중 이벤트* 다. 도구가 파일을 저장할 때 OS는 여러 이벤트(생성·수정·이름변경)를 연달아 낸다. 이걸 그대로 받으면 한 번 저장에 여러 번 리로드한다. *디바운스* — 짧은 시간 창의 이벤트를 합쳐 한 번만 처리 — 가 필수다. 또한 와처는 변경을 *증분 빌드 경로* 로 흘려보내야 한다 — 와처가 본 것은 원본 변경이고, 그 무효화 전파(2절)와 키 비교(3절)는 빌드와 같은 로직을 탄다.
+함정은 *저장 중 다중 이벤트* 다. 도구가 파일을 저장할 때 OS는 여러 이벤트(생성·수정·이름변경)를 연달아 낸다. 이걸 그대로 받으면 한 번 저장에 여러 번 리로드한다. *디바운스* — 짧은 시간 창의 이벤트를 합쳐 한 번만 처리 — 가 필수다. 디바운스는 저장 중 다중 이벤트를 합칠 뿐 *파일이 완전히 기록됐다는 보장은 아니다* — 임시 파일+rename이나 안정성 검사/재시도 정책으로 저장 완료를 확인한 뒤 cook한다. 또한 와처는 변경을 *증분 빌드 경로* 로 흘려보내야 한다 — 와처가 본 것은 원본 변경이고, 그 무효화 전파(2절)와 키 비교(3절)는 빌드와 같은 로직을 탄다.
 
 ### 참조 갱신과 GPU 리소스 교체
 
@@ -526,10 +539,14 @@ cook이 새 에셋을 내면, *실행 중 게임* 이 옛 리소스를 새것으
 ```cpp
 void ReloadTexture(AssetGuid guid, const CookedTexture& fresh) {
     Texture* tex = registry_.Get(guid);     // GUID로 기존 핸들 조회
-    tex->ReplaceGpuResource(fresh);          // GPU 리소스만 교체
+    if (!Validate(fresh)) return;           // 실패하면 기존 버전 유지
+    tex->ReplaceGpuResource(fresh);          // 소유 스레드/동기화 경계에서 새 버전 게시
+    // 이전 CPU 참조·GPU fence·기존 코드 실행이 끝난 뒤 이전 버전을 회수한다.
     // 이 텍스처를 참조하는 머티리얼들은 GUID로 가리키므로 건드릴 것 없다
 }
 ```
+
+교체는 *load → validate → 원자적/동기화된 publish → old version retire* 순서를 따른다. 완성된 새 파일/빌드 결과를 읽고(임시 파일+rename 또는 안정성 검사/재시도), 새 리소스를 만들어 검증하고, 실패하면 기존 버전을 유지한다. 성공하면 소유 스레드/동기화 경계에서 새 버전을 게시하고, 기존 CPU 사용자·GPU fence·기존 코드 실행(DLL 함수 포인터·callback·vtable 참조 포함)이 끝난 뒤에 이전 버전을 회수한다. 이 완료 의미는 Part01의 핫리로드 교체 설명과 그림에서도 같은 계약으로 다룬다.
 
 타입마다 교체 복잡도가 다르다. 텍스처·셰이더는 GPU 리소스 교체로 비교적 단순하다. 메시는 버텍스 버퍼 교체와 함께 그것을 쓰는 렌더 객체의 바운딩 볼륨 재계산이 필요하다. 셰이더는 컴파일 실패 시 *옛 버전을 유지* 해야 한다 — 새 셰이더가 에러나는데 옛것까지 버리면 화면이 깨진다.
 
@@ -567,9 +584,8 @@ void ReloadTexture(AssetGuid guid, const CookedTexture& fresh) {
 
 ## 더 읽을거리
 
-- Unreal Engine 문서 — Derived Data Cache(DDC)·쿠킹·에셋 레지스트리의 산업 표준 구현.
-- Unity 문서 — AssetImporter·AssetDatabase·Addressables·플랫폼별 텍스처 압축 설정.
-- bazel / Buck 등 빌드 시스템 문서 — 해시 기반 증분·원격 캐시·분산 빌드의 일반 원리.
-- "Game Engine Architecture" (Jason Gregory) — 에셋 컨디셔닝 파이프라인과 런타임 리소스 관리 장.
-- Perforce / Git LFS 문서 — 대용량 바이너리 에셋의 버전 관리와 잠금 워크플로.
-- GDC 발표들 — 대규모 프로젝트의 cook 시간 단축·셰이더 배리언트 관리·핫 리로드 사례.
+- Unreal Engine 문서(UE 5, https://dev.epicgames.com/documentation/en-us/unreal-engine/using-derived-data-cache-in-unreal-engine; https://dev.epicgames.com/documentation/en-us/unreal-engine/cooking-content-in-unreal-engine) — Derived Data Cache(DDC)와 Cooking Content. Asset Registry 세부 문서는 별도다.
+- Unity 6.0 문서(https://docs.unity3d.com/6000.0/Documentation/Manual/AssetDatabase.html) — AssetDatabase 개념·import 연계. AssetImporter·Addressables·플랫폼 압축 문서 전체를 대체하지는 않는다.
+- Bazel hermeticity/remote caching(https://bazel.build/basics/hermeticity; https://bazel.build/remote/caching) / Buck2 architecture(https://buck2.build/docs/concepts/architecture/) — 해시 기반 증분·원격 캐시 원리. 샌드박스를 숨은 입력 완전 차단으로 읽지 않는다(F22).
+- "Game Engine Architecture" (Jason Gregory, 4th ed., https://gameenginebook.com/) — 에셋 컨디셔닝 파이프라인·런타임 리소스 관리 배경. 특정 장의 코드 검증 근거는 아니다.
+- Git LFS(https://git-lfs.com/) — 대용량 바이너리 에셋의 포인터 기반 버전 관리. Perforce 잠금 워크플로는 제품 문서로 별도 확인한다.

@@ -125,11 +125,13 @@ Separation이 없으면 Cohesion이 모두를 한 점으로 뭉쳐 버리고, Co
 
 규칙의 입력은 *이웃의 위치와 속도* 다. 한 boid를 갱신하면서 그 결과를 곧바로 다음 boid의 입력으로 쓰면, 갱신 순서에 따라 결과가 달라진다 — 배열 앞쪽 boid가 이미 움직인 위치를 뒤쪽 boid가 보게 된다. 이는 시뮬레이션을 *순서 의존* 으로 만들고 병렬화를 불가능하게 한다.
 
-해법은 *double buffer* 다. 모든 boid의 가속도를 이전 프레임 스냅숏에서 계산해 새 버퍼에 쓰고, 한 번에 교체한다. 이는 "앞에서 갱신된 boid를 뒤 boid가 읽는" 의미론적 순서 의존을 없애 병렬화의 전제가 된다. 다만 이웃 합산 순서가 달라지면 부동소수점 반올림이 달라질 수 있으므로 비트 단위 결정론까지 자동으로 얻는 것은 아니다.
+해법은 *double buffer* 다. 모든 boid의 가속도를 이전 프레임 스냅숏에서 계산해 새 버퍼에 쓰고, 한 번에 교체한다. 이는 "앞에서 갱신된 boid를 뒤 boid가 읽는" 의미론적 순서 의존을 없애 병렬화의 전제가 된다. 교체 후 `next`가 다음 프레임의 입력이 되므로, 두 버퍼의 같은 인덱스는 같은 entity의 불변 설정(maxSpeed·maxAccel·responseTime 등)을 유지해야 한다 — 매 스텝 `next[i]=cur[i]`로 설정까지 복사한 뒤 위치·속도 같은 동적 필드만 덮어쓴다. 다만 이웃 합산 순서가 달라지면 부동소수점 반올림이 달라질 수 있으므로 비트 단위 결정론까지 자동으로 얻는 것은 아니다.
 
 ```cpp
 void StepFlock(std::vector<Boid>& cur, std::vector<Boid>& next, float dt) {
+    next.resize(cur.size());                             // 재배열·크기 변경 동기화
     for (size_t i = 0; i < cur.size(); ++i) {
+        next[i] = cur[i];                                // 설정 필드(maxSpeed/τ 등)까지 복사
         auto neighbors = FindNeighbors(cur, i);         // cur(이전 상태)만 읽음
         Vec2 accel = Flock(cur[i], neighbors);
         next[i].velocity = Truncate(cur[i].velocity + accel * dt, cur[i].maxSpeed);
@@ -252,7 +254,7 @@ $$
 0<\alpha<\frac{2}{\lambda_{\max}}.
 $$
 
-$0<\alpha<1$은 모든 이런 그래프에 대한 간단한 충분조건이다. 이 범위에서는 자기 상태를 남기는 양의 self-weight가 생겨 이분 그래프의 부호 교대도 피한다. 수렴 속도는 가장 작은 비영 고유값 $\lambda_2$에 좌우되고, 비정규 그래프에서 최종값은 단순 산술평균이 아니라 차수에 비례한 가중평균이다. 정규 그래프에서만 둘이 같다.
+$0<\alpha<1$은 모든 이런 그래프에 대한 간단한 충분조건이다. 이 범위에서는 자기 상태를 남기는 양의 self-weight가 생겨 이분 그래프의 부호 교대도 피한다. 이산 갱신에서 수렴 *속도*는 가장 작은 비영 고유값 $\lambda_2$가 아니라 모든 비합의 모드의 최대 감쇠율, 곧 SLEM $\max_{k\ge2}|1-\alpha\lambda_k|$로 정해진다. $0<\alpha<1$처럼 모든 모드가 양수로 남아 $|1-\alpha\lambda_k|=1-\alpha\lambda_2$가 되는 조건에서만 $\lambda_2$가 속도를 지배한다. $\alpha$가 커져 큰 $\lambda_k$에서 $1-\alpha\lambda_k$가 음수가 되면(예: 3정점 star, $\alpha=0.99$에서 모드 $1,.01,-.98$) 고주파 모드가 더 느리게 줄어들어 $\lambda_2$만으로는 속도를 설명할 수 없다. 수렴 *여부*의 조건 $0<\alpha<2/\lambda_{\max}$와 수렴 *속도*의 지배 모드를 구분해야 한다. 비정규 그래프에서 최종값은 단순 산술평균이 아니라 차수에 비례한 가중평균이다. 정규 그래프에서만 둘이 같다.
 
 전파에는 두 시간척도가 있다. 한 스텝은 그래프 한 홉 밖의 정보에 의존할 수 없으므로, 한쪽 끝의 변화가 반대쪽에 *처음 영향을 주는* 데에는 적어도 그래프 지름만큼의 스텝이 필요하다. 반면 오차가 충분히 작아지는 혼합 시간은 spectral gap에 의존한다. 길이 $n$인 사슬 계열에서는 $\lambda_2=\Theta(n^{-2})$이므로 고정 $\alpha$에서 완화 시간은 대략 $\Theta(n^2\log(1/\varepsilon))$로 증가한다. 최초 도달이 $O(n)$인 것과 전체 정렬이 $O(n^2)$인 것은 다른 주장이다.
 
@@ -377,6 +379,7 @@ struct SpatialHash {
     std::unordered_map<uint64_t, std::vector<int>> cells;
 
     static uint64_t Key(int cx, int cy) {
+        // signed << 대신 unsigned 비트 결합 — 음수 cell 좌표에서도 규약이 안전하다
         return (uint64_t(uint32_t(cx)) << 32) | uint32_t(cy);
     }
     void Clear() { for (auto& kv : cells) kv.second.clear(); }   // 용량 보존
@@ -536,7 +539,7 @@ double buffer로 한 step의 입력 상태와 출력 상태를 분리하면 각 
 flowchart LR
     Build["그리드 구축<br/>O(N) 병렬 가능"] --> Query["이웃 탐색<br/>boid별 독립"]
     Query --> Force["힘 계산<br/>boid별 독립"]
-    Force --> Integrate["적분 + 스왑<br/>boid별 독립"]
+    Force --> Integrate["적분 + 스왑<br/>reader 완료 후에만 이전 버퍼 재사용<br/>전역 swap은 전체 작업 완료 뒤"]
 ```
 
 CPU 멀티스레드에서는 boid 배열을 청크로 쪼개 worker에 분배하면 된다 — 읽기는 이전 버퍼, 쓰기는 다음 버퍼라 *락이 필요 없다*. 그리드 구축의 Insert만 같은 셀에 동시 push할 때 경쟁이 있으므로, 스레드별 로컬 그리드를 만든 뒤 병합하거나 셀별 원자적 카운터로 처리한다. GPU에서는 한 boid를 한 스레드에 매핑해 수만 스레드를 띄운다 — 그리드 구축은 카운팅 정렬(counting sort)로, 이웃 탐색은 셀 오프셋 테이블 조회로 구현한다.
@@ -592,7 +595,7 @@ Boids는 중앙 통제 없이 세 국소 규칙 — Separation(회피), Alignmen
 - M. Ballerini et al., "Interaction ruling animal collective behavior depends on topological rather than metric distance" (PNAS 2008) — 이웃 cap(topological neighbors)의 생물학적 근거.
 - T. Vicsek, A. Czirók, E. Ben-Jacob, I. Cohen, O. Shochet, "Novel Type of Phase Transition in a System of Self-Driven Particles" (Phys. Rev. Lett. 75, 1226, 1995) — 자기추진 입자 정렬 모형과 질서-무질서 전이.
 - A. Jadbabaie, J. Lin, A. S. Morse, "Coordination of Groups of Mobile Autonomous Agents Using Nearest Neighbor Rules" (IEEE Trans. Automatic Control 48(6), 2003) — 최근접 이웃 선형 합의의 수렴 증명.
-- R. Olfati-Saber & R. M. Murray, "Consensus Problems in Networks of Agents with Switching Topology and Time-Delays" (IEEE Trans. Automatic Control 49(9), 2004) — 대수적 연결성 $\lambda_2$를 수렴 속도로.
+- R. Olfati-Saber & R. M. Murray, "Consensus Problems in Networks of Agents with Switching Topology and Time-Delays" (IEEE Trans. Automatic Control 49(9), 2004) — 대수적 연결성 $\lambda_2$와 스위칭 토폴로지·시간 지연 하의 합의 수렴 분석.
 - F. Cucker & S. Smale, "Emergent Behavior in Flocks" (IEEE Trans. Automatic Control 52(5), 2007) — 비선형 flocking 수렴 정리.
 - Unity DOTS Boids 샘플 — SoA/Job System 기반 대규모 flocking.
 - Sebastian Lague, "Coding Adventure: Boids" — 시각적 직관과 GPU 구현.

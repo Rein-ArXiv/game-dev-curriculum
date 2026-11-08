@@ -1,6 +1,6 @@
 ## 들어가며
 
-SAT와 GJK·EPA 같은 충돌 알고리즘은 *형상의 표면을 정점·면·모서리* 로 명시한다. *거리 장(Distance Field)* 은 완전히 다른 패러다임으로, 형상을 *공간의 거리 함수* 로 표현한다.
+SAT 같은 충돌 알고리즘은 *형상의 표면을 정점·면·모서리* 로 명시하고, GJK·EPA 는 support 함수라는 *암묵 표현* 위에서 동작한다 (Part13). *거리 장(Distance Field)* 은 또 다른 패러다임으로, 형상을 *공간의 거리 함수* 로 표현한다.
 
 거리 장의 정의: *공간의 모든 점 $\vec{p}$* 에 대해 *가장 가까운 형상 표면까지의 거리* 를 함수 $f(\vec{p})$ 로 표현. 표면 안쪽에 *음의 부호* 를 더하면 *부호 거리 함수 (Signed Distance Function, SDF)*.
 
@@ -12,7 +12,7 @@ SAT와 GJK·EPA 같은 충돌 알고리즘은 *형상의 표면을 정점·면·
 2. **부드러운 합성**: $\text{smin}$ 으로 *blob 처럼 녹아드는* 합성. 메쉬로는 거의 불가능한 효과.
 3. **레이 마칭**: SDF 가 보장하는 *최대 안전 거리* 로 광선이 *형상을 통과 없이* 표면까지 도달. 폴리곤 래스터화의 대안 렌더링.
 4. **GPU 친화**: 셰이더에서 *함수만 평가*. VBO·IBO 없이 GPU 가 형상 자체를 *그리고* *물어볼* 수 있다.
-5. **거리 쿼리**: 임의 점에서 *형상까지 거리* 를 *상수 시간*. AI 위협 평가, 충돌 보조, 사운드 감쇠에 직접 활용.
+5. **거리 쿼리**: 기본 도형 하나라면 임의 점에서 *형상까지 거리* 가 함수 평가 한 번. 다만 *복잡한 SDF 조합* 은 평가하는 프리미티브 수와 텍스처 조회 횟수에 비례하는 비용이지 *일정한 상수 한 번* 이 아니다. AI 위협 평가, 충돌 보조, 사운드 감쇠에 직접 활용.
 
 이 글의 목표.
 
@@ -93,14 +93,14 @@ $$
 |\nabla f(\vec{p})| = 1 \quad \text{(거의 모든 곳에서)}
 $$
 
-직관: SDF 의 *변화율 (그래디언트 크기)* 이 *1* — 거리 함수이므로 *한 단위 이동* 에 *한 단위만큼 거리 변화*.
+직관: 이상적 SDF 에서 *그래디언트 방향으로 한 단위 이동* 하면 거리도 *한 단위만큼* 변한다. 다른 방향 $\hat{u}$ 로 이동할 때의 방향 미분은 $\nabla f \cdot \hat{u}$ 로 *그 방향 성분만큼* 변하므로, $|\nabla f|$ 는 *어느 방향으로든 한 단위씩 변한다는 뜻이 아니라 최대 변화율* 이다.
 
 함의:
 
 - **그래디언트 = 표면의 외향 법선**: $\hat{n} = \nabla f$ (단위벡터).
 - **거리의 정직성**: $f(\vec{p})$ 가 *진짜 거리*. 광선이 $f(\vec{p})$ 만큼 진행해도 *표면을 넘어가지 않음*.
 
-Eikonal 이 깨지는 곳: 형상의 *내부 medial axis* (가장 가까운 표면 점이 둘 이상). 이 곳에서 그래디언트가 *불연속*.
+Eikonal 이 깨지거나 그래디언트가 정의되지 않는 곳: *최근접 표면 점이 둘 이상* 인 medial axis. 이것은 형상 *내부* 뿐 아니라 비볼록 형상의 *외부* 에도 나타난다. 이런 집합에서 그래디언트는 불연속이거나 잘 정의되지 않으므로, Eikonal 식은 그래디언트가 정의되는 *거의 모든 곳* 에서만 성립한다.
 
 ### 1.5 SDF 의 표현 형태
 
@@ -426,14 +426,13 @@ SDF 만으로 장면을 *그리는* 알고리즘. 폴리곤 래스터화의 대�
 
 ```mermaid
 flowchart TD
-    Start[광선 시작 o] --> Eval["SDF 평가 d = f(p)"]
+    Start[광선 시작 o<br/>t = 0] --> Qmax{t > maxDist?}
+    Qmax -->|예| Miss[빗나감]
+    Qmax -->|아니오| Eval["SDF 평가 d = f(p)"]
     Eval --> Q{d < epsilon?}
     Q -->|예| Hit[충돌!]
     Q -->|아니오| Advance[t += d로 전진]
-    Advance --> Q2{t > maxDist?}
-    Q2 -->|예| Miss[빗나감]
-    Q2 -->|아니오| Eval2[다시 평가]
-    Eval2 --> Q
+    Advance --> Qmax
 ```
 
 SDF 가 보장: $|\nabla f| = 1$ → *한 단위 거리에 한 단위 변화* → *$f(\vec{p})$ 만큼 진행해도 표면 통과 안 함*.
@@ -448,25 +447,29 @@ struct RayResult {
     int   iterations;
 };
 
-// 전제: 광선이 외부에서 시작 (sdfFunc(ro) > 0).
-// 내부 시작 시는 abs(d) < EPSILON 으로 분기하거나 ro 보정 필요.
-RayResult RayMarch(vec3 ro, vec3 rd, auto sdfFunc) {
+// 전제: 광선이 외부에서 시작 (sdfFunc(ro) > 0), 단위 방향 (|rd| = 1),
+//       sdfFunc 는 exact signed distance (외부에서 거리 하한을 만족).
+// 내부 확장은 hit 규칙과 step 을 함께 바꿔야 한다 (아래 설명 참조).
+RayResult RayMarch(vec3 ro, vec3 rd, auto sdfFunc, float maxDistance) {
     const int   MAX_ITER = 100;
-    const float MAX_DIST = 100.0f;
     const float EPSILON  = 0.001f;
 
     float t = 0.0;
     for (int i = 0; i < MAX_ITER; ++i) {
+        // 평가 전에 t 범위를 먼저 확인 — MAX_DIST 밖은 hit 로 반환하지 않는다.
+        if (t > maxDistance) {
+            return {false, t, ro + t * rd, i};
+        }
         vec3 p = ro + t * rd;
         float d = sdfFunc(p);
 
-        // 외부 시작 가정. 내부 케이스 (d < 0) 에는
-        // abs(d) < EPSILON 으로 분기하는 변형이 필요.
+        // 외부 시작 가정이라 d >= 0. 내부 확장은 step = abs(d) 와
+        // 입/출구 목표 계약을 함께 도입해야 한다 (아래 설명).
         if (d < EPSILON) {
             return {true, t, p, i};
         }
-        if (t > MAX_DIST) {
-            return {false, t, p, i};
+        if (d > maxDistance - t) {  // 다음 step 이 최대거리를 넘으면 miss.
+            return {false, maxDistance, ro + maxDistance * rd, i};
         }
         t += d;  // SDF 만큼 안전하게 전진
     }
@@ -474,7 +477,7 @@ RayResult RayMarch(vec3 ro, vec3 rd, auto sdfFunc) {
 }
 ```
 
-매 반복: *현재 위치의 SDF 평가 + 그 만큼 전진*. epsilon 보다 작아지면 *표면에 도달*. 위 코드는 *외부 시작* (`sdfFunc(ro) > 0`) 전제. 내부 시작 시 첫 평가에서 *바로 hit* 으로 잡혀 잘못된 결과. 일반화하려면 `abs(d) < EPSILON` 또는 *내부/외부를 첫 부호로 분기* 후 진행.
+매 반복: *현재 위치의 SDF 평가 + 그 만큼 전진*. epsilon 보다 작아지면 *표면에 도달*. 위 코드는 *외부 시작* (`sdfFunc(ro) > 0`) 전제. 내부 시작이나 내부 통과를 다루려면 *판정과 step 을 함께* 바꿔야 한다. `abs(d) < EPSILON` 만으로 hit 을 판정하고 `t += d` 를 그대로 두면, 내부의 음수 d 에서 광선이 *뒤로* 진행한다. 내부 확장 예시는 *step = abs(d)* 로 전진하고, 목표를 *입구/출구 경계 교차* 로 명시하며, 시작점이 이미 표면 띠 안이면 그 자체를 hit 로 처리하는 계약을 둔다.
 
 ### 5.3 Sphere Tracing 이라는 이름
 
@@ -486,13 +489,13 @@ RayResult RayMarch(vec3 ro, vec3 rd, auto sdfFunc) {
 - **MAX_DIST**: 광선이 너무 멀어지면 종료. 장면 크기에 맞춰.
 - **EPSILON**: 표면 도달 판정. 너무 작으면 *수렴 못 함*, 너무 크면 *표면이 부풀어 보임*.
 
-흔한 함정: *SDF 가 진짜 거리가 아닐 때 (boolean 합성, 비균등 스케일, twist 등)*. *실제 거리보다 큰 추정* 이면 *광선이 표면을 통과* 한다. 대응: *오버 추정 SDF 의 결과에 0.5~0.8 곱* — 보수적 진행.
+흔한 함정: *SDF 가 진짜 거리가 아닐 때 (boolean 합성, 비균등 스케일, twist 등)*. *실제 거리보다 큰 추정* 이면 *광선이 표면을 통과* 한다. 그런데 오버추정 비율의 상한을 모르는 상태에서 *0.5~0.8 곱* 만으로 관통 방지가 보장되지는 않는다. 안전을 보장하려면 알려진 Lipschitz 상한 $L$ 로 나눈 lower bound ($d/L$) 를 쓰거나, 비균등 축소·twist 처럼 $L > 1$ 인 변환의 실제 bound 를 계산한다. 0.5~0.8 같은 계수는 검증된 bound 가 없을 때의 *휴리스틱* 일 뿐이다.
 
 ```cpp
-t += 0.7 * d;  // 보수적 step
+t += 0.7 * d;  // 휴리스틱 — 오버추정 상한을 모르면 안전 보장 아님
 ```
 
-수렴 속도가 느려지지만 *통과 방지*.
+수렴 속도가 느려지지만 상한이 알려진 경우에 한해 *통과 방지* 를 돕는다.
 
 ### 5.5 그림자
 
@@ -501,14 +504,15 @@ t += 0.7 * d;  // 보수적 step
 ```cpp
 float HardShadow(vec3 ro, vec3 light, auto sdf) {
     vec3 rd = normalize(light - ro);
-    float maxT = length(light - ro);
-    RayResult r = RayMarch(ro + 0.01 * rd, rd, sdf);
-    // hit 가 아니면 그림자 아님. miss 결과의 t 는 MAX_DIST 또는 임의 값.
-    return (r.hit && r.t < maxT) ? 0.0 : 1.0;
+    vec3 origin = ro + 0.01 * rd;          // 자기 차폐 회피용 오프셋
+    float maxT = length(light - origin);   // 오프셋된 origin 기준으로 다시 계산
+    RayResult r = RayMarch(origin, rd, sdf, maxT);
+    // maxT 밖은 hit 로 반환되지 않으므로 그림자 여부는 r.hit 만으로 정해진다.
+    return r.hit ? 0.0 : 1.0;
 }
 ```
 
-epsilon 만큼 띄워서 *시작점 근처 자체 충돌 회피*.
+epsilon 만큼 띄워서 *시작점 근처 자체 충돌 회피*. 중요: 오프셋 후에는 *maxT 도 새 origin 에서 다시 계산* 해야 한다. 원래 ro 기준 maxT 를 그대로 넘기면 광원 바로 뒤의 차폐체를 그림자로 처리하거나 march 구간이 실제 광원과 어긋난다. 또한 고정 최대 거리는 광원이 그보다 멀면 그림자를 놓치므로, 이 값은 *장면 크기나 광원 거리* 에 맞춰 전달한다.
 
 ### 5.6 Soft Shadow
 
@@ -598,7 +602,7 @@ vec3 SDFNormal4(vec3 p, auto sdf, float h = 0.001) {
 }
 ```
 
-4번 평가로 *그래디언트 추정*. *6 회 중앙 차분과 비슷한 정확도의 4-sample 근사* — 등가가 아니라 정사면체 대칭 방향 4 점에서 *유한 차분* 한 결과. 셰이더에서 *33% 빠름* — 모든 픽셀 계산.
+4번 평가로 *그래디언트 추정*. *6 회 중앙 차분과 비슷한 정확도의 4-sample 근사* — 등가가 아니라 정사면체 대칭 방향 4 점에서 *유한 차분* 한 결과다. 평가 횟수는 6회에서 4회로 줄지만 이것이 *전체 셰이더 wall time 의 33% 감소* 를 뜻하지는 않는다. 실제 오차와 성능은 SDF 함수의 비용·노이즈·하드웨어에 따라 달라지므로 측정으로 확인한다.
 
 ### 6.5 epsilon 선택
 
@@ -659,9 +663,9 @@ vec3 ClosestPointOnTriangle(vec3 p, vec3 a, vec3 b, vec3 c) {
 
 방법 1: *법선 기반*. 가장 가까운 점에서의 *삼각형 법선* 과 *최근접점→복셀 벡터* 내적. 양수면 외부, 음수면 내부. *간단하지만 취약* — closed/watertight mesh 에서도 *모서리 (변·정점이 가장 가까운 케이스)* 와 *비정상 normal* 에서 자주 틀린다. 학습용으로만.
 
-방법 2 (실전 표준): *광선 카운트 (ray casting)*. 복셀에서 *임의 방향* 으로 광선 쏴 *메쉬와 교차 횟수* 카운트. 홀수면 내부, 짝수면 외부 (*Jordan curve theorem*). 비싸지만 *강건*.
+방법 2 (실전 표준): *광선 카운트 (ray casting)*. 복셀에서 *임의 방향* 으로 광선 쏴 *메쉬와 교차 횟수* 카운트. 홀수면 내부, 짝수면 외부 (*Jordan curve theorem*). 비싸지만 전제가 맞으면 *강건*. 다만 공유 모서리에서 교차가 이중 카운트되거나 퇴화 삼각형·비폐곡면에서 홀짝이 흔들릴 수 있으므로, watertight 폐곡면·퇴화 제거·광선 방향 선택을 전제로 한다.
 
-방법 3 (모던 표준): *Generalized Winding Number*. Jacobson 등의 알고리즘. *open mesh, self-intersection mesh* 에도 동작. ray casting 보다 강건.
+방법 3 (모던 표준): *Generalized Winding Number*. Jacobson 등의 알고리즘. open mesh·self-intersection mesh 에서도 *부호 추정* 을 준다. 다만 열린 mesh 에서 '내부' 를 유일하게 정하는 정리가 아니므로 *임계값 정책* 이 필요하다. ray casting 보다 강건한 경우가 많다.
 
 ### 7.4 Jump Flooding 가속
 
@@ -674,7 +678,7 @@ flowchart LR
     Spread --> Filled[모든 복셀 채움]
 ```
 
-표면 근처만 정확 계산 후 *점진적으로 전파*. $O(\text{voxels} \log \text{N})$ 에 *근사 SDF* 완성. GPU 친화적.
+표면 근처만 정확 계산 후 *점진적으로 전파*. $O(\text{voxels} \log \text{N})$ 에 *근사 SDF* 완성. GPU 친화적. 다만 JFA 전파·trilinear 보간·양자화 값은 *conservative distance bound 를 보장하지 않는다*. 안전한 sphere tracing 이 필요하면 표본 간격과 보간 오차의 *상한* 을 따로 구하거나 보수적으로 줄여 잡는다.
 
 ### 7.5 정밀도와 메모리
 
@@ -718,12 +722,12 @@ float fogDensity(vec3 p, auto fogVolumeSDF) {
 셀 셰이딩 외곽선의 *깊이/법선 차이* 대신 *SDF 거리* 사용.
 
 ```cpp
-float outlineWidth(vec3 p, auto sdf, float t) {
-    return smoothstep(0.005, 0.0, abs(sdf(p)));  // 표면 근처만 강조
+float surfaceBand(vec3 p, auto sdf, float width) {
+    return 1.0 - smoothstep(0.0, width, abs(sdf(p)));  // 표면 띠 — edge0 < edge1
 }
 ```
 
-표면 근처에서만 *외곽선 강도 1*. 일반 외곽선보다 *부드럽고 연속적*.
+이 식은 *3D 표면 띠(surface band)* 다. 표면을 렌더한 *모든 점* 에서 `abs(sdf)=0` 이므로 silhouette 만 강조하지 않는다. 화면 공간 외곽선이 목적이면 시선·법선 조건(silhouette 판정)을 따로 넣어야 한다. 또한 GLSL `smoothstep` 은 `edge0 >= edge1` 일 때 결과가 정의되지 않으므로 `1 - smoothstep(0, width, x)` 처럼 *증가하는 edge* 를 쓴다.
 
 ### 8.3 부드러운 그림자 (이미 5.6절)
 
@@ -734,6 +738,7 @@ float outlineWidth(vec3 p, auto sdf, float t) {
 CPU 파티클을 *각 충돌* 검사 안 함. GPU 컴퓨트 셰이더에서 *SDF 평가 한 번* 으로 충돌 + 법선 추출.
 
 ```glsl
+// 의사 셰이더 (HLSL 컴퓨트 + GLSL 스타일 혼합)
 [numthreads(64,1,1)]
 void CSParticleStep(uint id : SV_DispatchThreadID) {
     Particle p = particles[id];
@@ -741,13 +746,16 @@ void CSParticleStep(uint id : SV_DispatchThreadID) {
     float d = SampleSDF(p.pos);
     if (d < p.radius) {
         vec3 n = SDFNormalFromTexture(p.pos);
-        p.vel = reflect(p.vel, n) * 0.6;  // 마찰
+        p.pos += (p.radius - d) * n;        // 위치 보정으로 침투 해소
+        if (dot(p.vel, n) < 0.0) {          // 다가올 때만 반사
+            p.vel = reflect(p.vel, n) * 0.6; // 0.6 은 단순 속도 감쇠(마찰 근사)
+        }
     }
     particles[id] = p;
 }
 ```
 
-수만 파티클이 *환경과 충돌*. 폴리곤 충돌은 *프래그멘테이션 폭발*.
+수만 파티클이 *환경과 충돌*. 폴리곤 충돌은 *프래그멘테이션 폭발*. `dot(v, n) < 0` 가드가 없으면 표면에서 *바깥으로* 움직이는 파티클까지 반사해 다시 안쪽으로 보낸다. 위치 보정이 없으면 다음 프레임에 다시 겹쳐 반복 반사될 수 있다. 0.6 전체 속력 감쇠는 Coulomb 마찰 자체가 아니라 단순 감쇠 계수다. 빠른 파티클은 substep 이나 CCD 로 터널링을 막는다.
 
 ### 8.5 절차적 폰트 (MSDF)
 
@@ -824,4 +832,4 @@ SDF 는 *형상을 거리 함수로 표현* 한다는 시점 변화로 게임 �
 - Christer Ericson, *Real-Time Collision Detection*, Ch. 5 — Closest point on triangle.
 - ShaderToy (https://shadertoy.com) — SDF 데모의 표준 라이브러리.
 - Unreal Engine 5 *Mesh Distance Fields* 문서 — 산업 통합 사례.
-- Karras, Aila, "Fast Parallel Construction of High-Quality Bounding Volume Hierarchies" — GPU 에서의 고품질 BVH 병렬 구축 (트리렛 재구조화).
+- Karras, Aila, "Fast Parallel Construction of High-Quality Bounding Volume Hierarchies" — GPU 에서의 고품질 BVH 병렬 구축 (트리렛 재구조화). 이 논문은 SDF 정의·합성·마칭의 안전성 근거가 아니며, BVH 구축 가속에 관한 참고문헌으로 Part16 의 GPU BVH 맥락에 속한다. 이 편에서는 거리 쿼리 가속의 연결 참고로만 둔다.

@@ -56,14 +56,12 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    S0["현재 상태 (내 턴, MAX)"] --> A1[공격]
-    S0 --> A2[방어]
-    A1 --> E1["상대 턴 (MIN)"]
-    A1 --> E2["상대 턴 (MIN)"]
-    A2 --> E3["상대 턴 (MIN)"]
-    E1 --> L1["내 턴 ..."]
-    E1 --> L2["내 턴 ..."]
-    E3 --> L3["내 턴 ..."]
+    S0["현재 상태 (내 턴, MAX)"] -->|공격| M1["상대 턴 (MIN)"]
+    S0 -->|방어| M2["상대 턴 (MIN)"]
+    M1 -->|응수 A| N1["내 턴 (MAX)"]
+    M1 -->|응수 B| N2["내 턴 (MAX)"]
+    M2 -->|응수 C| N3["내 턴 (MAX)"]
+    N1 -->|내 수 ...| L1["..."]
 ```
 
 노드의 *플레이어 라벨* 이 트리의 깊이에 따라 MAX/MIN으로 번갈아 든다는 점이 핵심이다. 이 번갈음이 적대적 탐색을 일반적인 그래프 탐색과 구분한다. 일반 탐색은 모든 노드에서 같은 목적(최단 경로, 최소 비용)을 추구하지만, 적대적 탐색은 *깊이마다 목적이 뒤집힌다*. 내 깊이에서는 점수를 올리려 하고, 상대 깊이에서는 같은 점수를 내리려 한다.
@@ -370,7 +368,7 @@ int Evaluate(const State& s) {
 ```mermaid
 flowchart TB
     D["깊이 d (탐색 한계)"] --> E["평가: '퀸이 폰 옆, 유리'"]
-    D -.->|한 수 더(d+1, 안 봄)| Real["실제: 폰이 퀸을 잡음, 불리"]
+    D -.->|"한 수 더(d+1, 안 봄)"| Real["실제: 폰이 퀸을 잡음, 불리"]
     E -->|잘못된 결론| Bad[퀸 손실로 가는 수 선택]
 ```
 
@@ -395,7 +393,7 @@ int Quiescence(const State& s, int alpha, int beta) {
 }
 ```
 
-`AlphaBeta`의 `depth == 0` 분기에서 `Evaluate(s)` 대신 `Quiescence(s, alpha, beta)`를 호출하면 캡처·체크처럼 크게 흔들리는 전술 수를 더 따라간 뒤 평가한다. `standPat`은 실제로 패스할 수 있다는 뜻이 아니다. 체크가 아닌 국면에서 정적 평가를 현재 하한 후보로 두고, 유리한 전술 수가 있을 때만 올리는 null-move 관찰이다. 체크 중에는 가만히 있을 수 없으므로 stand-pat을 허용하지 않고 모든 합법 회피를 생성해야 한다. quiescence search는 포함한 전술 종류 밖의 horizon effect를 남기며, 조용한 국면의 정의와 delta pruning이 정확성과 비용을 결정한다.
+negamax 형태인 `AlphaBetaNega`의 `depth == 0` 분기에서 `ScoreForSideToMove(s)` 대신 `Quiescence(s, alpha, beta)`를 호출하면 캡처·체크처럼 크게 흔들리는 전술 수를 더 따라간 뒤 평가한다. `Quiescence`는 현재 차례(side-to-move) 관점의 점수와 부호 반전 창 `(-beta, -alpha)`를 쓰므로, MAX 관점 값과 그대로의 `[alpha, beta]`를 쓰는 명시적 `AlphaBeta`의 `Evaluate(s)` 자리에 직접 끼워 넣으면 값과 창의 관점이 뒤집힌다(quiet MIN 상태가 MAX 관점 +100이면 `Quiescence`는 -100을 반환한다). 명시적 MAX/MIN 버전에 붙이려면 값과 창을 차례에 따라 함께 변환하는 adapter를 두거나 MAX용·MIN용 quiescence를 따로 작성해야 한다. `standPat`은 실제로 패스할 수 있다는 뜻이 아니다. 체크가 아닌 국면에서 정적 평가를 현재 하한 후보로 두고, 유리한 전술 수가 있을 때만 올리는 null-move 관찰이다. 체크 중에는 가만히 있을 수 없으므로 stand-pat을 허용하지 않고 모든 합법 회피를 생성해야 한다. quiescence search는 포함한 전술 종류 밖의 horizon effect를 남기며, 조용한 국면의 정의와 delta pruning이 정확성과 비용을 결정한다.
 
 ## 5. Iterative Deepening
 
@@ -623,7 +621,7 @@ MCTS의 기본 루프는 네 단계의 반복이다.
 flowchart LR
     S["1. Selection<br/>UCT로 트리 하강"] --> E["2. Expansion<br/>새 자식 추가"]
     E --> R["3. Rollout<br/>끝까지 무작위 시뮬"]
-    R --> B["4. Backpropagation<br/>경로에 결과 누적"]
+    R --> B["4. Backpropagation<br/>player-just-moved 관점 누적"]
     B --> S
 ```
 
@@ -651,6 +649,8 @@ $$
 탐험 항 $C\sqrt{\ln N / n_i}$ 는 *적게 방문한 자식($n_i$ 작음)일수록 커진다*. 즉 충분히 탐색되지 않은 가지에 보너스를 줘서 한 번씩 가보게 만든다. 부모가 많이 방문될수록($\ln N$ 증가) 이 보너스가 천천히 자라, 결국 거의 안 가본 자식도 언젠가 선택된다. $C$ 가 크면 탐험 쪽으로, 작으면 활용 쪽으로 치우친다.
 
 ```cpp
+// 계약: Node::wins는 그 노드로 이끈 수를 둔 플레이어(player-just-moved) 관점의 누적 보상이다.
+// 자식의 wins도 같은 관점이므로 부모(같은 플레이어)가 exploit을 최대화하는 것이 맞다.
 Node* SelectChild(Node* node) {
     Node* best = nullptr;
     double bestScore = -INF;
@@ -665,7 +665,7 @@ Node* SelectChild(Node* node) {
 }
 ```
 
-주의할 구현 디테일은 *아직 방문되지 않은 자식($n_i = 0$)* 의 처리다. 식에서 $n_i = 0$ 이면 0으로 나누므로, 보통 미방문 자식을 무한대 점수로 취급해 *모든 자식을 적어도 한 번씩* 방문한 뒤에야 UCB 비교를 시작한다. 또 backpropagation에서 보상을 누적할 때, 노드가 어느 플레이어 차례인지에 따라 승패 관점을 뒤집어야 한다 — 그러지 않으면 상대의 좋은 수를 내 좋은 수로 착각한다.
+주의할 구현 디테일은 *아직 방문되지 않은 자식($n_i = 0$)* 의 처리다. 식에서 $n_i = 0$ 이면 0으로 나누므로, 보통 미방문 자식을 무한대 점수로 취급해 *모든 자식을 적어도 한 번씩* 방문한 뒤에야 UCB 비교를 시작한다. 또 `wins`의 관점을 하나로 고정해야 한다. 이 코드는 `wins`를 *그 노드로 이끈 수를 둔 플레이어*(player-just-moved, 곧 자식 입장의 부모) 관점의 누적 보상으로 정의한다. 그 관점에서 자식 통계는 부모와 같은 플레이어의 보상이므로 `SelectChild`가 exploit을 최대화하는 것이 맞고, backup은 한 경로에서 관점을 한 번씩 뒤집는다 — leaf rollout에서 승자 W를 알았다면 W를 만든 쪽 노드부터 `reward = (mover == W) ? 1 : (무승부 ? 0.5 : 0)`, 그 부모로 올라가며 `reward = 1 - reward`로 누적한다. 자식 `wins`를 자식의 차례 관점으로 저장하면서 부모가 최대를 고르면 상대에게 유리한 수를 고르므로, 저장·backup·selection이 같은 관점을 공유해야 한다.
 
 ### 탐험 항은 왜 하필 그 형태인가 — Hoeffding 신뢰 상계와 UCB1 로그 후회
 
@@ -788,7 +788,7 @@ MCTS가 "유망한 가지에 집중"한다는 말의 구체적 의미를 추적�
 
 한계도 분명하다. *시뮬레이션이 싸야* 한다 — 한 rollout이 비싸면 통계를 쌓을 횟수가 줄어 추정이 거칠어진다. *희소 보상*(긴 게임 끝에야 승패가 갈리는)에서는 무작위 rollout의 분산이 커서 수렴이 느리다. *전술적 함정*(한 수만 틀려도 지는 좁은 외길)은 무작위 rollout이 잘 못 찾는다 — 이 점에서 깊이를 정밀하게 읽는 alpha-beta가 더 강하다.
 
-현대적 해법은 무작위 rollout을 *학습된 정책/가치 신경망* 으로 대체하는 것이다. rollout 대신 가치망이 잎의 값을 직접 추정하고, 정책망이 Selection·Expansion에서 유망한 수에 사전 확률을 부여한다(PUCT). 이것이 바둑·체스·장기를 단일 구조로 정복한 계열의 뼈대이며, MCTS의 통계적 트리 성장과 신경망의 평가를 결합한 형태다. 결국 적대적 탐색의 두 축 — *탐색 구조* 와 *상태 평가* — 가 각각 MCTS와 신경망으로 진화해 다시 만난 셈이다.
+현대적 해법은 무작위 rollout을 *학습된 정책/가치 신경망* 으로 대체하는 것이다. rollout 대신 가치망이 잎의 값을 직접 추정하고, 정책망이 Selection·Expansion에서 유망한 수에 사전 확률을 부여한다(PUCT). 이것이 바둑(AlphaGo Zero), 체스, 일본 장기(쇼기)를 단일 구조로 정복한 계열(AlphaZero)의 뼈대이며, MCTS의 통계적 트리 성장과 신경망의 평가를 결합한 형태다. 결국 적대적 탐색의 두 축 — *탐색 구조* 와 *상태 평가* — 가 각각 MCTS와 신경망으로 진화해 다시 만난 셈이다.
 
 
 ---
@@ -813,5 +813,6 @@ MCTS는 rollout 또는 가치 추정의 통계로 값을 갱신하고, UCT 계�
 - Wassily Hoeffding, "Probability Inequalities for Sums of Bounded Random Variables" (JASA 58, 1963) — 신뢰 반지름의 근거가 되는 집중 부등식.
 - Cameron Browne et al., "A Survey of Monte Carlo Tree Search Methods" (2012) — MCTS 변형 전반의 표준 서베이.
 - Peter Cowling et al., "Information Set Monte Carlo Tree Search" — 불완전 정보에서의 ISMCTS.
-- David Silver et al., "Mastering the game of Go without human knowledge" (2017) — MCTS + 정책/가치망(PUCT) 결합.
+- David Silver et al., "Mastering the game of Go without human knowledge" (2017) — MCTS + 정책/가치망(PUCT) 결합(AlphaGo Zero).
+- David Silver et al., "Mastering Chess and Shogi by Self-Play with a General Reinforcement Learning Algorithm" (arXiv:1712.01815, 2017) — 체스·일본 장기(쇼기)로의 AlphaZero 자기대국 일반화 사례.
 - Chess Programming Wiki (chessprogramming.org) — quiescence·killer·aspiration window·교체 정책의 구현 디테일 모음.

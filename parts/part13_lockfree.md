@@ -80,7 +80,7 @@ bool compare_exchange_strong(T* ptr, T& expected, T desired) {
 }
 ```
 
-두 스레드가 동시에 같은 변수에 CAS를 시도하면, 한 스레드만 성공한다.
+두 스레드가 같은 기대값에서 서로 다른 값으로 CAS를 시도하면, 해당 원자 변수의 수정 순서에서 먼저 선형화된 하나만 성공한다. 여기서 비교는 사용자 `operator==`가 아니라 값 표현의 비교이며, 같은 값을 다시 저장하거나 값이 원래대로 복귀하면 둘 다 성공할 수도 있다.
 
 ```mermaid
 sequenceDiagram
@@ -151,7 +151,8 @@ public:
     // 단, 실전에서는 hazard pointer 등 reclamation 기법 없이는
     // 다른 스레드가 보고 있는 메모리를 해제할 수 없다.
     Node* pop() {
-        Node* old_head = head.load(std::memory_order_relaxed);
+        // 첫 스냅샷에서 old_head->next까지 안전하게 읽으려면 acquire가 필요하다.
+        Node* old_head = head.load(std::memory_order_acquire);
 
         while (old_head &&
                !head.compare_exchange_weak(
@@ -395,6 +396,8 @@ public:
 };
 ```
 
+이 구현도 위 스택과 같은 교육용 골격이다. `dequeue`의 `delete first`는 다른 스레드가 같은 first나 그 next를 읽는 중일 수 있어 Hazard Pointer·Epoch 같은 회수 보호 없이는 use-after-free를 만든다. `new T(value)`로 만든 payload의 소유권과 마지막 dummy 노드의 정리도 생략되어 있으므로, 회수 기법과 RAII·shutdown 정리를 결합하기 전에는 실제 회수 경로로 쓰지 않는다.
+
 enqueue 과정의 흐름은 다음과 같다.
 
 ```text
@@ -461,7 +464,7 @@ pop();  // node 삭제
 node->data;  // 댕글링 포인터
 ```
 
-### Hazard Pointer 전체 구현
+### Hazard Pointer 최소 프로토콜 구현
 
 ```cpp
 class HazardPointerManager {
@@ -504,6 +507,10 @@ public:
         HPGuard(HPRecord& record, size_t slot)
             : rec(&record), index(slot) {}
 
+        // 복사본이 먼저 파괴되면 원본이 사용하는 hazard를 조기에 해제한다.
+        HPGuard(const HPGuard&) = delete;
+        HPGuard& operator=(const HPGuard&) = delete;
+
         template<typename T>
         T* protect(std::atomic<T*>& src) {
             T* ptr;
@@ -522,6 +529,9 @@ public:
 
     template<typename T>
     void retire(T* ptr) {
+        // 함수 템플릿(T)별 TLS이지 manager 인스턴스별 도메인이 아니다.
+        // 한 스레드가 같은 T를 쓰는 manager를 둘 이상 만들면 회수 목록을 공유하므로,
+        // domain+thread record 소유로 바꾸기 전에는 manager당 하나만 사용한다.
         thread_local std::vector<T*> retired_list;
         retired_list.push_back(ptr);
         if (retired_list.size() < 64) return;
@@ -556,7 +566,7 @@ hazard pointer의 핵심은 단순한 release/acquire message passing이 아니�
 
 ### Epoch-Based Reclamation
 
-Hazard Pointer보다 빠른 방법이다.
+배치로 회수하므로 Hazard Pointer보다 처리량이 높은 편이지만, 정지한 스레드가 있으면 회수가 지연되어 메모리 사용량이 늘 수 있다.
 
 ```cpp
 class EpochManager {
@@ -578,6 +588,10 @@ public:
         ThreadRecord& record;
 
     public:
+        // 복사본이 먼저 파괴되면 원본의 active를 조기에 내린다.
+        EpochGuard(const EpochGuard&) = delete;
+        EpochGuard& operator=(const EpochGuard&) = delete;
+
         EpochGuard(EpochManager& m, ThreadRecord& r)
             : manager(m), record(r) {
             for (;;) {
@@ -630,6 +644,8 @@ public:
 
 private:
     std::atomic<uint64_t> global_epoch{0};
+    // 미완성: register/unregister로 채워야 한다. 비어 있으면 try_advance가
+    // active reader를 보지 못하고 epoch를 전진시킨다.
     std::vector<ThreadRecord*> registered_records;
 };
 ```
@@ -868,11 +884,13 @@ step 4: T2 before CAS
 
 ```text
 owner ∈ {none, A, B}
+inCriticalA ∈ {false, true}
+inCriticalB ∈ {false, true}
 requestA ∈ {idle, pending}
 requestB ∈ {idle, pending}
 ```
 
-검증할 안전성은 `owner`가 동시에 A와 B일 수 없다는 것이고, 활성은 pending 요청이 환경 전제 아래 결국 획득하거나 취소된다는 것이다.
+`owner`는 하나의 값만 가지므로 그 자체로는 동시 소유를 표현하지 못한다. 검증할 안전성은 각 작업자의 임계 구역 상태 `inCriticalA`와 `inCriticalB`가 동시에 참일 수 없다는 것이고, 활성은 pending 요청이 환경 전제 아래 결국 획득하거나 취소된다는 것이다.
 
 상태 수는 빠르게 폭발한다. 작은 모델이 실제 프로토콜의 해당 상태 전이를 충실히 보존한다면, 모델에서 찾은 순서 버그는 실제 시스템에서도 재현 가능한 결함 후보가 된다. 반대로 모델이 생략한 상태와 환경 가정은 검사 결과의 범위 밖이다.
 
@@ -881,9 +899,9 @@ requestB ∈ {idle, pending}
 ```text
 A reads owner=none
 B reads owner=none
-A writes owner=A
-B writes owner=B
-assert exclusive_owner violated
+A sets inCriticalA=true
+B sets inCriticalB=true
+assert !(inCriticalA && inCriticalB) violated
 ```
 
 이 trace를 코드의 결정적 scheduler 테스트로 옮기면 모델과 구현 사이 연결이 생긴다.
@@ -909,7 +927,7 @@ Lock-free 자료구조는 CAS 하나로 시작하지만 ABA 문제라는 함정�
 
 Michael-Scott Queue의 도와주기 메커니즘은 lock-free 진행 조건을 만드는 대표적인 방법이다. 중단된 스레드가 소유한 mutex 해제를 기다리는 대신 다른 스레드가 불완전한 pointer 상태를 완결할 수 있다. 다만 이는 모든 스레드의 완료나 시간 상한을 보장하지 않는다.
 
-다만 lock-free는 은탄환이 아니다. 복잡성, 메모리 오버헤드, 디버깅 어려움을 감수할 가치가 있는지 신중히 판단해야 한다. 잘 설계된 mutex가 더 나은 선택일 때도 많다. 실측 없이 lock-free를 선택하지 말 것, ABA 문제는 메모리 재사용에서 발생하며 Hazard Pointer로 해결할 수 있다는 것이 핵심이다.
+다만 lock-free는 은탄환이 아니다. 복잡성, 메모리 오버헤드, 디버깅 어려움을 감수할 가치가 있는지 신중히 판단해야 한다. 잘 설계된 mutex가 더 나은 선택일 때도 많다. 실측 없이 lock-free를 선택하지 말 것, ABA에는 메모리 재사용에서 오는 회수 문제와 값이 A→B→A로 되돌아오는 논리적 재등장이 있으며 Hazard Pointer 같은 회수 기법은 전자를 다루고 후자는 알고리즘의 재삽입 정책으로 다뤄야 한다는 것이 핵심이다.
 
 
 ## 더 읽을거리

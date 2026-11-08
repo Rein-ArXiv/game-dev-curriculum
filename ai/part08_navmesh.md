@@ -377,7 +377,7 @@ for (int nb : poly[cur.poly].neighbors) {
     if (nb < 0 || closed[nb]) continue;
     Vec3 portalMid = PortalMidpoint(cur.poly, nb);     // 공유 변 중점
     float stepCost = Distance(cur.entryPoint, portalMid)
-                     * areaCost[poly[nb].area];        // 영역 가중 (늪=느림 등)
+                     * areaCost[poly[cur.poly].area];  // 현재 폴리곤 내부 구간의 영역 가중
     float g = cur.g + stepCost;
     if (g < gScore[nb]) {
         gScore[nb] = g;
@@ -388,6 +388,10 @@ for (int nb : poly[cur.poly].neighbors) {
 ```
 
 `areaCost`는 영역 타입별 가중치다 — 물·늪·용암을 일반 지면보다 비싸게 두면 A\*가 그런 지형을 우회한다. 이 가중이 1절에서 정의한 polygon `area` 필드가 길찾기에 작용하는 지점이다.
+
+비용의 소속에 주의한다. `cur.entryPoint`에서 portal까지는 *현재 폴리곤 내부*를 걷는 구간이므로 `cur`의 `area` 가중을 곱한다. 늪(가중 10)에서 평지(1)로 나가는 문턱을 예로 들면, 아직 늪 안을 걷는 이 구간에는 늪 가중이 붙어야 한다. 반대로 목표 폴리곤 안에서 마지막으로 걷는 구간(진입 portal에서 `goalPos`까지)은 그 폴리곤의 가중으로, off-mesh link나 시작점이 폴리곤 밖이면 접근 구간도 같은 규약으로 계산한다. 다음 폴리곤의 가중을 현재 구간에 곱하면 지형별 이동거리 비용 설명과 어긋난다.
+
+상태 키도 함께 본다. 위 코드는 `gScore`/`closed`를 폴리곤 ID로만 잡으므로, 같은 폴리곤이라도 어느 portal로 들어왔는지에 따라 달라지는 진입점 의존 비용을 하나의 `g`로 병합한다. 왼쪽 진입 g=1, 오른쪽 진입 g=2인데 출구가 오른쪽 근처라면 오른쪽 경로의 총비용이 더 작을 수 있지만, 폴리곤당 최솟값 하나만 남기면 이를 버린다. 진입점 의존 비용을 보존하려면 상태를 `(polygon, incoming portal)`로 두거나, 폴리곤 중심 같은 *고정 대표점* 사이의 그래프 비용으로 계약을 못 박아야 한다. 전자는 상태 수가 늘고, 후자는 연속 공간 경로가 아니라 대표점 그래프의 최적해라는 점을 분명히 해야 한다. 표준 polygon graph 탐색 결과를 연속 공간 전역 최적으로 부르지 않는다.
 
 ### 휴리스틱
 
@@ -587,7 +591,7 @@ tile cache로 빨라져도 그리드의 셀 토글($O(1)$)보다는 비싸다. �
 | 임시 바리케이드 | 종종 | tile cache obstacle |
 | 다른 에이전트, 군중 | 매 프레임 | 국소 회피 (NavMesh 안 건드림) |
 
-가장 잦은 동적 요소는 *다른 에이전트* 다. 군중이 서로 비키는 것을 NavMesh 재생성으로 처리하면 매 프레임 mesh를 다시 만드는 셈이라 불가능하다. 대신 NavMesh는 정적 환경만 표현하고, 에이전트 간 회피는 그 위에 *국소 회피(local avoidance)* 를 얹어 처리한다 — Detour Crowd의 속도 공간 기반 회피(RVO/ORCA 계열)가 대표적이다. 에이전트는 NavMesh가 준 경로를 따라가되, 매 프레임 주변 에이전트의 속도를 보고 충돌하지 않는 속도로 미세 조정한다. NavMesh는 "어디로 갈 수 있는가"(정적 가능 공간)를, 국소 회피는 "지금 누구와 부딪히지 않는가"(동적 충돌)를 맡는 분담이다.
+가장 잦은 동적 요소는 *다른 에이전트* 다. 군중이 서로 비키는 것을 NavMesh 재생성으로 처리하면 매 프레임 mesh를 다시 만드는 셈이라 불가능하다. 대신 NavMesh는 정적 환경만 표현하고, 에이전트 간 회피는 그 위에 *국소 회피(local avoidance)* 를 얹어 처리한다 — Detour Crowd의 속도 샘플링 기반 회피가 대표적이다. Recast/Detour의 `dtObstacleAvoidanceQuery`는 `sampleVelocityGrid`/`sampleVelocityAdaptive`로 후보 속도를 샘플링해 비용을 비교하는 구현이며, RVO2의 ORCA 반평면 선형계획과는 다른 구현이다. ORCA는 이론 비교용으로만 참조한다. 에이전트는 NavMesh가 준 경로를 따라가되, 매 프레임 주변 에이전트의 속도를 보고 충돌하지 않는 속도로 미세 조정한다. NavMesh는 "어디로 갈 수 있는가"(정적 가능 공간)를, 국소 회피는 "지금 누구와 부딪히지 않는가"(동적 충돌)를 맡는 분담이다.
 
 ### Off-Mesh Link
 
@@ -720,5 +724,5 @@ Recast 파이프라인은 임의의 3D 메시를 복셀로 rasterize해 문제�
 - Douglas & Peucker, "Algorithms for the reduction of the number of points required to represent a digitized line" (1973) — 윤곽 단순화의 원전.
 - Steve Rabin (ed.), *Game AI Pro* 1권, "Tactical Pathfinding on a NavMesh" — NavMesh 위 전술 길찾기와 영역 비용.
 - Elijah Emerson, "Crowd Pathfinding and Steering Using Flow Field Tiles" (*Game AI Pro* 1권) — 포털로 연결한 격자 섹터 위의 flow field 타일로 군중 길찾기·조향을 푼 사례(NavMesh가 아닌 격자 표현과의 대조).
-- Jur van den Berg et al., "Reciprocal n-body Collision Avoidance" (ORCA, 2011) — Detour Crowd가 쓰는 속도 공간 국소 회피의 이론.
+- Jur van den Berg et al., "Reciprocal n-body Collision Avoidance" (ORCA, 2011) — 속도 공간 국소 회피의 *이론 비교*용 참고문헌. Recast/Detour의 실제 구현은 half-plane LP가 아니라 `sampleVelocityGrid`/`sampleVelocityAdaptive` 샘플링이다.
 - Recast 기반 GDC 발표들(Halo·Killzone 등) — 상용 NavMesh 운용 사례와 파이프라인 튜닝.

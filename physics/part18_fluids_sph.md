@@ -200,13 +200,16 @@ $$
 \rho_i = \sum_j m_j W_{poly6}(\vec{r}_i - \vec{r}_j, h)
 $$
 
-자신도 포함 ($j = i$). 입자가 많이 모여 있으면 *큰 $\rho$*.
+자기 자신도 합의 한 항이다($j = i$). 입자가 많이 모여 있으면 *큰 $\rho$*. 이웃 목록이 self를 제외하는 API라면 $m_i W(0)$ 을 명시적으로 더하고, self를 포함하는 API라면 목록에 self가 정확히 한 번만 들어오도록 규약을 고정한다. 힘 단계에서는 $r=0$ 인 쌍을 건너뛴다.
 
 ```cpp
 void ComputeDensity(std::vector<Particle>& ps, float h, float m) {
-    for (auto& pi : ps) {
-        float density = 0.0f;
+    for (size_t i = 0; i < ps.size(); ++i) {
+        Particle& pi = ps[i];
+        // 이웃 목록 규약: j != i. 자기 기여는 닫힌 형태 W(0) 로 명시적으로 더한다.
+        float density = m * W_poly6(0.0f, h);
         for (int j : pi.neighbors) {
+            if ((size_t)j == i) continue;   // self를 포함하는 목록과도 호환
             vec3 r = pi.position - ps[j].position;
             float r2 = LengthSq(r);
             if (r2 < h * h) density += m * W_poly6(r2, h);
@@ -440,6 +443,8 @@ $$
 + \vec{g}
 $$
 
+한 step의 순서를 고정한다: grid build → density → pressure → $\vec{a}_i = \vec{g}$ 로 누적기 초기화 → pressure/viscosity/tension acceleration 누적 → integrate → boundary. `ComputePressureAcceleration` 과 `ComputeViscosityAcceleration` 는 `pi.acceleration` 에 `+=` 하므로, 각 step 시작에서 누적기를 명시적으로 초기화해야 이전 step 값이 새지 않는다. 단위는 압력 $p$ [Pa], 선형 EOS의 $k$ [m²/s²] (즉 $c_s^2$), 동점성 $\nu = \mu/\rho$ [m²/s] 와 점성 계수 $\mu$ [Pa·s] 로 구분한다. 표면장력 체적 힘 밀도 $\vec{f}^{tension}$ 을 가속도로 쓰려면 밀도 $\rho_i$ 로 나눈다.
+
 pressure / viscosity 식에서 이미 density 항을 반영했으므로 적분 단계에서 다시 density 로 나누지 않는다.
 
 semi-implicit Euler 적분:
@@ -458,7 +463,7 @@ SPH 가 *명시적 적분* → *dt 제약*. 크면 *발산*.
 
 ### 5.1 Acoustic CFL 조건
 
-Courant-Friedrichs-Lewy 조건. *정보가 한 dt 에 한 셀 넘어가면 안 됨*.
+Courant-Friedrichs-Lewy 조건. *정보가 한 dt 에 커널 지지 영역을 넘어가면 안 됨*. 여기서 $h$ 는 kernel 의 smoothing length 또는 support radius 이며, 이웃 검색용 hash 셀 크기는 구현 선택이라 CFL 의 $h$ 와 같은 값으로 취급하지 않는다. 힘·점성에 따른 추가 dt 제한은 5.3에서 다룬다.
 
 $$
 \Delta t \le C \frac{h}{|\vec{v}_{max}| + c_s}
@@ -499,7 +504,9 @@ $\nu$ 는 동점성 계수다. 표면장력, 경계 충돌, 특정 점성 이산
 
 - 너무 큰 dt: 발산. NaN. 시뮬 폭발.
 - 적정 dt: 안정. 약압축 OK.
-- 너무 작은 dt: 비용 폭증. 비압축 정확하지만 frame budget 초과.
+- 너무 작은 dt: 비용 폭증. 시간 이산화 오차는 줄지만 EOS가 허용하는 유한 압축성은 남고 frame budget을 초과할 수 있다.
+
+작은 dt는 시간 이산화 오차와 안정성만 개선한다. 고정 EOS·smoothing·이산화에서 오는 유한한 압축성은 모델 오차이므로, dt를 줄이는 것만으로 비압축이 되지는 않는다. 비압축성을 높이려면 허용 밀도 변화에 맞춰 음속/강성을 키우거나 IISPH·PBF 같은 비압축 solver를 선택해야 한다. 또한 공간 이산화 오차(kernel·입자 간격·이웃 결손)는 dt와 별개의 축이다.
 
 절대 시간 간격은 단위계, 입자 간격, 인공 음속과 점성에 따라 달라진다. 특정 초 단위 범위를 게임 전체의 표준으로 사용할 수 없다. 한 프레임의 sub-step 수는 위 제한식과 프레임 예산을 함께 만족하도록 정한다.
 
@@ -552,10 +559,20 @@ Solenthaler 2009. *밀도 오차 예측 + 보정 반복*.
 3. 보정 압력 계산:
 
 $$
-\Delta p = -\frac{\rho^* - \rho_0}{\beta}
+\Delta p_i = -\frac{\rho_i^* - \rho_0}{\beta_i},
+\qquad
+\beta_i = \frac{\partial \rho_i^*}{\partial p}
 $$
 
-$\beta$ 는 압력 변화가 예측 밀도에 미치는 영향을 근사한 계수다. 균일한 입자 배치, 고정 질량·시간 간격·kernel 을 가정한 구현에서는 대표값을 미리 계산할 수 있다. 불규칙한 이웃 분포, 경계, 적응적 해상도에서는 하나의 전역 상수가 같은 보정 정확도를 보장하지 않으므로 국소 계수나 보수적인 기준값이 필요하다.
+압력 변화에 대한 예측 밀도의 1차 응답은 다음 gradient 합으로 쓸 수 있다.
+
+$$
+\rho_i(t+\Delta t) \approx \rho_i^* + \Delta t^2 \sum_j m_j \nabla W_{ij}\cdot(\Delta \vec{a}_i^{p} - \Delta \vec{a}_j^{p}),
+\qquad
+\Delta \vec{a}_i^{p} = -\sum_j m_j \left(\frac{\Delta p_i}{\rho_0^2} + \frac{\Delta p_j}{\rho_0^2}\right)\nabla W_{ij}
+$$
+
+원 논문은 양수 prefactor $\beta = 2\Delta t^2 m^2/\rho_0^2$ 와 kernel gradient 합을 묶은 별도 계수를 쓰므로, 문서의 국소 민감도 $\beta_i = \partial\rho_i^*/\partial p$ 와 기호 정의가 다르다. 원문의 양수 $\beta$ 를 그대로 이 식의 분모처럼 쓰면 보정 부호가 뒤집힌다. 균일한 입자 배치, 고정 질량·시간 간격·kernel 에서는 대표값을 미리 계산할 수 있지만, 불규칙한 이웃 분포·경계·적응적 해상도에서는 전역 상수가 같은 보정 정확도를 보장하지 않는다. 분모가 0에 가까워질 때의 처리, 반복 간 압력 누적, 음압 정책과 수렴 종료 기준을 함께 명시한다.
 
 4. 보정 압력 → 보정 force → 보정 위치.
 5. 수렴 검사 → 미수렴 시 반복.
@@ -611,6 +628,7 @@ SPH의 입자별·이웃별 연산은 GPU 병렬화에 적합하다. 그러나 g
 ```glsl
 // CPU-side dispatch graph의 의사 코드다.
 DispatchClearGrid();
+MemoryBarrier();      // clear 완료·가시성 보장 후에만 atomic build
 DispatchBuildGrid();
 MemoryBarrier();
 
@@ -625,6 +643,8 @@ MemoryBarrier();
 
 DispatchIntegrate();
 ```
+
+단계 그래프의 의존성은 clear→build, build→density, density→pressure/force, force→integrate 순서다. 특히 clear와 build는 같은 count/buffer를 쓰므로 그 사이에 완료·가시성 보장이 필요하다. `DispatchClearGrid`가 내부에서 이를 처리하는 API라면 그 계약을 코드에 명시한다.
 
 반복형 압력 솔버는 압력 계산과 보정 dispatch를 수렴할 때까지 반복한다. barrier 종류, 읽기/쓰기 buffer의 ping-pong 여부, 원자 연산 또는 sort/prefix-sum 방식은 사용하는 그래픽 API의 메모리 모델에 맞춰야 한다. 처리 가능한 입자 수는 이웃 수, 반복 횟수, 해상도, GPU와 프레임 예산에 따라 측정한다.
 
@@ -733,6 +753,8 @@ for (auto& p : particles) {
 - *복잡한 자유 표면*: 비용 매우 큼, *드문 응용*.
 
 시각만 필요한 곳에 shader나 입자를 사용하고, 플레이어 행동으로 상태가 달라져야 하는 범위에만 유체 solver를 배치하면 계산 영역과 검증 범위를 줄일 수 있다.
+
+여기서 다룬 경계 처리는 입자 위치를 경계 밖으로 밀어내는 수준이며, 이는 장난감·시각용 SPH의 범위다. 벽 근처 밀도 결손과 경계 압력 정확도까지 목표로 하면 ghost/boundary particle, 경계 밀도 보정 또는 경계 압력 모델을 선택하고, 정수압·정지 유체 장면에서 밀도 프로파일과 압력을 검증해야 한다. 어떤 경계 방법을 쓰는지와 검증 장면을 데이터 계약에 명시한다.
 
 
 ---

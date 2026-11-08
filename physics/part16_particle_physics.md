@@ -75,7 +75,7 @@ struct ParticleSystem {
 `px[i] += vx[i] * dt` 의 N 회 반복. SIMD 가 *4 또는 8 개를 한 번에*.
 
 ```cpp
-// SoA + AVX2 (8 float 동시)
+// SoA + AVX + FMA (8 float 동시)
 for (int i = 0; i + 8 <= N; i += 8) {   // 나머지 N % 8 개는 스칼라 루프로 처리
     __m256 px_vec = _mm256_loadu_ps(&px[i]);
     __m256 vx_vec = _mm256_loadu_ps(&vx[i]);
@@ -84,7 +84,9 @@ for (int i = 0; i + 8 <= N; i += 8) {   // 나머지 N % 8 개는 스칼라 루�
 }
 ```
 
-8 배 속도 향상 *이론*. 실제로는 *메모리 대역폭* 이 한계라 *3~5 배* 일반.
+`_mm256_fmadd_ps` 는 AVX2 가 아니라 *AVX + FMA* 를 요구한다. AVX2 타깃만 켜면 FMA intrinsic 이 컴파일되지 않을 수 있으므로 두 기능을 모두 확인하고 `-mfma` 같은 빌드 옵션을 함께 준다. 또는 FMA 대신 곱셈과 덧셈을 쓴다.
+
+8 배 속도 향상 *이론*. 실제로는 *메모리 대역폭* 이 한계라 *3~5 배* 는 특정 측정 환경의 예시값이다. 기준 scalar/vectorized 빌드와 데이터 크기를 함께 적어야 비교가 된다.
 
 ### 1.3 AoS 의 SIMD 가능성
 
@@ -103,7 +105,7 @@ SoA 가 *SIMD + 캐시 효율* 둘 다 우위.
 
 ### 1.5 AoSoA (절충)
 
-큰 그룹의 AoS + 그룹 안 SoA. 캐시 라인 한 개에 *여러 파티클 + SIMD 친화* 둘 다.
+큰 그룹의 AoS + 그룹 안 SoA. 필드별로는 SIMD load 에 맞고, 파티클 여러 개를 함께 배치해 캐시 지역성을 노린다.
 
 ```cpp
 struct ParticleBlock {
@@ -114,7 +116,7 @@ struct ParticleBlock {
 std::vector<ParticleBlock> blocks;        // 한 block = 8 파티클
 ```
 
-SIMD 한 명령이 *한 block 안 8 파티클* 처리. 캐시 라인 한 개 안. *최적*.
+SIMD 한 명령이 *한 필드 배열* 의 8 파티클 (float 8개 = 32 byte) 을 처리한다. 필드 배열 하나는 32 byte load 한 번이고, 7개 필드 전체 `ParticleBlock` 은 이 환경에서 224 byte 로 캐시 라인 한 개 (64 byte) 보다 크다. 8개씩 묶었다는 사실만으로 base alignment 32/64 byte 가 보장되지는 않으므로, 실제로 쓰는 load intrinsic (`loadu` vs 정렬 `load`) 과 정렬 계약을 분리해 적는다.
 
 복잡함이 단점 — 인덱싱이 *블록 index + offset*.
 
@@ -135,11 +137,11 @@ $$
 \vec{x}_{n+1} = 2 \vec{x}_n - \vec{x}_{n-1} + \vec{a}_n \Delta t^2
 $$
 
-속도 없음. 메모리 절약 + 코드 단순.
+속도 없음. 상태는 현재 위치 + 이전 위치다. 메모리량은 저장 필드 전체로 비교해야 하며, 이것은 현재 위치 + 속도를 저장하는 형태와 vec3 두 개로 같은 경우가 많다. Verlet 의 장점은 *위치 제약과 결합하기 편한 상태 표현* 이다.
 
 ### 2.2 분기 없음
 
-가속도 $\vec{a}$ 가 *외력 / 질량* — 외력이 *위치만의 함수* 면 분기 없는 단순 곱셈. semi-implicit Euler 처럼 *순서 의존성* 도 없음 — 매 입자가 *독립*.
+가속도 $\vec{a}$ 가 *외력 / 질량*. 외력이 *위치만의 함수* 이고 코드가 그 분기를 피하면 단순 곱셈이 된다. semi-implicit Euler 처럼 같은 입자 안의 갱신 순서 의존성은 없다. 다만 스프링 힘은 이웃 입자의 위치를 읽으므로 입자들이 물리적으로 독립인 것은 아니며, SIMD 병렬화는 SoA 배치·별칭 회피·읽기 snapshot·상호작용 단계 분리로 성립한다.
 
 ```cpp
 // SoA Verlet step — 정렬·별칭·루프 의존성을 관리하면 벡터화하기 좋은 형태
@@ -158,7 +160,7 @@ for (int i = 0; i < N; ++i) {
 }
 ```
 
-분기 0, SIMD 친화, GPU 친화.
+외력 계산을 분기 없이 두면 SIMD 친화, GPU 친화.
 
 ### 2.3 외력의 함수 가정
 
@@ -210,10 +212,11 @@ PBD 의 *project 단계* 가 *제약별 순차 처리* — SIMD 직접 적용 �
 ```mermaid
 flowchart LR
     Constraints[모든 제약] --> Color[그래프 색칠]
-    Color --> Group1[색1: 독립 제약 묶음]
-    Color --> Group2[색2: 독립 제약 묶음]
-    Group1 -->|SIMD/GPU 병렬| Step1[묶음 동시 처리]
-    Group2 -->|SIMD/GPU 병렬| Step2[묶음 동시 처리]
+    Color --> Group1[색1: 서로 충돌하지 않는 제약]
+    Color --> Group2[색2: 서로 충돌하지 않는 제약]
+    Group1 -->|같은 색 내 SIMD/GPU 병렬| Step1[묶음 동시 처리]
+    Group2 -->|같은 색 내 SIMD/GPU 병렬| Step2[묶음 동시 처리]
+    CrossColor[색 사이 동시 실행 보장 아님] -.-> Color
 ```
 
 각 색의 제약끼리는 *공유 입자 없음* — 동시 수정 안전.
@@ -468,6 +471,8 @@ void BuildCloth(Cloth& c, int rows, int cols, float spacing) {
 }
 ```
 
+`BuildCloth` 는 기존 `constraints` 를 비우지 않는다. 새 객체에서 한 번만 호출하는 *fresh-only* 생성 함수라면 문제없다. 같은 객체에 다시 호출하면 이전 링크가 남으므로, 재호출을 허용하려면 `particles` 와 `constraints` 를 함께 초기화한다. 재구성 시 입자 인덱스를 참조하던 외부 handle 은 무효가 된다.
+
 ### 5.3 시뮬레이션
 
 PBD 루프 — 거리 제약 project + Verlet 적분.
@@ -602,11 +607,15 @@ void ParticleParticleCollision(Particle& a, Particle& b, float radius) {
 
 PBD project 의 추가 단계.
 
+이 구-구 검사는 *point-particle 근사* 다. 삼각형 내부·변 사이를 지나는 관통은 잡지 못한다.
+
 ### 6.5 Continuous self-collision
 
 빠른 cloth (큰 dt 또는 큰 속도) 에서 *입자가 한 step 에 다른 층 통과*. 정적 검사 못 잡음.
 
 해결: *continuous collision* — 입자의 *현재 ~ predicted* 경로를 segment 로 보고 *segment-segment 거리* 검사.
+
+위 6.4절의 구-구 검사와 경로 선분 검사는 *point-particle 근사* 다. 입자 구가 겹치는지만 보면 삼각형 내부·변 사이를 지나는 관통을 놓치고, 두 이동 선분 사이 최단거리는 서로 다른 시간의 점을 비교하므로 동시각 충돌 여부와 같지 않다. cloth 표면 자체의 CCD 가 필요하면 vertex-face / edge-edge CCD 나 보수적 두께·메시 해상도 조건을 쓴다. 입자 간 CCD 를 쓰려면 상대 운동 $\vec{r}(t)$ 의 *동일 시간* 최소거리 또는 최초근을 푼다.
 
 비용 더 큼. 대부분 게임이 *small dt + 정적 검사* 로 충분.
 
@@ -640,7 +649,7 @@ void HandleParticleVsEnvironment(Particle& p, const World& world) {
 }
 ```
 
-입자 위치를 *직접 보정* + 속도 *마찰*.
+입자 위치를 *직접 보정* + 속도 *마찰*. 단 속도 수준 마찰 함수는 *최종 velocity reconstruction 뒤* 에 호출해야 유효하다. `StepCloth` 처럼 `v = (predicted - position) / dt` 로 속도를 다시 만드는 단계보다 앞에서 호출하면 재구성이 마찰값을 덮어쓴다. `Step` 의 순서는 위치 projection → 속도 재구성 → 속도 수준 마찰/감쇠다. 위치 수준 마찰을 택하면 위치 correction 안에서 처리하고 이중 적용을 막는다.
 
 ### 7.2 SDF 환경
 
@@ -658,9 +667,9 @@ SDF sampling은 형상별 분기를 줄일 수 있지만 위 코드에도 접촉
 
 ### 7.3 환경 → 입자
 
-환경 강체가 *입자 시뮬에 영향* 안 받음 (one-way). 차량이 *지나가도 입자 시뮬에 안 흔들리는* 자연.
+현재 예제는 *rigid → particle 단방향* 이다. 강체를 충돌 경계로 읽어 입자를 밀지만, 입자는 강체에 반작용을 주지 않는다. 차량이 *지나가도 입자 시뮬이 그 차량의 운동을 바꾸지 않는* 구성이다.
 
-one-way coupling은 시각 입자가 권위 강체에 영향을 주지 않게 만드는 비용·소유권 선택이다. 물리적으로 자연스러운 것은 양방향 운동량 전달이지만, 이를 쓰려면 입자 contact impulse를 강체별로 안정하게 누적하고 질량비와 동기화를 처리해야 한다.
+one-way coupling은 시각 입자가 권위 강체에 영향을 주지 않게 만드는 비용·소유권 선택이다. 물리적으로 자연스러운 것은 양방향 운동량 전달이지만, 이를 쓰려면 입자 contact impulse를 강체별로 안정하게 누적하고 질량비와 동기화를 처리해야 한다. 그 경우 별도 two-way 모델과 운동량 반작용을 설명해야 한다.
 
 ### 7.4 약결합 (loose coupling)
 

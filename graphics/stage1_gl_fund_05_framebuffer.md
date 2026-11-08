@@ -125,7 +125,7 @@ glGetIntegerv(GL_MAX_DRAW_BUFFERS, &maxDrawBuf);
 
 ### 컬러 첨부 슬롯의 의미
 
-`GL_COLOR_ATTACHMENT0`은 *0번 슬롯* 일 뿐 어떤 색을 의미하지 않는다. 셰이더의 `layout(location = N) out vec4...`가 N번 슬롯의 첨부에 출력된다. 슬롯과 location이 1:1 매핑된다.
+`GL_COLOR_ATTACHMENT0`은 *0번 슬롯* 일 뿐 어떤 색을 의미하지 않는다. 셰이더의 `layout(location = N) out vec4...`는 `glDrawBuffers`로 지정한 `bufs[N]`이 가리키는 첨부로 출력된다. 데스크톱 GL에서는 location과 첨부 번호가 1:1일 필요가 없다 — 예를 들어 `bufs[0] = GL_COLOR_ATTACHMENT2`로 두면 location 0의 출력이 첨부 2로 간다. 반면 OpenGL ES 3.0은 `bufs[i]`에 `GL_COLOR_ATTACHMENTi` 또는 `GL_NONE`만 허용하므로 그런 재배치가 불가능하다(위반 시 `GL_INVALID_OPERATION`).
 
 ```glsl
 layout(location = 0) out vec4 oAlbedo;     // GL_COLOR_ATTACHMENT0
@@ -341,7 +341,7 @@ glDrawBuffers(3, drawBuffers);
 
 `glDrawBuffers`는 FBO의 *상태로 기록* 된다. 같은 FBO를 다시 바인딩하면 그 설정이 유지된다.
 
-배열의 *인덱스* 가 셰이더 출력 `location`에 대응한다. 사용자 FBO가 바인딩된 상태에서는 `bufs[i]`에 `GL_COLOR_ATTACHMENTi` 또는 `GL_NONE`만 지정할 수 있다. 예를 들어 location 2의 출력은 `bufs[2] = GL_COLOR_ATTACHMENT2`일 때 attachment 2로 기록된다. location 0을 attachment 2로 보내는 식의 임의 재배치는 허용되지 않으며, 시도하면 `GL_INVALID_OPERATION`이 발생한다. 출력 location을 쓰지 않으려면 해당 자리에 `GL_NONE`을 넣는다.
+배열의 *인덱스* `i`가 셰이더 출력 `location i`에 대응하고, `bufs[i]`가 그 출력이 기록될 첨부를 지정한다. 데스크톱 GL에서는 `bufs[i]`에 임의의 컬러 첨부(예: `bufs[0] = GL_COLOR_ATTACHMENT2`)를 둘 수 있어 location과 첨부 번호를 재배치할 수 있다. 다만 같은 첨부를 여러 슬롯에 중복 지정하면 안 된다. OpenGL ES 3.0은 `bufs[i]`에 `GL_COLOR_ATTACHMENTi` 또는 `GL_NONE`만 허용하므로 임의 재배치를 시도하면 `GL_INVALID_OPERATION`이 발생한다. 출력 location을 쓰지 않으려면 해당 자리에 `GL_NONE`을 넣는다.
 
 ```cpp
 GLenum bufs[] = { GL_COLOR_ATTACHMENT0, GL_NONE, GL_COLOR_ATTACHMENT2 };
@@ -576,7 +576,7 @@ blit resolve는 컬러를 평균하지만, *깊이는 평균이 의미 없다*. 
 
 ### 모바일 GPU의 Lazy Resolve
 
-타일 기반 모바일 GPU(Mali, Adreno, PowerVR)는 *MSAA 결과를 메모리에 쓰지 않고 타일 안에서 즉시 resolve* 하는 최적화를 한다. 이 경우 MSAA 컬러 첨부는 *타일 메모리(on-chip)에만 존재* 하고 시스템 메모리 사용량이 크게 줄어든다. OpenGL ES의 `glInvalidateFramebuffer`로 *MSAA 첨부 보존이 필요 없음* 을 알리면 이 최적화가 켜진다. 데스크톱에서도 `glInvalidateFramebuffer`(4.3+)로 더 이상 안 쓸 깊이 첨부를 무효화하면, 드라이버가 그 내용을 메모리에 라이트백하지 않아 대역폭을 아낀다.
+타일 기반 모바일 GPU(Mali, Adreno, PowerVR)는 *MSAA 결과를 메모리에 쓰지 않고 타일 안에서 즉시 resolve* 하는 최적화를 한다. 이 경우 MSAA 컬러 첨부는 *타일 메모리(on-chip)에만 존재* 하고 시스템 메모리 사용량이 크게 줄어든다. 다만 `glInvalidateFramebuffer`는 첨부 내용의 보존이 필요 없음을 알리는 힌트일 뿐, 논리적 resolve 명령 자체를 대신하지 않는다. 최종 결과를 후속 패스나 화면에서 읽으려면 앞에서 설명한 `glBlitFramebuffer`(또는 플랫폼 renderpass의 resolve attachment, multisampled-render-to-texture 확장 경로)로 명시적으로 resolve해야 한다 — 타일 메모리 최적화와 논리적 resolve 의무는 별개다. 데스크톱에서도 `glInvalidateFramebuffer`(4.3+)로 더 이상 안 쓸 깊이 첨부를 무효화하면, 드라이버가 그 내용을 메모리에 라이트백하지 않아 대역폭을 아낀다.
 
 ## 9. 통합 예제: HDR 메인 + 블룸 후처리 FBO
 
@@ -590,6 +590,7 @@ flowchart LR
     Bright --> Blur1[Horizontal Blur]
     Blur1 --> Blur2[Vertical Blur]
     Blur2 --> Combine[Combine Pass<br/>HDR + Bloom]
+    Main --> Combine
     Combine --> Tone[Tone Map<br/>화면 출력]
 ```
 

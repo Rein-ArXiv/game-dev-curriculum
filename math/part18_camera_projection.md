@@ -263,7 +263,7 @@ $$
 
 ### 3.4 깊이는 여전히 의미
 
-직교 투영에서도 *Z 매핑* 있음. *Depth buffer 는 같이 동작*. 차이: *Z 분포가 선형* ($1/z$ 아님). near/far 사이가 *균등하게 분포* — 정밀도가 *모든 깊이에 균등*.
+직교 투영에서도 *Z 매핑* 있음. *Depth buffer 는 같이 동작*. 차이: NDC z 로의 *사상 자체가 선형* ($1/z$ 아님) 이라 near/far 사이가 균등하게 매핑된다. 다만 *저장 양자화* 는 별개다 — D24_UNORM 처럼 고정소수점이면 간격이 균일하지만, D32_FLOAT 저장이면 binade 마다 절대 간격이 달라져 affine 사상 위에서도 world 간격이 모든 깊이에 균등하지는 않다. "정밀도가 모든 깊이에 균등" 은 *UNORM 저장* 일 때의 결론이다.
 
 ### 3.5 원근 + 직교 혼용
 
@@ -442,13 +442,13 @@ near 를 *10x 줄이면* 정밀도가 *멀리에서 10x 떨어진다*. 더 정�
 
 ### 5.6 Depth Bias (Polygon Offset)
 
-Z-fighting 임시 처방: *한 표면을 약간 앞으로* (depth bias).
+Z-fighting 임시 처방: *한 표면의 depth 값을 일정량 밀어* 우선순위를 준다.
 
 ```glsl
-glPolygonOffset(1.0f, 1.0f);  // 약간 앞으로
+glPolygonOffset(1.0f, 1.0f);  // depth 를 증가시켜 뒤로 민다
 ```
 
-그림자 맵의 *self-shadowing* 방지에 표준. 하지만 *근본 해결 아님* — *near 조정 + reverse-Z* 가 정공법.
+OpenGL·Direct3D 의 표준 depth 규약과 `GL_LESS` 비교에서는 *양의 offset 이 depth 값을 키워 표면을 카메라에서 멀어지는 쪽 (뒤)* 으로 민다 — 그림자 맵에서 acne 를 줄이는 방향이다. reverse-Z + `GL_GREATER` 처럼 깊이 비교 규약이 반대면 같은 양의 offset 이 *앞으로 미는* 것처럼 작용하므로, offset 의 부호는 *depth 부호와 깊이 비교 함수* 를 함께 보고 정한다. 어느 쪽이든 그림자 맵의 *self-shadowing* 방지에 표준이지만 *근본 해결 아님* — *near 조정 + reverse-Z* 가 정공법.
 
 ## 6. Reverse-Z
 
@@ -515,18 +515,20 @@ mat4 PerspectiveReverseZ(float fovY, float aspect, float n, float f) {
 
 ### 6.5 정밀도 개선 측정
 
-특정 거리의 world-space 해상도는 depth 값을 한 ULP 움직인 뒤 projection의 역함수로 되돌려 계산한다.
+특정 거리의 world-space 해상도는 depth 값을 *한 ULP 움직인 뒤* projection의 역함수로 되돌려 계산한다. float depth 에서는 `nextafter` 의 방향을 고정하지 말고 *양쪽 representable 이웃* 을 각각 unproject 해 원래 viewZ 와의 차이 중 작은 쪽을 쓴다 — `nextafter(d0, 1.0f)` 는 `d0 = 1` 에서 전혀 움직이지 않으므로 방향을 고정하면 0 이 나온다.
 
 ```cpp
+// float depth: d0 양쪽 representable 이웃까지 unproject 한 거리 변화의 최소값.
 float DepthResolutionAt(float viewZ, const Projection& p) {
-    float d0 = ProjectDepth(viewZ, p);
-    float d1 = std::nextafter(d0, 1.0f);
-    float z1 = UnprojectDepth(d1, p);
-    return std::fabs(z1 - viewZ);
+    float d0    = ProjectDepth(viewZ, p);
+    float dUp   = std::nextafter(d0, +INFINITY);
+    float dDown = std::nextafter(d0, -INFINITY);
+    return std::min(std::fabs(UnprojectDepth(dUp, p)   - viewZ),
+                    std::fabs(UnprojectDepth(dDown, p) - viewZ));
 }
 ```
 
-표준 Z와 reverse-Z를 비교할 때는 같은 near/far, `D32_FLOAT` 또는 `D24_UNORM` 같은 동일 format, 같은 viewport mapping을 사용한다. reverse-Z의 큰 이득은 float depth에서 두드러지며, 고정소수점 UNORM depth에서는 값을 뒤집는 것만으로 quantization 간격이 달라지지 않는다.
+표준 Z와 reverse-Z를 비교할 때는 같은 near/far, `D32_FLOAT` 또는 `D24_UNORM` 같은 동일 format, 같은 viewport mapping을 사용한다. reverse-Z의 큰 이득은 float depth에서 두드러지며, 고정소수점 UNORM depth에서는 값을 뒤집는 것만으로 quantization 간격이 달라지지 않는다. UNORM 의 해상도는 *원래 값의 unproject 오차* 가 아니라 양자화 간격 $1/(2^b - 1)$ (b = bit 수, 예: D24 면 $1/(2^{24}-1)$) 자체이므로, 이것도 unproject 로 world 간격으로 환산해 같은 방식으로 비교한다.
 
 ### 6.6 도입 계약
 
@@ -654,43 +656,53 @@ struct Plane {              // n·p = d 관례. d = 원점에서 평면까지의
 enum class ClipDepth { MinusOneToOne, ZeroToOne };
 
 // v = (A, B, C, D). frustum 안쪽이 Ax + By + Cz + D >= 0 인 일반형.
-static Plane MakePlane(vec4 v) {
-    float len = length(vec3(v));
-    Plane p;
-    p.normal = vec3(v) / len;
-    p.d      = -v.w / len;      // 일반형 D → Hessian d 는 부호 반전
-    return p;
+// 법선 (A, B, C) 이 0 이면 평면이 아니다 — 비활성/tautological 반공간으로
+// 표시하고 정규화하지 않는다. 무한 far 원근의 far 반공간이 이렇게 퇴화한다.
+static bool MakePlane(vec4 v, Plane& p) {
+    vec3 n = vec3(v);
+    float len = length(n);
+    if (!(len > 0.0f)) return false;    // 정규화하면 NaN/Inf
+    p.normal = n / len;
+    p.d      = -v.w / len;              // 일반형 D → Hessian d 는 부호 반전
+    return true;
 }
 
-void ExtractFrustumPlanes(mat4 viewProj, ClipDepth depth, Plane planes[6]) {
+// 유효 평면 개수를 반환한다. 무한 far 등으로 비활성 반공간이 있으면 6 미만.
+int ExtractFrustumPlanes(mat4 viewProj, ClipDepth depth, Plane planes[6]) {
     // 4.5절과 같은 [행][열] 인덱싱. 열 우선 라이브러리 (GLM 등) 면 m[0][i] … m[3][i] 로 첨자를 뒤집는다
     auto row = [&](int i) {
         return vec4(viewProj[i][0], viewProj[i][1], viewProj[i][2], viewProj[i][3]);
     };
     vec4 r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
 
-    planes[0] = MakePlane(r3 + r0);  // Left
-    planes[1] = MakePlane(r3 - r0);  // Right
-    planes[2] = MakePlane(r3 + r1);  // Bottom
-    planes[3] = MakePlane(r3 - r1);  // Top
-    planes[4] = MakePlane(depth == ClipDepth::MinusOneToOne ? r3 + r2 : r2);
-    planes[5] = MakePlane(r3 - r2);
+    vec4 cand[6] = {
+        r3 + r0,                                            // Left
+        r3 - r0,                                            // Right
+        r3 + r1,                                            // Bottom
+        r3 - r1,                                            // Top
+        depth == ClipDepth::MinusOneToOne ? r3 + r2 : r2,   // Near (reverse-Z 는 far)
+        r3 - r2                                             // Far (reverse-Z 는 near)
+    };
+    int count = 0;
+    for (int i = 0; i < 6; ++i)
+        if (MakePlane(cand[i], planes[count])) ++count;
     // reverse-Z 면 [4]와 [5]의 near/far 이름만 서로 바뀐다.
     // 여섯 반공간의 교집합은 같으므로 컬링 결과는 달라지지 않는다.
+    return count;
 }
 ```
 
-*행렬 한 번 계산* 으로 *6 평면 동시 추출*. 매 프레임 카메라가 변하면 다시. 수식의 $\text{row}_1 \ldots \text{row}_4$ 가 코드의 `r0 … r3` 다 — 1-기반과 0-기반 표기만 다르다.
+*행렬 한 번 계산* 으로 *최대 6 평면 동시 추출*. 매 프레임 카메라가 변하면 다시. 수식의 $\text{row}_1 \ldots \text{row}_4$ 가 코드의 `r0 … r3` 다 — 1-기반과 0-기반 표기만 다르다. `ExtractFrustumPlanes` 는 *유효 평면 개수* 를 함께 돌려주므로, 무한 far 처럼 비활성 반공간이 섞여도 호출자는 유효한 것만 검사한다.
 
-world 공간 VP 를 넣으면 world 평면이, view·projection 만 곱한 행렬을 넣으면 view 공간 평면이 나온다 — *넣은 행렬의 입력 공간* 이 곧 평면이 사는 공간이다. 컬링 대상의 바운딩 볼륨이 어느 공간에 있는지와 반드시 맞춰야 한다.
+world→clip 행렬 `VP` 를 넣으면 world 공간 평면이, view→clip 행렬 `P` 만 넣으면 view 공간 평면이 나온다 — *넣은 행렬의 입력 공간* 이 곧 평면이 사는 공간이다. 컬링 대상의 바운딩 볼륨이 어느 공간에 있는지와 반드시 맞춰야 한다.
 
 `p.d = -v.w / len` 의 *마이너스* 가 이 함수에서 가장 틀리기 쉬운 한 글자다. 추출식은 일반형 $(A, B, C, D)$ 를 주는데 `Plane` 은 Hessian $\hat{n} \cdot \vec{p} = d$ 를 담기 때문이다. 부호를 빠뜨리면 여섯 평면이 전부 원점 반대편으로 옮겨 앉는다.
 
 ### 8.3 정규화와 안쪽 판정 계약
 
-`MakePlane` 이 법선 길이로 `normal` 과 `d` 를 함께 나눈다. 나누기 전 $(A,B,C)$ 는 단위 벡터가 아니라 평면마다 길이가 다르므로, 정규화 없이는 *부호 판정만 옳고 거리 값은 평면끼리 비교할 수 없다*. 바운딩 구 반지름을 빼는 식의 검사가 성립하려면 정규화가 필수다.
+`MakePlane` 이 법선 길이로 `normal` 과 `d` 를 함께 나눈다. 나누기 전 $(A,B,C)$ 는 단위 벡터가 아니라 평면마다 길이가 다르므로, 정규화 없이는 *부호 판정만 옳고 거리 값은 평면끼리 비교할 수 없다*. 바운딩 구 반지름을 빼는 식의 검사가 성립하려면 정규화가 필수다. 법선이 0 인 비활성 반공간 (무한 far 의 far 평면 등) 은 정규화하지 않고 건너뛰며, `ExtractFrustumPlanes` 는 *유효 평면 개수* 를 반환해 호출자에게 알린다.
 
-추출된 여섯 평면은 두 가지를 보장한다.
+추출된 유효 평면들은 두 가지를 보장한다.
 
 - **내향 법선** — 안쪽 조건을 $\ge 0$ 형태로 이항해 만들었으므로 법선이 frustum 안을 향한다.
 - **Hessian 부호** — 점 $\vec{p}$ 가 안쪽일 조건은 여섯 평면 모두에서 $\hat{n} \cdot \vec{p} - d \ge 0$.
@@ -709,18 +721,18 @@ world 공간 VP 를 넣으면 world 평면이, view·projection 만 곱한 행�
 
 near 평면은 $\hat{n} \cdot \vec{p} = d$ 에서 $-z = 1$, 즉 $z = -1$ — 행렬에 넣은 near 거리 1 과 정확히 같다. 점 $(0, 0, -5)$ 를 넣으면 near 에서 $5 - 1 = +4$, far 에서 $-5 - (-11) = +6$, left 에서 $0.707 \cdot 5 = +3.54$ — 셋 다 양수이므로 안쪽이다. $(0, 0, -0.5)$ 는 near 에서 $0.5 - 1 = -0.5$ 로 음수, 즉 너무 가까워 잘린다. $(-10, 0, -5)$ 는 left 에서 $-7.07 + 3.54 = -3.54$ 로 음수 — 시야 왼쪽 밖이다.
 
-가장 싼 질의는 *바운딩 구* 다. 중심의 부호 거리에서 반지름을 빼면 끝난다.
+가장 싼 질의는 *바운딩 구* 다. 중심의 부호 거리에서 반지름을 빼면 끝난다. `ExtractFrustumPlanes` 가 돌려준 *유효 평면 개수* 만 검사한다.
 
 ```cpp
-bool SphereOutsideFrustum(vec3 center, float radius, const Plane planes[6]) {
-    for (int i = 0; i < 6; ++i)
+bool SphereOutsideFrustum(vec3 center, float radius, const Plane* planes, int count) {
+    for (int i = 0; i < count; ++i)
         if (dot(planes[i].normal, center) - planes[i].d < -radius)
             return true;    // 한 평면 바깥으로 완전히 벗어남
     return false;
 }
 ```
 
-*6 dot + 6 비교*. 반환값의 의미를 정확히 읽어야 한다 — `true` 는 "확실히 바깥", `false` 는 "겹친다" 가 아니라 *"바깥이라고 단정할 수 없음"* 이다.
+*유효 평면 수만큼의 dot + 비교*. 반환값의 의미를 정확히 읽어야 한다 — `true` 는 "확실히 바깥", `false` 는 "겹친다" 가 아니라 *"바깥이라고 단정할 수 없음"* 이다.
 
 여섯 반공간의 교집합은 frustum 자체가 맞다. 어긋나는 것은 검사 방식 쪽이다. 이 루프는 *구가 어느 한 평면 바깥에 통째로 있는가* 만 묻는데, 두 평면이 만나는 모서리 근처의 구는 어느 한 평면으로도 완전히 밀려나지 않으면서 frustum 밖에 있을 수 있다. 결과는 *보수적 컬링* — 못 지운 것이 남을 뿐 지워선 안 될 것을 지우지는 않으므로 그림은 맞고 낭비만 조금 남는다. 컬링 코드는 이 방향의 오차만 허용해야 한다.
 

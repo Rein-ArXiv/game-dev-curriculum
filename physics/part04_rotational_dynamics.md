@@ -255,7 +255,7 @@ $$
 \vec{L} = \mathbf{I} \vec{\omega}
 $$
 
-3D 에서 $\mathbf{I}$ 가 텐서, $\vec{\omega}$ 가 벡터 → $\vec{L}$ 도 벡터. *일반적으로 $\vec{L}$ 과 $\vec{\omega}$ 가 평행 안 함* (관성 텐서 비대각 때문) — 회전축이 *기울어진* 비대칭 강체에서 발생.
+3D 에서 $\mathbf{I}$ 가 텐서, $\vec{\omega}$ 가 벡터 → $\vec{L}$ 도 벡터. *일반적으로 $\vec{L}$ 과 $\vec{\omega}$ 가 평행하지 않다*. 비대각 관성 성분뿐 아니라 *주축 좌표계에서 관성이 대각이어도* 주관성모멘트가 서로 다르고 $\vec{\omega}$ 가 여러 주축 성분을 가지면 $\mathbf{I}\vec{\omega}$ 와 $\vec{\omega}$ 는 평행하지 않다. 예: $\mathbf{I} = \mathrm{diag}(1,2,3)$, $\vec{\omega} = (1,1,0)$ 이면 $\vec{L} = (1,2,0)$ 이고 $\vec{L} \times \vec{\omega} = (0,0,1) \ne 0$ 이다. $\vec{L} \parallel \vec{\omega}$ 인 경우는 *등방성* ($\mathbf{I} = c\mathbf{1}$) 이거나 $\vec{\omega}$ 가 *단일 고유축 방향* 일 때뿐이다.
 
 2D 에서 $L = I \omega$ — 스칼라 곱.
 
@@ -396,7 +396,17 @@ $$
 \dot{q} = \tfrac{1}{2} q \, \omega_q
 $$
 
-순서가 반대. *어느 frame 인가* 가 코드 정확성의 결정적.
+순서가 반대. *어느 frame 인가* 가 코드 정확성의 결정적. 이 글의 규약을 한 곳에 고정한다.
+
+| 항목 | 이 글의 규약 |
+|---|---|
+| 수식 성분 순서 | scalar-first $\omega_q = (0, \omega_x, \omega_y, \omega_z)$ |
+| 코드 생성자 | `Quaternion(x, y, z, w)` — scalar-last |
+| 곱 | Hamilton product |
+| $q$ 의 의미 | body → world (local → world) |
+| $\vec{\omega}$ | world frame |
+| 도함수 | $\dot{q} = \tfrac{1}{2}\omega_q q$ → `Multiply(omega_q, q)` |
+| 반대 라이브러리 | scalar-first 생성자면 `omega_q` 성분을 `(0, \omega_x, \omega_y, \omega_z)` 로 배치한다. $q$ 가 world → body 이거나 $\vec{\omega}$ 가 body frame 이면 곱셈 순서를 뒤집어 `Multiply(q, omega_q)` 를 쓴다. |
 
 ### 6.2 이산 적분
 
@@ -413,6 +423,7 @@ void StepRotation3D(RigidBody3D& body, float dt) {
                           body.angularVelocity.y,
                           body.angularVelocity.z,
                           0};
+    // Hamilton 곱, world ω * (body→world) q 규약 (6.1 표)
     Quaternion dq = QuaternionScale(QuaternionMultiply(omega_q, body.orientation),
                                       0.5f * dt);
     body.orientation = QuaternionAdd(body.orientation, dq);
@@ -421,6 +432,8 @@ void StepRotation3D(RigidBody3D& body, float dt) {
     body.torqueAccum = {0, 0, 0};
 }
 ```
+
+이 코드는 $\dot{\vec{\omega}} \approx \mathbf{I}_{world}^{-1}\vec{\tau}$ 근사를 사용하므로 *자이로 항 $\vec{\omega} \times (\mathbf{I}\vec{\omega})$ 을 생략* 한 모델이다. 토크를 주는 상황에서는 자연스럽지만, *무토크 비등방 강체의 자유회전* 에서는 각운동량 보존이 *dt 를 줄여도 사라지지 않는 체계적 모델 오차* 로 어긋난다 (적분 오차와 구분). 정확히 대조하려면 *L 을 먼저 적분한 뒤 $\vec{\omega} = \mathbf{I}_{world}^{-1}\vec{L}$ 로 재구성* 하거나 *자이로 항을 포함한 적분* 을 별도 경로로 둔다.
 
 ### 6.3 정규화 필수
 
@@ -501,6 +514,8 @@ $\vec{\omega} \times (\mathbf{I} \vec{\omega})$ 항. 게임은 보통 *무시* �
 
 게임은 *시각적 차이를 무시할 수 있는 경우* 이 항을 기본적으로 생략하기도 하지만, Bullet과 PhysX 같은 엔진은 긴 물체의 tumbling이나 큰 각속도를 다루기 위해 자이로스코픽 항을 옵션으로 제공한다.
 
+이 생략은 *모델 근사* 이므로, 무토크 비등방 자유회전에서는 §7.7·§8 의 각운동량 보존 검사와 함께 쓰면 불일치가 나타난다. 그 불일치는 dt 를 줄여 줄일 수 있는 적분 오차가 아니라 *모델에서 항을 뺀 체계적 오차* 다. 대조 실험에서는 L 을 적분 후 ω 를 재구성하는 방식 또는 자이로 항 포함 적분과 비교한다.
+
 ### 7.4 쿼터니언 정규화 빈도
 
 매 step 정규화 권장. 일부 엔진은 *N step 마다* 정규화로 성능 절감 — 하지만 *N 이 크면 누적된 비단위가 회전 왜곡*. *매 step* 이 안전.
@@ -537,7 +552,7 @@ if (w_sq > kMaxAngularSpeed * kMaxAngularSpeed) {
 회전 동역학이 *맞게 동작* 하는지 검증할 양.
 
 - *쿼터니언 norm*: 이상적으로 1이다. 허용오차는 `float`/`double`, 적분기, step 크기와 정규화 주기에 맞춰 정하고 정규화 전후 오차를 기록한다.
-- *각운동량 보존*: 외부 토크가 없는 고립계에서 이론상 일정하다. 이산 적분과 반올림 때문에 수치 결과에는 오차가 남는다.
+- *각운동량 보존*: 단일 body 의 질량중심 주위 *spin* $\vec{L} = \mathbf{I}_{world}\vec{\omega}$ 와, 공통 고정 원점 $O$ 에 대한 *시스템 총각운동량* $\sum_i [(\vec{x}_{COM,i} - O) \times m_i \vec{v}_i + \mathbf{I}_{world,i}\vec{\omega}_i]$ 를 구분한다. 외부 힘·외부 토크·구속이 없는 고립계에서 총각운동량이 이론상 일정하다. 이산 적분과 반올림 때문에 수치 결과에는 오차가 남는다.
 - *회전 에너지*: $\tfrac{1}{2} \vec{\omega}^T \mathbf{I} \vec{\omega}$ — 외부 일, 감쇠, 마찰, 비탄성 충돌과 구동 제약이 없는 이상계에서 보존 대상이다.
 
 이 양들의 *시간 그래프* 가 *bounded vs 발산* 으로 적분기의 정확성을 드러낸다.
@@ -548,13 +563,13 @@ if (w_sq > kMaxAngularSpeed * kMaxAngularSpeed) {
 
 ### 8.1 보존 법칙
 
-외부 토크 없는 닫힌 시스템에서 *총 각운동량 보존*.
+외부 토크 없는 닫힌 시스템에서 *공통 고정 원점 $O$ 에 대한 총 각운동량 보존*.
 
 $$
-\sum_i \vec{L}_i = \text{const}
+\vec{L}_{total} = \sum_i \left[ (\vec{x}_{COM,i} - O) \times m_i \vec{v}_i + \mathbf{I}_{world,i} \vec{\omega}_i \right] = \text{const}
 $$
 
-두 강체만을 포함한 고립계를 같은 기준점에서 보면 접촉 임펄스의 작용·반작용으로 총 각운동량이 보존된다. 외부 제약, 정적 월드, 마찰 모델, 비탄성 충돌과 솔버 오차가 있으면 시뮬레이션이 추적하는 부분계의 값은 달라질 수 있다.
+첫 항이 *궤도 (orbital)* 각운동량, 둘째 항이 질량중심 주위 *spin* 이다. 앞에서 정의한 $\vec{L} = \mathbf{I}\vec{\omega}$ 는 각 body 의 spin 이므로, *여러 body 의 총량을 검증할 때는 orbital 항을 반드시 더해야 한다*. 같은 접촉점의 $\pm \vec{J}$ 가 만드는 전체 토크는 상쇄되지만 *spin 부분만의 합은 일반적으로 보존되지 않는다*. 두 강체만을 포함한 고립계를 *같은 기준점* 에서 보면 접촉 임펄스의 작용·반작용으로 총 각운동량이 보존된다. 외부 힘·외부 제약, 정적 월드, 마찰 모델, 비탄성 충돌과 솔버 오차가 있으면 시뮬레이션이 추적하는 부분계의 값은 달라질 수 있다.
 
 ### 8.2 비대칭 회전과 보존
 
@@ -610,7 +625,8 @@ vec3 GetVelocityAtPoint(const RigidBody3D& body, vec3 worldPoint) {
 flowchart LR
     Center[질량중심 충돌] --> Trans[순수 병진]
     Edge[모서리 충돌] --> Both[병진 + 회전]
-    FarEdge[멀리 모서리] --> Spin[더 큰 회전 + 같은 병진]
+    FarEdge[멀리 모서리] --> Spin[더 큰 회전 + 같은 병진<br/>같은 J 가정]
+    ActualJ[충돌에서는 실제 J도<br/>같다는 보장 없음] -.-> Spin
 ```
 
 당구공이 *센터 vs 모서리에 맞을 때* 의 차이. 게임의 *물리 시뮬이 사실적으로 보이는* 결정적 요소.
@@ -618,7 +634,7 @@ flowchart LR
 ### 8.6 운동량의 두 측면
 
 - *선형 운동량 $\vec{p}$* — 질량 × 질량중심 속도. 외력 없으면 보존.
-- *각운동량 $\vec{L}$* — 관성 × 각속도. 외토크 없으면 보존.
+- *각운동량 $\vec{L}$* — (단일 body 의 질량중심 spin) 관성 × 각속도. 외토크 없으면 보존. 시스템 총량은 공통 원점에 대한 orbital 항 $\sum_i (\vec{x}_{COM,i} - O) \times m_i \vec{v}_i$ 를 더한 값이다.
 
 게임 충돌 시스템이 *두 보존 법칙을 자연스럽게 만족* 하도록 임펄스를 *대칭 분배* — 한 객체에 +J 면 다른 객체에 -J, 한 객체에 +τ 면 다른 객체에 대응 -τ.
 

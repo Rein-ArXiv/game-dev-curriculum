@@ -353,15 +353,17 @@ gate = idt_table[vector];
 
 인터럽트 게이트의 경우 (64비트 모드):
 ```text
-+------------------------+  <-- 새로운 RSP
++------------------------+  <-- 높은 주소
 | SS                     |  (권한 레벨 변경 시)
-| RSP                    |  (권한 레벨 변경 시)
+| RSP                    |  (권한 레벨 변경 시, 복귀용 old/사용자 RSP 값)
 | RFLAGS                 |
 | CS                     |
 | RIP                    |
-| Error Code (선택적)    |
-+------------------------+
+| Error Code (선택적)    |  <-- 새로운 RSP (error code가 없으면 RIP)
++------------------------+  <-- 낮은 주소
 ```
+
+프레임은 SS를 가장 높은 주소에, RIP와 error code를 가장 낮은 주소에 둔다. error code가 없는 인터럽트에서는 현재 커널 RSP가 RIP 슬롯을 가리키고, error code를 푸시하는 예외에서는 error code 슬롯을 가리킨다. `RSP` 슬롯에 들어 있는 값은 저장된 old(사용자) RSP이지 현재 RSP가 아니다.
 
 **6) RFLAGS 수정**
 - 인터럽트 게이트: IF = 0 (인터럽트 비활성화)
@@ -692,8 +694,18 @@ irqreturn_t handle_irq_event(struct irq_desc *desc)
 
         res = action->handler(desc->irq_data.irq, action->dev_id);
 
-        if (res == IRQ_HANDLED)
+        switch (res) {
+        case IRQ_WAKE_THREAD:
+            /* threaded handler를 실행할 IRQ thread를 깨운다 */
+            __irq_wake_thread(desc, action);
             ret = IRQ_HANDLED;
+            break;
+        case IRQ_HANDLED:
+            ret = IRQ_HANDLED;
+            break;
+        default:
+            break;
+        }
     }
 
     return ret;
@@ -963,7 +975,7 @@ Tasklet은 softirq 위에 구축된 더 간단한 메커니즘이다. 같은 tas
 struct tasklet_struct {
     struct tasklet_struct *next;
     unsigned long state;     // TASKLET_STATE_SCHED, TASKLET_STATE_RUN
-    atomic_t count;          // 참조 카운터 (0 = 활성화)
+    atomic_t count;          // disable 카운터 (0 = 활성화, >0 = 비활성화)
     void (*func)(unsigned long);
     unsigned long data;
 };
@@ -1018,6 +1030,7 @@ static void tasklet_action(struct softirq_action *a)
     local_irq_disable();
     list = __this_cpu_read(tasklet_vec.head);
     __this_cpu_write(tasklet_vec.head, NULL);
+    __this_cpu_write(tasklet_vec.tail, this_cpu_ptr(&tasklet_vec.head));
     local_irq_enable();
 
     while (list) {
@@ -1027,13 +1040,23 @@ static void tasklet_action(struct softirq_action *a)
         // 다른 CPU에서 실행 중?
         if (tasklet_trylock(t)) {
             if (atomic_read(&t->count) == 0) {
+                // 실행 전에 SCHED를 지워야 다음 schedule이 pending으로 오판하지 않는다
+                if (!test_and_clear_bit(TASKLET_STATE_SCHED, &t->state))
+                    BUG();
                 t->func(t->data);
+                tasklet_unlock(t);
+                continue;
             }
             tasklet_unlock(t);
-        } else {
-            // 다시 큐에 넣기
-            // ...
         }
+
+        // 다른 CPU가 실행 중이거나 count != 0(비활성)이면 다시 큐에 넣는다
+        local_irq_disable();
+        t->next = NULL;
+        *__this_cpu_read(tasklet_vec.tail) = t;
+        __this_cpu_write(tasklet_vec.tail, &t->next);
+        __raise_softirq_irqoff(TASKLET_SOFTIRQ);
+        local_irq_enable();
     }
 }
 ```

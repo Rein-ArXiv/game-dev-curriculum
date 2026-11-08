@@ -23,8 +23,11 @@
 [C++ Core Guidelines의 인터페이스 원칙](https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#S-interfaces)은 인터페이스를 구현과 분리하고 전제·후속 조건을 명확히 하라는 기준을 제시한다. 구체적인 언어와 무관하게 추상화의 품질은 계약이 숨기는 상태보다 드러내는 불변식으로 판단할 수 있다.
 
 ```cpp
+// 인터페이스 발췌다. 생성자가 유효한 용량을 받아 불변식을 확립한다.
 class Inventory {
 public:
+    explicit Inventory(std::size_t capacity) : capacity_(capacity) {}
+
     bool Add(Item item);
     bool Remove(ItemId id);
     std::span<const Item> Items() const;
@@ -42,6 +45,8 @@ $$
 $$
 
 외부 코드가 `items_`를 직접 변경할 수 있으면 타입이 불변식을 지킬 수 없다. 캡슐화는 필드를 감추는 형식이 아니라 유효한 상태 전이만 허용하는 경계다.
+
+`Items()`가 돌려주는 `span<const Item>`은 소유하지 않는 뷰다. 호출자가 그 뷰를 통해 값을 수정하지 못한다는 것과 원본이 변하지 않거나 수명이 보장된다는 것은 다르다. 삽입·삭제나 소유자 파괴 뒤의 뷰 유효성과 동시 접근 허용 여부를 계약에 명시해야 한다.
 
 좋은 인터페이스는 실패도 표현한다. 용량 초과가 가능한 `Add`가 무조건 성공하는 것처럼 보이면 호출자가 실패를 처리할 수 없다. 반환값, 오류 타입, 예외 정책 중 하나로 계약을 드러낸다.
 
@@ -61,7 +66,7 @@ struct Dead {
 using LifeState = std::variant<Alive, Dead>;
 ```
 
-`isDead == true`인데 `health > 0`인 조합을 여러 필드로 허용하는 대신 상태를 합 타입으로 표현할 수 있다. 모든 상태를 타입으로 분리해야 하는 것은 아니지만, 불가능한 조합이 버그의 주요 원인이라면 가치가 있다.
+`isDead == true`인데 `health > 0`인 조합을 여러 필드로 허용하는 대신 상태를 합 타입으로 표현할 수 있다. 합 타입은 불가능한 조합 일부를 제거하지만 `Alive` 안에 체력 0이나 음수를 넣는 것까지 막지는 않으므로, 남은 수치 불변식은 검증된 생성과 상태 전이로 지킨다. 모든 상태를 타입으로 분리해야 하는 것은 아니지만, 불가능한 조합이 버그의 주요 원인이라면 가치가 있다.
 
 단위도 타입의 일부다.
 

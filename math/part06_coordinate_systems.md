@@ -51,7 +51,7 @@ flowchart LR
 | World | 씬의 절대 원점 | 게임 단위 (보통 미터) | 게임플레이·물리 시뮬 |
 | View (Camera, Eye) | 카메라 위치 | 미터 | 빛·셰이딩·시야 판정 |
 | Clip | 투영 후, w로 나누기 전 | 동차 좌표 | GPU의 투영 절두체 클리핑 |
-| NDC (Normalized Device) | 화면 중앙 | $[-1, 1]$ 또는 $[0, 1]$ 큐브 | 픽셀 위치 계산 직전 |
+| NDC (Normalized Device) | 화면 중앙 | $x, y \in [-1, 1]$, $z \in [-1, 1]$ 또는 $[0, 1]$ | 픽셀 위치 계산 직전 |
 | Screen | 화면 좌상단 (또는 좌하단) | 픽셀 | 최종 출력 |
 
 각 단계의 *행렬* 이 정해져 있다.
@@ -324,7 +324,7 @@ z 성분의 NDC 값이 *비선형* 으로 분포한다 — *near 근처는 정�
 
 해결책: *Reverse-Z*. near를 큰 depth, far를 0 쪽으로 매핑하고 깊이 비교를 뒤집는다. 부동소수점 depth buffer의 표현 밀도와 perspective의 $1/z$ 분포를 더 잘 맞춰 넓은 거리 범위의 정밀도를 크게 개선한다. fixed-point depth buffer에서는 같은 이득이 나오지 않으며, coplanar surface·너무 가까운 near plane·부정확한 world transform에서 생기는 z-fighting까지 없애지는 않는다.
 
-Reverse-Z는 *단순히 near/far를 swap하는 게 아니라 투영 행렬을 처음부터 새로 만들어야* 한다. 깊이 비교 함수도 `GL_LESS` → `GL_GREATER` 로 바꿔야 한다.
+Reverse-Z는 *near/far 순서를 뒤집어 투영 helper에 넘기는 방법* 으로 만들 수 있는 경우가 있다 — helper가 역깊이 행렬을 생성하도록 near/far를 swap하는 식이다. 다만 그 한 번의 swap만으로 파이프라인 설정이 끝나는 것은 아니다. 깊이 비교 함수 (`GL_LESS` → `GL_GREATER`), depth format과 range, clear 값, clip control, infinite far 사용 여부를 함께 맞춰야 한다. 사용하는 helper가 역순 near/far를 허용하는지는 라이브러리 문서를 확인한다.
 
 ## 5. 핸드니스: 왼손 vs 오른손
 
@@ -355,10 +355,12 @@ flowchart LR
 
 | 항목 | 오른손 | 왼손 |
 |---|---|---|
-| $\hat{x} \times \hat{y}$ | $+\hat{z}$ | $-\hat{z}$ (같은 식이지만 Z 방향 자체가 반대) |
+| $\hat{x} \times \hat{y}$ (월드에서 보이는 방향) | $+\hat{z}$ | $-\hat{z}$ (해당 좌표계의 $\hat{z}$ 자체가 반대) |
 | 양의 회전 방향 (+Y 둘레) | 반시계 (위에서 봤을 때) | 시계 (위에서 봤을 때) |
 | 카메라 forward | 보통 $-Z$ | 보통 $+Z$ |
 | Winding (front face) | 투영·viewport와 rasterizer 설정의 계약 | 투영·viewport와 rasterizer 설정의 계약 |
+
+여기서 *성분 공식* 과 *기저의 기하학적 방향* 을 구분해야 한다. `cross((1,0,0),(0,1,0))` 를 호출하는 API는 오른손·왼손 기저와 무관하게 숫자 `(0,0,1)` 을 그대로 돌려준다 — 두 숫자 벡터에 동일한 성분식을 실행하기 때문이다. 왼손 좌표계에서 $\hat{x} \times \hat{y}$ 가 *월드에서 $-\hat{z}$ 로 보이는* 것은 그 좌표계의 $\hat{z}$ 축 자체가 반대쪽을 향하기 때문이지, cross API의 출력 숫자가 바뀌기 때문이 아니다. 숫자 예로, 왼손 좌표계에서도 `cross((1,0,0),(0,1,0))` 의 성분 결과는 `(0,0,1)` 이고, 그 `(0,0,1)` 이 가리키는 *월드 방향* 만 다르다.
 
 ### 5.3 엔진별 관례
 
@@ -376,7 +378,7 @@ DirectX 자체가 *왼손을 강제* 하지 않는다는 점은 짚었다 — Di
 
 ### 5.4 좌표계 사이 변환
 
-다른 손잡이 사이 모델을 옮기려면 *축 부호* 또는 *winding 순서* 를 뒤집는다.
+다른 손잡이 사이 모델을 옮기려면 *축 부호* 를 뒤집는 좌표 변환이 필요하다. 이 변환은 기저의 handedness를 바꾸므로, 그와 *별개 단계* 로 렌더링의 front-face 계약을 다시 맞춘다.
 
 **한 축 반전 행렬** (Z 반전):
 
@@ -387,17 +389,18 @@ $$
 이 행렬을 적용하면 *손잡이가 뒤집힌다*. 행렬식이 -1 이라 *winding order 도 반전*.
 
 ```cpp
-// 오른손 모델을 왼손 엔진에 임포트
+// 1단계: 좌표 변환 — 축 부호 반전
 mat4 flipZ = ScaleMatrix(vec3(1, 1, -1));
 modelMatrix = flipZ * originalModelMatrix;
 
-// 또는 인덱스 버퍼의 winding 뒤집기
+// 2단계: 변환된 handedness에 맞춰 front-face 계약 보정
+// 정점 위치·기저는 그대로 두고 인덱스 순서만 바꾼다.
 for (int i = 0; i < indexCount; i += 3) {
     std::swap(indices[i+1], indices[i+2]);
 }
 ```
 
-축 하나를 반전하는 변환은 *handedness 를 바꾸며 삼각형 winding 도 뒤집는다*. 따라서 렌더링 파이프라인에서는 다음 중 하나 이상의 처리가 필요하다 — *front-face 설정 변경*, *인덱스 winding 교체*, *normal/tangent basis 변환*. 어떤 조합이 필요한지는 *셰이더 파이프라인 + 모델 데이터 형태* 에 따라 갈린다.
+축 하나를 반전하는 변환은 *handedness 를 바꾸며 삼각형 winding 도 뒤집는다*. 그러나 *인덱스 winding 교체만으로는 정점 위치·방향이나 기저가 바뀌지 않는다* — winding 교체는 좌표 변환의 대안이 아니라, 좌표 변환 후 *front-face 계약을 맞추는 별도 단계* 다. 따라서 렌더링 파이프라인에서는 좌표 변환에 이어 *front-face 설정 변경*, *인덱스 winding 교체*, *normal/tangent basis 변환* 가운데 필요한 처리를 적용한다. 어떤 조합이 필요한지는 *셰이더 파이프라인 + 모델 데이터 형태* 에 따라 갈린다.
 
 ## 6. Y-up vs Z-up
 
@@ -449,7 +452,7 @@ mat4 axisMap   = flipZ * zUpToYUp;   // 두 단계 합성
 unityModelMatrix = axisMap * blenderModelMatrix * Inverse(axisMap);
 ```
 
-*conjugation* 패턴 ($A M A^{-1}$). 외부 행렬을 *현재 좌표계로 가져와* 적용 후 *원래 좌표계로 되돌림*. flipZ 단계가 들어가면서 winding/normal 처리도 동시에 필요해진다 (5.4절).
+*conjugation* 패턴 ($A M A^{-1}$). column-vector 기준으로 *오른쪽부터* 적용된다: $A^{-1}$ 이 새 좌표계의 행렬을 옛 좌표계로 옮기고, $M$ 을 그 옛 공간에서 적용한 뒤, $A$ 가 결과를 다시 새 좌표계로 되돌린다. 여기서 $A$ 는 *old → new* 변환이다. 각 변환을 `a_from_b` (b 좌표를 a로 보냄) 로 이름 붙이면 읽는 방향이 분명해진다 — 이 예에서는 `newFromOld = axisMap`, `oldFromNew = Inverse(axisMap)` 이다. flipZ 단계가 들어가면서 winding/normal 처리도 함께 필요해진다 (5.4절).
 
 ### 6.4 조합 변환
 
@@ -586,7 +589,7 @@ target이 *주시 점*, yaw가 *수평 회전*, pitch가 *수직 회전*, distan
 - 투영 행렬 1개: FOV·aspect·near·far (보통 매 프레임 안 바뀜).
 - MVP N개: $P \cdot V \cdot M_i$.
 
-PV는 *카메라당 1회* 캐싱 가능. PVM은 *오브젝트당 1회* 행렬 곱이 필요. N=10000이면 *PV 1번 + PVM 10000번* — 4×4 행렬 곱 64 곱 + 48 합 기준 약 0.25 ms.
+PV는 *카메라당 1회* 캐싱 가능. PVM은 *오브젝트당 1회* 행렬 곱이 필요. N=10000이면 *PV 1번 + PVM 10000번* 이고, 각 4×4 행렬 곱이 64 곱 + 48 합이므로 대략 *64만 곱 + 48만 합* 규모의 산술이다. 실제 소요 시간은 CPU/GPU·SIMD·메모리 접근에 좌우되므로 *측정 없이 시간으로 단정하지 않는다*.
 
 ### 8.2 PV 캐싱
 
@@ -655,7 +658,7 @@ struct InstanceData {
 };
 ```
 
-인스턴스당 80 byte. 1만 인스턴스 = 800 KB. 매 프레임 갱신이면 GPU 대역폭 부담 — *움직이는 인스턴스만 갱신* 하는 partial update가 흔한 최적화.
+인스턴스당 80 byte. 1만 인스턴스면 800 KB의 데이터다. 이 전체를 매 프레임 갱신할 때 대역폭 부담이 되는지는 *전송 경로 (버스·PCIe·통합 메모리), 프레임률, 동기화 방식* 에 달려 있으므로 전송량 숫자만으로 병목을 단정할 수 없다. *움직이는 인스턴스만 갱신* 하는 partial update가 흔한 최적화이며, 실제 부담은 프로파일러로 측정한다.
 
 ### 8.6 SoA vs AoS — 인스턴스 데이터 레이아웃
 

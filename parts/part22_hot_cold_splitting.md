@@ -30,11 +30,13 @@
 파레토식 집중은 hot path를 설명하는 직관이지 프로그램에 적용되는 90/10 정리가 아니다. 실행 시간의 집중도는 입력 분포, phase와 build마다 달라진다. 다음은 프로파일 결과를 읽는 *형식 예*다.
 
 ```text
-함수별 inclusive CPU time:
+함수별 exclusive(self) CPU time:
 Top 10 함수: X%
 Top 100 함수: Y%
 나머지 함수: 100-Y%
 ```
+
+inclusive 시간은 호출자와 피호출자에 중복 집계되므로, 이처럼 합계를 100%로 두는 비중 분류는 exclusive sample이나 중복을 제거한 call-tree 기준으로 계산한다.
 
 이는 **hot/cold path**의 개념으로 이어진다:
 
@@ -393,7 +395,7 @@ int parse(const char* str) {
 
 ### LLVM의 자동 아웃라이닝
 
-LLVM은 `-Oz` (크기 최적화) 옵션에서 자동으로 아웃라이닝을 수행한다:
+LLVM은 지원 타깃에서 `-Oz`(크기 최적화) 옵션의 machine outliner로 중복된 machine code를 함수로 추출한다. 이는 IR 수준의 hot/cold block 분리와는 다른 기법이다:
 
 ```bash
 clang -Oz -c code.c
@@ -478,7 +480,7 @@ After LTO:
 
 ### Profile-Guided Optimization (PGO)
 
-LTO보다 더 강력한 것은 **PGO**다. 실제 실행 프로파일을 기반으로 최적화한다[^5].
+LTO가 함수 간 정보를 쓰는 것과 별개로, 실제 실행 프로파일을 기반으로 배치와 인라이닝을 정하는 **PGO**가 있다[^5].
 
 과정:
 
@@ -490,8 +492,8 @@ gcc -fprofile-generate -O2 code.c -o program
 ./program < typical_input.txt
 # 여러 번 실행하여 프로파일 수집
 
-# 3. 프로파일 기반 재컴파일
-gcc -fprofile-use -O2 code.c -o program_optimized
+# 3. 프로파일 기반 재컴파일 (계측 빌드와 같은 출력 이름을 유지해야 profile을 찾는다)
+gcc -fprofile-use -O2 code.c -o program
 ```
 
 PGO가 수집하는 정보:
@@ -517,9 +519,12 @@ Facebook(Meta)이 개발한 BOLT(Binary Optimization and Layout Tool)는 **컴�
 # 1. Perf로 프로파일 수집 (실제 실행)
 perf record -e cycles:u -j any,u -- ./program
 
-# 2. BOLT로 바이너리 재배치
+# 2. perf 데이터를 BOLT가 읽는 profile로 변환
+perf2bolt -p perf.data -o perf.fdata ./program
+
+# 3. BOLT로 바이너리 재배치
 llvm-bolt ./program -o program.bolt \
-  -data=perf.data \
+  -data=perf.fdata \
   -reorder-blocks=ext-tsp \
   -reorder-functions=hfsort \
   -split-functions \
@@ -635,9 +640,11 @@ JsonToken parse_value(const char*& p) {
 }
 ```
 
+이 함수는 토큰의 시작 문자를 분류하는 스케치로, 문자열·숫자 본문의 소비와 전체 입력 소비·suffix 검사는 생략했다. 완전한 parser는 여기에 본문 소비와 실패 위치 반환을 추가해야 한다.
+
 문제:
 - 에러 처리 코드가 hot path와 섞여 있음
-- 함수가 큼 → 인라인 불가능
+- 함수가 큼 → 인라인 비용이 커져 후보에서 밀리기 쉬움
 - I-cache 낭비
 
 ### 최적화 버전
@@ -728,8 +735,11 @@ clang++ -fprofile-generate -O2 parser.cpp -o parser_instr
 ./parser_instr large.json
 ./parser_instr nested.json
 
-# 3. PGO 빌드
-clang++ -fprofile-use -O2 parser.cpp -o parser_pgo
+# 3. raw profile을 indexed profile로 변환
+llvm-profdata merge -o parser.profdata *.profraw
+
+# 4. PGO 빌드
+clang++ -fprofile-use=parser.profdata -O2 parser.cpp -o parser_pgo
 ```
 
 PGO 적용 여부는 최종 binary의 layout과 optimization record에서 확인한다. 적용될 수 있는 변환은 다음과 같다.
@@ -890,7 +900,7 @@ clang++ -O2 -ftime-trace code.cpp
 
 `code.json` 파일 생성 → Chrome의 `chrome://tracing`에서 열기
 
-컴파일 시간과 최적화 단계 시각화. 어떤 함수가 인라인되고, 어떤 최적화가 적용되었는지 확인.
+컴파일 시간과 단계별 시각화. 어떤 함수가 인라인되고 어떤 최적화가 적용되었는지는 `-Rpass`/`-Rpass-missed`나 `-fsave-optimization-record`로 확인한다.
 
 ### PGO 프로파일 분석
 
@@ -898,7 +908,7 @@ clang++ -O2 -ftime-trace code.cpp
 # Clang: 프로파일 요약
 llvm-profdata show --topn=20 default.profraw
 
-# GCC: 프로파일 기반 커버리지
+# GCC: 커버리지 계측(--coverage)으로 만든 .gcno/.gcda가 있어야 동작한다
 gcov -b code.c
 ```
 
@@ -1000,8 +1010,8 @@ Hot/Cold 코드 분리는 의미를 보존하면서 instruction working set과 l
 
 ### 실무 사례 연구
 
-- Facebook Engineering. "Optimizing C++ Build Times with BOLT". https://engineering.fb.com/ (BOLT 도입 사례)
-- Google Chrome Blog. "Optimizing Chrome with PGO and LTO". https://blog.chromium.org/ (대규모 PGO 적용)
+- Facebook Engineering. BOLT 도입 사례. https://engineering.fb.com/ (원문 제목·직접 링크 미확인)
+- Google Chrome Blog. PGO·LTO 적용 사례. https://blog.chromium.org/ (원문 제목·직접 링크 미확인)
 - Microsoft Visual C++ Team Blog. "Profile Guided Optimization with Visual Studio". https://devblogs.microsoft.com/cppblog/ (MSVC의 PGO 기능)
 
 ### 도구 및 벤치마크
@@ -1014,5 +1024,5 @@ Hot/Cold 코드 분리는 의미를 보존하면서 instruction working set과 l
 ### 서적
 
 - Drepper, Ulrich. "What Every Programmer Should Know About Memory". 2007. https://people.freebsd.org/~lstewart/articles/cpumemory.pdf (Section 3.4: Instruction Cache)
-- Fog, Agner. "Optimizing software in C++". https://www.agner.org/optimize/optimizing_cpp.pdf (Chapter 8: Optimizing for Speed)
+- Fog, Agner. "Optimizing software in C++". https://www.agner.org/optimize/optimizing_cpp.pdf (메모리 접근과 코드 배치 관련 장)
 - Marwedel, Peter, & Goossens, Gert (eds.). *Code Generation for Embedded Processors*. Kluwer Academic Publishers, 1995.

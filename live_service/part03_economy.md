@@ -69,7 +69,7 @@ flowchart LR
 
 ### 소스와 싱크 — 경제의 입출력
 
-경제는 *재화가 생기는 소스(source/faucet)* 와 *재화가 사라지는 싱크(sink)* 의 균형으로 정의된다. 물탱크에 물이 들어오고 빠지는 것과 같다. 들어오는 양이 빠지는 양을 꾸준히 넘으면 *인플레이션* 이고, 반대면 *디플레이션* 이다.
+경제는 *재화가 생기는 소스(source/faucet)* 와 *재화가 사라지는 싱크(sink)* 의 균형으로 정의된다. 물탱크에 물이 들어오고 빠지는 것과 같다. 들어오는 양이 빠지는 양을 꾸준히 넘으면 *유통량(통화량)이 늘고*, 반대면 줄어든다. 유통량 증가가 곧 물가 인플레이션은 아니며, 물가 압력은 품목·품질을 고정한 가격지수와 거래량, 유저 수를 함께 봐야 판정할 수 있다.
 
 ```mermaid
 flowchart TB
@@ -98,11 +98,12 @@ flowchart TB
 def net_currency_flow(faucets, sinks, active_players):
     total_in  = sum(f.rate * active_players for f in faucets)   # 시간당 유입
     total_out = sum(s.rate * active_players for s in sinks)     # 시간당 소멸
-    return total_in - total_out   # > 0 이면 인플레이션 압력
+    return total_in - total_out   # > 0 이면 유통량 증가 (물가 인플레이션과 동일시하지 않음)
 
 # 건강한 경제: net_flow가 0 근처에서 진동
-# 지속적 양수: 골드가 흔해져 상점 가격이 무의미해짐
+# 지속적 양수: 재화가 흔해져 고정가 상점 가격이 상대적으로 무의미해질 수 있음
 # 지속적 음수: 신규 유저가 따라잡지 못해 진입 장벽
+# 물가 판정은 품목·품질 고정 가격지수, 거래량, 유저 수를 함께 본다 (2절 MV=PQ caveat 참조)
 ```
 
 ### 자원 플로우 모델링
@@ -291,7 +292,7 @@ def expected_enhance_cost(target_level, base_cost, success_rate):
 | 희귀 (SR) | 5% | 쓸만함 |
 | 전설 (SSR) | 1% | 목표 대상 |
 
-여기서 의도된 긴장이 *기대값* 이다. 등급별 확률과 가치를 곱해 더하면 *한 번 뽑기의 기대 가치* 가 나온다. 이 값이 1회 단가보다 *낮아야* 수익이 난다 — 그러나 너무 낮으면 플레이어가 "가치가 없다"고 느껴 이탈한다. 기대값을 단가의 일정 비율 아래로 유지하되, *드물게 큰 보상*(SSR)이 터지는 분산을 둬서 "다음엔 나올지도"라는 기대를 살리는 것이 설계의 본질이다.
+여기서 의도된 긴장이 *기대값* 이다. 등급별 확률과 가치를 곱해 더하면 *한 번 뽑기의 기대 가치* 가 나온다. 다만 이 값은 이용자가 느끼는 *효용(value)* 의 기대치이지 공급자의 원가가 아니다. 따라서 기대 가치가 1회 단가보다 *낮다고* 해서 곧바로 수익이 보장되지는 않는다 — 수익은 매출에서 아이템 공급·결제 수수료·서버 비용 같은 변동비를 뺀 *기여마진* 으로 판단한다. 그러나 너무 낮으면 플레이어가 "가치가 없다"고 느껴 이탈한다. 기대값을 단가의 일정 비율 아래로 유지하되, *드물게 큰 보상*(SSR)이 터지는 분산을 둬서 "다음엔 나올지도"라는 기대를 살리는 것이 설계의 본질이다.
 
 ```python
 # 한 번 뽑기의 기대 가치 = Σ(확률 × 가치)
@@ -323,21 +324,43 @@ def expected_pulls_to_ssr(base_rate, pity_threshold, soft_pity_boost):
 
 ### 확률 공개 의무
 
-확률형 아이템은 *법적 규제* 의 대상이다. 한국은 게임산업진흥에 관한 법률 개정으로 확률형 아이템의 *확률 정보 표시* 를 의무화했다(2024년 시행). 게임 내·공식 웹사이트에 각 아이템의 *획득 확률을 명시* 해야 하고, 거짓 표시는 처벌 대상이다. 천장이 있으면 그 조건도 함께 표시한다.
+확률형 아이템은 *법적 규제* 의 대상이다. 한국은 게임산업진흥에 관한 법률 개정으로 확률형 아이템의 *확률 정보 표시* 를 의무화했다고 알려져 있으나, 정확한 법령 번호·조문·시행일과 적용 예외는 **확인 필요** 다. 이 문서의 검수는 출시 법률 준수 인증이 아니다. 게임 내·공식 웹사이트에 각 아이템의 *획득 확률을 명시* 해야 하고, 거짓 표시는 처벌 대상이며, 천장이 있으면 그 조건도 함께 표시한다는 점이 일반적인 요구다.
 
 다른 지역도 규제가 다양하다. 일부 국가는 가챠를 도박으로 분류해 강한 제약을 두고, 일부 플랫폼은 자체 정책으로 확률 공개를 요구한다. 글로벌 출시 게임은 *지역별로 다른 표시 의무* 를 빌드/설정으로 분기해야 한다.
 
 ```python
+from collections.abc import Mapping
+import math
+
 # 확률 공개 데이터는 클라이언트 노출용과 서버 실제값이 반드시 일치해야 한다
 # 표시 확률과 실제 드롭 확률의 불일치는 법적 책임이 따른다
-def validate_disclosed_rates(displayed, actual, tolerance=1e-9):
-    for item, disp_rate in displayed.items():
-        if abs(disp_rate - actual[item]) > tolerance:
-            raise ComplianceError(f"{item}: 표시 {disp_rate} != 실제 {actual[item]}")
-    assert abs(sum(actual.values()) - 1.0) < tolerance   # 확률 합 = 1
+# 표시 허용 오차는 %p가 아니라 확률 절대값 단위다.
+def validate_disclosed_rates(
+    displayed: Mapping[str, float],
+    actual: Mapping[str, float],
+    *,
+    display_abs_tol: float = 1e-6,
+    sum_abs_tol: float = 1e-12,
+) -> None:
+    for name, tol in (("display_abs_tol", display_abs_tol),
+                      ("sum_abs_tol", sum_abs_tol)):
+        if not math.isfinite(tol) or tol < 0:
+            raise ValueError(f"invalid {name}")
+    if not actual or set(displayed) != set(actual):
+        raise ValueError("probability item set mismatch or empty distribution")
+    for name, values in (("displayed", displayed), ("actual", actual)):
+        for item, probability in values.items():
+            if not math.isfinite(probability) or not 0 <= probability <= 1:
+                raise ValueError(f"{name}[{item}] outside finite [0, 1]")
+    if not math.isclose(math.fsum(actual.values()), 1.0,
+                        rel_tol=0.0, abs_tol=sum_abs_tol):
+        raise ValueError("actual probabilities do not sum to 1")
+    for item, probability in actual.items():
+        if abs(displayed[item] - probability) > display_abs_tol:
+            raise ValueError(f"display mismatch: {item}")
 ```
 
-표시 확률과 *서버의 실제 드롭 확률이 비트 단위로 일치* 하는지 검증하는 자동 테스트를 빌드 파이프라인에 두는 것이 운영의 안전장치다. 둘이 어긋나면 법적 책임으로 직결된다.
+표시 확률과 *서버의 실제 드롭 확률이 같은 항목 집합·유한값·[0,1] 범위·합계 1·표시 허용오차 안에서 일치* 하는지 검증하는 자동 테스트를 빌드 파이프라인에 두는 것이 운영의 안전장치다. 표시 허용오차는 %p가 아니라 확률 절대값 단위로 정의한다. 둘이 어긋나면 법적 책임으로 직결된다.
 
 ### 미성년자 보호와 환불
 
@@ -451,7 +474,7 @@ $$\text{ARPPU} = \frac{\text{총 매출}}{\text{과금 유저 수}}$$
 
 *ARPU(Average Revenue Per User)* 는 전체 유저 1인당 평균 매출이고, *ARPPU(Average Revenue Per Paying User)* 는 *과금 유저* 1인당 평균 매출이다. 둘의 관계가 정보를 준다. ARPU는 낮은데 ARPPU가 높으면 *소수 고래 의존* 이고, ARPU와 ARPPU가 가까우면 *과금 저변이 넓다*. 5절의 고래 분포가 이 두 지표의 격차로 드러난다.
 
-*LTV(Lifetime Value)* 는 한 유저가 *생애 전체* 동안 낼 것으로 추정되는 매출이다. 마케팅의 유저 획득 비용(CAC)과 비교해 *수익성* 을 판단하는 기준이다 — LTV가 CAC보다 커야 그 유저 획득이 이익이다.
+*LTV(Lifetime Value)* 는 한 유저가 *생애 전체* 동안 낼 것으로 추정되는 매출이다. 마케팅의 유저 획득 비용(CAC)과 비교해 *유저 획득의 수익성* 을 판단하는 출발점이다 — 다만 여기서 말하는 LTV는 생애 매출(revenue LTV)이므로, 변동비를 뺀 *기여마진 LTV(contribution-margin LTV)* 로 CAC와 비교해야 실질 이익을 판단할 수 있다. 매출 LTV > CAC는 전체 이익의 충분조건이 아니다.
 
 | 지표 | 정의 | 해석 |
 |---|---|---|
@@ -459,7 +482,7 @@ $$\text{ARPPU} = \frac{\text{총 매출}}{\text{과금 유저 수}}$$
 | ARPPU | 매출 / 과금 유저 | 과금 유저 깊이 |
 | 전환율 | 과금 유저 / 전체 유저 | 과금 저변 |
 | LTV | 생애 누적 매출 추정 | CAC 대비 수익성 |
-| LTV/CAC | LTV / 획득 비용 | 1 초과여야 지속 가능 |
+| LTV/CAC | LTV / 획득 비용 | 1 초과는 참고 지표 — 변동비 반영한 기여마진 LTV로 판단 |
 
 ### 전환율 분석
 
@@ -481,18 +504,22 @@ flowchart LR
 수익 지표가 *매출* 을 본다면, 화폐 분포는 *경제 건강* 을 본다. 2절의 총 유통량과 중앙값 보유고에 더해, *부의 분포 곡선* 을 본다 — 상위 1%, 10%, 중앙값, 하위 10%의 보유고를 함께 추적하면 인플레이션과 격차가 동시에 드러난다.
 
 ```python
+import statistics
+
 # 경제 건강 대시보드: 분포를 본다 (평균 하나로는 부족)
 def economy_health_snapshot(all_balances):
     s = sorted(all_balances)
     n = len(s)
+    if n == 0:
+        raise ValueError("all_balances must not be empty")   # empty 계약: 명시적 실패
     return {
-        "total_supply":   sum(s),              # 총 유통량
-        "median":         s[n // 2],           # 중앙값 (평균보다 robust)
-        "p99":            s[int(n * 0.99)],     # 고래 보유고
-        "p10":            s[int(n * 0.10)],     # 신규/저활동 유저
-        "gini":           gini_coefficient(s), # 불평등 지수
+        "total_supply":   sum(s),                     # 총 유통량
+        "median":         statistics.median(s),        # 중앙값 (짝수는 두 가운데 값의 평균)
+        "p99":            s[int(n * 0.99)],            # 고래 보유고
+        "p10":            s[int(n * 0.10)],            # 신규/저활동 유저
+        "gini":           gini_coefficient(s),         # 불평등 지수
     }
-    # median 단조 상승 → 인플레이션
+    # median 단조 상승 → 유통량/잔고 증가 (물가 인플레이션은 고정 가격지수와 함께 판정)
     # p99/median 확대 → 격차 심화 → 신규 진입 장벽
 ```
 
@@ -558,11 +585,9 @@ def economy_health_snapshot(all_balances):
 
 ## 더 읽을거리
 
-- GDC 경제 디자인 트랙 발표들 — 소스/싱크 균형, 인플레이션 제어, 가챠 설계의 실무 사례.
-- 한국 게임산업진흥에 관한 법률 및 확률형 아이템 정보공개 관련 고시 — 확률 표시 의무의 법적 기준.
+- 한국 게임산업진흥에 관한 법률 및 확률형 아이템 정보공개 관련 고시 — 확률 표시 의무의 법적 기준(정확한 법령 번호·조문·시행일은 **확인 필요**).
 - "Virtual Economies: Design and Analysis" (Vili Lehdonvirta, Edward Castronova, MIT Press 2014) — 가상 경제의 이론적 토대와 인플레이션 분석.
 - John D. Sterman, "Business Dynamics: Systems Thinking and Modeling for a Complex World" (McGraw-Hill, 2000) — 저수지(stock-flow) 모델과 1차 누설 적분기의 표준 교재.
 - Irving Fisher, "The Purchasing Power of Money" (Macmillan, 1911) — 화폐수량설 $MV=PT$의 원전.
 - EVE Online 경제 리포트·CCP의 경제 분석 사례 — 거래 가능 경제의 유통량·시세 모니터링 실례.
-- 모바일 분석 플랫폼(예: GameAnalytics, Adjust) 문서 — ARPU/ARPPU/LTV·전환 퍼널 추적의 표준 정의.
-- "Hooked: How to Build Habit-Forming Products" (Nir Eyal) — 수익화와 참여 설계의 심리적 배경(공정성 인식 포함).
+- "Hooked: How to Build Habit-Forming Products" (Nir Eyal) — 습관 형성과 참여 설계의 심리적 배경.

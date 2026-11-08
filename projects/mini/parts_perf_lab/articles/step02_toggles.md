@@ -2,7 +2,13 @@
 
 현재까지의 결과물은 1만 점이 화면을 떠다니고 update/draw ms가 텍스트로 표시되는 *측정 도구의 골격* 이다. 한 가지 구현 경로만 돌고 있어 *비교* 가 불가능하다. 같은 워크로드를 어떤 변형으로 돌리든 같은 수치가 나오고, 토글 같은 인터랙션도 없다.
 
-이 단계의 목표는 *런타임 토글 시스템* 을 얹어 비교의 토대를 만드는 것이다. 콤보박스 한 번 클릭으로 엔티티 수가 1k에서 100k로 바뀌고, 그 순간 update/draw ms가 눈에 띄게 증가하는 모습이 *프레임 그래프* 에 즉시 그려진다. 워크로드와 머신에 따라 update보다 draw 측 변화가 더 크게 보일 수도 있다. 어느 쪽이든 토글이 바뀌는 *그 순간* 의 그래프 변화가 측정 도구의 본질이다.
+이 단계의 목표는 *런타임 토글 시스템* 을 얹어 비교의 토대를 만드는 것이다. 콤보박스 한 번 클릭으로 엔티티 수가 1k에서 100k로 바뀌고, 그 순간 update/draw ms의 변화가 *프레임 그래프* 에 즉시 그려진다. 워크로드와 머신에 따라 update보다 draw 측 변화가 더 크게 보일 수도 있다. 어느 쪽이든 토글이 바뀌는 *그 순간* 의 그래프 변화가 측정 도구의 본질이다.
+
+> 이 실습은 게임 개발의 모든 CS 주제를 하나의 프로그램에 구현하는 과정이 아니다. 같은 상태를 여러 메모리 배치와 연산 방식으로 처리하고, 할당·순회 비용을 나누어 관찰하는 저수준 성능 실습이다. ECS 는 단일 컴포넌트 조합의 저장 배치까지만 다룬다. query 와 구조 변경, 문자열·인코딩·동시성 등은 별도 실습에서 다룬다.
+>
+> 실행 결과가 특정 순서로 나와야 성공하는 실습은 아니다. 먼저 같은 입력에 대해 같은 의미의 결과를 계산하는지 확인한다. 그다음 작업량·측정 구간·실행 환경을 맞추고 반복 측정한다. 기대와 다른 성능이 나오면 결과를 숨기거나 구현 오류로 단정하지 않고, 이 실험이 어떤 가정을 충족하지 못했는지 확인한다.
+>
+> 각 장의 코드는 세 종류로 구분한다. `현재 단계 완성 코드`는 해당 단계의 파일 집합과 함께 빌드할 수 있어야 한다. `발췌 코드`는 생략된 선언과 helper 의 실제 위치를 함께 적는다. `설명용 의사코드`는 의미와 제어 흐름을 보여주며 그대로 붙여 넣는 소스가 아니다. 최종 `src/`와 중간 단계의 함수 시그니처가 다르면 변환 표를 제공한다.
 
 이 단계의 결과물은 다음 다섯 가지를 갖춘 토글 시스템이다.
 
@@ -12,7 +18,7 @@
 4. 600 프레임 슬라이딩 윈도우 + 60/30fps 기준선이 있는 프레임 그래프
 5. 토글 변경 시 시뮬레이션 재시작 처리
 
-이 단계에서 *실제로 동작하는* 토글은 엔티티 수(1k/10k/100k) 한 가지다. 나머지 토글(allocator/layout/container/simd/branchless)은 뒤에 붙을 모듈이 없어 grayed out으로 자리만 잡아 둔다.
+이 단계에서 *실제로 동작하는* 토글은 엔티티 수(1k/10k/100k) 한 가지다. 나머지 토글(allocator/layout/container/simd/branchless)은 대응 모듈이 없어 grayed out으로 자리만 잡아 둔다. 토글 값은 *요청* 이며, 대응 커널이 없거나 선택한 레이아웃에 그 구현이 없으면 요청과 실제 실행이 달라질 수 있다. 그런 경우 HUD는 요청한 옵션과 실제 적용된 커널, 대체 이유를 함께 보여 줘야 하고, 효과가 없는 토글은 비활성화하거나 `적용 대상 아님` 으로 표시한다.
 
 ---
 
@@ -170,6 +176,8 @@ inline bool RequiresRestart(const Toggles& a, const Toggles& b) {
 ```
 
 SIMD 폭과 branchless predication은 *경로 선택* 이라 재시작 없이 다음 프레임부터 적용 가능하다. 그래서 이 함수에 포함하지 않는다.
+
+토글 값은 *요청* 이다. 빌드에 해당 커널이 없거나 선택한 레이아웃에 그 구현이 없으면 요청과 실행 결과가 달라진다. 예를 들어 AoS에는 이 lab에 수동 SIMD 경로가 없어 AVX2를 요청해도 `C++ Auto` 경로로 실행되고, AVX2를 빌드하지 않으면 SoA/Archetype의 AVX2 요청은 SSE로 떨어진다. 그래서 HUD는 요청한 옵션뿐 아니라 실제 적용된 커널과 대체 이유를 함께 표시해야 한다. 효과 없는 토글은 비활성화하거나 `적용 대상 아님` 으로 표시한다.
 
 ## 4. Hud 클래스의 3-zone 레이아웃
 
@@ -396,7 +404,7 @@ void Hud::DrawTogglePanel(Toggles& toggles, int x, int y) {
     GuiSetState(STATE_DISABLED);
     if (GuiDropdownBox({(float)(x2 + kLabelW), (float)rowY(row2),
                         (float)kFieldW, (float)kRowH},
-                       "Scalar;SSE;AVX2",
+                       "C++ Auto;SSE;AVX2",
                        &simdIdx, simdEdit_)) {
         simdEdit_ = !simdEdit_;
     }
@@ -421,7 +429,7 @@ void Hud::DrawTogglePanel(Toggles& toggles, int x, int y) {
 
 ## 6. 프레임 그래프 그리기
 
-좌측 stats 텍스트는 *현재 프레임* 만 보여 준다. 토글이 바뀌는 *순간* 의 변화를 보려면 *시간축* 이 필요하다. 프레임 그래프는 600 프레임의 update+draw 합산을 라인 차트로 그린다.
+좌측 stats 텍스트는 *현재 프레임* 만 보여 준다. 토글이 바뀌는 *순간* 의 변화를 보려면 *시간축* 이 필요하다. 프레임 그래프는 600 프레임의 update+draw-submit 합산을 라인 차트로 그린다.
 
 ```cpp
 void Hud::DrawFrameGraph(const FrameTimer& timer, int x, int y, int w, int h) {
@@ -489,6 +497,8 @@ void Hud::DrawFrameGraph(const FrameTimer& timer, int x, int y, int w, int h) {
 2. **두 기준선**: 60fps 초록, 30fps 노랑. 토글 변경으로 ms가 두 기준선 위·아래로 움직이는 모습이 한눈에 들어온다.
 3. **링 버퍼 순회 순서**: `head`가 *다음에 쓸 위치* 이므로 가장 오래된 데이터는 `(head + cap - filled) % cap` 부터 시작한다. 이걸 left→right로 그리면 시간축이 자연스럽게 흐른다.
 
+그래프의 가로축은 *프레임 표본 번호* 다. 600개 표본은 프레임률에 따라 서로 다른 길이의 시간을 나타내므로, 가로 위치를 초 단위 경과 시간으로 읽으면 안 된다. 16.67ms 하한 때문에 기본 패널에서는 약 0.15ms 이하의 차이가 정수 y 변환 뒤 바닥에 겹쳐 보이지 않을 수 있다. 이는 "차이가 없다"는 증명이 아니다. 모든 채널에 숫자 요약과 독립 확대 모드를 두고, 설정을 바꾸면 새 session을 시작하거나 그래프에 경계선을 넣어 다른 설정의 표본이 하나의 분포로 해석되지 않게 하는 작업은 **보충 구현 목표** 다.
+
 `DrawLine`을 폴리라인으로 연결한다. 1만 개 점을 그리는 것에 비하면 600줄짜리 폴리라인은 무시할 비용이다.
 
 ## 7. 메인 루프 통합과 재시작 처리
@@ -529,10 +539,13 @@ int main() {
     hud.Init(kWindowW, kWindowH, kHudH);
 ```
 
-루프는 update와 시뮬 draw를 먼저 측정하고, 샘플을 커밋한 뒤 HUD를 그린다. 이렇게 하면 HUD 자체의 비용은 draw ms에 섞이지 않는다.
+루프는 update와 시뮬 draw를 먼저 측정하고, HUD를 그린 뒤 EndDrawing 다음에 EndFrame과 CommitFrame을 호출한다. HUD는 EndDrawing 전에 그려지므로 그 비용은 draw-submit에 섞이지 않고 frame wall에만 들어간다. CommitFrame이 HUD 뒤에 있어 HUD가 읽는 값은 직전 커밋 결과다.
 
 ```cpp
     while (!WindowShouldClose()) {
+        // frame wall은 루프 선두부터 EndDrawing(HUD·flush·swap 포함) 뒤까지다.
+        timer.BeginFrame();
+
         const float dt = GetFrameTime();
 
         timer.BeginUpdate();
@@ -544,9 +557,13 @@ int main() {
         ClearBackground(Color{10, 10, 14, 255});
         sim.Draw();
         timer.EndDraw();
-        timer.CommitFrame();
+        // HUD는 EndDrawing 전에 그린다. HUD 비용은 draw-submit에 섞이지 않고
+        // frame wall에만 들어간다. CommitFrame이 뒤에 있어 HUD는 직전 커밋 값을 읽는다.
         hud.Draw(toggles, timer, sim.Count());
         EndDrawing();
+
+        timer.EndFrame();
+        timer.CommitFrame();
 
         // 토글 변경 처리. 재시작 필요한 변경이면 시뮬 재초기화.
         if (ppl::RequiresRestart(prevToggles, toggles)) {
@@ -583,22 +600,23 @@ cmake --build build --config Release
 
 ```text
 좌측                            중앙                          우측
-entities : 10000     entities : [10k ▼]   container: [vector ▼]   ┌──────────┐
-update   : 0.087 ms  allocator: [malloc▼] simd     : [Scalar▼]    │   ⎺⎺⎺⎺⎺⎺⎺ │ 60fps
-draw     : 1.243 ms  layout   : [SoA ▼]   ☐ branchless             │           │
-total    : 1.330 ms                                                 │           │
-fps      : 752.0                                                    │           │
-                                                                    └──────────┘
-                                                                       max 16.67 ms
+entities   : 10000   entities : [10k ▼]   container: [vector ▼]  ┌──────────┐
+frame wall : 1.412ms allocator: [malloc▼] simd     : [C++ Auto▼] │   ⎺⎺⎺⎺⎺⎺⎺ │ 60fps
+sim        : 0.087ms layout   : [SoA ▼]   ☐ branchless           │           │
+draw-submit: 1.243ms                                               │           │
+sim+submit : 1.330ms                                               │           │
+fps(actual): 747                                                   │           │
+                                                                   └──────────┘
+                                                                      max 16.67 ms
 ```
 
-allocator/layout/container/simd/branch는 회색으로 비활성. entities 콤보만 클릭 가능하다.
+allocator/layout/container/simd/branch는 회색으로 비활성. entities 콤보만 클릭 가능하다. 표시 이름 `C++ Auto` 는 손으로 쓴 인트린식이 없는 일반 C++ 경로를 뜻하며, 컴파일러가 자동 벡터화할 수 있다.
 
 ### 토글 동작 체크
 
 1. entities 콤보를 클릭해 `100k`로 바꾼다.
 2. 시뮬이 즉시 재시작 (`Shutdown` → `Init`). 화면이 잠깐 깜박인다.
-3. 시뮬이 다시 시작되면서 update ms가 한 자릿수 ms에서 두 자릿수 ms로 점프한다.
+3. 시뮬이 다시 시작되면서 update ms가 커질 수 있다(환경에 따라 자릿수가 바뀔 정도로).
 4. 우측 그래프에 그 점프가 *세로 절벽* 으로 그려진다. 토글 직전과 직후가 한 줄로 이어진다.
 5. 자동 줌이 새 max에 맞춰 스케일을 다시 잡는다. 60fps 기준선이 그래프 하단으로 내려간다.
 
@@ -638,7 +656,7 @@ void TestToggleRestartRules() {
 }
 ```
 
-패널 기하 쪽은 콤보를 펼쳤을 때의 겹침을 고정한다. `GuiLock` 과 "열린 콤보를 마지막에 그리기" 가 필요한 이유가 곧 이 겹침이므로, 겹침이 사라지면 그 잠금·지연도 다시 판단해야 한다.
+패널 기하 쪽은 두 가지를 함께 고정한다. 첫째, 콤보를 펼친 목록이 같은 컬럼의 아래 행 필드를 덮으므로 `GuiLock` 과 "열린 콤보를 마지막에 그리기" 가 필요하다. 둘째, raygui가 목록을 아래로 펼치는 탓에 기본 창(720)에서는 allocator 팝업 하단이 736이 되어 화면을 벗어나므로, 패널 상단을 필요한 만큼 위로 올려(`PanelOriginY`) 모든 열린 rect가 창 안에 오게 한다. 그리기 rect와 입력 판정(hit-test) rect가 같은 좌표를 쓰는지도 함께 본다. 화면 밖 항목을 잘라 그리는 것만으로는 선택 문제를 해결하지 못한다. 0 이하 크기 사각형은 면적이 0이라 `RectsOverlap` 이 false를 돌려준다.
 
 <!-- snippet: tests/core_tests.cpp#TestTogglePanelGeometry -->
 ```cpp
@@ -662,6 +680,17 @@ void TestTogglePanelGeometry() {
     CHECK(RectsOverlap(entitiesOpen, allocator));
     CHECK(RectsOverlap(entitiesOpen, layout));
     // ...
+    // 0 이하 크기는 면적 0이라 어떤 사각형과도 겹치지 않는다(음수 크기는 미지원).
+    CHECK(!RectsOverlap(UiRect{5, 5, 0, 1}, UiRect{0, 0, 10, 10}));
+    CHECK(!RectsOverlap(UiRect{0, 0, 10, 10}, UiRect{5, 5, 0, 0}));
+    CHECK(!RectsOverlap(UiRect{0, 0, 0, 0}, UiRect{0, 0, 0, 0}));
+    // ...
+    // 기본 창(720)에서 allocator 팝업이 736으로 넘친다. 패널을 올려 창 안에 넣는다.
+    CHECK(!ppl::PanelOpenFitsWindow(592, 720));
+    const int panelY = ppl::PanelOriginY(592, 720);
+    CHECK(panelY <= 592);
+    CHECK(ppl::PanelOpenFitsWindow(panelY, 720));
+    // ...
     // 두 패스 그리기: 모든 위젯이 정확히 한 번, 열린 콤보만 마지막 패스에.
     CHECK(PanelDrawsWidget(/*widgetOpen=*/false, /*openPass=*/false));
     CHECK(!PanelDrawsWidget(/*widgetOpen=*/false, /*openPass=*/true));
@@ -670,7 +699,7 @@ void TestTogglePanelGeometry() {
 }
 ```
 
-여기 쓰인 `kPanelRowH`·`PanelRowY`·`PanelFieldRect` 는 문서용 복제본이 아니라 `ui/hud_layout.h` 의 상수와 수식 그 자체다. 위젯을 그리는 코드가 같은 함수를 부른다.
+여기 쓰인 `kPanelRowH`·`PanelRowY`·`PanelFieldRect`·`DropdownOpenRect`·`PanelOriginY`·`PanelOpenFitsWindow`·`RectsOverlap` 는 문서용 복제본이 아니라 `ui/hud_layout.h` 의 상수와 수식 그 자체다. 위젯을 그리는 코드와 hit-test가 같은 함수를 부른다.
 
 ```bash
 cmake -S . -B build
@@ -684,25 +713,29 @@ ctest --test-dir build -C Release -R parts_toggles_tests --output-on-failure
 ```text
 parts_core_tests: group `toggles`
   toggles/ToggleRestartRules ... 18 check(s) ok
-  toggles/TogglePanelGeometry ... 16 check(s) ok
-toggles: 2 test(s), 34 check(s), 0 failure(s)
+  toggles/TogglePanelGeometry ... 22 check(s) ok
+toggles: 2 test(s), 40 check(s), 0 failure(s)
 ```
 
-두 검사가 각각 18·16개 단언을 돈다. 콤보박스 클릭 자체는 여전히 손으로 확인해야 하지만, 클릭이 *무엇을 부르는지* 와 *어디에 그려지는지* 는 여기서 갈린다.
+위 출력은 문서 명령으로 얻을 수 있는 예상 출력이다. 두 검사가 각각 18·22개 단언을 평가하지만, 이 수는 실행 통계일 뿐 검증 강도의 지표가 아니다. 콤보박스 클릭 자체는 여전히 손으로 확인해야 하지만, 클릭이 *무엇을 부르는지* 와 *어디에 그려지는지* 는 여기서 갈린다. 위젯의 실제 클릭·입력 판정, 열린 드롭다운 마지막 항목의 클릭 가능 여부, hit-test 영역과 그리기 영역의 일치는 창·입력 컨텍스트가 필요해 headless로 확인할 수 없다(**보충 구현 목표**).
 
 ### 검증 체크리스트
 
-- 콤보박스가 안 펼쳐짐 → `RAYGUI_IMPLEMENTATION` 정의가 빠졌거나 두 곳에 있음, raygui_impl.cpp가 빌드 대상에 들어갔는지 확인
-- 콤보박스가 안 닫힘 → `*Edit_` 멤버를 호출자가 들고 있어야 함, 함수 안 지역 변수면 매 프레임 false로 리셋
-- 그래프가 빈 박스만 그려짐 → `timer.CommitFrame()` 누락
-- 그래프가 화면을 빠져나감 → 자동 줌의 하한(`maxMs < 16.67f`) 누락
-- entities 변경 시 재시작 안 됨 → `prevToggles = toggles` 가 `hud.Draw` 와 `RequiresRestart` 사이에 있을 가능성
+증상마다 확인할 단계를 먼저 가른다. 링크 단계 문제와 실행 중 입력 문제를 한 원인으로 확정하지 않는다.
+
+- `RAYGUI_IMPLEMENTATION` 정의 누락/중복(build/link 단계) → 정확히 한 컴파일 단위에서 정의됐는지, raygui_impl.cpp가 빌드 대상에 들어갔는지 확인
+- 콤보박스가 안 펼쳐짐/안 닫힘(실행 중 입력) → `*Edit_` 가 호출자 멤버인지(지역 변수면 매 프레임 false로 리셋), `STATE_DISABLED`/`GuiLock` 상태, 위젯 겹침, 창 경계와 hit-test rect를 차례로 확인
+- 그래프가 빈 박스만 그려짐(실행 중) → `timer.CommitFrame()` 누락
+- 그래프가 화면을 빠져나감(실행 중) → 자동 줌의 하한(`maxMs < 16.67f`) 누락. 다만 그 하한이 작은 차이를 가리는 문제는 별개다.
+- entities 변경 시 재시작 안 됨(실행 중) → `prevToggles = toggles` 위치
 
 ---
 
 ## 결론
 
 이 단계의 결과물은 토글 한 번에 시뮬이 재시작되고 그 직후 ms 변화가 그래프에 *세로 절벽* 으로 그려지는 측정 도구다. 약 400줄의 코드(raygui 통합 + Toggles + Hud + 변경 감지)가 기존 골격 위에 얹혔다.
+
+이 장의 코드 조각은 이 단계의 파일 집합을 설명하기 위한 발췌다. 최종 `src/` 와 대조할 때 함수 시그니처가 다를 수 있으며, 생략된 선언은 주변 정의를 보충해야 컴파일된다.
 
 세 가지 결정이 이 단계의 토대를 만들었다.
 

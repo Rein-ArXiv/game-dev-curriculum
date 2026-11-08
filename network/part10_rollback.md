@@ -96,7 +96,7 @@ sequenceDiagram
 |---|---|---|
 | `float` 비결정성 | 컴파일러 / CPU / 명령 순서 | 고정소수점, fast-math 끄기 |
 | 미초기화 메모리 | 스택 / heap 의 *우연한 값* | 명시적 0 초기화 |
-| 컨테이너 순회 순서 | `unordered_map` 의 hash 무작위 | `vector` + 정렬된 키 |
+| 컨테이너 순회 순서 | `unordered_map` 의 구현·rehash 의존 순서(일부 구현은 hash seed를 무작위화) | `vector` + 정렬된 키 |
 | 포인터 주소 의존 | 정렬 키로 주소 사용 | 안정적 ID 사용 |
 | 시간 의존 | `time(NULL)`, `Random` | 결정론적 PRNG + tick seed |
 | 멀티스레드 | 작업 순서 비결정 | 시뮬은 단일 스레드 |
@@ -116,14 +116,16 @@ inline fp Mul(fp a, fp b) {
     return (fp)(((int64_t)a * b) >> 16);     // 64비트로 올려 곱한 뒤 시프트 (오버플로 방지)
 }
 inline fp Div(fp a, fp b) {
-    return (fp)(((int64_t)a << 16) / b);
+    // C++17에서도 안전하도록 음수 left shift 대신 넓은 곱셈을 쓴다.
+    // b != 0은 호출 전 불변식. 결과가 int32 표현 범위를 넘으면 별도 정책으로 처리한다.
+    return (fp)(((int64_t)a * 65536) / b);
 }
 inline fp FromInt(int x)   { return x << 16; }
 inline int ToInt(fp x)     { return x >> 16; }   // 버림
 inline fp FromFloat(float f) { return (fp)(f * FP_ONE); }   // 빌드 시점 상수에만
 ```
 
-함정 — *Mul 의 64비트 중간값*. `(int32 * int32)` 는 오버플로하므로 `int64` 로 올려 곱한 뒤 시프트해야 한다. 또 `Div` 의 0 나눗셈, 음수 시프트의 구현 정의 동작을 막아야 한다. `sqrt` / `sin` 같은 초월함수는 *룩업 테이블 + 고정소수 보간* 으로 자체 구현한다 — 표준 라이브러리의 float 버전은 플랫폼마다 비트가 다르다.
+함정 — *Mul 의 64비트 중간값*. `(int32 * int32)` 는 오버플로하므로 `int64` 로 올려 곱한 뒤 시프트해야 한다. 또 `Div` 의 0 나눗셈을 막고, C++17에서는 음수 signed *좌*시프트가 UB이므로 위처럼 넓은 곱셈으로 피해야 한다(음수 *우*시프트의 구현 정의 동작과는 다른 문제다). `sqrt` / `sin` 같은 초월함수는 *룩업 테이블 + 고정소수 보간* 으로 자체 구현한다 — 표준 라이브러리의 float 버전은 플랫폼마다 비트가 다르다.
 
 *트레이드오프* — 코드 가독성 ↓, *기존 float 라이브러리 사용 불가*, 정밀도/범위 수동 관리. 격투 게임은 이 비용을 *전부 감수* 한다. FPS / 액션은 *float + 신중한 컴파일러 옵션* 으로 *대부분 결정론 달성 가능* (단방향 검증 필요).
 
@@ -140,7 +142,7 @@ int b = x / FP_ONE;         // truncate =>  0   (FP_ONE = 1<<16)
 // a != b — 음수에서 두 변환 규칙이 1 LSB 어긋난다
 ```
 
-한 시뮬 경로가 `>> 16` 을, 다른 경로가 `/ FP_ONE` 이나 float 캐스트를 쓰면 음수 좌표에서 1 LSB 차이가 시뮬 상태에 새어 *디싱크의 씨앗* 이 된다. 모든 시뮬 코드가 *한 규칙만* 쓰도록 강제하고, 변환 헬퍼를 단일 함수로 통일해야 한다. 추가 경계 — *부호 있는 정수의 우시프트* 는 C++17까지 음수 피연산자에서 구현 정의 동작이었고, 두 보수와 산술 우시프트가 표준에 명문화된 것은 C++20(P0907)부터다. 실무 컴파일러는 모두 산술 시프트지만, 결정론을 표준 보장으로 받치려면 C++20 이상을 기준 삼는 편이 안전하다. 마지막으로 `Div` 의 0 나눗셈은 UB이므로 호출 전 불변식으로 차단하고, `Mul`·`Div` 결과가 16.16 표현 범위 $\pm 2^{15}$ 를 넘으면 조용히 오버플로하므로 좌표·속도 스케일을 그 범위 안에 설계한다.
+한 시뮬 경로가 `>> 16` 을, 다른 경로가 `/ FP_ONE` 이나 float 캐스트를 쓰면 음수 좌표에서 1 LSB 차이가 시뮬 상태에 새어 *디싱크의 씨앗* 이 된다. 모든 시뮬 코드가 *한 규칙만* 쓰도록 강제하고, 변환 헬퍼를 단일 함수로 통일해야 한다. 추가 경계 — *부호 있는 정수의 우시프트* 는 C++17까지 음수 피연산자에서 구현 정의 동작이었고, 두 보수와 산술 우시프트가 표준에 명문화된 것은 C++20(P0907)부터다. C++20이 명문화한 것은 음수 *우*시프트의 산술 동작이고, 음수 *좌*시프트는 `Div` 처럼 넓은 곱셈으로 미리 피한다. 어떤 shift가 C++20에서 정의되었다는 사실을 signed 덧셈·곱셈·좁히기·fixed-point 전체 계산의 overflow 안전성으로 확대하지 않는다. 실무 컴파일러는 모두 산술 시프트지만, 결정론을 표준 보장으로 받치려면 C++20 이상을 기준 삼는 편이 안전하다. 마지막으로 `Div` 의 0 나눗셈은 UB이므로 호출 전 불변식으로 차단하고, `Mul`·`Div` 결과가 16.16 표현 범위 $\pm 2^{15}$ 를 넘으면 조용히 오버플로하므로 좌표·속도 스케일을 그 범위 안에 설계한다.
 
 ### float 결정론의 함정
 
@@ -261,19 +263,22 @@ flowchart LR
 
 ### 적응형 버퍼 — Sleep / Speedup
 
-상대 입력이 *너무 빨리 / 너무 늦게 도착* 할 때 *프레임 타이밍 조정*. GGPO 의 *time sync* — 두 클라이언트의 *프레임 어드밴티지* 차이가 불감대(기본 3프레임)를 넘을 때만 앞선 쪽을 최대 9프레임까지 쉬게 해 좁힌다.
+상대 입력이 *너무 빨리 / 너무 늦게 도착* 할 때 *프레임 타이밍 조정*. GGPO 의 *time sync* 는 `localFrame - 마지막으로 받은 상대 tick` 을 그대로 advantage로 쓰지 않는다 — 그 값은 상대의 실제 진행도뿐 아니라 입력 전송 지연까지 포함하므로, 양쪽이 같은 속도로 진행해도 둘 다 ‘앞섰다’고 계산될 수 있다. GGPO는 각 클라이언트가 보고한 local/remote frame advantage를 window로 평균하고, 두 관점이 모두 같은 쪽이 앞섰다고 볼 때만 그 차이의 절반을 `sleep_frames` 로 삼는다. 그 값이 불감대(기본 3프레임) 미만이면 무시하고, 최대 9프레임으로 상한을 둔다.
 
 ```cpp
-int frameAdvantage = localFrame - confirmedRemoteFrame;   // 내가 얼마나 앞섰나
+// 학습용 단순 backpressure 예 — 실제 GGPO time sync 구현이 아니다.
+// 아래 advantage는 네트워크 지연을 포함하므로 GGPO의 양방향 advantage
+// 추정·평균·차이의 절반·불감대(MIN_FRAME_ADVANTAGE)·상한과 다르다.
+int delayInclusiveGap = localFrame - lastReceivedRemoteFrame;
 
-if (frameAdvantage > kThreshold) {
+if (delayInclusiveGap > kThreshold) {
     SleepThisFrame();      // 로컬이 너무 앞섬 — 한 프레임 쉼 (상대가 따라오게)
-} else if (frameAdvantage < -kThreshold) {
+} else if (delayInclusiveGap < -kThreshold) {
     RunExtraFrame();       // 로컬이 뒤짐 — 이번에 두 프레임 진행
 }
 ```
 
-핵심은 *한쪽이 너무 앞서면 예측 깊이가 깊어져 롤백이 잦아진다* 는 것. 양쪽을 비슷한 프레임에 두면 예측 깊이가 얕아지고 롤백이 준다. 강한 핑 변동에도 *부드러운 게임 진행* 을 만드는 것이 적응형 버퍼다.
+핵심은 *한쪽이 너무 앞서면 예측 깊이가 깊어져 롤백이 잦아진다* 는 것. 양쪽을 비슷한 프레임에 두면 예측 깊이가 얕아지고 롤백이 준다. 실제 GGPO는 양측 advantage 추정을 평균해 한쪽만 느리게 만들되, 위 `delayInclusiveGap` 처럼 전송 지연이 섞인 raw 차이를 그대로 slowdown 기준으로 쓰지 않는다. 강한 핑 변동에도 *부드러운 게임 진행* 을 만드는 것이 적응형 버퍼다.
 
 ## 4. 재시뮬레이션 비용과 최적화
 
@@ -294,8 +299,16 @@ void OnRemoteInputReceived(int playerId, uint32_t tick, Input input, History& h)
     f.confirmed[playerId] = true;
     GameState s = f.state;                           // tick 시작 상태 복원
 
-    for (uint32_t t = tick; t < currentTick; ++t) {  // tick..현재 재시뮬
+    // tick..currentTick 재시뮬. tick 공간은 2^32로 감싸므로 t < currentTick 비교
+    // 대신 모듈로 거리를 쓴다(보존 구간이 반 바퀴보다 짧을 때만 유효).
+    const uint32_t count = currentTick - tick;       // end는 exclusive
+    if (count > HISTORY_SIZE || count >= 0x80000000u)
+        return;                                      // 히스토리 밖 — 무시(또는 에러)
+
+    for (uint32_t step = 0; step < count; ++step) {
+        const uint32_t t = tick + step;              // 2^32 modulo
         FrameData& ft = h.At(t);
+        if (ft.tick != t) return;                    // 저장 tag 검사
         Simulate(s, ft.inputs);                      // 확정/예측 섞인 입력으로
         h.At(t + 1).state = s;                       // 재계산된 상태 저장
         h.At(t + 1).stateHash = HashState(s);
@@ -337,18 +350,20 @@ RTS / 시뮬레이션은 *프레임 간 변화량이 작아* 압축 효과 큼. 
 
 ### 선택적 업데이트
 
-*모든 객체가 매 프레임 변하지 않음*. *입력에 영향받는 객체만* 재시뮬.
+*모든 객체가 매 프레임 변하지 않음*. 재시뮬 대상에서 빼려면 *변경 빈도가 낮다* 가 아니라 *그 window에서 시뮬 결과에 영향이 없거나 event log로 정확히 재구성 가능하다* 는 조건을 만족해야 한다.
 
 ```cpp
 void SimulateSelective(GameState& s, const Input* inputs) {
     for (auto& obj : s.objects)
-        if (obj.isDynamic || AffectedByInput(obj, inputs))
+        // 시뮬 결과에 영향을 주는 dependency가 있거나 입력과 겹치면 재시뮬한다.
+        // '변경 빈도가 낮음'은 제외 근거가 아니다.
+        if (obj.isDynamic || AffectedByInput(obj, inputs) || AffectsSimulation(obj))
             obj.Update();
     // 카메라 / 배경 / UI 는 시뮬 외 — 롤백 대상 아님 (6절)
 }
 ```
 
-격투에서 *카메라 / 배경 / UI* 는 입력에 영향 안 받으므로 *시뮬에서 제외* — 재시뮬 비용을 줄이고 롤백 대상도 줄인다.
+격투에서 *카메라 / 배경 / UI* 는 입력에 영향 안 받으므로 *시뮬에서 제외* — 재시뮬 비용을 줄이고 롤백 대상도 줄인다. 반대로 문·장애물 같은 collision state는 드물게 바뀐다는 이유만으로 빼지 않는다 — 과거 tick에서는 열려 있었는데 현재 닫혀 있다면 player/physics만 복원해 재시뮬해도 다른 충돌 결과가 나오므로, 영향 영역의 dependency가 window 동안 불변임을 보장하거나 객체 dependency와 collision event를 함께 보존해야 한다.
 
 ## 5. 시각적 아티팩트 처리
 
@@ -408,7 +423,7 @@ else
 |---|---|---|
 | 플레이어 / NPC | Yes | 입력에 직접 반응 |
 | 발사체 | Yes | 충돌 판정의 핵심 |
-| 환경 인터랙티브 (문/상자) | Optional | 변화 드묾 |
+| 환경 인터랙티브 (문/상자) | Optional | window 동안 불변 또는 event로 정확 복원 가능할 때만 |
 | 배경 / 카메라 | No | 시각 효과 |
 | 사운드 / VFX | No | 부정확해도 OK |
 | 채팅 / UI | No | 게임 상태 무관 |
@@ -456,9 +471,9 @@ uint32_t HashState(const GameState& s) {
 }
 ```
 
-*매 N 프레임* 해시를 상대에게 송신해 비교. 다르면 *디싱크 로그 + 강제 재동기화 또는 매치 종료*. 해시에 *모든 시뮬 상태 + 난수 상태* 를 넣는 것이 중요 — 빠뜨린 멤버가 디싱크의 사각이 된다.
+*매 N 프레임* 해시를 상대에게 송신해 비교. 해시는 *동일한 확정 입력 frontier* 에서 비교해야 한다 — 같은 tick 번호라도 한쪽이 예측 입력을, 다른 쪽이 확정 입력을 사용했다면 해시 차이는 정상 rollback 상황이다. 직렬화 schema(byte order·padding·포함 필드·container 순서·RNG 상태)를 양쪽이 공유해야 하며, object memory dump는 canonical serialization이 아니다. 이 TickHash가 전체 relevant simulation state를 담는지 일부 진단용 hash인지 명명하고, 보이지 않는 축이 있다고 해시 차이만으로 단정하지 않는다. 다르면 *디싱크 로그 + 강제 재동기화 또는 매치 종료*. 해시에 *모든 시뮬 상태 + 난수 상태* 를 넣는 것이 중요 — 빠뜨린 멤버가 디싱크의 사각이 된다.
 
-### 결정론적 재현과 binary search
+### 결정론적 재현과 최초 불일치 탐색
 
 디싱크 발생 시 — *입력 시퀀스 + 시작 상태* 를 기록해 *오프라인 재현*. 같은 입력에 다른 결과면 *결정론 깨짐 위치를 좁힌다*.
 
@@ -471,7 +486,7 @@ struct DesyncRecord {
 };
 ```
 
-좁히기는 *이진 탐색* 패턴 — 해시 다른 tick *전체* 가 아니라 *객체별 해시* 로 어느 객체가, 그 다음 *어느 멤버 변수* 가 갈렸는지 좁힌다. "tick 1234에서 객체 7의 velX가 한 비트 다름" 까지 좁히면 원인(보통 그 객체를 만지는 float 연산)이 보인다.
+좁히기는 *단일 tick 해시의 이진 탐색* 으로는 안 된다 — 한 tick이 달라도 reset·clamp로 이후 tick이 다시 같아질 수 있어 `같음→다름→같음`이 가능하고, tick 해시의 일치 여부는 단조 술어가 아니다. 기본값은 *처음부터의 선형 최초 불일치 탐색* 이고, 입력·상태 이력을 누적한 prefix digest/checkpoint를 쓰면 prefix 불일치가 보존된다. 해시 일치도 충돌 가능성이 있으므로 확정 입력 frontier와 canonical serialization 위에서만 해석한다. 좁히는 대상은 전체 해시가 아니라 *객체별 해시* 로 어느 객체가, 그 다음 *어느 멤버 변수* 가 갈렸는지다. "tick 1234에서 객체 7의 velX가 한 비트 다름" 까지 좁히면 원인(보통 그 객체를 만지는 float 연산)이 보인다.
 
 ### 네트워크 에뮬레이션
 
@@ -536,7 +551,7 @@ flowchart TB
 
 이 구조는 *반응성 - 복잡도의 명시적 트레이드오프* 위에 *프로덕션 수준의 롤백 시스템* 을 구성한다. 결정론적 시뮬레이션 + 상태/입력 히스토리(링 버퍼) + 예측 - 롤백 - 재시뮬 + 시각 보정(시뮬/렌더 분리) + 디싱크 탐지가 한 흐름으로 묶인다. 격투와 대전 액션은 전체 시뮬 롤백이 중심이고, FPS는 클라이언트 예측과 서버 보정을 결합한 부분 롤백이 중심이다.
 
-롤백 넷코드의 가장 큰 비용은 *디버깅* 이다. 결정론 깨짐 한 비트가 매치 끝까지 점진적 디싱크로 누적되므로, *해시 검증 + 입력 기록 + 이진 탐색 좁히기 + 결정론 단위 테스트 + CI 비트 검증* 같은 디버깅·검증 인프라가 게임 코드만큼 중요하다. 출시 후 예상 못 한 하드웨어 조합의 결정론 깨짐은 *프로덕션 텔레메트리* 가 조기에 잡는다.
+롤백 넷코드의 가장 큰 비용은 *디버깅* 이다. 결정론 깨짐 한 비트가 매치 끝까지 점진적 디싱크로 누적되므로, *해시 검증 + 입력 기록 + 선형 최초 불일치 좁히기 + 결정론 단위 테스트 + CI 비트 검증* 같은 디버깅·검증 인프라가 게임 코드만큼 중요하다. 출시 후 예상 못 한 하드웨어 조합의 결정론 깨짐은 *프로덕션 텔레메트리* 가 조기에 잡는다.
 
 P2P 롤백은 모든 peer가 같은 입력으로 같은 상태를 재현할 수 있고 참가자 수가 작을 때 강하다. 참가자 수·치트 위험·시뮬레이션 비결정성이 커지면 서버 권위 시뮬레이션에 클라이언트 예측과 정정을 결합하는 편이 적합하다. 두 모델은 반응성, 업로드 fan-out, 신뢰 경계와 서버 비용의 균형점이 다르며 장르와 위협 모델로 선택한다.
 
@@ -546,4 +561,4 @@ P2P 롤백은 모든 peer가 같은 입력으로 같은 상태를 재현할 수 
 - Michael Stallone, "8 Frames in 16ms: Rollback Networking in Mortal Kombat and Injustice 2" (GDC 2018) — AAA 격투 게임의 롤백 전환 실록(결정론 확보·성능 예산).
 - [GGPO 공식 사이트](https://www.ggpo.net/) — 롤백 동작 원리 설명.
 - Glenn Fiedler, [Deterministic Lockstep](https://gafferongames.com/post/deterministic_lockstep/) — 롤백의 전제인 결정론적 시뮬레이션의 조건.
-- ISO/IEC 14882 (C++) [expr.shift]·[expr.mul] 및 P0907R4 "Signed Integers are Two's Complement"(C++20) — 정수 우시프트(floor)·나눗셈(0 방향 절단)·두 보수 표현의 표준 보장. fixed-point가 비트 단위 결정론을 받치는 근거.
+- ISO/IEC 14882:2020 (C++) [expr.shift]·[expr.mul] 및 P0907R4 "Signed Integers are Two's Complement"(C++20) — 정수 우시프트(floor)·나눗셈(0 방향 절단)·두 보수 표현의 표준 보장. fixed-point가 비트 단위 결정론을 받치는 근거.

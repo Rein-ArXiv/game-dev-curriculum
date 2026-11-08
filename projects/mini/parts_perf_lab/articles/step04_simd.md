@@ -1,16 +1,23 @@
 ## 들어가며
 
-현재까지의 결과물은 layout 토글로 SoA·AoS·Archetype 세 변종을 *런타임에 교체* 하는 측정 도구다. 핫 루프는 모두 scalar로 도는 상태고, 컴파일러가 자동 벡터화를 시도하지만 *경계 반사 분기* 때문에 부분 벡터화에 그친다. SoA의 핫 루프 구조는 이상적인데, 컴파일러 자동화의 손길이 닿지 않는 부분이 남아 있다는 뜻이다.
+현재까지의 결과물은 layout 토글로 SoA·AoS·Archetype 세 변종을 *런타임에 교체* 하는 측정 도구다. 핫 루프는 모두 인트린식 없이 일반 C++로 도는 상태다. 컴파일러는 자동 벡터화를 시도할 수 있지만, *경계 반사 분기* 가 있는 루프를 어디까지 벡터화하는지는 최적화 수준·컴파일러 버전·루프 형태에 따라 달라진다. 소스에 `if` 가 있다고 해서 그것이 곧 기계어 분기라는 보장도 없다.
 
-이 단계의 목표는 *수동 SIMD 인트린식* 으로 같은 핫 루프를 직접 작성해 SSE·AVX2 경로를 만드는 것이다. 자동 벡터화에 의존하지 않고 4개(SSE) 또는 8개(AVX2) float을 한 명령으로 처리하는 코드를 직접 박는다. 분기는 *마스크 + 비트 select* 로 분기 자체를 SIMD 안에서 처리한다. SIMD 토글이 활성화되어 콤보박스 한 번 클릭으로 Scalar → SSE → AVX2 경로가 즉시 교체되고, 그 차이가 그래프에 그려진다.
+이 단계의 목표는 *수동 SIMD 인트린식* 으로 같은 핫 루프를 직접 작성해 SSE·AVX2 경로를 만드는 것이다. 자동 벡터화에 의존하지 않고 4개(SSE) 또는 8개(AVX2) float을 한 명령으로 처리하는 코드를 직접 작성한다. 경계 갱신은 *마스크 + 비트 select* 로 lane별로 선택하되, 함수 전체의 루프·tail·dispatch 분기까지 사라지는 것은 아니다. SIMD 토글이 활성화되어 콤보박스 한 번 클릭으로 C++ Auto → SSE → AVX2 경로가 즉시 교체되고, 그 차이가 그래프에 그려진다.
 
-이 단계의 결과물은 다음 다섯 가지다.
+> 이 실습은 게임 개발의 모든 CS 주제를 하나의 프로그램에 구현하는 과정이 아니다. 같은 상태를 여러 메모리 배치와 연산 방식으로 처리하고, 할당·순회 비용을 나누어 관찰하는 저수준 성능 실습이다. ECS 는 단일 컴포넌트 조합의 저장 배치까지만 다룬다. query 와 구조 변경, 문자열·인코딩·동시성 등은 별도 실습에서 다룬다.
+>
+> 실행 결과가 특정 순서로 나와야 성공하는 실습은 아니다. 먼저 같은 입력에 대해 같은 의미의 결과를 계산하는지 확인한다. 그다음 작업량·측정 구간·실행 환경을 맞추고 반복 측정한다. 기대와 다른 성능이 나오면 결과를 숨기거나 구현 오류로 단정하지 않고, 이 실험이 어떤 가정을 충족하지 못했는지 확인한다.
+>
+> 각 장의 코드는 세 종류로 구분한다. `현재 단계 완성 코드`는 해당 단계의 파일 집합과 함께 빌드할 수 있어야 한다. `발췌 코드`는 생략된 선언과 helper 의 실제 위치를 함께 적는다. `설명용 의사코드`는 의미와 제어 흐름을 보여주며 그대로 붙여 넣는 소스가 아니다. 최종 `src/`와 중간 단계의 함수 시그니처가 다르면 변환 표를 제공한다.
+
+이 단계의 결과물은 다음 여섯 가지다.
 
 1. 플랫폼 가드 헤더 `platform.h` (x86/x64에서만 SIMD 코드 컴파일)
-2. CMake 옵션 `PERF_LAB_ENABLE_AVX2` (기본 OFF, 켜면 AVX2/FMA 활성화)
+2. CMake 옵션 `PERF_LAB_ENABLE_AVX2` (기본 OFF) 와 별도 옵션 `PERF_LAB_ENABLE_FMA`
 3. SoA에 SSE/AVX2 핫 루프 추가
 4. Archetype에 SSE/AVX2 핫 루프 추가
-5. AoS는 의도적으로 scalar 유지 (stride 문제로 SIMD 효과 없음)
+5. AoS는 이 lab에서 수동 SIMD 경로를 두지 않음 (자동 벡터화 가능성과는 별개)
+6. 요청과 실제 실행 커널을 판정하는 `ppl::ResolveKernel`
 
 ---
 
@@ -43,24 +50,28 @@ for (std::size_t i = 0; i < count_; ++i) {
 }
 ```
 
-`-O3` 또는 `/O2` 빌드에서 컴파일러는 이 루프를 다음과 같이 본다.
+`-O3` 또는 `/O2` 빌드에서 컴파일러가 이 루프를 어떻게 낮추는지는 버전·옵션·alias 분석·분기 형태에 달려 있다. 일반적으로 다음을 구분한다.
 
-- (a) 산술 부분은 *SIMD로 자동 변환 가능*. 4개 float을 SSE 한 명령으로 처리.
-- (b) 분기 부분은 *반환값이 데이터 의존* 이라 자동 벡터화가 막히거나 부분 처리에 그친다.
+- (a) 산술 부분은 *SIMD로 자동 변환될 수 있다*. 4개 float을 SSE 한 명령에 묶는 변환이 가능하다.
+- (b) 경계 갱신은 *데이터 의존* 이라 자동 벡터화가 막히거나 부분 처리에 그칠 수 있다. 다만 컴파일러가 이 갱신을 blend/select나 masked 명령으로 낮추는 경우도 있으므로, 소스의 `if` 하나가 곧 기계어 conditional branch라고 단정하지 않는다.
 
-결과적으로 자동 벡터화는 *반쪽짜리* 다. 산술은 빠르지만 분기는 lane별 scalar 처리. 수동 SIMD는 분기까지 *마스크 연산* 으로 풀어 쓴다.
+이 차이는 *기계어 수준에서* 확인해야 한다. 컴파일러 벡터화 리포트와 disassembly를 실습 산출물로 두고, "분기가 있으니 벡터화가 안 됐다" 같은 추론을 사실로 쓰지 않는다. 수동 SIMD는 경계 갱신을 *마스크 select* 로 명시해 lane별 선택을 고정한다.
 
 수동 SIMD의 트레이드오프는 다음과 같다.
 
 | 항목 | 자동 벡터화 | 수동 SIMD |
 |---|---|---|
 | 코드 분량 | 동일 (그대로) | 별도 함수 추가 |
-| 분기 처리 | 어렵거나 부분 | 마스크로 통합 |
-| 컴파일러 의존 | 큼 (버전·옵션마다 결과 다름) | 작음 (인트린식이 곧 명령) |
+| 경계 갱신 처리 | 컴파일러가 select로 낮출 수도, 분기로 남길 수도 있음 | 마스크 select로 명시 |
+| 컴파일러 의존 | 큼 (버전·옵션마다 결과 다름) | 인트린식이 특정 명령에 대응하나 스케줄·tail·dispatch 분기는 별개 |
 | 가독성 | 일반 C++ | 인트린식 학습 필요 |
 | 측정 일관성 | 낮음 | 높음 |
 
-이 도구는 *측정 일관성* 이 중요하므로 수동 SIMD를 추가한다. 자동 벡터화 결과는 baseline (`Scalar` 토글) 으로 남겨 비교한다.
+`Scalar` 라는 현재 이름은 수동 SIMD를 작성하지 않은 일반 C++ 구현을 뜻한다. 컴파일러가 자동으로 벡터화할 수 있으므로 HUD에서는 `C++ Auto` 로 부른다(콤보 문자열도 `C++ Auto;SSE;AVX2`). 벡터 명령이 전혀 없는 진짜 기준선을 비교하려면 별도 번역 단위에서 GCC `-fno-tree-loop-vectorize`·`-fno-tree-slp-vectorize`, Clang `-fno-vectorize`·`-fno-slp-vectorize` 로 자동 벡터화를 제한하고 실제 어셈블리를 확인한다. 이 별도 기준선 TU와 어셈블리 대조는 이 lab에 아직 없다 — **보충 구현 목표**.
+
+이 도구는 *측정 일관성* 이 중요하므로 수동 SIMD를 추가한다. 자동 벡터화 결과는 baseline (`C++ Auto` 토글) 으로 남겨 비교한다.
+
+입력 계약도 함께 고정한다. viewport는 `W, H >= 2` 이고 Init과 Update가 같은 상한(`W-1`, `H-1`)을 쓴다. 유효한 `dt` 는 음이 아닌 유한값이며, NaN·무한·음수 `dt` 는 `SanitizeDt` 가 0으로, 작은 viewport는 `SanitizeViewport` 가 2로 올린다. 경계 처리는 큰 `dt` 동안 벽을 여러 번 통과하는 운동을 정확히 재현하는 물리 해법이 아니라 *한 step 후 clamp + 부호 반전* 이라는 이산 규칙이다. 시각적 성능 실험이 목적이며, 물리적으로 정확한 다중 반사가 필요하면 별도 참조 모델을 둔다.
 
 ## 2. 플랫폼·CPU 기능 가드
 
@@ -87,32 +98,39 @@ for (std::size_t i = 0; i < count_; ++i) {
 #  define PERF_LAB_X86_SIMD 1
 #endif
 
-// PERF_LAB_AVX2: AVX2/FMA 인트린식 사용 가능 여부.
+// PERF_LAB_AVX2: AVX2 인트린식(폭) 사용 가능 여부.
 //   - CMake의 PERF_LAB_ENABLE_AVX2 옵션이 ON일 때 정의된다.
 //   - PERF_LAB_X86_SIMD가 정의된 경우에만 의미가 있다.
+// PERF_LAB_FMA: AVX2 경로의 pos += vel*dt 를 fmadd로 계산할지 여부.
+//   - CMake의 PERF_LAB_ENABLE_FMA 옵션이 ON일 때 정의된다(폭과 독립).
 
 #if defined(PERF_LAB_X86_SIMD)
 #  include <immintrin.h>
 #endif
 ```
 
-매크로 두 단계로 구분한다.
+매크로 세 단계로 구분한다.
 
 - `PERF_LAB_X86_SIMD`: 플랫폼 + SSE2 보장 여부. x86_64는 ABI baseline이라 자동 통과, 32-bit x86은 SSE2 활성 빌드에서만 통과해 *SSE2 미지원 빌드에서 SIMD 코드가 컴파일되는* 사고를 막는다.
 - `PERF_LAB_AVX2`: 빌드 옵션 기준. CMake가 `target_compile_definitions` 로 설정한다.
+- `PERF_LAB_FMA`: 같은 방식의 별도 옵션. AVX2 폭과 FMA 반올림 계약을 독립적으로 켜고 끌 수 있다.
 
 `<immintrin.h>` 한 헤더로 SSE2부터 AVX2까지 모두 들어온다. MSVC도 같은 헤더를 받아들이므로 컴파일러별 분기는 필요 없다.
 
 ### CMakeLists.txt
 
 ```cmake
-# SIMD(AVX2) 활성화 옵션. 켜지 않은 채로 빌드해도 SSE 경로는 SSE2까지만
-# 사용하므로 모든 x86-64에서 정상 동작한다.
+# SIMD(AVX2) 활성화 옵션. SIMD step에서 켠다.
+# 켜지 않은 채로 빌드해도 scalar 경로는 정상 동작한다.
 option(PERF_LAB_ENABLE_AVX2
-       "Enable AVX2/FMA compiler flags for SIMD modules" OFF)
+       "Enable AVX2 compiler flags for SIMD modules" OFF)
 
-# AVX2 플래그는 x86/x64 타깃에서만 의미가 있다. ARM 등에서 -mavx2 를 붙이면
-# 컴파일 자체가 깨지므로 타깃 아키텍처를 먼저 판정한다.
+# FMA(Fused Multiply-Add) 사용 여부. AVX2 경로에서 pos += vel*dt를 한 번 반올림으로
+# 계산할지(fmadd), 곱셈·덧셈으로 나눌지 정한다. 폭(AVX2)과 FMA를 독립 축으로 두어
+# 결과 차이를 폭 때문으로 오해하지 않게 한다. OFF면 -mfma를 넘기지 않는다.
+option(PERF_LAB_ENABLE_FMA
+       "Use FMA in the AVX2 SIMD path (requires FMA-capable CPU)" ON)
+
 set(PERF_LAB_TARGET_X86 OFF)
 if(CMAKE_CXX_COMPILER_ARCHITECTURE_ID MATCHES "^(X86|x86|x64|X64)$"
    OR CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|i[3-6]86)$")
@@ -122,16 +140,26 @@ endif()
 if(PERF_LAB_ENABLE_AVX2)
     if(PERF_LAB_TARGET_X86)
         # 앱 타깃과 테스트 타깃에 동일하게 부여한다. 테스트에 주지 않으면
-        # UpdateAVX2 가 매크로 가드 때문에 테스트 바이너리에서 아예 컴파일되지
-        # 않아 AVX2 경로가 무검증으로 남는다.
+        # UpdateAVX2 가 `#if defined(PERF_LAB_AVX2)` 가드 때문에 테스트 바이너리에서
+        # 아예 컴파일되지 않아 AVX2 경로가 무검증으로 남는다.
         target_compile_definitions(${PROJECT_NAME} PRIVATE PERF_LAB_AVX2=1)
         target_compile_definitions(parts_core_tests PRIVATE PERF_LAB_AVX2=1)
         if(MSVC)
             target_compile_options(${PROJECT_NAME} PRIVATE /arch:AVX2)
             target_compile_options(parts_core_tests PRIVATE /arch:AVX2)
+            if(PERF_LAB_ENABLE_FMA)
+                target_compile_definitions(${PROJECT_NAME} PRIVATE PERF_LAB_FMA=1)
+                target_compile_definitions(parts_core_tests PRIVATE PERF_LAB_FMA=1)
+            endif()
         else()
-            target_compile_options(${PROJECT_NAME} PRIVATE -mavx2 -mfma)
-            target_compile_options(parts_core_tests PRIVATE -mavx2 -mfma)
+            target_compile_options(${PROJECT_NAME} PRIVATE -mavx2)
+            target_compile_options(parts_core_tests PRIVATE -mavx2)
+            if(PERF_LAB_ENABLE_FMA)
+                target_compile_options(${PROJECT_NAME} PRIVATE -mfma)
+                target_compile_options(parts_core_tests PRIVATE -mfma)
+                target_compile_definitions(${PROJECT_NAME} PRIVATE PERF_LAB_FMA=1)
+                target_compile_definitions(parts_core_tests PRIVATE PERF_LAB_FMA=1)
+            endif()
         endif()
     else()
         message(WARNING
@@ -141,49 +169,82 @@ if(PERF_LAB_ENABLE_AVX2)
 endif()
 ```
 
-빌드 시 `cmake -DPERF_LAB_ENABLE_AVX2=ON` 으로 켠다. 옵션이 꺼진 빌드에서 AVX2 토글을 선택하면 SSE 경로로 폴백한다(런타임 동작). 비-x86/x64 타깃에서 이 옵션을 켜도 CMake는 AVX2 컴파일 플래그를 붙이지 않고, SIMD 경로는 scalar로 폴백한다.
+빌드 시 `cmake -DPERF_LAB_ENABLE_AVX2=ON` 으로 켠다. AVX2 경로의 FMA는 별도 옵션 `PERF_LAB_ENABLE_FMA`(기본 ON)가 정한다. AVX2를 켜도 FMA를 끄면 폭은 그대로 두고 `pos += vel*dt` 를 곱셈·덧셈 두 명령으로 계산하므로, 폭과 FMA 반올림 계약을 분리해 비교할 수 있다. 옵션이 꺼진 빌드에서 AVX2를 선택하면 `ResolveKernel` 이 SSE로 폴백하고 그 이유를 HUD에 표시한다. 비-x86/x64 타깃에서 이 옵션을 켜도 CMake는 AVX2 컴파일 플래그를 붙이지 않고, SIMD 선택은 C++ Auto로 폴백한다.
 
-### Update 분기 패턴
+일반 C++(`C++ Auto`) 경로와 SSE 경로가 같은 반올림 계약을 쓰도록, non-MSVC 빌드에는 `-ffp-contract=off` 를 붙여 컴파일러가 곱셈·덧셈을 FMA로 합치는 것을 막는다. AVX2 경로의 FMA는 인트린식으로 명시하므로 이 옵션과 별개다.
 
-이 두 매크로를 받아서 SIMD 토글에 따라 적절한 경로를 호출한다.
+### Update 분기 패턴 — 요청과 실제 실행 커널
+
+매크로 가드만으로 `switch` 를 직접 쓰면 요청과 실제 실행이 어긋나기 쉽다. 그래서 `src/sim/kernel_dispatch.h` 의 `ResolveKernel` 이 한 곳에서 판정을 계산하고, HUD·CSV·dispatch가 그 결과를 함께 쓴다.
 
 ```cpp
-void SoASimulation::Update(float dt, SimdWidth simd, bool /*branchless*/) {
-    switch (simd) {
+// src/sim/kernel_dispatch.h
+enum class KernelFallback : int {
+    None = 0,
+    LayoutHasNoSimd,  // 선택한 layout에 그 SIMD 구현이 없음 (AoS)
+    Avx2NotCompiled,  // AVX2 요청, 이 빌드에 없음
+    NoIntrinsics,     // 비-x86 등 인트린식 자체가 없음
+};
+
+struct ResolvedKernel {
+    SimdWidth      effective;          // 실제로 도는 커널
+    bool           branchlessApplied;  // 실제로 predication이 걸리는가
+    KernelFallback reason;             // 요청과 다를 때의 이유
+};
+
+inline ResolvedKernel ResolveKernel(Layout layout, SimdWidth requested,
+                                    bool branchless);
+```
+
+`ResolveKernel` 의 규칙은 다음과 같다.
+
+- AoS: 이 lab에 수동 SIMD 경로가 없으므로 요청과 무관하게 `effective = Scalar`(`C++ Auto`). SIMD를 요청하면 이유는 `LayoutHasNoSimd`.
+- AVX2 요청 + `PERF_LAB_AVX2` 미정의(x86): SSE로 폴백, 이유 `Avx2NotCompiled`.
+- 비-x86: SSE/AVX2 요청 모두 `Scalar`, 이유 `NoIntrinsics`.
+- `branchless` 는 `effective == Scalar` 일 때만 적용된다. SIMD는 이미 마스크 select라 영향받지 않는다.
+
+구현은 이 판정 결과를 그대로 분기한다.
+
+```cpp
+void SoASimulation::Update(float dt, SimdWidth simd, bool branchless) {
+    const ResolvedKernel k = ResolveKernel(Layout::SoA, simd, branchless);
+    const float safeDt = SanitizeDt(dt);
+    switch (k.effective) {
         case SimdWidth::Scalar:
-            UpdateScalar(dt);
+            UpdateScalar(safeDt, k.branchlessApplied);
             break;
         case SimdWidth::SSE:
 #if defined(PERF_LAB_X86_SIMD)
-            UpdateSSE(dt);
+            UpdateSSE(safeDt);   // SIMD는 이미 마스크 처리, branchless 무관
 #else
-            UpdateScalar(dt);  // 비-x86 플랫폼은 scalar로 폴백
+            UpdateScalar(safeDt, k.branchlessApplied);
 #endif
             break;
         case SimdWidth::AVX2:
 #if defined(PERF_LAB_X86_SIMD) && defined(PERF_LAB_AVX2)
-            UpdateAVX2(dt);
+            UpdateAVX2(safeDt);
 #elif defined(PERF_LAB_X86_SIMD)
-            UpdateSSE(dt);     // AVX2 빌드 옵션이 꺼져 있으면 SSE로 폴백
+            UpdateSSE(safeDt);
 #else
-            UpdateScalar(dt);  // 비-x86 플랫폼은 scalar로 폴백
+            UpdateScalar(safeDt, k.branchlessApplied);
 #endif
             break;
     }
 }
 ```
 
-3중 가드를 통과해야 AVX2 코드가 실행된다. 이러면 다음 시나리오 모두 안전하다.
+`branchlessApplied` 와 `reason` 을 HUD에 표시하므로, AoS+AVX2나 AVX2 미빌드처럼 요청과 실제가 다른 경우가 화면에서 바로 보인다. 실행 경로를 수치 차이로 추정하지 않고 이 판정을 테스트가 직접 확인한다.
 
-- Apple Silicon에서 `cmake -DPERF_LAB_ENABLE_AVX2=ON` → 컴파일 OK, 런타임에 모두 scalar
-- Intel CPU에서 옵션 OFF → SSE/AVX2 토글 모두 SSE 또는 scalar
-- AVX2/FMA 지원 x86/x64 CPU에서 옵션 ON → SSE/AVX2 토글 각각 해당 경로
+주의할 점은 *런타임 CPU 기능 검출은 아직 없다는 것* 이다. `PERF_LAB_ENABLE_AVX2=ON` 은 타깃 전체에 `/arch:AVX2` 또는 `-mavx2` 를 붙이므로 scalar·SSE 경로까지 VEX 인코딩으로 컴파일된다. 그래서 이 옵션으로 빌드한 바이너리는 SIMD 토글과 무관하게 실행 CPU가 AVX2를 지원해야 하고, FMA 옵션을 켰다면 FMA도 지원해야 한다. 지원하지 않는 CPU에서는 시작 직후 illegal instruction이 날 수 있다.
 
-주의할 점은 *런타임 CPU 기능 검출은 아직 없다는 것* 이다. `/arch:AVX2`(`-mavx2 -mfma`)는 타깃 전체에 붙으므로 scalar·SSE 경로까지 VEX 인코딩으로 컴파일된다. 그래서 이 옵션으로 빌드한 바이너리는 SIMD 토글과 무관하게 실행 CPU가 AVX2와 FMA를 지원해야 하고, 지원하지 않는 CPU에서는 시작 직후 illegal instruction이 날 수 있다. 이 실험 도구는 빌드 옵션을 명시적으로 켠 개발 환경에서 측정한다는 전제를 둔다.
+- 옵션 OFF 또는 비-x86 빌드: 해당 SIMD 경로를 컴파일하지 않고 `ResolveKernel` 이 대체 커널로 폴백한다. 이 빌드는 범용으로 실행할 수 있다.
+- 옵션 ON x86 빌드: AVX2(필요하면 FMA) 지원 CPU/OS 대상 전용이다. 이 실행 파일을 "모든 CPU에서 안전"이라고 부르지 않는다.
+
+모든 CPU에서 안전한 실행 파일이 필요하면 높은 ISA 전용 함수를 별도 번역 단위로 분리하고, 안전한 baseline에서 실행 지원(CPUID/OSXSAVE/XGETBV)을 검사한 뒤 호출해야 한다. 이 lab은 아직 그 범용 런타임 dispatch를 구현하지 않았다 — **보충 구현 목표**.
 
 ## 3. SSE2 안전 select 패턴
 
-SIMD에서 *분기* 를 처리하는 방법은 *마스크* 를 쓰는 것이다. 비교 결과(`__m128`) 가 *각 lane별로 모든 비트가 1 또는 0* 이라, 그 마스크로 두 값 중 하나를 lane별로 선택한다.
+이 lab의 SIMD 경로는 경계 갱신을 *마스크* 로 처리한다. 비교 결과(`__m128`) 가 *각 lane별로 모든 비트가 1 또는 0* 이라, 그 마스크로 두 값 중 하나를 lane별로 선택한다.
 
 SSE4.1에는 이 동작을 한 명령으로 하는 `_mm_blendv_ps` 가 있다.
 
@@ -223,7 +284,7 @@ AVX2 경로는 `_mm256_blendv_ps` 가 AVX1부터 있어 그대로 쓸 수 있다
 
 ```mermaid
 flowchart LR
-    Load["4개 float 로드<br/>posX/posY/velX/velY"] --> Add["pos += vel * dt<br/>add + mul"]
+    Load["네 배열에서 각각 float 4개 로드<br/>posX/posY/velX/velY"] --> Add["pos += vel * dt<br/>add + mul"]
     Add --> Cmp["경계 비교<br/>cmplt + cmpgt"]
     Cmp --> Mask["OR로 마스크 합성"]
     Mask --> Sel["select로 vel 부호 반전<br/>SseSelect(v, -v, mask)"]
@@ -312,6 +373,8 @@ void SoASimulation::UpdateSSE(float dt) {
 2. **`SseSelect` 헬퍼**: SSE2만 쓰는 lane select. SSE4.1을 요구하지 않아 모든 x86-64에서 컴파일된다.
 3. **잔여 처리**: `count_ % 4` 가 0이 아니면 마지막 0~3개는 scalar 루프로 처리. SoA에서는 흔한 패턴이다.
 
+SSE 경로의 벡터 본체는 같은 필드의 float 4개, 즉 엔티티 4개를 동시에 처리한다. 한 반복에서 `posX_`, `posY_`, `velX_`, `velY_` 네 배열을 각각 읽으므로, "네 필드 float 하나씩을 합쳐 4개 읽는다"와 다르다. 벡터 폭으로 나누어떨어지지 않는 남는 엔티티는 tail에서 처리한다. 경계 갱신을 마스크로 선택하더라도 함수 전체의 loop/dispatch/tail 분기까지 없어진 것은 아니다.
+
 ### 분기를 마스크로 푸는 형태
 
 scalar 코드의 분기:
@@ -329,11 +392,11 @@ const __m128 mX = _mm_or_ps(_mm_cmplt_ps(px, zero), _mm_cmpgt_ps(px, wMax));
 vx = SseSelect(vx, _mm_sub_ps(zero, vx), mX);
 ```
 
-분기가 *없다*. 모든 lane이 *항상* 두 분기 양쪽을 계산하고 마스크로 결과를 선택한다. 분기 예측 실패 비용이 0이 되는 대신 *항상 최대* 비용을 낸다. 분기가 거의 안 일어나는 코드(*경계 반사는 드물다*)에서는 마스크 처리가 더 비쌀 수도 있지만, 분기 빈도가 높거나 패턴이 불규칙하면 마스크 처리가 압도적이다.
+벡터 본체 안에서는 경계 갱신이 lane별 조건 분기로 남지 않는다. 모든 lane이 두 경우를 계산하고 마스크로 결과를 고른다. 그 대신 *항상* 최대 연산을 낸다. 다만 이는 마스크를 쓴 벡터 본체에 대한 설명이고, 함수 전체에 conditional branch가 0이라는 뜻은 아니다 — 루프 조건, tail, dispatch 분기는 남는다. 마스크 처리가 유리한지는 분기 빈도·패턴과 CPU에 달려 있어, 시간 차이만으로 원인을 확정하지 않는다.
 
 ## 5. SoA의 AVX2 경로와 FMA
 
-AVX2는 `__m256` (8 float)을 다룬다. SSE 대비 처리 폭이 두 배다. 또한 FMA(Fused Multiply-Add) 명령을 사용해 `pos += vel * dt` 를 *한 명령* 으로 처리한다.
+AVX2는 `__m256` (8 float)을 다룬다. SSE 대비 처리 폭이 두 배다. FMA(Fused Multiply-Add) 사용 여부는 *별도 빌드 옵션* `PERF_LAB_ENABLE_FMA` 가 정한다. FMA를 켜면 `pos += vel * dt` 를 `_mm256_fmadd_ps` 한 명령으로 계산하고, 끄면 곱셈·덧셈 두 명령으로 계산한다. 즉 *벡터 폭* 과 *FMA 반올림 계약* 은 독립 축이다.
 
 ```cpp
 #if defined(PERF_LAB_AVX2)
@@ -353,11 +416,20 @@ void SoASimulation::UpdateAVX2(float dt) {
         __m256 vx = _mm256_loadu_ps(&velX_[i]);
         __m256 vy = _mm256_loadu_ps(&velY_[i]);
 
-        // FMA로 pos += vel * dt 한 명령.
+#if defined(PERF_LAB_FMA)
+        // FMA 옵션이 켜졌을 때: pos += vel * dt 를 한 명령으로(중간 반올림 1회).
         px = _mm256_fmadd_ps(vx, dtv, px);
         py = _mm256_fmadd_ps(vy, dtv, py);
+#else
+        // FMA 옵션이 꺼졌을 때: 분리 곱셈·덧셈. 반올림 지점이 FMA 경로와 다르다.
+        px = _mm256_add_ps(px, _mm256_mul_ps(vx, dtv));
+        py = _mm256_add_ps(py, _mm256_mul_ps(vy, dtv));
+#endif
 
-        // 경계 마스크. _CMP_LT_OQ는 ordered + quiet (NaN-safe).
+        // 경계 마스크. _CMP_LT_OQ/_CMP_GT_OQ는 ordered + quiet 비교라
+        // NaN lane은 이 조건에서 false가 된다. 이것이 커널 전체의 NaN 안전성을
+        // 뜻하지는 않는다 — dt는 SanitizeDt로 미리 거르고, NaN/inf 상태는
+        // 검증 경계에서 별도로 다룬다.
         const __m256 mX = _mm256_or_ps(_mm256_cmp_ps(px, zero, _CMP_LT_OQ),
                                         _mm256_cmp_ps(px, wMax, _CMP_GT_OQ));
         const __m256 mY = _mm256_or_ps(_mm256_cmp_ps(py, zero, _CMP_LT_OQ),
@@ -398,10 +470,12 @@ void SoASimulation::UpdateAVX2(float dt) {
 SSE 코드와 비교한 주요 차이는 다음 셋이다.
 
 1. **`_mm_*` → `_mm256_*`**: 모든 인트린식이 256비트 변종. 처리 폭 4 → 8.
-2. **FMA**: `_mm256_fmadd_ps(a, b, c)` 는 `c + a * b` 를 한 명령으로. 정밀도도 *중간 결과를 반올림하지 않아* 약간 더 좋다.
-3. **`_mm256_cmp_ps` 와 predicate**: AVX의 비교 명령은 *predicate 인자* 가 있어 `_CMP_LT_OQ`(less than, ordered, quiet) 같은 식으로 NaN 처리 방식까지 명시한다.
+2. **FMA(옵션)**: `PERF_LAB_ENABLE_FMA` 가 ON일 때 `_mm256_fmadd_ps(a, b, c)` 가 `c + a * b` 를 한 명령으로 계산한다. FMA는 곱셈 결과를 중간 반올림하지 않으므로 분리 곱셈·덧셈과 반올림 계약이 다르다.
+3. **`_mm256_cmp_ps` 와 predicate**: AVX의 비교 명령은 *predicate 인자* 가 있어 `_CMP_LT_OQ`(less than, ordered, quiet) 같은 식으로 비교 동작을 명시한다. ordered quiet는 NaN lane이 이 조건에서 false가 된다는 성질이지, 커널 전체의 NaN 안전성을 보장하지 않는다.
 
-이 세 차이로 AVX2가 SSE 대비 *이론상* 2배 처리량 + FMA의 추가 이득을 본다. 실측에서는 메모리 대역폭과 store 비용이 병목이라 1.5배 ~ 2배 사이가 흔하다.
+폭을 4에서 8로 늘리면 *이론상* 두 배 처리량이지만, FMA를 함께 켜면 수치 계약도 바뀌므로 두 효과를 한 축으로 묶어 "AVX2가 SSE의 몇 배"라고 단정하지 않는다. 실측 비율은 메모리 대역폭·store·tail 비율에 따라 달라진다.
+
+FMA와 분리된 곱셈·덧셈은 반올림 계약이 다르므로 단순한 벡터 폭 비교가 아니다. `pos += vel*dt` 에서 FMA는 한 번만 반올림하고, 분리 연산은 곱셈 뒤 한 번·덧셈 뒤 한 번 반올림한다. 그래서 같은 식도 결과 비트가 달라질 수 있고, 긴 프레임 수를 돌리면 위치가 드리프트할 수 있다. 이때 수치가 다르다는 사실은 실행 경로의 증거가 아니고, 해당 경로가 올바르게 구현됐다는 것과도 별개다. 폭과 FMA를 독립 옵션으로 나눈 이유가 여기 있다(<https://docs.nvidia.com/cuda/floating-point/index.html>).
 
 ## 6. Archetype의 chunk 단위 SIMD
 
@@ -470,7 +544,7 @@ void ArchetypeSimulation::UpdateSSE(float dt) {
 
 chunk 크기 256은 4의 배수, 8의 배수라 SSE는 *마지막 chunk 외에는* 잔여 처리가 없다. 마지막 chunk만 0~3 또는 0~7개의 잔여를 처리할 수 있다. 100k 엔티티면 가득 찬 390개 chunk(각 256) + 마지막 chunk 160개로 총 391 chunk다(390×256+160=100,000). 160도 4와 8의 배수라 이 경우엔 마지막 chunk조차 SSE 40패스 / AVX2 20패스로 정확히 떨어지고 scalar 잔여가 없다.
 
-Archetype의 SIMD 측정 결과는 SoA와 거의 같다. 단일 archetype 시뮬에서 chunk 외부 루프 오버헤드는 무시 수준이다.
+Archetype의 SIMD 측정 결과는 SoA와 비슷할 수 있다. 단일 조합 시뮬에서 chunk 외부 루프 오버헤드는 작을 수 있지만, chunk 수와 tail 비율에 따라 달라지므로 "거의 같아야 한다"를 합격 기준으로 두지 않는다.
 
 ## 7. AoS는 왜 scalar로 두는가
 
@@ -489,17 +563,19 @@ AoS의 데이터 배치를 다시 보자.
 2. **shuffle/transpose**: 4개 entity를 한 번에 로드한 뒤 SIMD 안에서 transpose. 가능하지만 코드 복잡도 폭증 + transpose 비용.
 3. **temporary SoA**: AoS 데이터를 매 프레임 시작에 임시 SoA로 복사. 복사 비용이 SIMD 이득을 상쇄한다.
 
-세 옵션 모두 *AoS의 stride 한계* 를 *우회* 하는 형태고, 결국 *AoS이면 SIMD를 안 쓴다* 가 게임 엔진의 실용적 결론이다. SoA/Archetype 측에서 SIMD 이득을 가져가고, AoS는 임의 접근에 강한 모델로 두는 게 일반 패턴이다.
+이 세 가지는 이 lab이 *선택하지 않은* 우회 경로들이다. 컴파일러는 SLP나 shuffle/transpose로 AoS 루프를 부분 벡터화할 수 있으므로, *AoS라서 SIMD가 불가능하다* 는 결론이 아니다. 이 lab의 AoS에 수동 SIMD 경로를 두지 않은 것은 구현 범위이고, 자동 벡터화 가능성과는 별개다. 같은 필드끼리 순차 처리하는 대량 핫 루프에서는 SoA/Archetype 쪽에서 수동 SIMD 이득을 가져가기 쉽다는 것이 일반적인 경향이다.
 
-이 도구도 같은 방향으로, AoS는 SIMD 토글에 무관하게 scalar로 동작한다.
+이 도구의 AoS는 SIMD 요청을 `ResolveKernel` 로 판정해 언제나 `C++ Auto`(`Scalar`) 경로를 돌린다.
 
 ```cpp
-void AoSSimulation::Update(float dt, SimdWidth /*simd*/, bool /*branchless*/) {
-    UpdateScalar(dt);
+void AoSSimulation::Update(float dt, SimdWidth simd, bool branchless) {
+    // AoS는 이 lab에 수동 SIMD 경로가 없다. 요청과 실제 실행 커널을 분리해 기록한다.
+    const ResolvedKernel k = ResolveKernel(Layout::AoS, simd, branchless);
+    UpdateScalar(SanitizeDt(dt), k.branchlessApplied);
 }
 ```
 
-`simd` 인자를 받지만 무시한다. 측정 시점에서 *SoA·Archetype은 SSE/AVX2로 갈수록 빨라지고, AoS는 변하지 않는* 모습이 그래프에 명확히 드러난다. 이게 *측정 도구가 알려 주는 정보* 다.
+`simd` 요청은 `ResolveKernel` 이 `effective = C++ Auto`, 이유 `LayoutHasNoSimd` 로 기록한다. 그래서 AoS에서 SIMD 토글이 그래프를 바꾸지 않는 것은 *이 구현에 수동 SIMD 경로가 없기 때문* 이지, layout 효과를 입증하는 증거가 아니다.
 
 ## 8. Hud 활성화와 빌드·실행 결과
 
@@ -519,7 +595,7 @@ if (!simdEdit_) {
 }
 ```
 
-이제 SIMD 토글이 활성화되어 콤보박스 클릭으로 Scalar/SSE/AVX2 경로가 즉시 전환된다.
+이제 SIMD 토글이 활성화되어 콤보박스 클릭으로 C++ Auto/SSE/AVX2 경로가 즉시 전환된다. HUD는 요청한 이름과 실제 실행 커널을 `simd 요청>실행` 형태로 함께 보여 주고, 폴백이면 그 이유를 짧은 이름(`no-simd`, `no-avx2`, `no-x86`)으로 표시한다.
 
 ### 빌드
 
@@ -529,28 +605,34 @@ cmake -S . -B build
 cmake --build build --config Release
 ```
 
-AVX2 활성화:
+AVX2 활성화(기본적으로 FMA도 함께):
 ```bash
 cmake -S . -B build -DPERF_LAB_ENABLE_AVX2=ON
 cmake --build build --config Release
 ```
 
+AVX2를 켜되 FMA는 끄기(폭과 FMA 계약을 분리):
+```bash
+cmake -S . -B build -DPERF_LAB_ENABLE_AVX2=ON -DPERF_LAB_ENABLE_FMA=OFF
+cmake --build build --config Release
+```
+
 ### 실행 결과
 
-Intel CPU + AVX2 옵션 ON 빌드, 100k 엔티티 기준 일반적인 경향:
+Intel CPU + AVX2 옵션 ON 빌드, 100k 엔티티 기준 일반적인 경향(고정된 정답이 아니라 가설):
 
-- **SoA Scalar**: 자동 벡터화로 어느 정도 빠름. baseline.
-- **SoA SSE**: scalar 대비 update ms가 작아짐. 정확한 비율은 컴파일러와 CPU에 따라 다르며, 자동 벡터화가 이미 잘 동작했다면 차이가 작을 수 있다.
-- **SoA AVX2**: SSE 대비 추가 단축. FMA 효과까지 합쳐 SSE × 1.5~2배 정도가 흔하다.
-- **AoS Scalar / SSE / AVX2**: *모두 같음*. SIMD 토글이 무효화되어 같은 scalar 경로가 도는 결과.
+- **SoA C++ Auto**: 자동 벡터화로 어느 정도 빠를 수 있음. baseline.
+- **SoA SSE**: C++ Auto 대비 update ms가 작아질 수 있음. 정확한 비율은 컴파일러와 CPU에 따라 다르며, 자동 벡터화가 이미 잘 동작했다면 차이가 작을 수 있다.
+- **SoA AVX2**: SSE 대비 추가 단축이 날 수 있음. FMA를 켠 빌드라면 폭과 FMA 반올림 계약이 함께 바뀐 것이므로, 차이를 폭 하나의 효과로 단정하지 않는다.
+- **AoS C++ Auto / SSE / AVX2**: 이 lab의 AoS에는 수동 SIMD 경로가 없어 *모두 같은 커널* 이 돈다. 그래서 세 요청의 그래프가 같게 나온다.
 
-콤보를 SoA Scalar → SoA AVX2 → AoS AVX2 순서로 클릭하면 그래프에 *세로 절벽 두 번* 이 그려진다. 첫 절벽은 SIMD 효과(아래로), 두 번째 절벽은 layout이 AoS가 되면서 SIMD 토글이 무효화돼 다시 위로. *AoS의 SIMD 무효성* 이 시각적 사건으로 드러난다.
+콤보를 SoA C++ Auto → SoA AVX2 → AoS AVX2 순서로 클릭하면 그래프에 세로 절벽이 그려질 수 있다. 다만 AoS에서 SIMD 토글이 무효인 것은 *이 구현에 그 경로가 없기 때문* 이며, 그 자체가 layout 효과를 증명하지는 않는다. 실제 실행 커널은 HUD의 `요청>실행` 표시로 확인한다.
 
 ### 자동 검증: `parts_simd_tests`
 
-"SIMD로 빨라졌다"는 주장은 세 폭이 *같은 값* 을 낼 때만 성립한다. 결과가 달라졌다면 빨라진 게 아니라 덜 한 것이다. `simd` 그룹이 그 등식을 붙든다.
+"SIMD로 빨라졌다"는 주장은 각 폭이 *같은 계산* 을 할 때만 성립한다. 결과가 달라졌다면 빨라진 게 아니라 덜 한 것이다. `simd` 그룹은 이 정확성과, 요청과 실제 실행 커널의 일치를 함께 본다.
 
-두 종류의 단언이 들어 있다. SoA 쪽은 폭이 달라도 결과가 허용 오차 안이라는 것, AoS 쪽은 폭이 달라도 결과가 *비트까지* 같다는 것이다. 뒤엣것이 앞에서 말한 *AoS의 SIMD 무효성* 을 기계가 확인하는 형태다.
+`TestSimdEquivalence` 는 SoA의 C++ Auto·SSE·AVX2 결과가 허용 오차 안에 있는지, AoS에서는 세 요청이 같은 C++ Auto 경로를 돌아 수치적으로 같은지(`NearStates(..., 0.0f)`, `+0`/`-0` 를 구분하지 않는 수치 동등)를 확인한다. `TestKernelResolution` 은 `ResolveKernel` 의 반환값(`effective`, `branchlessApplied`, `reason`)을 직접 검사해, AoS+SIMD 요청이나 AVX2 미빌드 요청이 실제로 어느 커널로 가는지 확인한다.
 
 <!-- snippet: tests/core_tests.cpp#TestSimdEquivalence -->
 ```cpp
@@ -568,12 +650,11 @@ void TestSimdEquivalence() {
     simd->CopyState(c);
     CHECK(NearStates(a, c, 1e-4f));
 #if defined(PERF_LAB_AVX2)
-    // AVX2는 FMA로 pos += vel*dt 의 중간 반올림이 사라져 비트가 다르다.
+    // FMA를 켠 빌드라면 pos += vel*dt 의 중간 반올림이 사라져 결과가 달라질 수 있다.
+    // 폭별 허용 오차로 정확성을 보고, 실행 경로는 별도 테스트가 판정한다.
     std::vector<float> d;
     wide->CopyState(d);
     CHECK(NearStates(a, d, ToleranceFor(ppl::SimdWidth::AVX2, kFrames)));
-    // SSE만큼 가깝지는 않다는 것까지 못 박는다. 깨지면 AVX2 토글이 폴백 중이다.
-    CHECK(!NearStates(a, d, 1e-6f));
 #endif
 
     // AoS는 SIMD 토글을 통째로 무시하고 언제나 scalar 경로를 돈다.
@@ -590,7 +671,7 @@ void TestSimdEquivalence() {
 }
 ```
 
-`CHECK(!NearStates(a, d, 1e-6f))` 는 방향이 반대인 단언이다. AVX2 결과가 스칼라와 *너무 똑같으면* 오히려 실패한다 — 그건 AVX2 경로가 아니라 SSE나 scalar가 돌고 있다는 신호이기 때문이다. 옵션을 켜지 않은 빌드에서는 이 두 줄이 아예 컴파일되지 않는다.
+실행 경로는 수치 차이로 판정하지 않는다. 올바른 FMA도 입력에 따라 스칼라와 같은 값을 낼 수 있고, 잘못된 계산도 다른 값을 낼 수 있기 때문이다. 그래서 `TestSimdEquivalence` 에는 "AVX2 결과가 스칼라와 다르다"는 반대 방향 단언이 없다. 실행 경로는 `TestKernelResolution` 의 `ResolveKernel` 판정으로, 정확성은 폭별 허용 오차 비교로 분리해 확인한다. 옵션을 켜지 않은 빌드에서는 `#if defined(PERF_LAB_AVX2)` 안쪽 AVX2 단언이 컴파일되지 않는다.
 
 ```bash
 cmake -S . -B build -DPERF_LAB_ENABLE_AVX2=ON
@@ -603,18 +684,36 @@ ctest --test-dir build -C Release -R parts_simd_tests --output-on-failure
 
 ```text
 parts_core_tests: group `simd`
-  simd/SimdEquivalence ... 5 check(s) ok
-simd: 1 test(s), 5 check(s), 0 failure(s)
+  simd/SimdEquivalence ... 4 check(s) ok
+  simd/KernelResolution ... 10 check(s) ok
+simd: 2 test(s), 14 check(s), 0 failure(s)
 ```
 
-`5 check(s)` 는 AVX2를 켠 빌드의 수다. 옵션 없이 구성하면 위의 두 줄이 빠져 `3 check(s)` 가 나온다. 이 차이가 곧 "AVX2 경로가 실제로 컴파일됐는가" 의 지표라, 옵션을 켰는데 `3` 이 나오면 아키텍처가 x86이 아니거나 매크로 가드가 어긋난 것이다.
+`4 check(s)` 는 AVX2를 켠 빌드의 `SimdEquivalence` 수다. 옵션 없이 구성하면 AVX2 비교 한 줄이 빠져 `3 check(s)` 가 되고 그룹 합계는 `13` 이 된다. 이 차이는 "AVX2 경로가 실제로 컴파일됐는가"의 지표일 뿐, 실행 경로 자체의 증거는 아니다. 실행 경로는 `KernelResolution` 의 `ResolveKernel` 판정으로 확인한다.
+
+### 실행 경로와 정확성의 분리 — 보충 구현 목표
+
+현재는 `ResolveKernel` 의 판정(`effective`, `branchlessApplied`, `reason`)과 폭별 허용 오차 비교까지 구현되어 있다. 아래는 실행 경로 관측과 독립 참조를 더 분리하기 위한 설계 의사코드이며, `RunObserved`(검증 전용 커널 진입 기록)와 독립 `Reference`(non-FMA/FMA 참조)는 아직 구현하지 않았다.
+
+```cpp
+// 설계 의사코드. ResolveKernel은 구현되어 있고, RunObserved/Reference는 보충 구현 대상이다.
+const auto actual = ResolveKernel(layout, request, branchless);
+CHECK(actual.effective == expectedKernelForFixture);
+const auto run = RunObserved(actual, fixture); // 검증 전용 진입 기록
+CHECK(run.enteredKernel == actual.effective);
+const auto expected = Reference(actual.numericContract, fixture); // non-FMA/FMA 분리
+CHECK(CompareUnderContract(run.state, expected));
+```
+
+Scalar와 AVX 결과가 다르다는 단언으로 실제 AVX 실행 여부를 확인하지 않는다. 올바른 FMA도 입력에 따라 같은 값을 낼 수 있고, 잘못된 계산도 다른 값을 낼 수 있다. 실행 경로 검사는 dispatch 관측으로, 정확성 검사는 독립 참조로 수행한다. non-FMA와 FMA 참조를 나눠 쓰고, N=0/1/3/4/5/7/8/9/255/256/257 같은 tail·chunk 경계를 검사한다. AoS와 SIMD가 무조건 특정 배수 차이를 내야 한다는 합격 기준은 두지 않는다.
 
 ### 검증 체크리스트
 
-- AVX2 토글 선택 시 *SSE와 같은 ms* → AVX2 빌드 옵션이 꺼져 있어 SSE로 폴백 중. `cmake -DPERF_LAB_ENABLE_AVX2=ON` 으로 재빌드.
-- SSE/AVX2 토글이 *Scalar와 같은 ms* → 비-x86 플랫폼이라 scalar 폴백 중 (Apple Silicon 등). 이 경우 layout만 비교 가능.
+- HUD의 `simd 요청>실행` 이 `AVX2>SSE no-avx2` → AVX2 빌드 옵션이 꺼져 있어 SSE로 폴백 중. `cmake -DPERF_LAB_ENABLE_AVX2=ON` 으로 재빌드.
+- HUD가 `SSE>C++ Auto no-x86` → 비-x86 플랫폼이라 인트린식이 없어 `C++ Auto` 로 폴백 중 (Apple Silicon 등).
+- HUD가 `AVX2>C++ Auto no-simd` → AoS처럼 수동 SIMD 경로가 없는 layout. 요청과 실행이 다르다는 표시이고 오류가 아니다.
 - 컴파일 오류 *target specific option mismatch* → AVX2 코드가 옵션 OFF 빌드에서 컴파일 시도됨. `PERF_LAB_AVX2` 매크로 가드가 빠진 줄 확인.
-- 100k에서도 SIMD 차이가 작음 → 컴파일러 자동 벡터화가 이미 SoA scalar 코드에 잘 동작한 케이스. 엔티티 수를 늘리거나 워크로드를 더 산술 집약적으로 바꿔 비교한다. `-O0` 빌드는 디버그 참고용이지 성능 판단 기준으로 쓰지 않는다.
+- 100k에서도 SIMD 차이가 작음 → 컴파일러 자동 벡터화가 이미 SoA `C++ Auto` 코드에 잘 동작한 경우일 수 있다. 엔티티 수나 워크로드를 바꿔 비교하되, 환경 없는 배수를 정답으로 두지 않는다. `-O0` 빌드는 디버그 참고용이지 성능 판단 기준으로 쓰지 않는다.
 
 ### 측정의 정직성
 
@@ -626,13 +725,13 @@ simd: 1 test(s), 5 check(s), 0 failure(s)
 
 ## 결론
 
-이 단계의 결과물은 SIMD 토글 한 번에 SoA·Archetype의 핫 루프가 SSE 또는 AVX2 경로로 전환되고, AoS는 토글에 무관하게 scalar로 도는 모습이 그래프에 그려지는 도구다. 약 350줄의 SIMD 코드(SoA SSE/AVX2 + Archetype SSE/AVX2 + 플랫폼 가드 헤더)가 기존 코드 위에 얹혔다.
+이 단계의 결과물은 SIMD 토글 한 번에 SoA·Archetype의 핫 루프가 SSE 또는 AVX2 경로로 전환되고, AoS는 토글에 무관하게 `C++ Auto` 경로로 도는 도구다. 요청·실행 커널·폴백 이유는 HUD에 함께 표시된다. 약 350줄의 SIMD 코드(SoA SSE/AVX2 + Archetype SSE/AVX2 + 플랫폼 가드 헤더 + `ResolveKernel`)가 기존 코드 위에 얹혔다.
 
 세 가지 결정이 이 단계의 토대를 만들었다.
 
-1. **2단계 가드 (`PERF_LAB_X86_SIMD` + `PERF_LAB_AVX2`)** — 플랫폼 자동 감지 + 빌드 옵션을 분리해 ARM 환경, AVX2 미지원 환경, 옵션 끈 빌드까지 모두 안전하게 폴백한다.
+1. **2단계 가드 + `ResolveKernel`** — 플랫폼 감지(`PERF_LAB_X86_SIMD`)와 빌드 옵션(`PERF_LAB_AVX2`)을 분리하고, 요청·실행 커널·폴백 이유를 `ResolveKernel` 한 곳에서 판정한다. 옵션 OFF 또는 비-x86 빌드는 컴파일 단계에서 대체 커널로 폴백해 범용으로 실행할 수 있다. 다만 `PERF_LAB_ENABLE_AVX2=ON` 빌드는 AVX2 지원 CPU/OS 대상 전용이며, 런타임 CPU 검사가 아니다. 범용 실행 파일용 별도 TU + 런타임 지원 검사는 **보충 구현 목표**다.
 2. **SSE2 bitwise select** — `_mm_blendv_ps`(SSE4.1) 의존을 빼고 `_mm_andnot_ps + _mm_and_ps + _mm_or_ps` 세 명령으로 같은 lane select를 구현. 모든 x86-64 baseline에서 추가 컴파일 옵션 없이 동작.
-3. **AoS는 의도적 scalar 유지** — gather/scatter 또는 transpose로 우회 가능하지만 비용이 SIMD 이득을 상쇄. *AoS의 SIMD 무효성* 자체가 측정 결과의 핵심 정보다.
+3. **AoS는 이 lab에서 수동 SIMD 미구현** — gather/scatter·shuffle/transpose·SLP 등 여러 우회 전략이 있으나 이 lab은 채택하지 않았다. *AoS의 SIMD 불가능* 이 아니라 구현 범위이고, AoS에서 토글이 무효인 것만으로 layout 효과를 입증하지 않는다.
 
 여기까지의 코드는 자동 벡터화와 수동 SIMD를 같은 시뮬에서 토글로 비교할 수 있다. 다만 *분기 비용* 자체는 아직 측정에 별도 변수로 안 들어와 있다. 분기 처리 방식이 scalar 경로에 고정되어 있어, 분기 예측이 그래프에 어떤 영향을 주는지는 이 상태에서 관측할 수 없다.
 

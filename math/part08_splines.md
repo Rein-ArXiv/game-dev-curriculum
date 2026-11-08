@@ -1,8 +1,8 @@
 ## 들어가며
 
-스플라인 (Spline) 은 *많은 제어점* 을 매끄럽게 잇는 곡선의 일반화다. Bezier와 Catmull-Rom 이 *몇 개의 점만* 다루는 형태였다면, 스플라인은 *수십·수백 개의 제어점 위* 에 부드러운 곡선을 정의한다. 도로 형상, 카메라 시네마틱 경로, 적의 등장 패턴, 머리카락 시뮬, 트랙 시스템 — 게임의 *복잡한 곡선* 이 모두 스플라인이다.
+스플라인 (Spline) 은 *조각 다항식 (piecewise polynomial) 또는 유리 곡선* 을 매끄럽게 잇는 곡선의 일반화다. Catmull-Rom 이나 조각 Bezier 도 이미 넓은 의미의 스플라인이고, 여기서는 *수십·수백 개의 제어점 위* 에 부드러운 곡선을 정의하는 기저를 다룬다. 도로 형상, 카메라 시네마틱 경로, 적의 등장 패턴, 머리카락 시뮬, 트랙 시스템 — 게임의 *복잡한 곡선* 이 모두 스플라인이다.
 
-핵심 통찰은 *지역 영향 (local control)*. 3차 Bezier 한 개는 4 제어점 *모두* 가 곡선 *전체* 에 영향을 주지만, B-Spline 같은 스플라인은 *한 제어점이 곡선의 일부에만* 영향. 디자이너가 *긴 트랙의 한 부분만 수정* 해도 *다른 부분은 안 바뀐다*. 이게 게임 에디터의 *직관적 곡선 편집* 의 토대.
+이 절에서 다루는 B-Spline 기저의 핵심 통찰은 *지역 영향 (local control)*. 단 *모든 스플라인이 지역적이지는 않다* — natural cubic spline 은 표본 하나를 바꾸면 전역 계수가 바뀔 수 있다. 3차 Bezier 한 개는 4 제어점 *모두* 가 곡선 *전체* 에 영향을 주지만, B-Spline 기저는 *한 제어점이 곡선의 일부에만* 영향. 디자이너가 *긴 트랙의 한 부분만 수정* 해도 *다른 부분은 안 바뀐다*. 이게 게임 에디터의 *직관적 곡선 편집* 의 토대.
 
 이 글의 목표는 다음 다섯 가지다.
 
@@ -36,9 +36,9 @@
 
 ### 1.1 왜 조각인가
 
-전체를 *한 다항식* 으로 표현하려면 차수가 폭발한다. N개 점을 *모두 정확히 지나는 한 다항식* 의 차수는 *N - 1*. N = 100이면 *99차 다항식* — 수치적으로 불안정 (Runge 현상), 평가 비용 큼, 한 점 변경이 전체 곡선에 영향.
+전체를 *한 다항식* 으로 표현하려면 차수가 폭발한다. 서로 다른 abscissa를 갖는 N개 점을 *모두 정확히 지나는 한 다항식* 의 차수는 *최대 N - 1* (반드시 N-1은 아니다). N = 100이면 *최대 99차 다항식* — 수치적으로 불안정 (Runge 현상), 평가 비용 큼, 한 점 변경이 전체 곡선에 영향.
 
-조각 분할이 답이다. *각 조각마다 3차 다항식*, *조각 사이 경계에서 연속성*. 100점 = 99개 3차 조각. 각 조각의 평가는 *상수 시간* (3차 다항식), 한 조각의 변경이 *그 조각만* 영향.
+조각 분할이 답이다. *각 조각마다 3차 다항식*, *조각 사이 경계에서 연속성*. 100점 = 99개 3차 조각. 각 조각의 평가는 *상수 시간* (3차 다항식). *B-Spline 기저* 를 쓰면 한 제어점 변경의 영향이 국소 조각에 머문다 (natural cubic 처럼 전역 계수를 다시 푸는 방식과 구분).
 
 ### 1.2 노트 (knot)
 
@@ -74,17 +74,17 @@ $$
 
 3차 (Cubic) 가 *게임에서 가장 자주 쓰이는* 차수. *단순 노트 (simple knot, multiplicity 1) 기준 C^2 자동 보장* + *조각 평가 빠름*. 더 높은 차수는 평가 비용 + 진동 위험.
 
-위 표는 *단순 노트* 기준이다. 노트의 *중복도 (multiplicity) r* 이 1보다 크면 그만큼 *연속성이 떨어진다* — 일반적으로 $C^{k-r}$. Clamped endpoint 는 그래서 *끝점 보간을 얻는 대신* 끝에서 연속성이 낮다.
+위 표는 *내부 단순 노트 (simple knot, multiplicity 1) 기준* 이다. *내부 노트* 의 *중복도 (multiplicity) r* 이 1보다 크면 그만큼 *연속성이 떨어진다* — 일반적으로 $C^{k-r}$. Clamped endpoint 는 바깥쪽 조각이 없어 *한쪽 방향으로만* 정의되므로, 끝에서의 매끄러움은 내부 노트와 같은 양방향 $C^{k-r}$ 판정 대상이 아니고 *본질적으로 discontinuous 라고 평가할 수도 없다*.
 
 ### 1.5 조각 사이 연속성의 메커니즘
 
-B-Spline의 연속성은 *기저 함수가 노트 주변에서 특정 차수까지 매끄럽게 이어지도록 정의된 구조* 에서 나온다. 인접 조각이 *같은 계수를 공유* 해서가 아니라, 기저 함수와 노트 multiplicity의 형태가 *그 자체로* 연속성을 만든다. 단, 중복 노트가 있으면 그만큼 연속성이 낮아진다.
+B-Spline의 연속성은 *기저 함수가 노트 주변에서 특정 차수까지 매끄럽게 이어지도록 정의된 구조* 에서 나온다. 인접 조각이 *같은 계수를 공유* 해서가 아니라, 기저 함수와 노트 multiplicity의 형태가 *그 자체로* 연속성을 만든다. 단, *내부* 노트의 중복도가 증가하면 그만큼 연속성이 낮아진다.
 
 ```mermaid
 flowchart LR
-    P0[조각 1<br/>3차] -->|C2 자동| P1[조각 2<br/>3차]
-    P1 -->|C2 자동| P2[조각 3<br/>3차]
-    P2 -->|C2 자동| P3[조각 4<br/>3차]
+    P0[조각 1<br/>3차] -->|"C2 자동 (내부 단순 knot, r=1)"| P1[조각 2<br/>3차]
+    P1 -->|"C2 자동 (내부 단순 knot, r=1)"| P2[조각 3<br/>3차]
+    P2 -->|"C2 자동 (내부 단순 knot, r=1)"| P3[조각 4<br/>3차]
 ```
 
 이게 Bezier 조각을 *수동으로 잇는* 패턴 (*접선 일치 제약*) 보다 우월한 점. 디자이너가 *접선을 수동으로 맞추지 않아도* 자동.
@@ -144,7 +144,7 @@ $$
 
 ### 2.3 차수와 연속성의 자동 보장
 
-차수 $k$ B-Spline은 *자동으로 $C^{k-1}$ 연속*. 노트에서 *부드러운 이음* 이 기저 함수의 형태로 인코딩되어 있다.
+차수 $k$ B-Spline은 *내부 단순 노트에서 자동으로 $C^{k-1}$ 연속*. 노트에서 *부드러운 이음* 이 기저 함수의 형태로 인코딩되어 있다.
 
 | 차수 | 자동 연속성 |
 |---|---|
@@ -153,7 +153,7 @@ $$
 | 3 (Cubic) | C2 |
 | 4 (Quartic) | C3 |
 
-3차 B-Spline 이 *게임 에디터의 표준*. C2 자동 + 4 제어점 지역 영향.
+3차 B-Spline 이 *게임 에디터의 표준*. 내부 단순 노트에서 C2 자동 + 4 제어점 지역 영향.
 
 ### 2.4 NURBS의 일반화
 
@@ -262,11 +262,19 @@ float CoxDeBoor(int i, int k, float t, const std::vector<float>& knots) {
 
 *분모 0 처리* 가 핵심. 노트가 중복되면 (multiple knot) 분모가 0이 될 수 있다 — 그 항을 *0으로 처리* 가 표준.
 
-또 *마지막 노트 $t = t_{\text{last}}$* 일 때 모든 base-case 기저가 0이 되는 함정이 있다 (조건 $t < t_{i+1}$ 이 *반열린 구간* 이라). 실전 구현은 *마지막 endpoint를 특수 처리* 하거나, 평가 전에 *t를 유효 구간 안으로 clamp* 한다.
+또 *마지막 노트 $t = t_{\text{last}}$* 일 때 모든 base-case 기저가 0이 되는 함정이 있다 (조건 $t < t_{i+1}$ 이 *반열린 구간* 이라). clamped B-Spline은 $t = t_{\text{last}}$ 에서 첫·끝 제어점을 지나야 하므로, *정확한 endpoint를 특수 처리* 해 마지막 span과 기저를 계산한다.
 
 ```cpp
-t = std::clamp(t, knots[degree], knots[knots.size() - 1 - degree] - 1e-7f);
+const float tMax = knots[knots.size() - 1 - degree];  // 마지막 정의 구간 끝
+if (t == tMax) {
+    // 정확한 오른쪽 끝점은 clamp로 밀지 않는다. clamped 곡선의 끝점 보간이
+    // 계약이면 그 점을 직접 반환하거나 마지막 span의 기저를 명시적으로 계산한다.
+    return controlPoints.back();
+}
+t = std::clamp(t, knots[degree], std::nextafter(tMax, knots[degree]));
 ```
+
+여기서 `nextafter` 는 *반올림으로 $t_{\text{last}}$ 가 남는 것만* 막는 내부 평가용 대표값이고, endpoint 보간 자체를 보장하지는 않는다. 기존처럼 `- 1e-7f` 같은 고정 epsilon 을 빼면 knot 값이 클 때 *반올림되어 값이 그대로 남아* 모든 기저가 0이 되고, 정의 구간이 그보다 짧으면 upper < lower 가 되어 clamp 전제가 깨진다.
 
 ### 3.4 메모이제이션
 
@@ -355,7 +363,7 @@ $$
 \vec{P}(t) = \frac{\sum_i w_i N_{i,k}(t) \vec{P}_i}{\sum_i w_i N_{i,k}(t)}
 $$
 
-각 제어점에 *가중치 $w_i \ge 0$* 가 붙고, 가중치들의 가중합으로 정규화. $w_i = 1$ 모두 같으면 *일반 B-Spline*.
+각 제어점에 *가중치 $w_i \ge 0$* 가 붙고, 가중치들의 가중합 $\sum_i w_i N_{i,k}(t)$ 로 정규화. 분모가 0이 되지 않도록 *활성 기저의 가중합이 양수* ($\sum_i w_i N_{i,k}(t) > 0$) 라는 조건이 필요하다 — $w_i \ge 0$ 만으로는 모든 활성 가중치가 0인 구간을 막지 못한다. $w_i = 1$ 모두 같으면 *일반 B-Spline*.
 
 ### 4.2 원·원뿔의 정확한 표현
 
@@ -370,12 +378,12 @@ std::vector<vec3>  cps = {
     {-1,  0, 0}, {-1, -1, 0}, { 0, -1, 0}, { 1, -1, 0},
     { 1,  0, 0},   // 닫힌 곡선
 };
-std::vector<float> weights = { 1, 0.707, 1, 0.707, 1, 0.707, 1, 0.707, 1 };
+std::vector<float> weights = { 1, 0.7071068f, 1, 0.7071068f, 1, 0.7071068f, 1, 0.7071068f, 1 };
 std::vector<float> knots   = { 0, 0, 0, 0.25, 0.25, 0.5, 0.5, 0.75, 0.75, 1, 1, 1 };
 // degree = 2
 ```
 
-*$0.707 = \cos(45°)$* 가중치가 정확한 원을 만든다. 일반 B-Spline 으로는 *근사 원* 만 가능.
+*수학적 가중치 $w = 1/\sqrt{2} = \cos(45°)$* 가 정확한 원을 만든다. 코드의 `0.7071068f` 는 이 값을 float 로 반올림한 근사이므로, 구현은 *이상적 원의 근사* 다. 일반 B-Spline 으로는 원을 *근사* 만 가능.
 
 이 정확성이 CAD에서 NURBS가 표준인 이유. 기계 부품의 *정확한 원형 구멍*, *완벽한 원형 단면* 을 표현.
 
@@ -438,8 +446,9 @@ flowchart LR
 
 ```cpp
 std::vector<vec2> ChaikinIterate(const std::vector<vec2>& points) {
+    if (points.size() < 2) return points;  // 0/1점은 그대로 (열린 polyline 규약)
     std::vector<vec2> result;
-    for (size_t i = 0; i < points.size() - 1; ++i) {
+    for (size_t i = 0; i + 1 < points.size(); ++i) {
         vec2 q1 = 0.75f * points[i] + 0.25f * points[i+1];
         vec2 q2 = 0.25f * points[i] + 0.75f * points[i+1];
         result.push_back(q1);
@@ -448,6 +457,8 @@ std::vector<vec2> ChaikinIterate(const std::vector<vec2>& points) {
     return result;
 }
 ```
+
+원래처럼 `points.size() - 1` 을 조건에 쓰면 `size()` 가 unsigned 라 *빈 입력에서 매우 큰 값으로 underflow* 하고 `points[0]` 에 접근한다 (UBSan으로 재현되는 문제). 위 구현은 0/1점 입력을 그대로 돌려주고, 반복 조건도 `i + 1 < points.size()` 로 underflow 가 없다. 이 함수는 *열린 polyline* 을 가정한 규약이며, 끝점 보존이나 폐곡선 처리는 별도의 subdivision 정책이다.
 
 3~5번 반복이면 *시각적으로 부드러운 곡선*. 단순한 코드로 *그럴듯한 곡선* 을 빠르게.
 
@@ -466,14 +477,16 @@ flowchart LR
 
 ### 5.3 더 높은 차수의 subdivision
 
-Chaikin은 *2차*. 3차 또는 4차 subdivision은 더 부드러운 결과 + 더 복잡한 규칙.
+Chaikin은 *2차*. 3차 또는 더 높은 차수의 subdivision 규칙은 더 부드러운 결과 + 더 복잡한 규칙을 준다.
 
-| 알고리즘 | 차수 | 노트 |
-|---|---|---|
-| Chaikin | 2 | 단순, 빠름 |
-| 4-point | 3 | 점 위 보간, 4개 이웃 사용 |
-| Lane-Riesenfeld | k (가변) | k번 평균으로 차수 k 곡선 |
-| (Catmull-Clark·Doo-Sabin은 표면 subdivision이라 곡선 문서에서 제외) | — | *표면 분할 알고리즘* |
+| 알고리즘 | 분할 규칙 | 재현성 | 연속성 |
+|---|---|---|---|
+| Chaikin | 변을 1/4·3/4로 분할 | limit이 2차 B-Spline, affine 재현 | C1 |
+| 4-point | 4개 이웃으로 새 점 삽입 | cubic polynomial 재현 | tension 매개변수에 따라 달라짐 |
+| Lane-Riesenfeld | k번 평균화 | 차수 k 다항식 재현 | 차수 k |
+| (Catmull-Clark·Doo-Sabin) | — | — | *표면 분할 알고리즘이라 곡선 문서에서 제외* |
+
+고전 *4-point interpolatory subdivision* 은 *cubic polynomial reproduction* 성질이 있지만, limit curve 가 일반적인 *조각 3차 B-Spline* 인 것은 아니다. limit 의 매끄러움도 고정 차수가 아니라 *tension 매개변수* 에 의존한다.
 
 게임에서 곡선 subdivision은 드물게 등장 (대부분 B-Spline 또는 Bezier 직접 평가가 충분). *표면 subdivision (Catmull-Clark)* 이 mesh smoothing에 더 자주.
 
@@ -505,6 +518,8 @@ $$
 
 엄밀히는 $|\vec{P}'(t)|$ 의 Riemann sum이 아니라 *N개 점을 직선으로 잇는 polyline 길이* 다. 곡선이 매끄러우면 N이 클 때 같은 결과로 수렴.
 
+수치 적분의 차수는 *integrand 의 매끄러움과 composite step 정의* 를 전제로 한다. 여기서 integrand $|\vec{P}'(t)|$ 는 knot 이나 cusp 에서 매끄럽지 않을 수 있으므로, 그런 구간은 *knot 단위로 나눠* 적분하거나 적응적 오차 추정을 함께 쓴다.
+
 ```cpp
 float ArcLengthPolylineApprox(const Spline& s, int N) {
     float total = 0.0f;
@@ -518,7 +533,7 @@ float ArcLengthPolylineApprox(const Spline& s, int N) {
 }
 ```
 
-가장 단순. 오차가 $1/N^2$ 로 줄어든다. 게임에서 N = 32~64면 충분.
+가장 단순. 구간이 매끄러우면 오차가 $1/N^2$ 로 줄어든다. 게임에서 N = 32~64면 대개 충분하지만, knot/cusp 에서는 구간을 나눠 적분한다.
 
 **Simpson's rule** (3점당 2차 다항식 적분):
 
@@ -538,14 +553,14 @@ float ArcLengthSimpson(const Spline& s, int N) {
 }
 ```
 
-Polyline 근사보다 *훨씬 정확* (오차 $O(h^4)$ vs $O(h^2)$). 같은 정확도 위해 *N을 크게 줄임*.
+integrand 가 구간에서 충분히 매끄럽고 composite step 이 균일하면 polyline 근사보다 *훨씬 정확* (오차 $O(h^4)$ vs $O(h^2)$). 같은 정확도 위해 *N을 크게 줄임*. knot/cusp 가 포함되면 그 지점에서 구간을 분할해야 이 차수가 유지된다.
 
 **Gauss-Legendre quadrature** (가장 정확):
 
 특정 *Gauss 점* 에서 표본해 *낮은 N으로 높은 정확도*. CAD 라이브러리의 표준.
 
 ```cpp
-// 5점 Gauss-Legendre (오차 O(h^10))
+// 5점 Gauss-Legendre: 매끄러운 integrand의 한 panel에서 오차 O(h^10)
 const float kGaussX[5] = {
     -0.9061798f, -0.5384693f, 0.0f, 0.5384693f, 0.9061798f
 };
@@ -554,7 +569,7 @@ const float kGaussW[5] = {
 };
 ```
 
-5개 점 평가로 *polyline 100점 정도 정확도*. 게임 런타임에는 *Simpson 또는 polyline 근사가 더 흔함*.
+국소 구간이 매끄러우면 *낮은 N으로 높은 차수* 를 얻는다. 다만 5점 Gauss 가 *polyline 100점과 같은 정확도* 라는 보장은 없다 — 표본 수가 다른 두 방법의 정확도를 일반적으로 동일시할 수 없다. knot/cusp 에서는 panel 을 나눠 적분하고, 필요하면 single panel 의 오차 scaling 과 composite order 를 구분해 추정한다. 게임 런타임에는 *Simpson 또는 polyline 근사가 더 흔함*.
 
 ### 6.3 LUT 빌드
 
@@ -608,39 +623,60 @@ struct ArcLengthLUT {
 ```cpp
 // 매 프레임
 character.distanceTraveled += character.speed * dt;
-if (character.distanceTraveled > arcLut.totalLength) {
-    // 트랙 끝 — 정지 또는 loop
-    return;
+if (loop) {
+    character.distanceTraveled =
+        std::fmod(character.distanceTraveled, arcLut.totalLength);  // 나머지 거리 보존
+} else if (character.distanceTraveled >= arcLut.totalLength) {
+    character.distanceTraveled = arcLut.totalLength;  // 끝점까지 clamp
+    character.state = CharacterState::Stopped;         // 종료 상태로 전이
 }
-float t = arcLut.TFromS(character.distanceTraveled);
+float t = arcLut.TFromS(character.distanceTraveled);  // 끝점이면 t = 1
 character.position = spline.At(t);
 character.tangent  = normalize(spline.Derivative(t));
 ```
 
-*거리 누적* + *LUT 변환* + *위치 + 접선*. 캐릭터·차량·카메라가 *균등 속도로 트랙* 을 따라간다.
+`distance` 를 *clamp 한 뒤* 마지막 위치를 적용하므로 트랙 *끝점까지 이동* 하고, 국소 `return` 으로 마지막 유효 표본에 멈추지 않는다. loop 는 나머지 거리를 보존한다. *거리 누적* + *LUT 변환* + *위치 + 접선*. 캐릭터·차량·카메라가 *균등 속도로 트랙* 을 따라간다.
 
 ### 6.5 적응적 표본
 
 *곡률이 큰 부분* 은 LUT를 *세밀히*, 평탄한 부분은 *드물게* 표본.
 
+끝점과 중간점만 직선 위에 있는 S자 곡선은 `midLen - chordLen = 0` 이지만 크게 휜다 — 예를 들어 Bezier $(0,0),(1,2),(2,-2),(3,0)$ 은 중간점이 현의 중점이지만 실제 길이 $\approx 3.934$ 로 현 길이 $3$ 과 다르다. 따라서 중간점 하나의 chord 편차로 평탄함을 판정하면 안 된다. 대신 Bezier 제어 다각형 대 현의 길이 차이 같은 *오차 상한* 이나, 고차 구적법의 한 판과 두 반쪽 판의 차이 같은 *신뢰할 수 있는 오차 추정* 을 쓴다. 종료는 *오차 목표 충족* 과 *최대 depth/최소 interval 상한 도달* 을 구분한다.
+
 ```cpp
-void AdaptiveBuild(const Spline& s, ArcLengthLUT& lut, float maxError) {
-    Recurse(s, 0.0f, 1.0f, maxError, lut);
+// 구간 [t0,t1] 의 호 길이를 5점 Gauss-Legendre 로 근사
+float GaussSegmentLength(const Spline& s, float t0, float t1) {
+    const float x[5] = {-0.9061798f,-0.5384693f,0.0f,0.5384693f,0.9061798f};
+    const float w[5] = {0.2369269f,0.4786287f,0.5688889f,0.4786287f,0.2369269f};
+    float half = 0.5f * (t1 - t0), mid = 0.5f * (t0 + t1), sum = 0.0f;
+    for (int j = 0; j < 5; ++j) {
+        sum += w[j] * length(s.Derivative(mid + half * x[j]));
+    }
+    return sum * half;
 }
 
-void Recurse(const Spline& s, float t0, float t1, float maxError, ArcLengthLUT& lut) {
-    vec3 p0 = s.At(t0);
-    vec3 p1 = s.At(t1);
-    vec3 mid = s.At((t0 + t1) * 0.5f);
-    float chordLen   = length(p1 - p0);
-    float midLen     = length(mid - p0) + length(p1 - mid);
-    if (midLen - chordLen < maxError) {
-        // 충분히 평탄
+void AdaptiveBuild(const Spline& s, ArcLengthLUT& lut, float maxError,
+                   int maxDepth = 12, float minInterval = 1e-4f) {
+    Recurse(s, 0.0f, 1.0f, maxError, 0, maxDepth, minInterval, lut);
+}
+
+void Recurse(const Spline& s, float t0, float t1, float maxError,
+             int depth, int maxDepth, float minInterval, ArcLengthLUT& lut) {
+    float whole  = GaussSegmentLength(s, t0, t1);
+    float tm     = 0.5f * (t0 + t1);
+    float halves = GaussSegmentLength(s, t0, tm) + GaussSegmentLength(s, tm, t1);
+
+    float err = std::fabs(whole - halves);  // 한 판 대 두 판 차이 = 오차 추정
+    bool converged     = err < maxError;
+    bool depthLimit    = depth >= maxDepth;
+    bool intervalLimit = (t1 - t0) <= minInterval;
+
+    if (converged || depthLimit || intervalLimit) {
         lut.AddSample(t0, ...);
+        // depth/interval 상한 도달은 오차 목표 충족과 별개로 표시한다.
     } else {
-        // 더 분할
-        Recurse(s, t0, (t0+t1)*0.5f, maxError, lut);
-        Recurse(s, (t0+t1)*0.5f, t1, maxError, lut);
+        Recurse(s, t0, tm, maxError, depth + 1, maxDepth, minInterval, lut);
+        Recurse(s, tm, t1, maxError, depth + 1, maxDepth, minInterval, lut);
     }
 }
 ```
@@ -707,15 +743,17 @@ struct CarOnTrack {
         vec3 N = normalize(Nraw);
         vec3 R = cross(T, N);  // right
 
-        // 옵션: banking 회전을 N·R 평면에서 추가
+        // 옵션: banking 회전은 진행 축 T 둘레의 roll이다 (R 축 둘레는 pitch가 된다).
         float bank = bankingCurve.At(t);
-        // ... bank 만큼 N과 R을 R 축 둘레 회전 등
+        // ... bank 만큼 N과 R을 T 축 둘레로 회전
 
         car.position = pos;
-        car.rotation = MatrixFromAxes(T, N, R);
+        car.rotation = MatrixFromAxes(T, N, R);  // 지역 축 순서 (T, N, R) 계약
     }
 };
 ```
+
+`MatrixFromAxes(T, N, R)` 는 *차량의 지역 축* 을 순서대로 받는 계약이다. banking 은 진행 방향 $T$ 둘레의 roll 이므로 $N$ 과 $R$ 을 $T$ 축으로 회전시킨다. $R$ 축 회전은 차량의 pitch 성분이 된다.
 
 진짜 *Frenet normal* 이 필요하면 *연쇄 외적* 식이 있다. 부호가 안전한 형태:
 
@@ -737,7 +775,7 @@ vec3 N = normalize(cross(cross(vel, acc), T));
 
 *직선 구간에서 법선이 정의 안 됨*. 곡률 0 = 분자 영벡터 = 정규화 NaN.
 
-대응: *parallel transport frame* 또는 *RMF (Rotation Minimizing Frame)*. 직선 구간에서도 *연속적인 법선* 을 보장하는 변형.
+대응: *parallel transport frame* 또는 *RMF (Rotation Minimizing Frame)*. 직선 구간에서도 *연속적인 법선* 을 보장하는 변형. 아래 코드처럼 이전 법선을 새 접선에 투영하는 방식은 *근사 transported frame* 이며, 정확한 parallel transport 나 RMF 와 동일하지 않다. 정확한 RMF 는 *double-reflection / minimal rotation* 알고리즘으로 계산한다.
 
 ```cpp
 // 직선 구간 처리
@@ -754,7 +792,7 @@ vec3 EstimateNormal(vec3 T, vec3 prevN) {
 }
 ```
 
-*이전 프레임의 법선* 을 *현재 접선에 직교 정규화*. 곡선이 *연속적인 자세 변화* 를 보장.
+*이전 프레임의 법선* 을 *현재 접선에 직교 정규화* 한 *근사 전달* 이다. 매끄러운 변화를 대체로 따르지만, 인접 표본에서 $T$ 가 `prevN` 과 평행하거나 반대에 가까우면 fallback 이 갑자기 바뀌어 180도 반전이 생길 수 있고, 폐곡선에서는 누적 twist 가 0으로 닫히지 않을 수 있다. 초기 frame 을 명시적으로 정하고, 폐곡선이면 twist 보정을 별도로 둔다.
 
 ### 7.5 카메라의 부드러운 자세
 
@@ -764,7 +802,7 @@ vec3 EstimateNormal(vec3 T, vec3 prevN) {
 struct CameraTrack {
     Spline path;
     ArcLengthLUT lut;
-    vec3 prevN;  // 이전 프레임 법선 (parallel transport)
+    vec3 prevN;  // 이전 프레임 법선 (근사 transported frame)
 
     void Update(float dt) {
         distance += speed * dt;
@@ -846,7 +884,7 @@ struct RoadSegment {
 struct EnemyPattern {
     Spline path;
     float duration;
-    AnimCurve speedCurve;  // 진행 속도 변화
+    AnimCurve progressCurve;  // 시간 t(0..1) → 진행도(0..1) 매핑 (속도 함수가 아님)
 
     void Spawn(EnemyManager& mgr) {
         Enemy* e = mgr.SpawnEnemy();
@@ -859,14 +897,14 @@ struct EnemyPattern {
         e.t += dt / e.duration;
         if (e.t > 1.0f) { mgr.DestroyEnemy(e); return; }
 
-        float adjT = speedCurve.At(e.t);
+        float adjT = progressCurve.At(e.t);  // 시간 → 진행도 (속도가 아님)
         e.position = e.path->At(adjT);
         e.facing   = normalize(e.path->Derivative(adjT));
     }
 };
 ```
 
-스타일 게임·아케이드 슈터의 *고전적 패턴*. 디자이너가 곡선 + 속도 곡선만 정의.
+스타일 게임·아케이드 슈터의 *고전적 패턴*. 디자이너가 곡선 + 진행도 곡선만 정의. 여기서 `progressCurve` 값은 *속도가 아니라 시간→진행도 매핑* 이다. `progressCurve` 가 상수 1이면 첫 프레임부터 끝점으로 간다. 실제 *속도 함수* 를 쓰려면 그 함수를 시간에 대해 적분·정규화하고 호 길이 매개화와 결합해야 한다.
 
 ### 8.4 머리카락·로프 시뮬
 
@@ -898,19 +936,23 @@ struct ProjectilePath {
     vec3 start, velocity;
     float gravity;
 
-    Spline ToSpline() {
+    // 일정 중력 궤적 p(t) = start + v t + ½ a t² 은 t의 2차식이므로,
+    // Spline 이 2차 Bezier 표현이면 한 조각으로 정확히 표현된다.
+    // B-Spline 제어점에 표본을 그대로 넣으면 곡선이 표본을 지나지 않아 탄도와 달라진다.
+    Spline ToSpline(float T) {
+        auto pos = [&](float t) {
+            return start + velocity * t + vec3(0, -0.5f * gravity * t * t, 0);
+        };
+        vec3 p0 = pos(0.0f), p2 = pos(T), m = pos(T * 0.5f);
+        vec3 p1 = 2.0f * m - 0.5f * (p0 + p2);  // B(0.5) = m 조건
         Spline s;
-        for (int i = 0; i <= 20; ++i) {
-            float t = float(i) / 20.0f * 2.0f;  // 2초 동안
-            vec3 p = start + velocity * t + vec3(0, -0.5f * gravity * t * t, 0);
-            s.AddControlPoint(p);
-        }
+        s.SetControlPoints({p0, p1, p2});  // 2차 Bezier 제어점
         return s;
     }
 };
 ```
 
-투사체의 *물리적 궤적* 을 미리 *스플라인으로* 표현 후 시각화. *조준 보조* 또는 *디버그 표시*.
+투사체의 *물리적 궤적* 을 미리 *스플라인으로* 표현 후 시각화. *조준 보조* 또는 *디버그 표시*. 표본을 그대로 `AddControlPoint` 에 넣는 방식은 Spline 이 *표본 보간 API (표본을 지남)* 이거나 오차 제한 fit 일 때만 원래 궤적을 보존한다.
 
 ### 8.6 트랙 에디터의 핸들 편집
 
@@ -950,9 +992,9 @@ struct SplineEditor {
 | 옵션 | 장점 | 단점 |
 |---|---|---|
 | Unity AnimationCurve | 통합·시각 편집 | Unity 종속 |
-| Unreal FSplineComponent | 통합·시각 편집 | Unreal 종속 |
+| Unreal USplineComponent | 통합·시각 편집 | Unreal 종속 |
 | 자체 구현 (Hermite, B-Spline) | 학습 가치, 통제 | 시간 |
-| GLM glm::CatmullRom | 헤더-only | 종합 기능 부족 |
+| GLM glm::catmullRom (gtx/spline) | 헤더-only | 종합 기능 부족 |
 | OpenSubdiv (Pixar) | 표면 subdivision 풀 기능 | 무거움 |
 
 학습 단계에서는 *자체 구현*. Hermite/Bezier 위에 *제어점 시퀀스 + 노트 벡터* 만 더하면 B-Spline 가능.

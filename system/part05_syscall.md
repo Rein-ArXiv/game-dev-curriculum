@@ -758,8 +758,8 @@ asmlinkage long sys_write(unsigned int fd, const char __user *buf, size_t count)
 // arch/x86/entry/syscall_32.c
 __visible const sys_call_ptr_t ia32_sys_call_table[__NR_syscall_compat_max+1] = {
     [0 ... __NR_syscall_compat_max] = &sys_ni_syscall,
-    [0] = sys_read,
-    [1] = sys_write,
+    [3] = sys_read,   // i386 ABI: read = 3
+    [4] = sys_write,  // i386 ABI: write = 4
     // ...
 };
 ```
@@ -945,6 +945,12 @@ ENTRY(entry_SYSCALL_64)
 
     /* 복귀 준비 */
     POP_REGS                                ; 레지스터 복원
+
+    /*
+     * SYSRET는 RCX/R11로 RIP/RFLAGS만 복원하고 일반 user RSP는 복원하지 않는다.
+     * 진입 시 pt_regs에 저장한 사용자 RSP를 직접 복원해야 한다.
+     */
+    movq RSP(%rsp), %rsp                    ; pt_regs.rsp → 사용자 RSP
 
     swapgs                                  ; GS 복원
     sysretq                                 ; 사용자 공간으로 복귀
@@ -1176,8 +1182,10 @@ popq %rdi
 
 ```asm
 swapgs                  ; GS를 사용자용으로 복원
-sysretq                 ; 사용자 공간으로 복귀
+sysretq                 ; RCX/R11 복원 (user RSP는 미리 movq RSP(%rsp), %rsp로 복구)
 ```
+
+`sysretq`는 RCX와 R11로 RIP/RFLAGS만 복원할 뿐 일반 user RSP는 건드리지 않는다. 복귀 전에 `movq RSP(%rsp), %rsp`로 pt_regs에 저장한 사용자 스택 포인터를 직접 되돌려야 한다. 또 `swapgs`와 `sysretq` 사이는 커널 GS가 이미 사용자 GS로 바뀐 window이므로, 이 구간에서 NMI/interrupt가 끼면 entry 코드의 GS 복구와 중단 창 순서 계약을 따라야 한다. pt_regs가 오염됐거나 조건이 맞지 않으면 sysret 대신 iret 계열 복귀를 쓴다.
 
 `sysretq` 명령어는:
 ```text
@@ -1247,7 +1255,7 @@ vfs_write
     ↓
 반환값을 RAX에 저장
     ↓
-레지스터 복원
+레지스터/사용자 RSP 복원
     ↓
 sysretq
     ↓
@@ -1952,7 +1960,7 @@ int main(void)
         gettimeofday(&tv, NULL);
     }
     end = rdtsc_end();
-    printf("gettimeofday (glibc path): %llu cycles per call\n",
+    printf("gettimeofday (glibc path): %llu TSC ticks per call\n",
            (end - start) / ITERATIONS);
 
     /* 직접 시스템 콜 호출 */
@@ -1961,7 +1969,7 @@ int main(void)
         syscall(SYS_gettimeofday, &tv, NULL);
     }
     end = rdtsc_end();
-    printf("gettimeofday (forced syscall): %llu cycles per call\n",
+    printf("gettimeofday (forced syscall): %llu TSC ticks per call\n",
            (end - start) / ITERATIONS);
 
     return 0;
@@ -1975,6 +1983,8 @@ gcc -O2 -march=native vdso_bench.c -o vdso_bench
 ```
 
 측정 전에는 프로세스를 한 CPU에 고정하고, 여러 표본의 중앙값과 분위수를 기록하며, `strace` 또는 `perf trace`로 glibc 경로가 실제 시스템 콜로 폴백하지 않았는지 확인한다. `RDTSC` 자체의 순서 제약과 측정 오버헤드도 빈 루프로 보정해야 한다. 결과는 CPU·clocksource·커널·보안 완화 설정에 종속되므로 예시 숫자를 이식 가능한 상수로 사용하지 않는다.
+
+여기서 `end - start`는 현재 코어가 실행한 retired instruction cycle 수가 아니라 TSC tick 차이다. TSC는 frequency scaling·CPU migration·TSC scaling에 따라 nanosecond 환산이 달라지므로, ticks 단위로 표기하고 counter frequency를 어떻게 산정했는지(예: CPUID, `tsc_khz`)와 측정 구간의 migration 여부를 함께 적는다.
 
 ### vDSO와 time namespaces
 
@@ -2367,9 +2377,9 @@ MODULE_LICENSE("GPL");
  - `kernel/sys.c`: 일반 시스템 콜 구현
  - `fs/read_write.c`: 파일 I/O 시스템 콜
 
-**4) YouTube 강의**
-- "Understanding the Linux Kernel" by Richard Guy Briggs
-- "Linux Kernel Development" by The Linux Foundation
+**4) YouTube 강의** (제목·발표 주체만으로는 개별 영상을 식별하지 못함)
+- "Understanding the Linux Kernel" by Richard Guy Briggs — 직접 근거로 쓰기 전에 영상 URL·행사 확인 필요
+- "Linux Kernel Development" by The Linux Foundation — 직접 근거로 쓰기 전에 영상 URL·행사 확인 필요
 
 ### 관찰 환경
 
@@ -2399,15 +2409,17 @@ mkdir initramfs
 cd initramfs
 mkdir -p bin sbin etc proc sys usr/bin usr/sbin
 
-# busybox 추가
+# busybox 추가 (동적 busybox면 인터프리터/DSO도 initramfs에 함께 있어야 한다)
+file /bin/busybox            # 정적 링크인지 확인
 cp /bin/busybox bin/
+busybox --install -s bin     # /bin/mount 등 applet 링크 생성
 ln -s /bin/busybox bin/sh
 
 # init 스크립트
 cat > init <<EOF
 #!/bin/sh
-mount -t proc none /proc
-mount -t sysfs none /sys
+/bin/busybox mount -t proc none /proc
+/bin/busybox mount -t sysfs none /sys
 exec /bin/sh
 EOF
 chmod +x init
@@ -2420,6 +2432,8 @@ qemu-system-x86_64 -kernel ../arch/x86/boot/bzImage \
                    -initrd ../initramfs.cpio.gz \
                    -append "console=ttyS0" -nographic
 ```
+
+`-initrd`로 넘기는 위 파일은 initrd가 아니라 initramfs(cpio + gzip)다. 호스트 `/bin/busybox`를 복사하는 것만으로는 loader/libraries와 applet 경로가 갖춰지지 않으므로, 정적 busybox인지 `file`로 확인하고 `busybox --install` 또는 `/bin/busybox mount`를 쓰며 QEMU를 실제로 부팅해 `/bin/sh`와 mount가 동작하는지 검증한다.
 
 **3) strace로 시스템 콜 추적**
 ```bash

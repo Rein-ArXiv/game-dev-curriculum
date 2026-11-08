@@ -224,11 +224,12 @@ velocity 반복이 *속도 제약* ($J \vec{v} = 0$) 을 만족시킴. 하지만
 
 ```mermaid
 flowchart LR
-    V[velocity iter] -->|J·v = 0 만족| Drift[C 는 drift 가능]
+    V[velocity iter] -->|"J·v = 0 (bilateral·bias 없음 특수형)"| Drift[C 는 drift 가능]
     Drift --> Pos[position iter 별도 보정]
+    General[일반형: inequality J·v ≥ 0,<br/>bias·soft row 는 J·v = -b 등] -.-> V
 ```
 
-특히 *충돌 시작 시 초기 침투* 는 velocity iter 만으로 해소 안 됨 — position iter 가 필수.
+특히 *충돌 시작 시 초기 침투* 는 velocity iter 만으로 해소되지 않는다. 별도 position pass 나 위치-속도를 결합한 implicit 구성에서 다룬다 — position pass는 모든 솔버의 필수 단계가 아니라 선택한 solver 구성이다.
 
 ### 3.2 NGS (Non-linear Gauss-Seidel)
 
@@ -288,10 +289,11 @@ position pass는 최대 penetration이 slop 아래로 내려가면 조기 종료
 
 ### 3.6 Position 솔버 대안
 
-- *NGS* (Box2D): 명시적 위치 수정.
-- *Pseudo-velocity* (Bullet): 위치 보정을 별도 속도 채널.
-- *Implicit* (PhysX TGS): velocity 와 position 결합.
-- *PBD* (Position-Based Dynamics): velocity 자체를 *위치 변경에서 도출*. cloth/soft body 표준.
+이들을 *하나의 explicit/implicit 축* 으로 나누면 부정확하다. 실제로는 서로 다른 축이 섞여 있다.
+
+- *시간 이산화*: PGS와 TGS 모두 PhysX 5.4.1 문서에서는 implicit discretization의 근사로 설명된다. TGS만 implicit이라고 대조하지 않는다.
+- *제약 재선형화·소단계*: TGS는 작은 sub-step마다 pose와 contact arm을 갱신해 비선형성을 반영한다. PGS는 한 step의 Jacobian을 고정한다.
+- *위치 오차 보정*: NGS(Box2D)는 위치를 직접 수정하고, pseudo-velocity(Bullet)는 별도 위치 보정 속도 채널을 둔다. PBD는 속도 자체를 위치 변경에서 도출한다.
 
 각 방법의 *정확성·안정성·비용* 트레이드오프 다름.
 
@@ -307,7 +309,7 @@ position pass는 최대 penetration이 slop 아래로 내려가면 조기 종료
 flowchart LR
     Step1[Step n: λ 수렴] --> Save[누적 λ 저장]
     Save --> Step2[Step n+1: 이전 λ 로 시작]
-    Step2 --> Fast[수 iter 안에 수렴]
+    Step2 --> Fast["수 iter 안에 수렴<br/>통상 기대 (stale cache 는 보장 아님)"]
 ```
 
 ### 4.2 적용
@@ -324,6 +326,13 @@ void ContactConstraint::WarmStart() {
 ```
 
 step 시작에 *이전 누적 λ 의 impulse 를 강체 속도에 적용*. velocity iteration 의 *시작 상태* 가 *이전 step 의 수렴 상태* 에 가깝다.
+
+warm start 캐시는 다음 계약을 만족할 때만 유효하다.
+
+- *접촉 항등성*: body/feature ID가 같고 normal basis가 이전과 일치(또는 재투영)해야 한다. shape/body generation 변경, teleport, 접선 기준 회전 시 캐시를 무효화한다.
+- *dt 처리*: 지속 하중의 누적 impulse는 substep dt 비율로 scaling하거나 재초기화한다. 충돌성(impact) target은 substep dt 변화에 그대로 carry하지 않는다.
+- *λ 초기화*: 새 contact는 `λ = 0` 으로 시작하고, 사라진 contact는 캐시에서 제거한다.
+- *restitution snapshot*: impact restitution target은 warm start로 속도를 바꾸기 *전* 의 상대 속도로 고정해 반복 재반발을 막는다.
 
 ### 4.3 효과
 
@@ -363,8 +372,8 @@ Gauss-Seidel 의 수렴 조건과 *게임 시나리오에서의 실용성*.
 
 선형 시스템 $K \vec{\lambda} = \vec{q}$ 의 GS 수렴은:
 
-- $K$ 가 *대각 우세 (diagonal dominance)*, 또는
-- $K$ 가 *positive definite*.
+- $K$ 가 *strict diagonal dominance* (또는 irreducibility를 포함한 적절한 약 대각 조건)를 만족하거나,
+- $K$ 가 *symmetric positive definite* (실수 대칭 PD).
 
 $M^{-1}$이 양의 준정부호라면 $K = J M^{-1} J^T$도 양의 준정부호다. $K$가 양의 정부호가 되려면 제약 행들이 역질량이 정의하는 metric에서 독립이고 0 effective mass 행이 없어야 한다. 중복 제약, 잠긴 자유도와 정적 강체 조합은 singular $K$를 만들 수 있다.
 
@@ -384,7 +393,9 @@ flowchart LR
     SlowGS --> ManyIter[수십 iter 필요]
 ```
 
-박스 100 개 스택의 *맨 아래 박스* 가 *맨 위 박스의 영향* 을 받으려면 *정보가 100 단계를 통과*. GS 반복 1 회당 *1 단계만 전달* — 100 단계엔 *100 iter* 필요.
+GS는 같은 sweep 안에서 이미 갱신된 값을 재사용하므로, 행 순서가 연결 방향과 같으면 한 sweep 안에 여러 이웃으로 영향이 전파된다. 반대 방향이면 한 이웃씩 지연될 수 있다. 따라서 정보 전달 거리는 *행 순서와 sweep 방향* 에 의존한다.
+
+첫 영향이 도달하는 sweep 수와 목표 residual까지의 수렴은 별개다. 질량비·condition 수·재정렬(reordering)이 수렴 속도를 좌우하며 “100단계 = 100 iter”처럼 항상 일정하다고 일반화할 수 없다.
 
 해결: *더 많은 iter*, *substepping*, *island reordering* (가까운 강체 먼저).
 
@@ -438,7 +449,7 @@ iter 가 *N → 2N* 이면 시간 *2 배*. 오차는 GS 의 선형 수렴 특성
 
 ### 6.4 동적 iteration 조정
 
-게임에 따라 *iter 수를 동적 변경*.
+게임에 따라 *iter 수를 동적 변경* 할 수 있다. 단 *동일 입력·동일 step 에서 같은 solver 횟수* 를 보장해야 하는 서버·리플레이·결정론 모드에서는 wall-clock 기반 조정을 쓰지 않는다. 그런 모드에서는 고정 반복 수를 쓰거나 조정에 쓴 결정값을 기록한다.
 
 ```cpp
 int desiredIters = std::min(
@@ -446,7 +457,7 @@ int desiredIters = std::min(
     kMaxIters);
 ```
 
-또는 *복잡도 자동 감지* — 침투가 큰 frame 에 *iter 증가*.
+비결정적 로컬 품질 모드에서만 *복잡도 자동 감지* — 침투가 큰 frame 에 *iter 증가* — 를 허용한다.
 
 ### 6.5 Substepping 의 대안
 
@@ -473,7 +484,7 @@ if (lastFrameTime > kPhysicsFrameBudget) iter = std::max(iter - 1, 4);
 else if (lastFrameTime < kPhysicsFrameBudget * 0.5f) iter = std::min(iter + 1, 20);
 ```
 
-부하 따라 *iter 자동 조정* — 최악 케이스에도 frame drop 회피.
+`lastFrameTime` 은 PC 부하·스케줄러에 따라 달라지므로 같은 입력에서도 solver 횟수가 바뀌고, 최소 반복으로도 frame budget을 넘으면 조정만으로 frame drop을 보장 회피하지 못한다. 측정 기반 adaptive 정책에는 *최소 정확성 하한*, *최악 작업량 한도*, *부채 처리 정책*(반복을 다음 frame으로 이월하거나 품질을 낮춤)을 함께 둔다.
 
 ## 7. Island solver
 
@@ -498,9 +509,17 @@ std::vector<int> parent(world.bodies.size(), -1);
 int Find(int x) { /* path compression */ }
 void Union(int x, int y) { parent[Find(x)] = Find(y); }
 
-// 모든 contact + joint 로 union
-for (auto& c : world.contacts) Union(c.bodyA, c.bodyB);
-for (auto& j : world.joints) Union(j.bodyA, j.bodyB);
+// 정적 body 는 island 연결점으로 쓰지 않는다.
+// 정적 body 를 통해 서로 다른 동적 집합이 한 island 로 합쳐지면
+// 병렬 분할과 sleep 단위가 나빠진다 (물리 결과가 틀리거나 island 간 race 가 나는 것은 아니다).
+for (auto& c : world.contacts) {
+    if (world.bodies[c.bodyA].isStatic || world.bodies[c.bodyB].isStatic) continue;
+    Union(c.bodyA, c.bodyB);
+}
+for (auto& j : world.joints) {
+    if (world.bodies[j.bodyA].isStatic || world.bodies[j.bodyB].isStatic) continue;
+    Union(j.bodyA, j.bodyB);
+}
 
 // 같은 부모 = 같은 island
 std::map<int, std::vector<int>> islands;
@@ -508,6 +527,8 @@ for (int i = 0; i < world.bodies.size(); ++i) {
     islands[Find(i)].push_back(i);
 }
 ```
+
+read-only 정적 body 는 여러 동적 island 에 *읽기 참조* 로 참여시키고, island 경계는 동적/kinematic 연결로만 만든다. dynamic/kinematic body 를 island 간에 공유해야 한다면 쓰기와 깨우기 정책을 별도로 정한다. 정적 ground 를 통해 합쳐진 큰 island 도 유효한 계산 단위이므로, 이는 정확성 오류가 아니라 병렬성·sleep 품질 문제다.
 
 ### 7.3 Island별 솔버
 

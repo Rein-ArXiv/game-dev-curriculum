@@ -2,19 +2,22 @@
 // 화면 출력(Draw)은 aos_draw.cpp에 있고, 테스트 타깃은 그 TU를 컴파일하지 않는다.
 #include "sim/aos.h"
 
+#include "sim/kernel_dispatch.h"
+
 #include <algorithm>
 #include <random>
 
 namespace ppl {
 
 void AoSSimulation::Init(std::size_t entityCount, int viewportW, int viewportH) {
-    viewportW_ = viewportW;
-    viewportH_ = viewportH;
+    // 좌표 계약: 0 <= x <= W-1, 0 <= y <= H-1. Init과 Update가 같은 상한을 쓴다.
+    viewportW_ = SanitizeViewport(viewportW);
+    viewportH_ = SanitizeViewport(viewportH);
     entities_.resize(entityCount);
 
     std::mt19937 rng(0xC0FFEEu);
-    std::uniform_real_distribution<float> distX(0.0f, static_cast<float>(viewportW_));
-    std::uniform_real_distribution<float> distY(0.0f, static_cast<float>(viewportH_));
+    std::uniform_real_distribution<float> distX(0.0f, static_cast<float>(viewportW_ - 1));
+    std::uniform_real_distribution<float> distY(0.0f, static_cast<float>(viewportH_ - 1));
     std::uniform_real_distribution<float> distV(-120.0f, 120.0f);
 
     for (auto& e : entities_) {
@@ -25,8 +28,10 @@ void AoSSimulation::Init(std::size_t entityCount, int viewportW, int viewportH) 
     }
 }
 
-void AoSSimulation::Update(float dt, SimdWidth /*simd*/, bool branchless) {
-    UpdateScalar(dt, branchless);
+void AoSSimulation::Update(float dt, SimdWidth simd, bool branchless) {
+    // AoS는 이 lab에 수동 SIMD 경로가 없다. 요청과 실제 실행 커널을 분리해 기록한다.
+    const ResolvedKernel k = ResolveKernel(Layout::AoS, simd, branchless);
+    UpdateScalar(SanitizeDt(dt), k.branchlessApplied);
 }
 
 void AoSSimulation::UpdateScalar(float dt, bool branchless) {

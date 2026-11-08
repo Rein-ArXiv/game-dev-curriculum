@@ -531,6 +531,16 @@ void EnableGLDebug() {
         return;
     }
 
+    // 디버그 컨텍스트 bit는 KHR_debug 진입점 제공을 보장하지 않는다.
+    // GL 4.3+ 또는 KHR_debug 지원과 함수 포인터 로드 성공을 먼저 확인한다.
+    const bool hasKHRDebug = (GLVersion.major > 4) ||
+                             (GLVersion.major == 4 && GLVersion.minor >= 3) ||
+                             GLAD_GL_KHR_debug;
+    if (!hasKHRDebug || glDebugMessageCallback == nullptr) {
+        // 미지원이면 glGetError 폴링 폴백으로 넘어간다.
+        return;
+    }
+
     glEnable(GL_DEBUG_OUTPUT);
     glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
     glDebugMessageCallback(DebugCallback, nullptr);
@@ -699,7 +709,7 @@ OpenGL 4.6에는 약 700개의 함수가 있다. 모두 타입 정의 + 함수 �
 
 ### GLAD 사용
 
-GLAD는 https://glad.dav1d.de 또는 https://gen.glad.sh 에서 필요한 OpenGL 버전과 확장을 선택해 *그 조합에 맞는 헤더와 소스* 를 다운로드한다.
+GLAD1은 https://glad.dav1d.de 에서, GLAD2는 https://gen.glad.sh 에서 필요한 OpenGL 버전과 확장을 선택해 *그 조합에 맞는 헤더와 소스* 를 다운로드한다. 이 절의 예제는 GLAD1 생성물(`glad/glad.h` + `gladLoadGLLoader`)을 기준으로 하므로, 헤더 경로와 초기화 API가 다른 GLAD2 생성물과 한 프로젝트에서 섞지 않는다.
 
 생성된 파일 구조:
 
@@ -864,9 +874,10 @@ add_executable(${PROJECT_NAME}
 )
 target_link_libraries(${PROJECT_NAME} PRIVATE glad glfw)
 
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_definitions(${PROJECT_NAME} PRIVATE ENABLE_GL_DEBUG)
-endif()
+# multi-config(Visual Studio 등)에서도 Debug 구성에만 정의되도록
+# $<CONFIG:Debug> generator expression을 쓴다.
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    $<$<CONFIG:Debug>:ENABLE_GL_DEBUG>)
 ```
 
 ### GLContext.h
@@ -1013,7 +1024,13 @@ bool GLContext::Init(int width, int height, const std::string& title) {
 #ifdef ENABLE_GL_DEBUG
     GLint flags = 0;
     glGetIntegerv(GL_CONTEXT_FLAGS, &flags);
-    if (flags & GL_CONTEXT_FLAG_DEBUG_BIT) {
+    // debug context bit만으로는 KHR_debug 진입점을 보장하지 않는다.
+    // GL 4.3+ 또는 KHR_debug 지원과 함수 포인터 로드 성공을 함께 확인한다.
+    const bool hasKHRDebug = (GLVersion.major > 4) ||
+                             (GLVersion.major == 4 && GLVersion.minor >= 3) ||
+                             GLAD_GL_KHR_debug;
+    if ((flags & GL_CONTEXT_FLAG_DEBUG_BIT) &&
+        hasKHRDebug && glDebugMessageCallback != nullptr) {
         glEnable(GL_DEBUG_OUTPUT);
         glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
         glDebugMessageCallback(OnGLDebug, nullptr);
@@ -1023,6 +1040,9 @@ bool GLContext::Init(int width, int height, const std::string& title) {
                               GL_DEBUG_SEVERITY_NOTIFICATION,
                               0, nullptr, GL_FALSE);
         std::puts("[GL] debug callback enabled");
+    } else {
+        // 미지원 환경은 glGetError 폴링 폴백을 사용한다.
+        std::puts("[GL] KHR_debug unavailable; fall back to glGetError polling");
     }
 #endif
 

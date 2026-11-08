@@ -88,7 +88,7 @@ command:    add 100   buy item 17    equip item 17
 
 | 규칙 | 구현 |
 |---|---|
-| 자기 쓰기 이상을 읽음 | 커밋 위치 토큰 이상을 적용한 사본을 고르고, 없으면 리더로 보내거나 기다린다 |
+| 자기 쓰기 이상을 읽음 | 같은 샤드·로그 계보·세대에서 커밋 위치 토큰 이상을 적용한 사본을 고르고, 없으면 같은 계보의 리더가 그 위치 이상을 적용했는지 확인한 뒤 보내거나 기다린다 |
 | 같은 세션은 같은 사본으로 | 세션-팔로워 고정으로 단조 읽기 확보 |
 | 경제 불변식은 강한 쓰기 경로로 | 잔액 확인과 차감을 같은 직렬화 가능 트랜잭션·조건부 갱신·원장 명령으로 원자화한다 |
 | 지연 둔감 읽기만 팔로워로 | 전적 조회, 랭킹 화면, 프로필 열람 |
@@ -100,7 +100,7 @@ command:    add 100   buy item 17    equip item 17
 일관성 모델은 어느 순간 모든 사본의 바이트가 같은지를 묻는 규칙이 아니다. 여러 클라이언트의 호출과 응답으로 이루어진 *역사(history)* 중 어떤 순서를 합법으로 인정할지 정의한다.
 
 - **선형화 가능성(linearizability)**: 각 연산이 호출과 응답 사이의 한 점에서 원자적으로 일어난 것처럼 배치할 수 있고, 실제 시간 순서를 보존한다.
-- **순차 일관성(sequential consistency)**: 모든 클라이언트가 같은 전역 순서를 보지만, 실제 시간 순서를 보존할 필요는 없다.
+- **순차 일관성(sequential consistency)**: 각 클라이언트의 프로그램 순서를 보존하는 하나의 합법적인 전역 순서가 존재하되, 클라이언트 사이의 실시간 순서는 강제하지 않는다.
 - **인과 일관성(causal consistency)**: 원인과 결과 관계가 있는 작업의 순서를 보존한다. 서로 독립적인 동시 작업은 다른 순서로 보일 수 있다.
 - **최종 일관성(eventual consistency)**: 새 갱신이 멈추면 사본이 결국 수렴한다. 수렴 시간과 중간 읽기 보장은 별도로 정의해야 한다.
 
@@ -115,7 +115,7 @@ command:    add 100   buy item 17    equip item 17
 - monotonic writes: 같은 클라이언트의 쓰기를 순서대로 적용한다.
 - writes-follow-reads: 읽고 내린 결정이 그 읽기보다 오래된 상태 위에 기록되지 않게 한다.
 
-구현은 커밋 위치나 논리적 버전을 세션 토큰에 담고, 읽기 라우터가 그 위치까지 적용한 복제본만 선택하는 방식이 일반적이다. 단순히 “같은 팔로워에 붙인다”는 방법은 해당 팔로워가 장애 나거나 뒤처질 때 보장을 설명하기 어렵다.
+구현은 커밋 위치나 논리적 버전을 세션 토큰에 담고, 읽기 라우터가 그 위치까지 적용한 복제본만 선택하는 방식이 일반적이다. 토큰에는 샤드뿐 아니라 그 위치가 속한 로그 계보(stream·timeline)와 세대(generation), 그리고 그 위치가 커밋·적용·가시 중 무엇을 뜻하는지를 함께 담아야 같은 숫자의 위치를 다른 계보와 비교하지 않는다. 단순히 “같은 팔로워에 붙인다”는 방법은 해당 팔로워가 장애 나거나 뒤처질 때 보장을 설명하기 어렵다.
 
 ### 벽시계와 논리적 순서를 구분한다
 
@@ -201,18 +201,18 @@ entry = { index, term, command }
 
 ## 4. 샤딩: 데이터를 자르는 법
 
-샤딩은 데이터를 샤드 키(shard key) 기준으로 잘라 노드들에 나누는 것이다 — 쓰기 처리량과 저장 용량이 노드 수에 비례해 늘어난다.
+샤딩은 데이터를 샤드 키(shard key) 기준으로 잘라 노드들에 나누는 것이다 — 균등한 키 분포와 코로케이션, 허용 가능한 교차 샤드 비용을 전제로 쓰기 처리량과 저장 용량이 노드 수에 대략 비례해 늘어난다.
 
 ```mermaid
 flowchart TD
-    R[라우터 / 클라이언트 라이브러리] -->|account_id 해시| S1[(샤드 1<br/>계정 0~33%)]
-    R --> S2[(샤드 2<br/>계정 34~66%)]
-    R --> S3[(샤드 3<br/>계정 67~99%)]
+    R[라우터 / 클라이언트 라이브러리] -->|account_id 해시| S1[(샤드 1<br/>해시 공간 0~33%)]
+    R --> S2[(샤드 2<br/>해시 공간 34~66%)]
+    R --> S3[(샤드 3<br/>해시 공간 67~99%)]
 ```
 
 자르는 방식은 둘이다.
 
-- **해시 샤딩**: `hash(key) mod N` 또는 해시 범위 매핑 — 부하가 균등하게 퍼진다. 범위 질의(키 순서로 훑기)는 전 샤드 분산 질의가 된다.
+- **해시 샤딩**: `hash(key) mod N` 또는 해시 범위 매핑 — 균등한 해시 분포 가정에서 부하가 균등에 가깝게 퍼진다. 범위 질의(키 순서로 훑기)는 전 샤드 분산 질의가 된다.
 - **범위 샤딩**: 키 구간별로 자른다 — 범위 질의가 한 샤드에 머문다. 대신 새 데이터가 한 구간에 몰리면(시간순 키) 그 샤드만 뜨거워진다.
 
 게임의 지배적 접근 패턴은 "한 플레이어의 데이터 묶음"이므로, *계정 ID 해시 샤딩* 이 기본형이다 — 로그인·인벤토리·지갑 작업이 전부 한 샤드 안에서 끝난다. 같은 이유로 한 계정의 연관 테이블들(캐릭터·인벤토리·지갑)을 *같은 샤드 키로 같은 샤드에* 모으는 것(코로케이션)이 중요하다 — 그래야 한 플레이어의 트랜잭션이 단일 샤드 트랜잭션으로 남는다.
@@ -253,11 +253,13 @@ flowchart TD
 ```text
 1. 목적 샤드에 기준 스냅샷 복사
 2. 복사 이후 변경 로그를 목적 샤드에 따라잡기
-3. 짧은 전환 구간에서 새 쓰기 차단 또는 이중 기록
-4. 라우팅 세대 증가와 함께 목적 샤드를 소유자로 전환
+3. 기존 소유자의 쓰기 차단/펜싱 또는 이중 기록 — in-flight 쓰기를 배수(drain)하고 마지막 커밋 위치를 확정
+4. 목적 샤드가 그 위치까지 적용했음을 확인한 뒤, 라우팅 세대 증가와 함께 목적 샤드를 소유자로 전환
 5. 이전 샤드의 오래된 세대 쓰기 거부
 6. 검증 후 이전 사본 정리
 ```
+
+전환 helper는 어느 경로를 택하든 “기존 소유자의 쓰기 차단/펜싱 → 마지막 커밋 위치 확정 → 목적지가 그 위치까지 적용했음 확인 → 새 세대 활성화”의 barrier를 포함해야 한다. 라우팅 전환과 barrier의 선후 순서는 구현마다 다를 수 있으므로 한 순서로 강제하지 않되, barrier 없이 라우팅만 바꾸면 그 사이 성공한 쓰기를 새 소유자가 놓친다. 전환이 중간에 실패하면 같은 세대로 재개하는 규약을 둔다.
 
 라우터 캐시는 즉시 갱신되지 않는다. 따라서 요청에 라우팅 세대나 소유권 토큰을 포함하고 저장소가 오래된 세대의 쓰기를 거부해야 한다. “새 라우팅 테이블을 배포했으니 이전 노드로는 요청이 안 간다”는 가정은 지연된 요청과 정지 후 재개한 프로세스 앞에서 깨진다.
 
@@ -317,6 +319,7 @@ enum class ReadConsistency {
 
 struct ReadToken {
     ShardId shard;
+    LogLineage lineage;
     LogPosition minApplied;
 };
 ```
@@ -326,29 +329,37 @@ struct ReadToken {
 ```cpp
 WriteResult UpdateProfile(DbRouter& db, PlayerId player, ProfilePatch patch) {
     ShardId shard = db.ShardForPlayer(player);
-    auto r = db.Leader(shard).Execute(
+    Replica& leader = db.Leader(shard);
+    auto r = leader.Execute(
         "UPDATE player_profile SET nickname=?, version=version+1 WHERE player_id=?",
         patch.nickname, player);
 
     return {
         .ok = r.ok,
-        .readToken = ReadToken{shard, r.commitPosition}
+        .readToken = ReadToken{shard, leader.Lineage(), r.commitPosition}
     };
 }
 ```
 
-이후 같은 사용자가 자기 프로필을 읽을 때는 팔로워가 그 로그 위치까지 따라왔는지 확인한다. 따라오지 못했으면 리더로 라우팅하거나 짧게 기다린다.
+이후 같은 사용자가 자기 프로필을 읽을 때는 팔로워가 같은 계보에서 그 로그 위치까지 따라왔는지 확인한다. 따라오지 못했으면 같은 계보의 리더가 그 위치 이상을 적용했는지 확인한 뒤 라우팅하거나, 보장할 수 없으면 기다리거나 Unavailable을 반환한다. `Applied()` 검사와 실제 질의는 그 보장을 유지하는 같은 연결·스냅숏에서 수행한다.
 
 ```cpp
 Profile LoadProfile(DbRouter& db, PlayerId player, ReadToken token) {
     ShardId shard = db.ShardForPlayer(player);
     Replica& replica = db.Follower(shard);
 
-    if (token.shard == shard && replica.Applied() >= token.minApplied) {
+    if (token.shard == shard && replica.Lineage() == token.lineage &&
+        replica.Applied() >= token.minApplied) {
         return replica.QueryProfile(player);
     }
 
-    return db.Leader(shard).QueryProfile(player);
+    Replica& leader = db.Leader(shard);
+    if (leader.Lineage() == token.lineage &&
+        leader.Applied() >= token.minApplied) {
+        return leader.QueryProfile(player);
+    }
+
+    return Profile::Unavailable();
 }
 ```
 
@@ -406,4 +417,4 @@ TransferResult TransferCurrency(DbRouter& db, CrossShardTransfer cmd) {
 - [PostgreSQL 문서: High Availability, Load Balancing, and Replication](https://www.postgresql.org/docs/current/high-availability.html) — 동기/비동기 복제 옵션의 실물.
 - Giuseppe DeCandia 외, "Dynamo: Amazon's Highly Available Key-value Store" (SOSP 2007) — 가용성 우선 설계의 고전(가상 노드·최종 일관성).
 - Peter Bailis 외, "Probabilistically Bounded Staleness for Practical Partial Quorums" (PVLDB 5(8), 2012) — 부분 쿼럼의 staleness를 t-visibility·k-staleness로 정량화한 원전.
-- [Vitess 문서: Sharding](https://vitess.io/docs/reference/features/sharding/) — MySQL 위 가상 버킷 리샤딩의 산업 구현.
+- [Vitess 문서: Sharding](https://vitess.io/docs/reference/features/sharding/) — MySQL 위 keyspace ID·key range 기반 샤딩과 온라인 리샤딩의 관련 구현 사례. 본문의 고정 4096버킷 구조를 그대로 구현한다는 직접 근거는 아니다.

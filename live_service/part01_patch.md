@@ -85,7 +85,7 @@ WeaponTable g_weapons;     // 접속 시 서버에서 동기화
 flowchart TB
     subgraph 서버측
     SC[서버 코드 변경] --> SD[즉시 배포 가능]
-    SD --> SR[문제 시 즉시 롤백]
+    SD --> SR[문제 시 즉시 롤백<br/>DB·클라이언트 호환 유지 시]
     end
     subgraph 클라이언트측
     CC[클라이언트 코드 변경] --> CS[스토어 심사<br/>모바일: 수 시간~수일]
@@ -122,15 +122,18 @@ DataRevision    = 정수                  예: 10583
 
 ```cpp
 // 접속 핸드셰이크: 클라이언트 버전을 검사해 접속 정책을 결정한다
-enum class VersionVerdict { Allow, ForceUpdate, Maintenance };
+// 지원 범위는 g_minSupportedProtocol <= protocolVersion <= g_currentProtocol 이다
+enum class VersionVerdict { Allow, ClientTooOld, ClientTooNew, Maintenance, Unsupported };
 
 VersionVerdict CheckVersion(const ClientHello& hello) {
     if (g_serverState == ServerState::Maintenance)
         return VersionVerdict::Maintenance;
     if (hello.protocolVersion < g_minSupportedProtocol)
-        return VersionVerdict::ForceUpdate;          // 너무 오래됨 → 강제 업데이트
+        return VersionVerdict::ClientTooOld;         // 지원 범위 미만 → 스토어 업데이트로 해결 가능
     if (hello.protocolVersion > g_currentProtocol)
-        return VersionVerdict::ForceUpdate;          // 서버보다 앞섬(롤백 직후) → 재조정
+        return VersionVerdict::ClientTooNew;         // 서버보다 앞섬(롤백 직후) → 업데이트로 해결 불가
+    if (!g_supportedProtocols.count(hello.protocolVersion))
+        return VersionVerdict::Unsupported;          // 범위 안이지만 지원 목록에 없는 프로토콜
     return VersionVerdict::Allow;                    // 호환 범위 내
 }
 ```
@@ -153,9 +156,15 @@ VersionVerdict CheckVersion(const ClientHello& hello) {
 ```cpp
 // 클라이언트 시작 시 버전 게이트
 auto resp = QueryVersionGate(currentVersion);
-if (resp.verdict == ForceUpdate) {
-    ShowBlockingDialog("업데이트가 필요하다", resp.storeUrl);
+if (resp.verdict == ClientTooOld) {
+    ShowBlockingDialog("업데이트가 필요하다", resp.storeUrl);  // 업데이트로 해결 가능
     return;                                  // 진행 차단
+} else if (resp.verdict == ClientTooNew) {
+    ShowBlockingDialog("서버 점검 중이거나 버전이 맞지 않는다");  // storeURL 없음
+    return;                                  // 스토어 업데이트로 해결되지 않음
+} else if (resp.verdict == Maintenance || resp.verdict == Unsupported) {
+    ShowBlockingDialog("접속할 수 없다", resp.statusMessage);
+    return;                                  // 서버 상태/지원 정책 문제
 } else if (resp.hasOptionalUpdate) {
     ShowDismissableBanner("새 버전이 있다");  // 권장만, 게임은 진행
 }
@@ -174,7 +183,7 @@ message PlayerState {
 }
 ```
 
-규칙은 단순하다. *필드 번호를 재사용하지 않는다*. *기존 필드의 의미를 바꾸지 않는다*. *제거 대신 deprecated 표시 후 방치한다*. 이 규율을 지키면 대부분의 변경이 *호환 추가* 로 끝나 강제 업데이트를 피할 수 있다. 호환을 깨는 변경(필드 의미 변경, 제거)만이 프로토콜 버전을 올린다.
+규칙은 단순하다. *필드 번호를 재사용하지 않는다*. *기존 필드의 의미를 바꾸지 않는다*. *제거 대신 deprecated 표시 후 방치한다*. 이 규율을 지키면 대부분의 변경이 *호환 추가* 로 끝나 강제 업데이트를 피할 수 있다. 다만 여기서 "호환"은 한 층이 아니다. *wire 호환* 은 직렬화 바이트를 서로 해석할 수 있는가, *source 호환* 은 API·생성 코드가 그대로 컴파일되는가, *semantic 호환* 은 같은 필드가 같은 의미로 쓰이는가를 뜻한다. Protocol Buffers에서 필드를 *삭제* 해도 번호를 `reserved`로 묶고 재사용하지 않으면 구버전은 모르는 번호를 무시하고 새 코드는 없는 필드를 기본값으로 읽어 wire 호환은 유지된다 — wire에서 깨지는 것은 번호 재사용이나 타입 변경이다. 반면 source 호환은 생성 API의 접근자가 사라져 깨질 수 있고, semantic 호환은 그 필드가 애플리케이션 필수 값이었으면 깨진다. FlatBuffers는 규칙이 더 까다롭다 — table은 deprecated로 남겨 진화시킬 수 있지만 struct는 필드를 추가·삭제하면 레이아웃이 어긋나 wire 호환이 깨진다. 따라서 프로토콜 버전을 올리는 기준은 "제거했는가"가 아니라 *어느 층의 호환이, 어떤 형식의 규칙 아래에서 깨졌는가*다.
 
 ## 3. 클라이언트 배포와 델타 패치
 
@@ -208,7 +217,7 @@ flowchart LR
 
 전제: 청크 스토어와 매니페스트 비교(매니페스트 절). 이론적 모델만 여기서 소유한다.
 
-**고정 블록의 경계 이동 비용.** 파일 크기를 $N$, 블록 크기를 $B$로 고정하면 블록은 $N/B$개이고 경계는 위치 $0,B,2B,\dots$에 *못 박힌다*. 새 버전이 위치 $p$에 $\delta$바이트를 삽입하면 $p$ 이후의 모든 바이트가 $\delta$만큼 뒤로 밀린다. 블록 $j=\lfloor p/B\rfloor$ 이후의 모든 블록은 경계는 그대로인데 *담는 내용* 이 통째로 달라지므로 해시가 전부 어긋난다. 재전송 블록 수는
+**고정 블록의 경계 이동 비용.** 파일 크기를 $N$, 블록 크기를 $B$로 고정하면 블록은 $N/B$개이고 경계는 위치 $0,B,2B,\dots$에 *못 박힌다*. 새 버전이 위치 $p$에 $\delta$바이트를 삽입하면 $p$ 이후의 모든 바이트가 $\delta$만큼 뒤로 밀린다. 블록 경계는 위치에 못 박혀 있으므로 $\delta\bmod B \neq 0$이고 데이터가 비반복적이면, 블록 $j=\lfloor p/B\rfloor$ 이후는 *담는 내용* 이 어긋나 해시가 달라진다. 반대로 $\delta$가 $B$의 배수면 뒤쪽 블록은 정확히 $\delta/B$블록만큼 이동한 옛 블록과 내용이 같아, 내용 해시 기반 청크 스토어에서는 재사용된다(모든 뒤쪽 청크가 항상 달라지는 것은 아니다). 즉 아래 근사는 *비정렬 삽입* 과 *중복 청크 없음* 을 전제로 한다. 재전송 블록 수는
 
 $$
 n_{\text{resend}} \approx \left\lceil \frac{N-p}{B} \right\rceil,\qquad \text{재전송 바이트} \approx N-p.
@@ -216,7 +225,7 @@ $$
 
 삽입 위치 $p$가 균등분포면 기대 재전송은 $\mathbb{E}[N-p]=N/2$다. 즉 *한 바이트 삽입이 평균적으로 파일의 절반을 재전송* 시킨다. 빌드 타임스탬프 한 곳, 정렬 한 줄이 4GiB 클라이언트의 2GiB를 다시 받게 만드는 것이 이 항이다.
 
-**콘텐츠 정의 청킹(CDC)의 컷 포인트.** 경계를 *위치* 가 아니라 *내용* 으로 정한다. 폭 $w$바이트의 롤링 해시 $r_i=H(\text{bytes}[i-w+1..i])$를 흘려보내며 $r_i \bmod 2^{k_c} = 0$인 위치 $i$만 경계로 삼는다(Rabin fingerprint/Gear 계열). 롤링 해시가 균등이라 가정하면 각 위치가 경계일 확률은 $q=2^{-k_c}$로 독립이고, 청크 길이는 기하분포를 따라 평균 청크 크기는
+**콘텐츠 정의 청킹(CDC)의 컷 포인트.** 경계를 *위치* 가 아니라 *내용* 으로 정한다. 폭 $w$바이트의 롤링 해시 $r_i=H(\text{bytes}[i-w+1..i])$를 흘려보내며 $r_i \bmod 2^{k_c} = 0$인 위치 $i$만 경계로 삼는다(Rabin fingerprint/Gear 계열). 이상적 모델에서 각 위치가 *독립적으로* 확률 $q=2^{-k_c}$로 경계가 된다고 가정하면(주변 균등성만으로는 위치 간 독립이 나오지 않는다), 청크 길이는 기하분포를 따라 평균 청크 크기는
 
 $$
 \bar B = \frac{1}{q} = 2^{k_c}.
@@ -224,13 +233,13 @@ $$
 
 (구현은 최소 청크 $m$을 강제해 그 전까지 술어를 검사하지 않으므로 무기억성에 의해 $\mathbb{E}[\text{길이}]=m+2^{k_c}$.)
 
-**재동기화 보조정리.** 컷 포인트 $i$는 오직 바이트 $[i-w+1,i]$에만 의존한다. 따라서 삽입 영역을 (옛 파일 기준) 위치 $p$만큼 지나 새 파일에서 다시 $w$바이트를 더 흘리면, 그 시점의 롤링 윈도우에는 *옛 바이트만* 들어 있어 *옛 컷 포인트열이 그대로 재현* 된다. 교란은 위치 $p$ 주변의 국소 영역
+**재동기화의 기대 규모.** 컷 포인트 $i$는 오직 바이트 $[i-w+1,i]$에만 의존한다. 따라서 삽입 영역을 (옛 파일 기준) 위치 $p$만큼 지나 새 파일에서 다시 $w$바이트를 더 흘리면, 그 시점의 롤링 윈도우에는 *옛 바이트만* 들어 있어 *옛 컷 포인트열이 재현* 되는 것이 기대된다. 교란은 위치 $p$ 주변의 국소 영역
 
 $$
-\text{교란 폭} \lesssim \delta + 2\bar B + w
+\text{교란 폭} \sim \delta + 2\bar B + w
 $$
 
-에 갇히고, 그 이전·이후의 청크는 바이트가 동일하므로 해시가 일치해 재전송되지 않는다. 결국 재전송은 $N$과 무관하다.
+에 머무는 규모이며(결정적 상한이 아니다), 그 이전·이후의 청크는 바이트가 동일하므로 해시가 일치해 재전송되지 않는 것으로 모델링된다. 이 모델에서 재전송 규모는 $N$에 의존하지 않는다.
 
 **정량 이득.** 삽입 한 곳에 대해 고정 블록은 기대 $N/2$를 재전송하고, CDC는 편집을 머금은 한두 청크만, 즉 $\delta + c\,\bar B$($c\approx 2$)를 재전송한다. $\delta \gg \bar B$가 아닐 때의 비율은
 
@@ -238,7 +247,7 @@ $$
 \frac{N/2}{\delta + 2\bar B}\;\xrightarrow{\ \delta \gg \bar B\ }\;\frac{N}{2\delta}.
 $$
 
-수치로, $N=4$GiB·$\delta=4$MiB 코드 변경·$\bar B=64$KiB면 고정 약 2GiB 대 CDC 약 4.1MiB(약 500배), $\delta=1$바이트(빌드 지문 한 곳)면 고정 2GiB 대 CDC 약 $2\bar B=128$KiB다. bsdiff·xdelta 같은 접미사 배열 디프는 *서버가 두 특정 빌드 쌍을 직접 비교* 해 이 밀림을 스스로 흡수하지만, 그 대가로 버전쌍마다 디프를 미리 만들어야 한다(버전 점프 절 표의 $O(n^2)$). CDC는 디프 최적성을 약간 내주는 대신 *어떤 베이스에서 어떤 타깃으로든 공유 청크* 만으로 올라갈 수 있는 무상태 경로를 산다.
+수치로, $N=4$GiB·$\delta=4$MiB$+1$바이트(비정렬) 코드 변경·$\bar B=64$KiB면 고정 약 2GiB 대 CDC 약 4.1MiB(약 500배), $\delta=1$바이트(빌드 지문 한 곳)면 고정 2GiB 대 CDC 약 $2\bar B=128$KiB다. bsdiff·xdelta 같은 *바이너리 델타 도구*는 *서버가 두 특정 빌드 쌍을 직접 비교* 해 이 밀림을 스스로 흡수하지만, 그 대가로 버전쌍마다 디프를 미리 만들어야 한다(버전 점프 절 표의 $O(n^2)$). 이때 접미사 배열 기반은 bsdiff 쪽이고, xdelta는 two-level fingerprinting/문자열 매칭 계열로 구현 방식이 다르다. CDC는 디프 최적성을 약간 내주는 대신 *어떤 베이스에서 어떤 타깃으로든 공유 청크* 만으로 올라갈 수 있는 무상태 경로를 산다.
 
 **청크 크기의 최적값.** 청크가 $N/\bar B$개이면 매니페스트는 청크당 해시 $h$바이트(SHA-256이면 $h=32$)로 $hN/\bar B$를 차지하고, $E$개의 흩어진 작은 편집은 각자 자기 청크를 통째 재전송해 청크 데이터 약 $E\bar B$를 만든다. 패치 한 번의 총 전송은
 
@@ -247,7 +256,7 @@ f(\bar B) = E\,\bar B + \frac{hN}{\bar B},\qquad
 f'(\bar B)=E-\frac{hN}{\bar B^{2}}=0 \;\Rightarrow\; \bar B^{\star}=\sqrt{\frac{hN}{E}}.
 $$
 
-$h=32$·$N=4$GiB·$E=1000$이면 $\bar B^{\star}=\sqrt{32\cdot2^{32}/1000}\approx 11.4$KiB다. 작은 편집이 많을수록 작은 청크, 큰 통짜 교체가 많을수록 큰 청크가 유리하다는 직관이 닫힌 식으로 떨어지고, 실측 게임 패처가 8~64KiB대를 쓰는 근거가 된다.
+$h=32$·$N=4$GiB·$E=1000$이면 $\bar B^{\star}=\sqrt{32\cdot2^{32}/1000}\approx 11.4$KiB다. 작은 편집이 많을수록 작은 청크, 큰 통짜 교체가 많을수록 큰 청크가 유리하다는 직관이 닫힌 식으로 떨어지고, FastCDC 계열 구현이 평균 청크를 8~64KiB대로 두는 것과 정합한다.
 
 ```python
 import random, hashlib, math, statistics
@@ -267,13 +276,13 @@ for N in (200000,400000,800000):                      # CDC 재전송은 N과 �
     nd=d[:p]+bytes(random.getrandbits(8) for _ in range(delta))+d[p:]
     h1=set(hs(d,chunk(d,(1<<k)-1))); c2=chunk(nd,(1<<k)-1); h2=hs(nd,c2)
     r=sum(b-a for (a,b),x in zip(c2,h2) if x not in h1)
-    print(f"N={N}: 고정 꼬리~{N-p}B, CDC 재전송={r}B")  # 고정은 N/2, CDC는 한 청크
+    print(f"N={N}: (고정 블록 가정 시 꼬리~{N-p}B), CDC 재전송={r}B")  # 고정 꼬리는 산술, CDC만 관측
 print("B* =", round(math.sqrt(32*4*2**30/1000)), "B")   # = 11723 ~ 11.4KiB
 ```
 
-검증: 위 시뮬에서 CDC 재전송은 $N$이 4배로 커져도 한 청크(수 KB) 수준에 머무는 반면 고정 블록은 꼬리 $N-p$ 전체를 재전송했고, 균등 삽입의 기대 고정 재전송은 $N/2$에 수렴했다. $\bar B^{\star}=\sqrt{hN/E}=11{,}723$바이트로 닫힌 식과 일치한다.
+검증: 위 시뮬은 $p=N//3$ 한 곳에 $\delta=500$바이트를 삽입한 세 입력에서 **CDC 재전송만** 관측한다. 관측된 CDC 재전송은 $N$이 4배로 커져도 한 청크(수 KB) 수준에 머물렀다. 비교용으로 출력한 고정 블록 꼬리 $N-p$는 실제로 측정한 값이 아니라 산술이며, 이 코드에는 고정 청크 구현·다중 삽입 위치·균등 삽입 샘플링·seed 반복·분포 통계가 없다. $\bar B^{\star}=\sqrt{hN/E}=11{,}723$바이트는 닫힌 식과 일치한다.
 
-**실패 경계.** 최소 청크 크기를 강제하지 않으면 0이 길게 이어지는 저엔트로피 영역에서 롤링 해시가 정체돼 거의 모든 위치가 컷이 되어 *청크 폭발* 이 나고, 청크당 해시 오버헤드 $h$가 데이터를 압도한다(절단 기하분포로 막는다). 최대 청크 크기를 강제하지 않으면 술어가 오래 안 터지는 영역에서 거대 청크가 생겨 한 바이트 편집이 큰 청크 전체를 재전송하는 *고정 블록의 약점이 부활* 한다. 윈도우 $w$가 너무 짧으면 경계가 짧은 반복 패턴에 상관돼 동기가 어긋나고, 너무 길면 재계산·지연이 는다(실측은 48바이트 안팎). 그리고 이 모든 이점은 *결정적 빌드* 를 전제한다 — 타임스탬프·해시맵 순회 순서·병렬 링크 순서 같은 비결정성은 *변경되지 않은 영역의 청크 해시까지* 흔들어 CDC의 국소성을 무효화한다. 청크 친화적 빌드가 결정성을 요구하는 정량적 이유가 여기 있다.
+**실패 경계.** 위 유도는 최소·최대 청크와 경계별 해시 reset이 없는 *이상적 슬라이딩 윈도우* 를 모델로 삼았다. 실제 구현은 최소 청크 $m$ 강제(그 전까지 술어 검사 생략)와 최대 청크 상한, 컷마다 해시 상태 reset을 더해 이 모델을 바꾼다. 최소 청크 크기를 강제하지 않으면 0이 길게 이어지는 저엔트로피 영역에서 롤링 해시가 정체돼 거의 모든 위치가 컷이 되어 *청크 폭발* 이 나고, 청크당 해시 오버헤드 $h$가 데이터를 압도한다(절단 기하분포로 막는다). 최대 청크 크기를 강제하지 않으면 술어가 오래 안 터지는 영역에서 거대 청크가 생겨 한 바이트 편집이 큰 청크 전체를 재전송하는 *고정 블록의 약점이 부활* 한다. 윈도우 $w$가 너무 짧으면 경계가 짧은 반복 패턴에 상관돼 동기가 어긋나고, 너무 길면 재계산·지연이 는다(Gear 계열 구현은 48바이트 안팎을 쓴다). 그리고 이 모든 이점은 *결정적 빌드* 를 전제한다 — 타임스탬프·해시맵 순회 순서·병렬 링크 순서 같은 비결정성은 *변경되지 않은 영역의 청크 해시까지* 흔들어 CDC의 국소성을 무효화한다. 청크 친화적 빌드가 결정성을 요구하는 정량적 이유가 여기 있다.
 
 ### 버전 점프와 델타 체인
 
@@ -341,13 +350,13 @@ manifest.json (짧은 TTL, 서명됨)
 
 ```mermaid
 flowchart LR
-    Deploy[새 빌드] --> C1[1% 카나리]
-    C1 -->|지표 정상| C2[10%]
-    C2 -->|지표 정상| C3[50%]
-    C3 -->|지표 정상| Full[100%]
-    C1 -->|지표 악화| RB1[롤백]
-    C2 -->|지표 악화| RB2[롤백]
-    C3 -->|지표 악화| RB3[롤백]
+    Deploy[새 빌드] --> C1[1% 카나리<br/>미검출≠안전 입증]
+    C1 -->|충분 표본·관찰 시간·비열등성| C2[10%]
+    C2 -->|충분 표본·관찰 시간·비열등성| C3[50%]
+    C3 -->|충분 표본·관찰 시간·비열등성| Full[100%]
+    C1 -->|가드레일·유의 악화| RB1[롤백]
+    C2 -->|가드레일·유의 악화| RB2[롤백]
+    C3 -->|가드레일·유의 악화| RB3[롤백]
 ```
 
 ### 카나리 배포
@@ -362,22 +371,30 @@ flowchart LR
 
 ```cpp
 // 카나리 자동 판정: 새 빌드 그룹 vs 안정 빌드 그룹의 지표 비교
-struct CanaryGate {
-    float maxCrashRateRatio = 1.2f;    // 안정군 대비 20% 초과 시 실패
-    float maxErrorRateRatio = 1.5f;
-    int   minSamples        = 5000;    // 통계적 유의성 확보 전엔 판정 보류
+enum class CanaryDecision { Pending, Pass, Fail };
+
+struct CanaryEvidence {
+    bool absoluteGuardrailViolated = false;      // 절대 상한 위반
+    bool credibleRegression        = false;      // 안정군 대비 유의한 악화
+    bool enoughBaselineSamples     = false;      // baseline 표본 충분
+    bool enoughCanarySamples       = false;      // canary 표본 충분
+    bool minimumObservationTimeReached = false;  // 최소 관찰 시간 경과
+    bool nonInferioritySupported   = false;      // 비열등성(악화 아님) 입증
 };
 
-bool CanaryHealthy(const Metrics& canary, const Metrics& baseline,
-                   const CanaryGate& g) {
-    if (canary.sessions < g.minSamples) return true;          // 아직 판정 보류
-    if (canary.crashRate > baseline.crashRate * g.maxCrashRateRatio) return false;
-    if (canary.errorRate > baseline.errorRate * g.maxErrorRateRatio) return false;
-    return true;
+CanaryDecision Evaluate(const CanaryEvidence& e) {
+    if (e.absoluteGuardrailViolated || e.credibleRegression)
+        return CanaryDecision::Fail;             // 악화 확인 → 중단·롤백
+    if (!e.enoughBaselineSamples || !e.enoughCanarySamples ||
+        !e.minimumObservationTimeReached)
+        return CanaryDecision::Pending;          // 증거 부족 → 계속 관찰
+    if (!e.nonInferioritySupported)
+        return CanaryDecision::Pending;          // 검출 실패 ≠ 안전 입증
+    return CanaryDecision::Pass;                 // 충분한 증거로 승급 가능
 }
 ```
 
-판정의 함정은 *표본 부족* 이다. 1% 카나리에서 크래시 한 건이 났다고 즉시 롤백하면 *정상 노이즈에 과민반응* 한다. 그래서 `minSamples` 처럼 *충분한 표본이 모일 때까지 판정을 유예* 하고, *비율(ratio)* 로 비교해 절대 수치의 자연 변동을 흡수한다.
+판정의 함정은 *표본 부족* 과 *미검출을 안전으로 착각하는 것* 이다. Pending은 "아직 abort하지 않음"일 뿐 승급 승인도 안전성 입증도 아니며, Pass는 baseline·canary 양쪽 표본과 최소 관찰 시간을 채운 뒤 *비열등성* 이 지지될 때만 나온다. 1% 카나리에서 크래시 한 건이 났다고 즉시 롤백하면 *정상 노이즈에 과민반응* 하지만, 표본이 부족해 차이를 검출하지 못한 것을 "차이 없음"으로 읽어 승급하면 위험을 놓친다. 최소 표본 수는 보편 상수(예: 5000)가 아니라 지표별 최소 검출 변화·분산·오류율·다중 비교·관찰 기간에 맞춰 정하고, *비율(ratio)* 과 절대 가드레일을 함께 본다.
 
 ### 블루-그린 배포
 
@@ -418,9 +435,9 @@ if (g_flags.IsEnabled("new_matchmaking", player)) {
 ```mermaid
 flowchart TB
     Detect[문제 감지<br/>모니터링·알람] --> Decide{롤백 가능?}
-    Decide -->|서버/데이터| Easy[이전 버전 재배포<br/>분 단위]
+    Decide -->|서버/데이터·호환 expand| Easy[이전 버전 재배포<br/>분 단위]
     Decide -->|피처 플래그| Flag[플래그 OFF<br/>초 단위]
-    Decide -->|스키마 변경됨| Hard[순방향 수정 필요<br/>롤백보다 핫픽스]
+    Decide -->|비호환·파괴적 스키마| Hard[순방향 수정 필요<br/>롤백보다 핫픽스]
     Decide -->|클라이언트| Block[강제 다운그레이드 불가<br/>서버 측 우회]
 ```
 
@@ -481,7 +498,7 @@ gitGraph
 flowchart TB
     E[1. 확장<br/>새 컬럼 추가<br/>옛 코드 영향 없음] --> M[2. 이중 쓰기<br/>옛·새 컬럼 둘 다 기록]
     M --> B[3. 백필<br/>기존 행을 새 컬럼으로 채움]
-    B --> R[4. 읽기 전환<br/>새 컬럼만 읽도록 배포]
+    B -->|모든 writer 전환 + 잔여 NULL/불일치 검증 완료| R[4. 읽기 전환<br/>새 컬럼만 읽도록 배포]
     R --> C[5. 수축<br/>충분히 안정 후 옛 컬럼 제거]
 ```
 
@@ -516,7 +533,7 @@ FROM batch
 WHERE p.player_id = batch.player_id;
 ```
 
-읽기를 새 컬럼으로 전환한 뒤 충분한 관찰 기간을 두고 옛 컬럼을 제거한다. 옛 컬럼을 남기는 것은 롤백 가능성의 **필요조건**이지 충분조건이 아니다. 이중 쓰기 중 일부만 실패했거나 변환 함수의 의미가 바뀌었거나 새 코드가 옛 코드가 표현할 수 없는 값을 썼다면, 코드만 되돌려도 옛 컬럼은 이미 stale하거나 손상됐을 수 있다. 수축을 늦추는 것과 함께 dual-write 불일치율, backfill checkpoint, 양방향 읽기 비교, 재실행 가능한 변환을 유지해야 한다.
+읽기를 새 컬럼으로 전환한 뒤 충분한 관찰 기간을 두고 옛 컬럼을 제거한다. 옛 컬럼을 남기는 것은 롤백 가능성의 **필요조건**이지 충분조건이 아니다. 이중 쓰기 중 일부만 실패했거나 변환 함수의 의미가 바뀌었거나 새 코드가 옛 코드가 표현할 수 없는 값을 썼다면, 코드만 되돌려도 옛 컬럼은 이미 stale하거나 손상됐을 수 있다. 수축을 늦추는 것과 함께 dual-write 불일치율, backfill checkpoint, 양방향 읽기 비교, 재실행 가능한 변환을 유지해야 한다. 특히 쓰기 경로가 여럿이면 새 코드만 이중 쓰는 것으로는 부족하다 — 구버전 writer가 `nickname`만 갱신하면 백필이 끝난 행이 다시 stale해진다. 읽기 전환 전에 *모든 writer* 를 이중 쓰기로 전환하거나 DB trigger/CDC로 새 컬럼을 동기화하고, 구버전 writer를 차단(writer fence)해야 한다. 백필이 도는 동안 최신 값이 들어오면 백필이 옛 값을 덮어쓸 수 있으므로, 백필 술어를 버전/조건으로 제한해 stale backfill 경합을 막는다.
 
 ### 무결성 검증과 백업
 
@@ -527,10 +544,14 @@ WHERE p.player_id = batch.player_id;
 - *드라이런*: 운영과 같은 규모의 스테이징(8절)에서 마이그레이션을 *먼저 돌려* 소요 시간·락 영향·실패 지점을 측정한다.
 
 ```sql
--- 백필 검증: 옛/새 컬럼이 불일치하는 행이 없어야 한다
-SELECT count(*) FROM players
+-- 백필 검증: NULL 잔여와 값 불일치를 따로 센다 (normalize(nickname)는 NOT NULL 계약)
+SELECT count(*) AS missing_rows FROM players
+WHERE nickname_v2 IS NULL;                  -- 0이어야 백필 완료
+
+SELECT count(*) AS mismatched_rows FROM players
 WHERE nickname_v2 IS NOT NULL
-  AND nickname_v2 <> normalize(nickname);   -- 0이어야 정상
+  AND nickname_v2 <> normalize(nickname);   -- 0이어야 값 일치
+-- NULL을 제외하는 <> 비교만으로는 전체 미백필(NULL 잔여)을 검출하지 못한다
 ```
 
 마이그레이션 롤백 시나리오는 단계별로 다르다. 확장 직후에는 대개 코드 롤백만으로 충분하다. 이중 쓰기·백필 이후에는 먼저 옛 표현이 최신인지 검증하고, divergence가 있으면 repair job이나 forward fix를 실행한 뒤 읽기를 되돌린다. 수축 뒤에는 옛 binary와 schema가 호환되지 않으므로 복원·재생 또는 새 forward migration이 필요하다. “수축 전에는 롤백 경로를 유지하기 쉽다”가 정확한 성질이며, *항상 가역*은 아니다.
@@ -551,18 +572,25 @@ WHERE nickname_v2 IS NOT NULL
 | p99 지연 | 상위 1% 응답 시간 | 상승 → 성능 회귀 |
 
 ```cpp
-// 배포 후 모니터링: 직전 버전을 기준선으로 회귀를 탐지한다
+// 배포 후 모니터링: 절대 floor와 직전 버전 기준 상대 회귀를 분리해 호출한다
 struct ReleaseHealth {
-    float crashRate, errorRate, loginSuccessRate;
+    float crashRate, errorRate, loginSuccessRate;   // 모두 비율(0~1) 단위
     int   ccu;
     float patchApplyRate, p99LatencyMs;
 };
 
-bool RegressionDetected(const ReleaseHealth& now, const ReleaseHealth& baseline) {
-    if (now.crashRate     > baseline.crashRate * 1.3f)        return true;
-    if (now.errorRate     > baseline.errorRate * 1.5f)        return true;
-    if (now.loginSuccessRate < baseline.loginSuccessRate * 0.95f) return true;
-    if (now.patchApplyRate   < 0.98f)                         return true;
+// 1) 절대 하한: 기준선과 무관하게 넘으면 안 되는 운영 floor
+bool AbsoluteFloorViolated(const ReleaseHealth& now) {
+    if (now.loginSuccessRate < 0.95f)  return true;   // 로그인 성공률 95% (절대 하한)
+    if (now.patchApplyRate   < 0.98f)  return true;   // 패치 적용 성공률 98%
+    return false;
+}
+
+// 2) 상대 회귀: 직전 안정 버전 대비 악화. %와 %p를 혼동하지 않는다
+bool RelativeRegressionDetected(const ReleaseHealth& now, const ReleaseHealth& baseline) {
+    if (now.crashRate > baseline.crashRate * 1.3f)                return true;
+    if (now.errorRate > baseline.errorRate * 1.5f)                return true;
+    if (now.loginSuccessRate < baseline.loginSuccessRate * 0.95f) return true;  // 5% 상대 하락
     return false;
 }
 ```
@@ -577,15 +605,16 @@ flowchart LR
     All --> Old[안정 버전 코호트]
     New --> Cmp[지표 비교]
     Old --> Cmp
-    Cmp -->|차이 유의| Act[롤백·롤아웃 중단]
-    Cmp -->|차이 없음| Go[롤아웃 진행]
+    Cmp -->|유의한 악화| Act[롤백·롤아웃 중단]
+    Cmp -->|유의한 개선·비열등성| Go[롤아웃 진행]
+    Cmp -->|증거 부족: Pending → 계속 관찰| Cmp
 ```
 
 ### 에러 로그와 성공 기준
 
 지표가 *무엇이* 나빠졌는지를 알려준다면, *에러 로그·크래시 리포트* 는 *왜* 인지를 알려준다. 클라이언트 크래시 덤프와 서버 예외 스택을 *버전·플랫폼·디바이스별로 집계* 해, 새 버전에서만 *새로 나타난* 시그니처를 찾는다. 이 "신규 크래시 시그니처"가 회귀의 직접 증거다.
 
-패치의 성공/실패는 *배포 전에 명시한 기준* 으로 판정한다. "크래시율이 기준선의 1.3배를 넘지 않고, 로그인 성공률이 95% 이상 유지되며, 패치 적용 성공률 98% 이상이면 성공"처럼 *숫자로* 정한다. 기준을 *사후에* 정하면 "이 정도면 괜찮다"는 편향이 끼어든다. 사전 기준이 있어야 *자동 카나리 게이트* (4절)와 *롤백 결정* 이 사람의 직감이 아니라 데이터로 작동한다.
+패치의 성공/실패는 *배포 전에 명시한 기준* 으로 판정한다. 이때 절대 floor와 상대 회귀는 다른 게이트다. 로그인 성공률 95%·패치 적용 성공률 98% 같은 값은 기준선과 무관한 *절대 하한* 이고, 크래시율 1.3배·로그인 성공률 5% 상대 하락 같은 값은 직전 안정 버전 대비 *상대 회귀* 다. 두 게이트를 함께 통과해야 성공이며, 백분율(%)과 %p를 섞지 않는다. "크래시율이 기준선의 1.3배를 넘지 않고, 로그인 성공률이 절대 95% 이상이면서 기준선 대비 5% 넘게 떨어지지 않으며, 패치 적용 성공률 98% 이상이면 성공"처럼 *숫자로* 정한다. 기준을 *사후에* 정하면 "이 정도면 괜찮다"는 편향이 끼어든다. 사전 기준이 있어야 *자동 카나리 게이트* (4절)와 *롤백 결정* 이 사람의 직감이 아니라 데이터로 작동한다.
 
 ## 8. 파이프라인과 조직
 
@@ -600,7 +629,7 @@ flowchart LR
     Stage --> Verify[스테이징 검증<br/>회귀·성능·마이그레이션 드라이런]
     Verify --> Approve{승인}
     Approve -->|승인| Canary[카나리 1%]
-    Canary --> Rollout[점진 롤아웃]
+    Canary -->|가드레일·표본·비열등성 통과| Rollout[점진 롤아웃]
     Rollout --> Prod[100%]
 ```
 
@@ -643,7 +672,7 @@ flowchart LR
 
 ## 더 읽을거리
 
-- Google, "Site Reliability Engineering" — 카나리 배포, 점진 롤아웃, 에러 버짓, 무중단 운영의 산업 표준.
+- Google, "Site Reliability Engineering" — 카나리 배포·점진 롤아웃·에러 버짓·무중단 운영의 입문 표준. 주장과 맞는 직접 근거는 같은 저자군의 "The Site Reliability Workbook" 중 "Canarying Releases"·"Alerting on SLOs" 장이며, 이 책은 4절의 5000 표본 수치의 근거가 아니다.
 - Martin Fowler, "BlueGreenDeployment"·"FeatureToggle"; Danilo Sato, "ParallelChange(expand-contract)" (모두 martinfowler.com bliki) — 배포·플래그·마이그레이션 패턴의 원전.
 - Jez Humble & David Farley, "Continuous Delivery" — CI/CD 파이프라인과 배포 자동화의 기초.
 - Colin Percival, bsdiff ("Naive differences of executable code", 2003) / Joshua MacDonald, xdelta — 이진 델타 알고리즘의 구현 참고.
@@ -651,5 +680,4 @@ flowchart LR
 - A. Muthitacharoen, B. Chen, D. Mazières, "A Low-Bandwidth Network File System" (SOSP 2001) — 중복 제거를 위한 콘텐츠 정의 청킹(LBFS)의 도입.
 - A. Tridgell & P. Mackerras, "The rsync algorithm" (Australian National Univ., TR-CS-96-05, 1996) — 롤링 체크섬 블록 정합으로 차분 전송.
 - W. Xia et al., "FastCDC: a Fast and Efficient Content-Defined Chunking Approach for Data Deduplication" (USENIX ATC 2016) — 최소·최대·정규화 청킹과 빠른 Gear 해시.
-- CDN 제공자(Cloudflare·Akamai·CloudFront) 캐싱·무효화 문서 — 불변 URL·매니페스트 기반 배포.
 - Protocol Buffers / FlatBuffers 스키마 진화 가이드 — 호환을 깨지 않는 직렬화 규칙.
