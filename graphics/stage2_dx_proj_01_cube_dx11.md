@@ -218,7 +218,7 @@ D3D11_INPUT_ELEMENT_DESC layout[] = {
 - `SemanticName`은 HLSL의 `: POSITION` 같은 시맨틱과 매칭된다. DX는 입력을 *이름* 으로 연결하므로, OpenGL의 `layout(location = 0)` 같은 숫자 위치보다 의미가 명확하다.
 - `SemanticIndex`는 같은 이름이 여러 개일 때 구분한다. `TEXCOORD0`, `TEXCOORD1`처럼 UV 세트가 둘이면 인덱스 0과 1로 나눈다.
 - `Format`은 그 필드의 비트 폭과 채널 수다. `R32G32B32_FLOAT`는 3개의 32비트 float, 즉 12바이트다.
-- `InputSlot`은 0~15의 정점 버퍼 슬롯 번호다. 같은 슬롯의 모든 요소는 한 정점 버퍼에서 읽힌다.
+- `InputSlot`은 정점 버퍼 슬롯 번호다. 이 예제의 feature level 11.x에서는 0~31이며, 낮은 feature level에서는 16개로 제한될 수 있다. 같은 슬롯의 모든 요소는 한 정점 버퍼에서 읽힌다.
 - `AlignedByteOffset`은 정점 구조체 안의 바이트 오프셋이다. `D3D11_APPEND_ALIGNED_ELEMENT`를 쓰면 직전 요소의 끝에서 자동으로 누적한다.
 - `InputClass`는 정점별(`PER_VERTEX_DATA`)인지 인스턴스별(`PER_INSTANCE_DATA`)인지를 구분한다. 인스턴싱에서 인스턴스 변환 행렬을 정점 버퍼로 넘길 때 후자를 쓴다.
 
@@ -247,6 +247,7 @@ if (errBlob) {
     OutputDebugStringA((const char*)errBlob->GetBufferPointer());
 }
 
+ThrowIfFailed(hr);  // 실패한 컴파일의 vsBlob을 역참조하지 않는다
 ComPtr<ID3D11VertexShader> vs;
 device->CreateVertexShader(
     vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(),
@@ -392,7 +393,7 @@ void UpdateFrameCB(const FrameCB& cb) {
 }
 ```
 
-`D3D11_MAP_WRITE_DISCARD`는 현재 백킹 메모리를 버리고 새 페이지를 할당받게 한다. GPU가 아직 이전 프레임의 상수 버퍼를 읽는 중이어도 CPU는 새 페이지에 쓰므로 충돌이 없다. 드라이버는 내부적으로 같은 버퍼에 대한 여러 페이지를 *링 버퍼* 처럼 돌려쓰며, GPU가 다 읽은 페이지를 재활용한다. 이 *DYNAMIC + DISCARD* 조합이 매 프레임 갱신되는 작은 버퍼의 표준 패턴이다.
+`D3D11_MAP_WRITE_DISCARD`는 기존 내용의 보존을 요구하지 않는다는 계약이다. 드라이버가 다른 백킹 영역을 제공하면 GPU가 이전 내용을 읽는 동안 CPU가 새 내용을 쓸 수 있지만, 새 페이지나 무대기를 항상 보장하지는 않는다. 드라이버는 내부적으로 같은 버퍼에 대한 여러 페이지를 *링 버퍼* 처럼 돌려쓰며, GPU가 다 읽은 페이지를 재활용한다. 이 *DYNAMIC + DISCARD* 조합이 매 프레임 갱신되는 작은 버퍼의 표준 패턴이다.
 
 대안인 `D3D11_MAP_WRITE_NO_OVERWRITE`는 페이지를 새로 잡지 않고, 이미 쓴 영역과 겹치지 않는 부분만 추가로 쓴다. 다만 상수 버퍼에 대한 NO_OVERWRITE 매핑은 D3D11.1 런타임의 선택 기능(`D3D11_FEATURE_D3D11_OPTIONS::MapNoOverwriteOnDynamicConstantBuffer`)이라 모든 기본 D3D11 환경에서 보장되지 않는다. `CheckFeatureSupport`로 지원 여부를 확인해 분기하고, 미지원이면 DISCARD와 링 버퍼를 쓰거나 여러 상수 버퍼로 나누는 전략을 택한다. 지원되는 환경에서는 한 프레임에 여러 객체의 데이터를 큰 버퍼에 차곡차곡 쌓는 *서브 할당(sub-allocation)* 패턴에 쓸 수 있다. 잘못 쓰면 GPU가 읽는 중인 영역을 덮어쓰므로 NO_OVERWRITE는 약속(겹치지 않음)을 지킬 때만 안전하다.
 
@@ -523,7 +524,7 @@ ComPtr<ID3D11RasterizerState> rsState;
 device->CreateRasterizerState(&rs, rsState.GetAddressOf());
 ```
 
-`CullMode`는 어느 면을 버릴지다. `BACK`은 카메라 반대를 향한 뒷면을 제거해, 닫힌 메시에서 드로우할 픽셀을 절반으로 줄인다. 어느 쪽이 앞면인지는 `FrontCounterClockwise`가 정한다. `TRUE`면 화면에서 반시계 방향으로 감긴 삼각형이 앞면이다. 이것이 OpenGL의 기본 컨벤션과 일치한다. DX의 기본은 `FALSE`(시계 방향이 앞면)이므로, OpenGL용 메시 데이터를 가져올 때 큐브의 면이 통째로 사라지는 버그는 대부분 이 와인딩 불일치에서 온다. 면이 안 보이면 `CullMode`를 `NONE`으로 잠깐 바꿔 와인딩 문제인지 먼저 확인한다.
+`CullMode`는 어느 면을 버릴지다. `BACK`은 카메라 반대를 향한 뒷면을 제거해, 닫힌 메시의 뒤쪽 삼각형을 래스터화 전에 제거한다. 제거되는 삼각형 비율과 절약되는 픽셀 수는 시점·형상·가림에 따라 달라진다. 어느 쪽이 앞면인지는 `FrontCounterClockwise`가 정한다. `TRUE`면 화면에서 반시계 방향으로 감긴 삼각형이 앞면이다. 이것이 OpenGL의 기본 컨벤션과 일치한다. DX의 기본은 `FALSE`(시계 방향이 앞면)이므로, OpenGL용 메시 데이터를 가져올 때 큐브의 면이 통째로 사라지는 버그는 대부분 이 와인딩 불일치에서 온다. 면이 안 보이면 `CullMode`를 `NONE`으로 잠깐 바꿔 와인딩 문제인지 먼저 확인한다.
 
 `DepthClipEnable`은 near/far 평면 밖의 깊이를 잘라낼지다. 그림자 맵 렌더링에서는 이를 끄고 깊이를 [0,1]로 클램프(`DepthClampEnable` 역할)하는 변형을 쓰기도 한다.
 
@@ -533,6 +534,12 @@ device->CreateRasterizerState(&rs, rsState.GetAddressOf());
 
 ```cpp
 D3D11_BLEND_DESC bd{};
+bd.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+bd.RenderTarget[0].DestBlend = D3D11_BLEND_ZERO;
+bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
 bd.RenderTarget[0].BlendEnable = FALSE;
 bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
 
@@ -581,7 +588,7 @@ context->OMSetDepthStencilState(dsState.Get(), 0);
 
 `OMSetBlendState`의 둘째 인자는 블렌드 팩터(`SrcBlend`가 `BLEND_FACTOR`일 때 쓰는 상수 색), 셋째는 멀티샘플 커버리지 마스크다. `0xFFFFFFFF`는 모든 샘플을 쓴다는 뜻이다. `OMSetDepthStencilState`의 둘째 인자는 스텐실 참조 값으로, 스텐실을 켤 때 비교 기준이 된다.
 
-이 세 호출이 DX12에서는 PSO 안의 멤버로 통합된다. DX11의 분산된 상태 설정이 PSO의 `RasterizerState`, `BlendState`, `DepthStencilState` 필드로 합쳐지고, 거기에 셰이더와 Input Layout, 렌더 타겟 포맷까지 한 객체로 묶인다. PSO를 만드는 순간 드라이버가 모든 상태 조합을 한 번에 컴파일하므로, 드로우 시점의 검증과 셰이더 재컴파일 비용이 사라진다. DX11에서 이 비용은 매 상태 변경마다 드라이버 안에서 조금씩 발생한다.
+이 세 호출이 DX12에서는 PSO 안의 멤버로 통합된다. DX11의 분산된 상태 설정이 PSO의 `RasterizerState`, `BlendState`, `DepthStencilState` 필드로 합쳐지고, 거기에 셰이더와 Input Layout, 렌더 타겟 포맷까지 한 객체로 묶인다. PSO는 상태 조합을 생성 시점에 제시해 draw 근처의 검증·shader variant 준비 비용을 줄일 수 있다. 모든 드라이버 작업과 이후 스톨을 없앤다고 보장하지는 않는다. DX11에서 이 비용은 매 상태 변경마다 드라이버 안에서 조금씩 발생한다.
 
 ## 6. Output Merger와 한 프레임의 흐름
 
@@ -654,7 +661,7 @@ void RenderFrame(const FrameCB& cb) {
 }
 ```
 
-`DrawIndexed(36, 0, 0)`의 인자는 (인덱스 수, 인덱스 버퍼 시작 위치, 정점 버퍼 베이스 오프셋)이다. `Present(1, 0)`의 첫 인자 1은 V-Sync 간격으로, 다음 수직 동기 신호까지 대기한다. 0으로 두면 즉시 표시(티어링 가능)다.
+`DrawIndexed(36, 0, 0)`의 인자는 (인덱스 수, 인덱스 버퍼 시작 위치, 정점 버퍼 베이스 오프셋)이다. `Present(1, 0)`의 첫 인자 1은 수직 갱신 한 번의 표시 간격을 요청한다. 호출 반환이나 실제 표시 시점이 바로 다음 vsync로 고정되는 것은 아니다. 0은 동기 간격을 없애지만 큐·합성 경로가 남으므로 즉시 표시를 보장하지 않는다.
 
 ### 상태의 영속성
 
@@ -668,7 +675,7 @@ flowchart TB
     end
 ```
 
-DX11과 DX12의 결정적 차이는 *상태가 영속(sticky)* 하느냐다. DX11은 이전 프레임에 설정한 바인딩이 그대로 유지되므로, 다음 프레임에 변하지 않는 상태는 다시 호출할 필요가 없다. 위 `RenderFrame`은 명료함을 위해 모든 상태를 매번 설정하지만, 실전에서는 *바뀐 슬롯만* 다시 호출해 드라이버 호출 수를 줄인다. 반면 DX12의 Command List는 리셋되면 빈 상태에서 시작하므로 모든 상태를 매번 다시 기록해야 한다. 이 차이가 DX11 코드를 짧게, DX12 코드를 명시적으로 만든다.
+DX11과 DX12의 결정적 차이는 *상태가 영속(sticky)* 하느냐다. DX11은 대체로 이전 프레임의 바인딩이 유지되므로, 다음 프레임에 변하지 않는 상태는 다시 호출할 필요가 없다. 단, flip-model `Present`는 백 버퍼를 출력 바인딩에서 풀 수 있어 다음 프레임의 `OMSetRenderTargets`는 다시 해야 한다. 위 `RenderFrame`은 명료함을 위해 모든 상태를 매번 설정하지만, 실전에서는 *바뀐 슬롯만* 다시 호출해 드라이버 호출 수를 줄인다. 반면 DX12의 Command List는 리셋되면 빈 상태에서 시작하므로 모든 상태를 매번 다시 기록해야 한다. 이 차이가 DX11 코드를 짧게, DX12 코드를 명시적으로 만든다.
 
 영속성에는 함정도 있다. 한 객체를 그린 뒤 다른 객체용으로 일부 상태만 바꾸면, 깜빡한 상태가 이전 값으로 남아 의도치 않은 결과가 난다. 예를 들어 투명 객체 뒤 불투명 객체를 그릴 때 블렌드 상태를 되돌리지 않으면 불투명 객체가 반투명하게 보인다. 영속 모델에서는 *각 드로우가 자신이 의존하는 모든 상태를 책임지고 설정* 하는 규율이 안전하다.
 

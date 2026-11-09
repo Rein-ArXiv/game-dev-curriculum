@@ -172,7 +172,7 @@ GRUB은 이 설정을 읽어 다음을 수행한다.
 
 ### 커널 로딩 과정
 
-GRUB이 커널을 로드하는 과정은 다음과 같다.
+GRUB이 커널을 로드하는 개념적 과정은 다음과 같다. 아래 코드는 버전에 따라 달라지는 실제 소스의 축약 의사 코드다.
 
 ```c
 // grub-core/loader/i386/linux.c
@@ -312,7 +312,7 @@ asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
 
 ### 64비트 모드 전환
 
-압축을 해제하기 전에, `startup_32`는 CPU를 64비트 롱 모드로 전환한다.
+32비트 부트 진입 경로에서는 압축을 해제하기 전에 `startup_32`가 CPU를 64비트 롱 모드로 전환한다. 64비트 부트 프로토콜은 이미 롱 모드와 페이징이 준비된 상태로 64비트 진입점에 들어가므로 이 전환을 거치지 않는다.
 
 ```asm
     /* 페이지 테이블 설정 (identity mapping) */
@@ -358,9 +358,9 @@ asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
 
 ### start_kernel 진입
 
-압축 해제된 커널의 진입점은 `start_kernel` 함수다. 이것은 C 언어로 작성된 커널의 첫 번째 함수이며, 사실상 커널의 `main`이다.
+압축 해제된 커널은 아키텍처별 초기 진입 코드를 거쳐 공통 초기화 함수 `start_kernel`에 도달한다. 그 전에 실행되는 초기 C 코드도 있으므로 최초의 C 함수는 아니지만, `start_kernel`은 공통 커널 초기화의 `main`에 해당한다.
 
-`init/main.c`.
+다음은 `init/main.c`의 역할을 요약한 의사 코드다. 실제 함수의 순서와 세부 사항은 커널 버전에 따라 다르다.
 
 ```c
 asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
@@ -755,7 +755,7 @@ int main(int argc, char *argv[]) {
 
 ### SysVinit 런레벨
 
-런레벨은 시스템의 동작 모드를 나타낸다.
+런레벨은 시스템의 동작 모드를 나타낸다. 다음은 흔한 배포판 관례의 예이며, 특히 2~5의 의미는 배포판 설정에 따라 다르다.
 
 | 런레벨 | 설명 |
 |-------|------|
@@ -821,13 +821,13 @@ $ systemctl set-default multi-user.target
 
 ### initramfs의 필요성
 
-커널이 루트 파일시스템을 마운트하려면 다음이 필요하다.
+실제 루트 파일시스템을 마운트하려면 구성에 따라 다음이 필요하다.
 1. 파일시스템 드라이버 필요 (ext4, XFS 등)
 2. 디바이스 드라이버 필요 (SATA, NVMe 등)
 3. 암호화된 경우 복호화 필요 (LUKS)
 4. LVM, RAID 설정 필요
 
-이 모든 것을 커널에 내장하면 커널이 너무 커진다. 그래서 **initramfs**를 사용한다.
+필요한 드라이버와 초기 사용자 공간 도구를 커널 이미지와 분리해 구성할 수 있어 **initramfs**를 자주 사용한다. 필요한 기능이 커널에 내장되고 별도 초기 사용자 공간 설정이 없다면 initramfs 없이 직접 루트를 마운트할 수도 있다.
 
 ### initramfs vs initrd
 
@@ -838,7 +838,7 @@ $ systemctl set-default multi-user.target
 - 레거시
 
 **initramfs** (Initial RAM Filesystem).
-- tmpfs로 마운트
+- cpio 아카이브를 초기 rootfs에 풀어 놓음 (rootfs는 설정에 따라 ramfs 또는 tmpfs)
 - cpio 아카이브
 - 메모리 효율적
 - 현대 표준
@@ -851,11 +851,11 @@ Ubuntu/Debian의 `update-initramfs` 사용 예다.
 $ update-initramfs -c -k 5.15.0-generic
 ```
 
-내부적으로 `mkinitramfs`를 실행한다.
+내부 흐름을 단순화하면 다음과 같다. 실제 배포판 스크립트의 복사본은 아니며 라이브러리·장치 노드와 설정 등은 생략했다.
 
 ```bash
 #!/bin/bash
-# /usr/sbin/mkinitramfs
+# mkinitramfs의 역할을 요약한 의사 코드
 
 DESTDIR=$(mktemp -d)
 
@@ -1003,7 +1003,7 @@ $ tree -L 2
 
 ## 9. 전체 부트 프로세스 요약
 
-전원 버튼부터 로그인 프롬프트까지의 전체 과정은 다음과 같다.
+전원 버튼부터 로그인 프롬프트까지의 한 가지 예는 다음과 같다. 펌웨어가 EFI stub으로 커널을 직접 실행하거나 initramfs 없이 부팅하는 경로도 있다.
 
 ```text
 1. 전원 ON
@@ -1023,8 +1023,8 @@ $ tree -L 2
    └─> 커널 명령행 파라미터 설정
 
 4. Linux 커널 (압축된 상태)
-   ├─> startup_32 (32비트 진입, 임시 페이지 테이블 구성)
-   ├─> 64비트 롱 모드 전환과 startup_64 진입
+   ├─> 32비트 진입이면 startup_32에서 롱 모드 전환
+   ├─> 64비트 진입이면 startup_64로 직접 진입
    └─> extract_kernel() 뒤 압축 해제된 커널 진입
 
 5. start_kernel() (C 언어)

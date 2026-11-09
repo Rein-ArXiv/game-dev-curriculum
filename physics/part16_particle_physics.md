@@ -137,7 +137,7 @@ $$
 \vec{x}_{n+1} = 2 \vec{x}_n - \vec{x}_{n-1} + \vec{a}_n \Delta t^2
 $$
 
-속도 없음. 상태는 현재 위치 + 이전 위치다. 메모리량은 저장 필드 전체로 비교해야 하며, 이것은 현재 위치 + 속도를 저장하는 형태와 vec3 두 개로 같은 경우가 많다. Verlet 의 장점은 *위치 제약과 결합하기 편한 상태 표현* 이다.
+이 식은 일정한 $\Delta t$를 전제로 한다. 초기 속도 $v_0$를 줄 때는 $x_{-1}=x_0-v_0\Delta t+\tfrac12 a_0\Delta t^2$처럼 이전 위치를 초기화한다. 가변 dt에 그대로 같은 식을 쓰면 안 된다. 속도 없음. 상태는 현재 위치 + 이전 위치다. 메모리량은 저장 필드 전체로 비교해야 하며, 이것은 현재 위치 + 속도를 저장하는 형태와 vec3 두 개로 같은 경우가 많다. Verlet 의 장점은 *위치 제약과 결합하기 편한 상태 표현* 이다.
 
 ### 2.2 분기 없음
 
@@ -190,7 +190,7 @@ drag / damping 같은 *속도 의존 처리* 가 이 estimate 로 가능.
 
 ### 2.5 PBD 와의 통합
 
-PBD 의 *Predict-Project-Correct* 가 Verlet 의 자연 확장.
+PBD의 *Predict-Project-Correct*는 위치 제약과 결합하기 좋다. 아래 예측식은 명시적 속도를 가진 semi-implicit Euler 형태이며 position Verlet과 상태 정의가 다르다.
 
 ```cpp
 for (int i = 0; i < N; ++i) {
@@ -400,16 +400,20 @@ GPU에서도 atomic append를 사용할 수 있지만 고정 `maxPerCell`은 ove
 // GPU 의 atomic insertion
 uint cellIdx = CellIndex(int(floor(p.position.x / cellSize)), ...);   // CPU 와 같은 floor. 조밀 배열 첨자 — int64 packing key 가 아님
 uint slot = atomicAdd(cellCounts[cellIdx], 1);
-cellEntries[cellIdx * maxPerCell + slot] = particleId;
+if (slot < maxPerCell) {
+    cellEntries[cellIdx * maxPerCell + slot] = particleId;
+} else {
+    RecordCellOverflow(cellIdx, particleId);
+}
 ```
 
-`slot >= maxPerCell`이면 쓰기를 버리거나 overflow buffer에 기록해야 한다. 정확한 이웃이 필요하면 cell key 정렬 + prefix sum으로 가변 길이 범위를 만드는 방식이 더 안전하다.
+`cellCounts`는 용량보다 커질 수 있으므로 순회도 `min(cellCounts[cellIdx], maxPerCell)`로 제한하고 overflow를 별도로 처리한다. `slot >= maxPerCell`이면 쓰기를 버리거나 overflow buffer에 기록해야 한다. 정확한 이웃이 필요하면 cell key 정렬 + prefix sum으로 가변 길이 범위를 만드는 방식이 더 안전하다.
 
 ### 4.6 SPH (Smoothed Particle Hydrodynamics)
 
 유체 시뮬레이션의 표준 — *grid hash 활용 입자 시스템*. 각 입자가 *주변 입자들과 평균* 으로 *밀도·압력*. 그리드 hash 가 *이웃 검색 토대*.
 
-게임의 *수면 / 유체 효과* (물웅덩이 스플래시, 폭포 파편 등) 가 SPH 의 단순화 버전.
+SPH는 수면·스플래시 같은 유체 효과의 한 구현 방법이다. 독립적인 탄도 입자로 만든 물방울 효과까지 모두 SPH의 단순화라고 볼 수는 없다.
 
 
 ## 5. Cloth: 입자 + 거리 제약
@@ -475,7 +479,7 @@ void BuildCloth(Cloth& c, int rows, int cols, float spacing) {
 
 ### 5.3 시뮬레이션
 
-PBD 루프 — 거리 제약 project + Verlet 적분.
+PBD 루프 — semi-implicit Euler 예측 + 거리 제약 project + 속도 재구성.
 
 ```cpp
 void StepCloth(Cloth& c, vec3 gravity, float dt) {
@@ -595,8 +599,7 @@ void ParticleParticleCollision(Particle& a, Particle& b, float radius) {
     float dist = length(d);
     float minDist = 2 * radius;
     if (dist >= minDist) return;
-    if (dist < 1e-8f) return;
-    vec3 n = d / dist;
+    vec3 n = (dist > 1e-8f) ? d / dist : vec3{1, 0, 0}; // 같은 위치도 분리
     float invSum = a.invMass + b.invMass;
     if (invSum <= 0) return;
     vec3 correction = n * ((dist - minDist) / invSum);
@@ -658,7 +661,7 @@ void HandleParticleVsEnvironment(Particle& p, const World& world) {
 ```cpp
 float d = SampleSDF(p.predicted);
 if (d < particleRadius) {
-    vec3 grad = SampleSDFGradient(p.predicted);
+    vec3 grad = SampleSDFGradient(p.predicted); // exact SDF의 단위 gradient 전제
     p.predicted += grad * (particleRadius - d);
 }
 ```

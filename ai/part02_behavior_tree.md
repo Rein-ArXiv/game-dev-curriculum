@@ -69,7 +69,7 @@ class Node {
 public:
     virtual ~Node() = default;
     virtual Status Tick(Blackboard& bb) = 0;
-    virtual void   Reset() {}            // Running 중단 시 정리 (onExit 성격)
+    virtual void   Reset() {}            // 중단 시 정리; 미실행/완료 상태에서도 안전하고 멱등적
 };
 
 class Composite : public Node {
@@ -78,13 +78,21 @@ protected:
     size_t cursor_ = 0;                  // 현재 진행 중인 자식
 public:
     void Add(std::unique_ptr<Node> c) { children_.push_back(std::move(c)); }
+    void Reset() override {
+        for (auto& c : children_) c->Reset();
+        cursor_ = 0;
+    }
 };
 
 class Decorator : public Node {
 protected:
     std::unique_ptr<Node> child_;
+public:
+    void Reset() override { if (child_) child_->Reset(); }
 };
 ```
+
+여기서 `Reset`은 자신이 소유한 작업의 취소·정리가 완료된 뒤 반환하는 동기적 모형이다. 취소 완료가 비동기라면 Aborting 상태나 완료 통지를 따로 두고, 그 완료 전에 같은 자원을 새 행동에 넘기지 않아야 한다.
 
 이 단일 인터페이스가 BT의 합성성을 만든다. Composite는 자식이 Leaf인지 다른 Composite인지 알 필요가 없다 — `Tick`을 호출하고 `Status`를 받을 뿐이다. 그래서 임의의 서브트리를 임의의 위치에 끼울 수 있다. `Reset`은 Running 중이던 노드가 중단될 때(상위 우선순위가 선점) 자원을 정리하는 FSM의 onExit에 대응한다.
 
@@ -209,6 +217,8 @@ flowchart TB
 | TimeLimit(t) | t초 초과 시 Failure + 자식 Reset | 타임아웃 |
 | Condition(pred) | 술어 거짓이면 자식 미실행, Failure | 가드 |
 
+가드가 Running 자식을 중단시키는 변형이라면 조건이 거짓으로 바뀔 때 자식의 `Reset`도 호출한다. 아래 시간 데코레이터는 단조롭게 증가하는 시간을 사용하고, `lastFire_`는 최초 실행이 가능하도록 음의 무한대, `startTime_`는 -1로 초기화한다고 가정한다.
+
 쿨다운은 데코레이터가 시간 상태를 가질 수 있음을 보여주는 좋은 예다.
 
 ```cpp
@@ -234,6 +244,13 @@ Status TimeLimit::Tick(Blackboard& bb) {
     Status s = child_->Tick(bb);
     if (s != Status::Running) startTime_ = -1;                // 끝나면 리셋
     return s;
+}
+```
+
+```cpp
+void TimeLimit::Reset() {
+    Decorator::Reset();
+    startTime_ = -1;  // 선점 뒤 새로 시작할 때 이전 deadline을 재사용하지 않음
 }
 ```
 
@@ -273,6 +290,8 @@ Status Parallel::Tick(Blackboard& bb) {
 }
 ```
 
+위 코드는 매 틱 모든 자식을 다시 평가하는 reactive Parallel이다. 조건 감시에는 맞지만, 먼저 Success를 반환한 일회성 행동도 다음 틱에 다시 호출된다는 뜻이다. 완료한 행동을 반복하면 안 되는 parallel 작업은 자식별 terminal 결과를 기억하고 완료 자식은 건너뛰는 변형을 써야 한다. 그 변형에서는 계속 감시할 조건을 Running으로 유지하거나 별도 모니터로 분리한다. `ResetChildren()`은 자식들의 `Reset`을 호출하는 helper다.
+
 종료 시 *아직 Running이던 자식을 Reset* 하는 것이 중요하다 — 한 자식이 RequireOne로 전체를 끝낼 때, 나머지 Running 자식이 잡고 있던 자원(이동 컨트롤러)을 풀어야 한다.
 
 Parallel은 강력하지만 위험하다. 동시에 실행되는 행동들이 같은 자원(이동 컨트롤러, 애니메이션 슬롯)을 다투면 충돌한다. 그래서 Parallel을 "주 행동 1개 + 부수 모니터링 N개" 형태로 제한할 수 있다. `Parallel[교전 서브트리, 체력감시, 탄약감시]`처럼 한 자식만 실제 운동을 만들고 나머지는 조건을 감시하면 쓰기 충돌의 범위를 줄일 수 있다.
@@ -304,7 +323,7 @@ sequenceDiagram
 
 ### Running 노드 기억
 
-memory Composite는 *그 자식 위치를 기억* 해야 한다 — 2절의 `cursor_`가 그 역할이다. 그렇지 않으면 매 틱 처음부터 다시 평가해 진행 중인 이동이 리셋된다. 반대로 reactive Composite는 매 틱 처음부터 평가하되, *이전에 Running이던 자식을 Reset* 해 선점을 표현한다.
+memory Composite는 *그 자식 위치를 기억* 해야 한다 — 2절의 `cursor_`가 그 역할이다. reactive Composite는 매 틱 처음부터 평가하되, *더 이상 선택되지 않는 Running 자식을 Reset* 해 선점을 표현한다. 루트부터 다시 평가하는 것 자체가 이동을 재시작한다는 뜻은 아니다. 계속 선택된 행동은 자기 실행 상태를 유지하고, 실제 중단될 때만 Reset한다.
 
 ### 매 틱 전체를 다시 평가한다
 
@@ -334,7 +353,7 @@ inline constexpr BBKey<Vector3>  TargetPos{"target_pos"};
 
 ### 미스는 값이 아니다
 
-BT의 제어 흐름은 Success와 Failure 두 값으로만 짜인다. 그래서 blackboard 읽기의 실패도 이 어휘로 번역돼야 한다. 키는 이 관점에서 두 부류로 갈린다.
+BT는 완료 결과를 Success/Failure로, 진행 중 상태를 Running으로 표현한다. 그래서 blackboard 읽기의 실패도 이 실행 계약에 맞게 처리해야 한다. 키는 이 관점에서 두 부류로 갈린다.
 
 - *틱 드라이버가 보장하는 키*: 프레임 시간처럼 루트 tick 전에 항상 채워진다. 미스는 정상 입력이 아니라 배선 버그이므로 계약 위반으로 다룬다.
 - *존재 자체가 조건인 키*: 타깃, 마지막 목격 위치처럼 없을 수 있다. 미스는 정상 상태이고 조건 노드의 Failure로 번역된다.
@@ -365,10 +384,17 @@ Status HasTarget::Tick(Blackboard& bb) {
 
 Status MoveToTarget::Tick(Blackboard& bb) {
     auto dst = bb.Get(BB::TargetPos);
-    if (!dst) return Status::Failure;              // 입력이 없으면 실행하지 않는다
-    return agent_.MoveTo(*dst) ? Status::Success : Status::Running;
+    if (!dst) { Reset(); return Status::Failure; }  // 진행 중 입력이 사라져도 정리
+    // 프로젝트 helper: 도착=Success, 진행=Running, 경로 실패=Failure.
+    Status s = agent_.MoveToStatus(*dst, this);
+    if (s != Status::Running) Reset();
+    return s;
 }
+
+void MoveToTarget::Reset() { agent_.CancelMove(this); }  // 이 노드가 소유한 이동 요청만 취소
 ```
+
+위 이동 helper는 노드 주소를 요청 소유자 토큰으로 사용한다는 모형이다. `CancelMove(this)`는 이 노드의 요청이 없으면 아무 일도 하지 않으며 다른 노드의 이동을 취소하지 않는다. 실제 엔진에서는 task handle과 완료·취소 계약으로 같은 소유권을 표현한다.
 
 ### 기본값을 돌려주는 읽기가 트리를 망가뜨린다
 
@@ -393,7 +419,7 @@ template <class T> T Get(std::string_view key) const {
 
 ### 인스턴스 분리와 스코프
 
-Blackboard는 NPC마다 인스턴스를 둔다. 노드는 *스테이트리스(stateless)* 하게 유지하고 — Running 위치 같은 최소한의 진행 상태만 노드에 두고 — 행동의 입출력은 모두 Blackboard에 둔다. 이렇게 하면 같은 트리 정의(노드 구조)를 여러 NPC가 공유하면서 데이터만 인스턴스별로 분리할 수 있다. 트리는 *공유 자산*, Blackboard는 *인스턴스 상태* 라는 분리가 메모리와 로딩 양쪽에서 이득이다.
+Blackboard는 NPC마다 인스턴스를 둔다. 위 코드는 cursor·타이머·행동 핸들을 노드 객체 안에 저장하므로 그 실행 객체도 NPC별로 분리해야 한다. 같은 트리 정의를 공유하려면 불변 구조와 인스턴스별 실행 메모리를 나누거나 노드 실행 객체를 NPC별로 만들어야 한다. Blackboard만 분리하고 상태 있는 노드 객체를 그대로 공유하면 여러 NPC가 서로의 진행 위치를 덮어쓴다.
 
 큰 시스템은 Blackboard를 *스코프* 로 계층화한다 — 전역(팀 공유), NPC별, 서브트리별. 분대 정보(공유 타깃)는 팀 Blackboard에, 개인 정보(내 탄약)는 NPC Blackboard에 둔다. 이 계층을 두면 개인 행동과 집단 행동이 같은 저장소를 덮어쓰지 않고, 공유 판단과 개인 판단의 책임 경계가 분명해진다.
 
@@ -429,7 +455,7 @@ Unreal Engine의 Behavior Tree가 이 모델의 대표다. 데코레이터(조�
 | Lower Priority | 조건이 참이 되면 더 낮은 우선순위(오른쪽) 분기를 선점 |
 | Both | Self + Lower Priority |
 
-"HP 낮음" 조건에 *Lower Priority* abort를 걸면, HP가 떨어지는 순간 — 매 틱 검사 없이 *그 이벤트 시점에* — 진행 중이던 오른쪽 전투 분기가 중단되고 도망 분기가 활성화된다. polling의 반응성을 유지하면서, 재평가를 *키 변화 빈도* 에 비례하게 줄인다.
+"HP 낮음" 조건에 *Lower Priority* abort를 걸면, 키 변화 알림으로 오른쪽 전투 분기의 중단과 상위 분기 재평가를 요청할 수 있다. 콜백 안에서 재진입해 즉시 트리를 바꾸기보다 안전한 평가 경계에서 처리해야 한다. Unreal의 task abort도 `InProgress`를 반환하고 `FinishLatentAbort`로 나중에 완료할 수 있으므로, 이벤트 발생 순간에 모든 정리가 끝난다고 가정하지 않는다. 이렇게 매 틱 검사 대신 변경 알림을 쓰면 재평가를 *키 변화 빈도* 에 비례하게 줄일 수 있다.
 
 ```cpp
 // 조건 데코레이터: blackboard 키를 구독, 변화 시 abort 신호
@@ -468,7 +494,7 @@ $$
 
 $c_{\text{obs}}$는 옵저버 장부와 더티 큐 유지 비용이다. 구현과 등록 처닝에 따라 무시할 수도, 지배적일 수도 있으므로 측정 항목으로 남긴다.
 
-단순한 감각을 얻기 위해 모든 가드가 같은 알림률 $q$, 같은 평가비용 $c_{\text{eval}}$을 갖고 알림 자체 비용을 평가비용에 포함하며, 모든 알림이 abort를 일으키는 보수적 상한($a=1$), $c_{\text{obs}}=0$을 가정하자. abort 오버헤드 비를 $r=c_{\text{abort}}/c_{\text{eval}}$라 하면
+단순한 감각을 얻기 위해 polling과 구독 모델이 같은 $G$개 가드를 다루고, 모든 가드가 같은 알림률 $q$, 같은 평가비용 $c_{\text{eval}}$을 갖고 알림 자체 비용을 평가비용에 포함하며, 모든 알림이 abort를 일으키는 보수적 상한($a=1$), $c_{\text{obs}}=0$을 가정하자. abort 오버헤드 비를 $r=c_{\text{abort}}/c_{\text{eval}}$라 하면
 
 $$
 \frac{C_{\text{poll}}}{C_{\text{ev}}}
@@ -504,7 +530,7 @@ flowchart TB
     Root --> P4["Action: 순찰 (기본)"]
 ```
 
-위에서 아래로 "할 수 있는 가장 높은 우선순위 행동"을 고른다. 가장 아래에 항상 성공하는 기본 행동(순찰)을 두어 트리가 Failure로 끝나지 않게 한다.
+위에서 아래로 "할 수 있는 가장 높은 우선순위 행동"을 고른다. 가장 아래에 현재 조건에서 실행 가능한 기본 행동(순찰)을 둔다. 이 행동도 진행 중에는 Running을 반환할 수 있다.
 
 ### Guarded Sequence (가드된 시퀀스)
 
@@ -586,7 +612,7 @@ BT의 전이 로그는 "프레임 N: Root→전투Seq→교전Sel→근접Seq→
 
 행동 트리는 행동을 트리로 *합성* 하고, 매 틱 루트에서 잎으로 평가를 흘려 실행할 행동을 고른다. Composite(Sequence/Selector/Parallel), Decorator, Leaf 세 종류와 Running/Success/Failure 세 반환값이 전부지만, 이 최소 구성으로 우선순위 폴백, 시간에 걸친 행동, 동시 실행, 조건 분리를 모두 표현한다. memory/reactive 변형이 "진행 유지"와 "조건 반응"을 가르고, 데코레이터가 빈도·반복·타임아웃을 행동에서 분리한다.
 
-BT의 진짜 가치는 모듈성이다. 서브트리를 재사용하고, Blackboard로 데이터를 인스턴스별로 분리하고, 디자이너가 트리를 조립하고 프로그래머가 잎을 구현하는 분업이 가능하다. 이 분업이 성립하려면 Blackboard 읽기가 미스를 값으로 위장하지 않아야 한다 — 트리의 어휘는 Success와 Failure뿐이므로, 입력의 부재는 기본값이 아니라 Failure로 번역돼야 잘못된 행동이 성공으로 보고되지 않는다. polling BT의 반응성 비용은 event-driven의 abort 정책(Self/Lower Priority/Both)으로 키 변화 빈도에 비례하게 줄인다. 실전 트리는 우선순위 Selector·Guarded Sequence·Monitor+Action Parallel 같은 관용구의 다층 조합이다.
+BT의 진짜 가치는 모듈성이다. 서브트리를 재사용하고, Blackboard로 데이터를 인스턴스별로 분리하고, 디자이너가 트리를 조립하고 프로그래머가 잎을 구현하는 분업이 가능하다. 이 분업이 성립하려면 Blackboard 읽기가 미스를 값으로 위장하지 않아야 한다 — 완료와 실패를 명시적으로 반환하는 실행 계약에 맞춰, 입력의 부재는 기본값이 아니라 Failure로 번역돼야 잘못된 행동이 성공으로 보고되지 않는다. polling BT의 반응성 비용은 event-driven의 abort 정책(Self/Lower Priority/Both)으로 키 변화 빈도에 비례하게 줄인다. 실전 트리는 우선순위 Selector·Guarded Sequence·Monitor+Action Parallel 같은 관용구의 다층 조합이다.
 
 한계는 연속적 우선순위, 정확한 상태 복원, 런타임 계획 생성이다. 이 셋은 각각 효용 AI, 상태 스택, 계획 기반 AI의 영역이며, 실전 BT는 이들을 잎으로 품어 함께 쓴다. tick 경로 하이라이트와 blackboard watch 같은 시각적 디버깅 도구가 BT의 합성성을 실제로 다룰 수 있게 만든다. BT는 단독 해법이라기보다, 게임 AI 의사결정의 *조립 골격* 으로 자리 잡았다.
 

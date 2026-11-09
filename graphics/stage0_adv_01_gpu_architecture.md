@@ -77,7 +77,7 @@ Vulkan의 subgroup 연산은 이 묶음을 직접 활용한다. 같은 warp 안�
 
 ```glsl
 #extension GL_KHR_shader_subgroup_arithmetic : require
-#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_basic : require
 
 uint aliveCount = subgroupAdd(uint(isAlive));   // warp 내 합산 (레지스터만 사용)
 if (subgroupElect()) {                          // 대표 lane 하나 선출
@@ -105,7 +105,7 @@ GPU 메모리 계층은 CPU와 비슷해 보이지만 처리량 중심 설계의
 
 GPU는 많은 memory channel과 넓은 GDDR/HBM 인터페이스로 높은 peak bandwidth를 제공하고, CPU는 cache hierarchy와 낮은 thread latency·일반 목적 접근에 다른 균형을 둔다. 제품 세대와 메모리 구성에 따라 수치가 크게 달라지므로 비교할 때는 해당 장치의 이론 peak와 profiler의 achieved bandwidth를 함께 적는다. 이론 peak를 못 채웠다고 곧 메모리 최적화 실패는 아니다. 작은 dispatch, dependency, partition imbalance, cache hit가 원인일 수 있다.
 
-메모리 트래픽 대비 연산량의 비율을 *산술 강도(Arithmetic Intensity)* 라 부른다. 메모리에서 가져온 바이트 하나당 얼마나 많은 연산을 하느냐다. 산술 강도가 낮으면(예: 단순 복사, 가벼운 후처리) 대역폭 바운드(bandwidth-bound)가 되고, 높으면(예: 복잡한 PBR, 노이즈 함수) ALU 바운드가 된다. 어느 쪽인지 알아야 최적화 방향이 정해진다.
+메모리 트래픽 대비 연산량의 비율을 *산술 강도(Arithmetic Intensity)* 라 부른다. 메모리에서 가져온 바이트 하나당 얼마나 많은 연산을 하느냐다. 산술 강도가 낮은 작업(예: 단순 복사, 가벼운 후처리)은 대역폭 상한에, 높은 작업(예: 복잡한 PBR, 노이즈 함수)은 연산 상한에 가까워질 가능성이 있다. 다만 dependency latency·atomic 직렬화·작은 dispatch처럼 어느 상한도 채우지 못하는 병목이 있으므로 이 비율만으로 실제 병목을 확정하지 않는다. 어느 쪽인지 알아야 최적화 방향이 정해진다.
 
 ### Coalescing: 메모리 성능의 핵심
 
@@ -139,13 +139,13 @@ shared float tilePadded[32][33];
 
 ### 텍스처 경로와 버퍼 경로
 
-텍스처 샘플러는 일반 버퍼 로드보다 많은 일을 한다. 주소 모드(wrap/clamp), 필터링(bilinear/trilinear), mip 선택, anisotropic filtering을 전용 텍스처 유닛에서 처리한다. 색상 텍스처처럼 2D 공간 지역성이 강한 접근은 텍스처 캐시와 잘 맞는다 — 텍스처는 메모리에 선형이 아니라 *타일/스위즐(swizzle)* 순서로 저장되어, 2D 이웃 텍셀이 메모리에서도 가깝게 모인다.
+텍스처 샘플러는 일반 버퍼 로드보다 많은 일을 한다. 주소 모드(wrap/clamp), 필터링(bilinear/trilinear), mip 선택, anisotropic filtering을 전용 텍스처 유닛에서 처리한다. 색상 텍스처처럼 2D 공간 지역성이 강한 접근은 텍스처 캐시와 잘 맞는다 — 일반적인 최적화된 GPU 이미지 배치는 *타일/스위즐(swizzle)* 순서로 저장되어, 2D 이웃 텍셀이 메모리에서도 가깝게 모인다.
 
-반면 구조화 버퍼의 선형 접근은 SSBO/Storage Buffer 경로와 잘 맞는다. 같은 데이터라도 어느 경로로 읽느냐에 따라 캐시 동작이 달라진다. 인덱스 버퍼처럼 순차적으로 흩뿌려 읽는 데이터를 텍스처로 넣으면 텍스처 캐시의 2D 지역성 가정이 어긋나 오히려 손해다.
+반면 구조화 버퍼의 선형 접근은 SSBO/Storage Buffer 경로와 잘 맞는다. 같은 데이터라도 어느 경로로 읽느냐에 따라 캐시 동작이 달라진다. 그렇다고 1D 접근을 텍스처 경로에 놓으면 반드시 손해라는 뜻은 아니다. 버퍼 텍스처·명시적 texel fetch도 가능하고, 두 경로가 캐시를 공유하는 GPU도 있다. 선형·타일 이미지 배치와 필터링 필요성, 실제 cache hit·throughput을 함께 비교한다.
 
 ## 3. Occupancy와 지연 숨기기
 
-Occupancy는 한 SM/CU에 동시에 resident 상태로 올라갈 수 있는 warp/wave의 비율이다. GPU는 메모리 접근 지연을 줄이는 대신, 한 warp가 기다리는 동안 다른 warp를 실행해 지연을 숨긴다. 이것이 GPU가 거대한 캐시 없이도 처리량을 유지하는 방식이다.
+Occupancy는 한 SM/CU에 동시에 resident 상태로 올라갈 수 있는 warp/wave의 비율이다. GPU는 메모리 접근 지연을 줄이는 대신, 한 warp가 기다리는 동안 다른 warp를 실행해 지연을 숨긴다. 이 지연 숨기기는 캐시 재사용과 함께 GPU가 처리량을 유지하는 방식이다.
 
 ```mermaid
 flowchart TB
@@ -220,7 +220,7 @@ flowchart TB
 | 두 경로로 갈림 (divergent) | 두 활성 마스크가 필요 | 단순 모델에서 최대 $C_A + C_B$ |
 | 중첩 분기 4-way 발산 | 여러 활성 마스크가 필요 | 단순 모델에서 최대 $\sum_i C_i$ |
 
-루프의 trip count가 lane마다 다르면 *가장 오래 도는 lane* 에 전체 warp가 묶인다. lane 31개는 10회에 끝나도 1개 lane이 1,000회 돈다면 warp 전체가 1,000회를 돈다. 가변 길이 루프(레이마칭, 동적 BVH 순회)는 이 효과가 크다.
+루프의 trip count가 lane마다 다르면 루프 안의 명령은 *가장 오래 도는 활성 lane* 을 위해 계속 발행된다. lane 31개가 10회에 끝나고 1개 lane만 1,000회 돈다면, 나머지 반복에서 그 경로의 실행 슬롯 대부분이 비게 된다. 이는 모든 lane이 반드시 다음 명령으로도 진행할 수 없다는 일반 규칙은 아니며, 실제 재수렴과 후속 진행은 하드웨어·컴파일러의 스케줄링 계약을 따른다. 가변 길이 루프(레이마칭, 동적 BVH 순회)는 이 효과가 크다.
 
 ### Coherent branch는 저렴하다
 
@@ -309,11 +309,11 @@ Vulkan은 이 차이를 subgroup size와 memory property 같은 장치 속성으
 
 | 메모리 속성 | 위치 | 용도 |
 |---|---|---|
-| device-local | VRAM | 텍스처, 렌더 타깃, 자주 읽는 버퍼 |
-| host-visible + host-coherent | 시스템 RAM (또는 BAR) | 업로드 스테이징, 매 프레임 갱신 |
-| device-local + host-visible | ReBAR/스몰 BAR 영역 | 작은 빈번 업데이트 (가능 시) |
+| device-local | GPU가 효율적으로 접근하는 heap, 별도 GPU에서는 주로 VRAM | 텍스처, 렌더 타깃, 자주 읽는 버퍼 |
+| host-visible + host-coherent | CPU 매핑 가능한 메모리, 시스템 RAM·UMA 공유 heap·BAR 매핑 등 | 업로드 스테이징, 매 프레임 갱신 |
+| device-local + host-visible | UMA 공유 heap 또는 별도 GPU의 BAR 노출 영역 | 작은 빈번 업데이트 (가능 시) |
 
-CPU가 채워야 하는 데이터는 host-visible 메모리에 쓰고, GPU가 자주 읽는 데이터는 device-local로 복사하는 것이 기본 패턴이다. ReBAR(Resizable BAR)가 켜진 시스템에서는 device-local이면서 host-visible인 큰 영역이 노출되어 스테이징 복사를 줄일 수 있다.
+CPU가 채워야 하는 데이터는 host-visible 메모리에 쓰고, GPU가 자주 읽는 데이터는 device-local로 복사하는 것이 기본 패턴이다. UMA에서는 같은 물리 메모리가 CPU와 GPU에 함께 보일 수 있으므로 device-local을 별도 VRAM과 동일시하면 안 된다. 별도 GPU에서 ReBAR(Resizable BAR)가 켜진 시스템에서는 device-local이면서 host-visible인 큰 영역이 노출되어 스테이징 복사를 줄일 수 있다.
 
 ## 7. Occupancy 분석 도구
 

@@ -224,11 +224,14 @@ GC는 모든 살아 있는 객체를 루트에서 찾아야 한다. 루트는 �
 ```cpp
 void StoreField(Object* owner, Object*& slot, Object* value) {
     slot = value;
-    if (gc.marking && owner->color == Black && value->color == White) {
+    if (gc.marking && value != nullptr &&
+        owner->color == Black && value->color == White) {
         MarkGray(value);
     }
 }
 ```
+
+이 예는 mutator와 마킹 작업이 교대로 실행되는 증분 수집기의 개념 코드다. 실제 동시 수집기에서는 필드 저장과 색·마킹 큐 접근 사이의 원자성 및 메모리 순서를 별도로 보장해야 한다.
 
 세대별 GC에서는 오래된 객체가 젊은 객체를 가리키는 참조를 remembered set에 기록한다. 젊은 세대 수집 때 전체 오래된 세대를 스캔하지 않으려면 이 장벽이 정확해야 한다. 장벽 누락은 드물고 비결정적인 use-after-free처럼 나타난다.
 

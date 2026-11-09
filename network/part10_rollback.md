@@ -120,7 +120,8 @@ inline fp Div(fp a, fp b) {
     // b != 0은 호출 전 불변식. 결과가 int32 표현 범위를 넘으면 별도 정책으로 처리한다.
     return (fp)(((int64_t)a * 65536) / b);
 }
-inline fp FromInt(int x)   { return x << 16; }
+// 전제: x는 [-32768, 32767] 범위다. 곱은 넓은 타입에서 수행한다.
+inline fp FromInt(int x)   { return (fp)((int64_t)x * FP_ONE); }
 inline int ToInt(fp x)     { return x >> 16; }   // 버림
 inline fp FromFloat(float f) { return (fp)(f * FP_ONE); }   // 빌드 시점 상수에만
 ```
@@ -142,7 +143,7 @@ int b = x / FP_ONE;         // truncate =>  0   (FP_ONE = 1<<16)
 // a != b — 음수에서 두 변환 규칙이 1 LSB 어긋난다
 ```
 
-한 시뮬 경로가 `>> 16` 을, 다른 경로가 `/ FP_ONE` 이나 float 캐스트를 쓰면 음수 좌표에서 1 LSB 차이가 시뮬 상태에 새어 *디싱크의 씨앗* 이 된다. 모든 시뮬 코드가 *한 규칙만* 쓰도록 강제하고, 변환 헬퍼를 단일 함수로 통일해야 한다. 추가 경계 — *부호 있는 정수의 우시프트* 는 C++17까지 음수 피연산자에서 구현 정의 동작이었고, 두 보수와 산술 우시프트가 표준에 명문화된 것은 C++20(P0907)부터다. C++20이 명문화한 것은 음수 *우*시프트의 산술 동작이고, 음수 *좌*시프트는 `Div` 처럼 넓은 곱셈으로 미리 피한다. 어떤 shift가 C++20에서 정의되었다는 사실을 signed 덧셈·곱셈·좁히기·fixed-point 전체 계산의 overflow 안전성으로 확대하지 않는다. 실무 컴파일러는 모두 산술 시프트지만, 결정론을 표준 보장으로 받치려면 C++20 이상을 기준 삼는 편이 안전하다. 마지막으로 `Div` 의 0 나눗셈은 UB이므로 호출 전 불변식으로 차단하고, `Mul`·`Div` 결과가 16.16 표현 범위 $\pm 2^{15}$ 를 넘으면 조용히 오버플로하므로 좌표·속도 스케일을 그 범위 안에 설계한다.
+한 시뮬 경로가 `>> 16` 을, 다른 경로가 `/ FP_ONE` 이나 float 캐스트를 쓰면 음수 좌표에서 1 LSB 차이가 시뮬 상태에 새어 *디싱크의 씨앗* 이 된다. 모든 시뮬 코드가 *한 규칙만* 쓰도록 강제하고, 변환 헬퍼를 단일 함수로 통일해야 한다. 추가 경계 — *부호 있는 정수의 우시프트* 는 C++17까지 음수 피연산자에서 구현 정의 동작이었고, 두 보수와 산술 우시프트가 표준에 명문화된 것은 C++20(P0907)부터다. C++17에서는 음수 signed 좌시프트가 정의되지 않지만, C++20의 좌시프트는 유효한 shift count에서 결과 타입 폭을 기준으로 modulo 규칙을 따른다. 위 `FromInt`와 `Div`는 구 표준 호환성과 표현 범위를 분명히 하기 위해 넓은 곱을 사용한다. 결과가 `fp` 범위에 들어야 narrowing 변환 결과를 의도대로 보존한다. 어떤 shift가 C++20에서 정의되었다는 사실을 signed 덧셈·곱셈·좁히기·fixed-point 전체 계산의 overflow 안전성으로 확대하지 않는다. 실무 컴파일러는 모두 산술 시프트지만, 결정론을 표준 보장으로 받치려면 C++20 이상을 기준 삼는 편이 안전하다. 마지막으로 `Div` 의 0 나눗셈은 UB이므로 호출 전 불변식으로 차단하고, `Mul`·`Div` 결과가 16.16 표현 범위 $\pm 2^{15}$ 를 넘으면 조용히 오버플로하므로 좌표·속도 스케일을 그 범위 안에 설계한다.
 
 ### float 결정론의 함정
 
@@ -284,37 +285,9 @@ if (delayInclusiveGap > kThreshold) {
 
 상대 입력이 *예측과 다른 것* 으로 확정 시 — 그 tick 으로 롤백 + *현재까지 재시뮬*.
 
-```cpp
-void OnRemoteInputReceived(int playerId, uint32_t tick, Input input, History& h) {
-    FrameData& f = h.At(tick);
-    if (f.tick != tick) return;                      // 히스토리 밖 — 무시(또는 에러)
-    if (f.inputs[playerId] == input) {
-        f.confirmed[playerId] = true;                 // 예측 적중 또는 같은 확정 입력
-        return;                                       // rewind 불필요
-    }
-    if (f.confirmed[playerId]) return;                // 충돌하는 중복은 protocol error로 기록
+재시뮬레이션에서는 입력이 달라진 가장 이른 tick의 **시작 상태**를 복원한다. 먼저 그 tick부터 현재 직전까지 모든 history 슬롯의 tick 태그와 보존 범위를 검증하고, 확정된 입력을 반영한다. 이후 tick마다 이미 확정된 입력은 유지하고 아직 미확정인 입력은 갱신된 과거 입력에 따라 다시 예측한 뒤 시뮬레이션한다. 각 tick의 시작 상태와 해시도 다시 저장하고, 마지막 결과를 현재 시뮬레이션 상태에 적용한다.
 
-    // 예측 실패 — 롤백
-    f.inputs[playerId] = input;
-    f.confirmed[playerId] = true;
-    GameState s = f.state;                           // tick 시작 상태 복원
-
-    // tick..currentTick 재시뮬. tick 공간은 2^32로 감싸므로 t < currentTick 비교
-    // 대신 모듈로 거리를 쓴다(보존 구간이 반 바퀴보다 짧을 때만 유효).
-    const uint32_t count = currentTick - tick;       // end는 exclusive
-    if (count > HISTORY_SIZE || count >= 0x80000000u)
-        return;                                      // 히스토리 밖 — 무시(또는 에러)
-
-    for (uint32_t step = 0; step < count; ++step) {
-        const uint32_t t = tick + step;              // 2^32 modulo
-        FrameData& ft = h.At(t);
-        if (ft.tick != t) return;                    // 저장 tag 검사
-        Simulate(s, ft.inputs);                      // 확정/예측 섞인 입력으로
-        h.At(t + 1).state = s;                       // 재계산된 상태 저장
-        h.At(t + 1).stateHash = HashState(s);
-    }
-}
-```
+가장 이른 입력이 바뀌면 그 뒤의 "마지막 입력 반복" 예측들도 달라질 수 있다. 저장된 예측을 그대로 재사용하면 틀린 상태가 남는다. history가 부족하거나 동일 tick에 충돌하는 확정 입력이 들어오면 조용히 진행하지 않고 재동기화 또는 연결 종료 정책을 적용한다. 여러 늦은 입력은 먼저 모아 가장 이른 tick부터 한 번 재시뮬레이션한다.
 
 ### 비용 모델
 

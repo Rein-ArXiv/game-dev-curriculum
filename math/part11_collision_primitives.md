@@ -473,7 +473,7 @@ for (auto& box : staticGeometry) {
 }
 ```
 
-각 정적 박스에 대해 *침투 해소*. 반복하면 캐릭터가 모든 박스에서 분리.
+각 정적 박스에 대해 *침투 해소*. 한 박스에서 밀어낸 결과가 앞서 처리한 다른 박스에 다시 겹칠 수 있으므로, 여러 접촉은 반복 처리나 별도 제약 해법이 필요하다.
 
 **총알 vs 정적 환경**: 광선 (Ray) 으로 처리하는 게 더 정확하지만, *작은 총알 = Sphere* 도 OK.
 
@@ -536,7 +536,7 @@ bool OBBOBBIntersectSAT(OBB a, OBB b) {
 }
 ```
 
-각 축에서 *두 OBB의 투영이 겹치는가* 를 검사. 한 축에서라도 분리되면 false.
+각 축에서 *두 OBB의 투영이 겹치는가* 를 검사. 한 축에서라도 분리되면 false. 위의 임계값은 정확히 평행한 축뿐 아니라 거의 평행한 축도 건너뛰므로, 그 축만이 분리축인 경우 겹친다고 잘못 판정할 수 있는 보수적 근사다. 정밀 판정에는 스케일과 오차를 고려한 SAT 구현을 쓴다.
 
 ```cpp
 bool IsSeparated(OBB a, OBB b, vec3 axis) {
@@ -587,7 +587,7 @@ OBB가 등장하는 곳:
 핵심: *두 선분 사이 최단 거리*.
 
 $$
-\text{distance}(\text{capsule}_1, \text{capsule}_2) = \text{distance}(\text{seg}_1, \text{seg}_2) - r_1 - r_2
+\text{distance}(\text{capsule}_1, \text{capsule}_2) = \max(0,\;\text{distance}(\text{seg}_1, \text{seg}_2) - r_1 - r_2)
 $$
 
 선분 사이 거리는 *parametric form* 으로 풀이 (코드 복잡, 닫힌 형태 있음).
@@ -800,7 +800,7 @@ vec3 ClosestPointOnSolidSphere(vec3 p, Sphere s) {
 }
 ```
 
-*충돌 알고리즘 (closest feature, GJK 의 지원 함수)* 에서는 *체적 기준*. *물체 표면 위 점이 필요* 한 경우 (랜덤 샘플링, 표면 위 마커) 는 *표면 기준*.
+충돌에서 점과 도형의 거리를 구할 때는 *체적 기준* 이 자연스럽다. GJK의 지원 함수는 주어진 방향의 내적을 최대화하는 점을 찾는 별도 연산이다. *물체 표면 위 점이 필요* 한 경우 (표면 위 마커) 는 *표면 기준* 을 쓴다.
 
 ### 7.6 Closest Point 함수 표
 
@@ -874,6 +874,7 @@ bool DetectsPlayer(Enemy& enemy, vec3 playerPos, float detectRadius, float fovDe
     if (dist > detectRadius) return false;
 
     // 2. FOV 콘 검사 (전방 벡터와 시선 방향의 각도 비교)
+    if (dist == 0.0f) return true;  // 같은 위치: 방향이 없어 감지로 처리하는 정책
     vec3 dir = toPlayer / dist;
     float cosHalfFov = std::cos(radians(fovDeg * 0.5f));
     if (dot(enemy.forward, dir) < cosHalfFov) return false;

@@ -26,14 +26,14 @@
 
 프로그래밍 언어 구현은 오랫동안 두 진영으로 나뉘어 있었다:
 
-**인터프리터**: 소스 코드를 한 줄씩 읽어가며 즉시 실행
+**인터프리터**: AST나 바이트코드 같은 프로그램 표현을 해석하며 실행
 - 빠른 시작 시간
-- 느린 실행 속도 (명령어당 수십~수백 개의 CPU 사이클)
+- 명령 해독·디스패치 비용이 들 수 있음 (비용은 표현과 구현에 따라 달라짐)
 - 예: 초기 Python, Ruby, JavaScript(V8 이전)
 
 **AOT 컴파일러**: 실행 전에 기계어로 완전히 번역
 - 긴 컴파일 시간
-- 빠른 실행 속도 (명령어당 1~몇 개의 CPU 사이클)
+- 런타임 명령 해독을 줄이고 정적 최적화를 적용할 수 있음 (실제 비용은 생성 코드와 workload에 따라 달라짐)
 - 예: C, C++, Rust, Go
 
 1960년대 McCarthy의 LISP 인터프리터부터 시작된 이 이분법은, 1984년 Deutsch와 Schiffman의 "Efficient Implementation of the Smalltalk-80 System" 논문에서 무너지기 시작했다.
@@ -49,11 +49,11 @@
 이론상 인터프리터로는 절망적으로 느렸어야 했다. 하지만 SELF-93은 이런 극단적 동적성을 가지고도 최적화 C 코드의 절반 수준 성능에 도달했다(Hölzle, "Adaptive Optimization for SELF", PhD thesis, Stanford, 1994). 비밀은 **adaptive optimization**에 있었다:
 
 ```text
-시작: 인터프리터로 실행
+시작: 빠른 컴파일러가 생성한 초기 코드로 실행
   ↓
 hot spot 발견 (자주 실행되는 코드)
   ↓
-JIT 컴파일 → 네이티브 기계어
+최적화 컴파일러로 재컴파일 → 특수화된 네이티브 기계어
   ↓
 이후 실행은 네이티브 코드
 ```
@@ -332,7 +332,7 @@ int main() {
 
 ### DEP/NX Bit의 역사
 
-**2004년 이전**: CPU는 메모리가 코드인지 데이터인지 구분하지 못했다. 모든 메모리가 실행 가능했다. 이는 재앙이었다:
+**NX가 보편화되기 전의 주류 32비트 x86 환경**에서는 페이지 단위로 데이터의 실행을 막는 보호가 부족했다. 이를 모든 과거 CPU에 일반화할 수는 없지만, 당시 스택에 주입한 코드를 실행하는 공격은 큰 문제였다:
 
 ```c
 // 전형적인 버퍼 오버플로우 공격
@@ -350,7 +350,7 @@ strcpy(buffer, user_input);  // 공격자가 200바이트 전송
 - NX=1이면 해당 페이지 실행 시 CPU 예외 발생
 - OS가 스택과 힙을 NX=1로 설정
 
-갑자기 모든 JIT 구현이 작동을 멈췄다. 일반 `malloc` 메모리를 실행할 수 없게 되었기 때문이다.
+DEP가 적용되는 환경에서는 일반 `malloc` 메모리를 그대로 실행하던 JIT 구현을 바꿔야 했다. 실행 권한을 명시적으로 요청하던 JIT까지 모두 작동을 멈춘 것은 아니다.
 
 ### mprotect의 작동 원리
 
@@ -358,7 +358,7 @@ strcpy(buffer, user_input);  // 공격자가 200바이트 전송
 int mprotect(void *addr, size_t len, int prot);
 ```
 
-- **addr**: 페이지 정렬된 주소 (4KB 경계)
+- **addr**: OS가 요구하는 페이지 크기에 정렬된 주소 (4KB로 고정되지 않음)
 - **len**: 보호할 크기
 - **prot**: `PROT_READ | PROT_WRITE | PROT_EXEC`의 조합
 
@@ -459,7 +459,7 @@ typedef struct Node {
 
 ### 2단계: 코드 생성
 
-이 예제는 Linux x86-64의 System V ABI를 전제한다. 같은 x86-64라도 Windows x64의 첫 정수 인자는 `rcx`이므로 아래 레지스터 규약을 그대로 옮기지 않는다.
+이 예제는 Linux x86-64의 System V ABI를 전제한다. 같은 x86-64라도 Windows x64의 첫 정수 인자는 `rcx`이므로 아래 레지스터 규약을 그대로 옮기지 않는다. C의 `int` 수식과 결과를 비교할 때는 모든 중간 결과가 32비트 부호 있는 정수 범위 안에 있다고 가정한다. 생성된 `add`·`imul`은 하위 32비트를 남기므로, 범위를 넘는 입력까지 허용하려면 언어의 wrap 또는 overflow 검사 규칙을 따로 정해야 한다.
 
 x86-64 System V calling convention:
 - 첫 번째 인자: `rdi` (32비트는 `edi`)
@@ -811,7 +811,7 @@ struct PolymorphicCache {
 
 ### Megamorphic State
 
-5개 이상의 타입이 오면 **megamorphic**으로 전환:
+위처럼 네 항목만 보관하는 예에서는 더 많은 타입이 오면 **megamorphic**으로 전환할 수 있다. 실제 임계값과 캐시 정책은 엔진·연산 종류·버전에 따라 다르다:
 
 ```javascript
 // 수십 개의 서로 다른 타입
@@ -827,7 +827,7 @@ V8은 다음 상태 전이를 거친다:
 Uninitialized → Monomorphic → Polymorphic → Megamorphic
 ```
 
-한번 Megamorphic이 되면 돌아오지 못한다 (deoptimization이 있기 전까진).
+이 상태는 해당 지점에 여러 타입이 관찰됐다는 피드백이다. 최적화된 실행 상태를 복구하는 deoptimization과 IC 피드백을 초기화하는 일은 별개이며, deopt가 발생한다고 자동으로 monomorphic 상태로 돌아가는 것은 아니다.
 
 ### JIT과 IC의 결합
 
@@ -863,7 +863,7 @@ call_rect:
 done:
 ```
 
-**Megamorphic일 때**: 최적화 포기, 인터프리터로 폴백하거나 generic lookup.
+**Megamorphic일 때**: 해당 호출에 generic lookup이나 공용 캐시를 사용할 수 있다. 이 호출 하나의 상태 때문에 함수 전체가 반드시 인터프리터로 돌아가는 것은 아니다.
 
 ## 7. 디옵티마이제이션: 추측이 틀렸을 때
 
@@ -976,12 +976,12 @@ function bad(x) {
 for (let i = 0; i < 100000; i++) {
     bad(i);           // 정수 → JIT 컴파일
     if (i % 100 == 0) {
-        bad("x");     // 문자열 → deopt
-    }                // 다시 정수 → 재컴파일
-}                    // 반복...
+        bad("x");     // 정수 전용 코드라면 deopt를 유발할 수 있음
+    }
+}
 ```
 
-V8은 "deopt 횟수"를 세어, 너무 자주 일어나면 최적화를 포기한다.
+이 코드가 매번 deopt와 재컴파일을 반복한다는 뜻은 아니다. 엔진은 문자열 입력까지 피드백에 반영해 더 일반적인 코드를 만들 수 있다. 실제 deopt loop인지는 대상 버전의 최적화·deopt 로그로 확인해야 하며, 잦은 실패에 대한 재최적화 정책도 엔진과 버전에 따라 달라진다.
 
 ## 8. 실전: LuaJIT, V8,.NET의 구현
 
@@ -1095,6 +1095,8 @@ ret
 ```
 
 **TurboFan (최적화, a와 b가 항상 SMI)**:
+아래는 정수를 두 배로 태깅해 64비트 레지스터에 담는 개념 코드다. 실제 V8의 SMI 폭과 태그 배치는 빌드·pointer compression 설정에 따라 다르며, 이 코드를 특정 버전의 dump로 제시하는 것은 아니다.
+
 ```assembly
 ; Guard
 test rdi, 1
@@ -1160,7 +1162,7 @@ mov ecx, 0
     ret
 ```
 
-**Tier 1** (SIMD vectorized):
+**SIMD로 벡터화한 합산의 개념 코드** (위 C# 스칼라 루프가 Tier 1에서 반드시 이렇게 변환된다는 뜻은 아니다. 명시적 `Vector<T>`/intrinsic 사용 여부와 대상 JIT의 지원을 확인한다):
 ```assembly
 vxorps xmm0, xmm0, xmm0
 xor eax, eax

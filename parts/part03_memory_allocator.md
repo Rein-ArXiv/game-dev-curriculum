@@ -90,7 +90,7 @@ LPVOID pCommitted = VirtualAlloc(
 2. **동적 확장**: 배열 재할당 없이 커밋 영역만 늘려서 크기를 증가
 3. **메모리 압박 완화**: 필요한 시점에만 물리 메모리를 소비
 
-64비트 시스템에서는 주소 공간이 사실상 무제한(이론적으로 128TB+)이므로, 예약은 매우 저렴한 연산이다.
+64비트 프로세스는 보통 물리 RAM보다 훨씬 넓은 가상 주소 공간을 사용할 수 있어 이런 예약 전략을 쓸 수 있다. 그래도 사용 가능한 주소 폭은 CPU·OS·프로세스 구성에 따라 유한하고, 연속 영역 부족과 매핑 메타데이터 비용 때문에 예약이 실패할 수 있다.
 
 ### 페이지 크기와 서브페이지 할당의 필요성
 
@@ -262,6 +262,7 @@ Fast bins는 주기적으로 consolidation(병합) 과정을 거쳐 단편화를
 glibc 2.26부터 도입된 **tcache**는 혁명적인 개선이다.
 
 ```c
+// 흐름을 보이는 구조 개요. counts 원소 폭 등은 glibc 버전별로 다르다.
 typedef struct tcache_perthread_struct {
     uint16_t counts[TCACHE_MAX_BINS];        // 각 bin의 청크 개수
     tcache_entry *entries[TCACHE_MAX_BINS];  // LIFO 스택
@@ -397,7 +398,7 @@ Tcache가 대부분의 경우를 커버하지만, tcache 미스 시에는 여전
 ### 설계 철학
 
 jemalloc의 핵심 목표는 두 가지이다:
-1. **메모리 단편화 최소화**: 장기 실행 서버에서 메모리 누수 방지
+1. **메모리 단편화 최소화**: 장기 실행 서버에서 할당·보유 메모리의 낭비 감소 (애플리케이션의 누수를 고치는 것은 아님)
 2. **멀티스레드 확장성**: 스레드 수가 증가해도 성능 유지
 
 이를 위해 세 가지 핵심 아이디어를 사용한다:
@@ -569,16 +570,16 @@ struct arena_t {
     // 4단계 메모리 상태
     extent_tree_t extents_dirty;     // 해제됨, 빠른 재사용
     extent_tree_t extents_muzzy;     // 부분 해제
-    extent_tree_t extents_retained;  // 완전 해제
+    extent_tree_t extents_retained;  // 재사용하려고 가상 매핑을 보존
 };
 ```
 
-메모리는 다음 4단계 상태를 거친다:
+메모리 사용을 볼 때 다음 상태를 구분한다. 모든 extent가 이 순서로 이동하는 것은 아니다:
 
 1. **Active**: 현재 사용 중
 2. **Dirty**: 해제되었지만 물리 메모리는 유지 (빠른 재할당 가능)
 3. **Muzzy**: MADV_FREE 적용, OS가 메모리 압박 시 회수 가능
-4. **Retained**: 완전 해제, 주소 공간만 유지
+4. **Retained**: OS에 매핑을 반환하지 않고 재사용하려고 보존. 보통 untouched·decommitted·purged 상태지만 실제 backing은 extent hook과 플랫폼 정책에 의존
 
 **Decay-based purging**은 시간 기반으로 메모리를 단계적으로 해제한다:
 
@@ -755,7 +756,9 @@ private:
 
 Span은 여러 페이지의 집합이며, 동일 크기 객체들을 담는다:
 
-**Span (8 pages = 32KB, 64바이트 객체용):**
+**Span (논리 page를 4KiB로 잡은 설정 예: 8 pages = 32KiB, 64바이트 객체용):**
+
+TCMalloc의 논리 page 크기는 빌드 설정에 따라 달라지며 OS page와 같다는 보장은 없다.
 
 | 내용 | 설명 |
 |------|------|
@@ -983,7 +986,8 @@ CAS는 경쟁이 없으면 첫 시도에 성공할 수 있지만 동시 원격 �
 mimalloc이 빠른 또 다른 이유는 포인터로부터 페이지 메타데이터를 O(1)에 찾는 기법이다.
 
 ```c
-// 세그먼트(기본 4MiB)는 4MiB 경계에 정렬되어 있다
+// 세그먼트 크기·정렬과 page index를 단순화한 개념 코드다.
+// MI_SEGMENT_MASK는 대상 버전·설정의 segment alignment에서 얻는다.
 static inline mi_segment_t* mi_ptr_segment(const void* p) {
     return (mi_segment_t*)((uintptr_t)p & ~MI_SEGMENT_MASK);
 }
@@ -997,7 +1001,7 @@ static inline mi_page_t* mi_ptr_page(void* p) {
 }
 ```
 
-페이지(작은 객체용 64KiB 단위)들은 4MiB 정렬된 세그먼트 안에 담기고, 페이지 메타데이터는 세그먼트 헤더의 배열에 모여 있다. 포인터에서 비트 마스킹 한 번으로 세그먼트 헤더를 찾고, 오프셋 시프트로 페이지 인덱스를 얻는다. 이는 다음과 같은 장점이 있다:
+페이지를 정렬된 세그먼트 안에 배치하면 포인터의 비트 마스킹으로 세그먼트를 찾고 그 안의 위치로 메타데이터를 찾을 수 있다. 위 도식의 고정 `page_shift`는 개념 모델이며, 실제 페이지·slice 배치와 metadata 위치는 버전에 따라 다르다. 예를 들어 mimalloc v2.1.7의 기본 64비트 설정은 64KiB slice와 32MiB segment를 사용한다. 과거의 4MiB 도식을 모든 버전의 기본값으로 읽으면 안 된다. 이 계열의 기법은 다음과 같은 장점이 있다:
 - 별도 객체별 해시 테이블 불필요. jemalloc도 arbitrary pointer의 extent metadata를 찾을 때 radix tree 계열 `rtree`를 사용하며 단순한 "extent 트리 선형 검색"은 아니다.
 - 캐시 미스 최소화
 - 예측 가능한 성능
@@ -1102,11 +1106,13 @@ Large Page는 다음과 같은 경우 효과적이다:
 // 1. Large Page 크기 확인 (지원하지 않으면 0)
 SIZE_T largePageSize = GetLargePageMinimum();
 if (largePageSize == 0) {
-    // 이 시스템은 large page 미지원
+    exit(EXIT_FAILURE); // 미지원이면 아래 나눗셈·할당으로 진행하지 않는다
 }
 
 // 2. 필요한 크기를 largePageSize의 배수로 올림 (overflow 검사 포함)
 SIZE_T want = 100 * 1024 * 1024;   // 100MB
+if (want > SIZE_MAX - (largePageSize - 1))
+    exit(EXIT_FAILURE);
 SIZE_T size = ((want + largePageSize - 1) / largePageSize) * largePageSize;
 
 // 3. 권한 필요 (SeLockMemoryPrivilege)
@@ -1322,10 +1328,12 @@ public:
     }
 
     void Grow(size_t new_size) {
+        if (new_size > reserved_)
+            return;
         if (new_size > committed_) {
             // 64KB 단위로 커밋 확장
             size_t new_commit = RoundUp(new_size, 64 * 1024);
-            if (new_commit > reserved_)
+            if (new_commit < new_size || new_commit > reserved_)
                 return;   // 예약 범위 초과
 
             // 성공한 뒤에만 장부를 갱신한다.
@@ -1352,11 +1360,11 @@ public:
             if (new_commit == 0)
                 return;
 
-            VirtualFree(
+            if (!VirtualFree(
                 (char*)base_ + new_commit,
                 committed_ - new_commit,
                 MEM_DECOMMIT
-            );
+            )) return;
 
             committed_ = new_commit;
         }
@@ -1511,7 +1519,7 @@ public:
 // 간단한 벤치마크 프레임워크
 #include <chrono>
 
-static thread_local void* g_sink;  // 결과 escape로 할당 제거 방지 (스레드별)
+static thread_local void* volatile g_sink; // 스레드별 volatile 포인터 저장: 값 사용을 관측 가능하게 함
 
 void benchmark_allocator(int num_threads, int iterations) {
     if (num_threads <= 0 || iterations <= 0)
@@ -1531,19 +1539,20 @@ void benchmark_allocator(int num_threads, int iterations) {
 
     auto end = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    const std::uint64_t totalOps = std::uint64_t(num_threads) * std::uint64_t(iterations);
 
     // 시작-끝 wall time을 전체 병렬 op 수로 나눈 값은 역처리량이지
     // 개별 할당의 latency가 아니다. 단일 op 지연은 별도로 측정한다.
     std::cout << "Total: " << duration.count() << " ns\n";
     std::cout << "Wall per op: "
-              << duration.count() / (num_threads * iterations) << " ns\n";
+              << duration.count() / totalOps << " ns\n";
     std::cout << "Throughput: "
-              << (double)num_threads * iterations / (duration.count() * 1e-9)
+              << (double)totalOps / (duration.count() * 1e-9)
               << " ops/s\n";
 }
 ```
 
-`g_sink`가 없으면 관찰 가능한 사용이 없어 컴파일러가 `malloc`/`free` 쌍을 최적화로 제거할 수 있다. 실제 측정에서는 생성한 assembly나 profile로 할당이 남아 있는지 확인한다.
+일반 포인터 전역에 대입하는 것만으로는 관측 가능한 사용이 되지 않아, 사용되지 않는 저장과 `malloc`/`free` 쌍이 함께 제거될 수 있다. 여기서는 포인터 자체의 저장을 `volatile`로 만들었고, `totalOps`는 곱셈 전에 넓은 정수로 변환해 overflow를 피한다(`std::uint64_t`에는 `<cstdint>` 필요). 한 op는 `malloc`과 `free` 한 쌍이며 volatile 저장 비용도 포함한다. 실제 측정에서는 생성한 assembly나 profile로 할당이 남아 있는지 확인한다.
 
 각 할당자로 컴파일해서 비교(아래는 헤더·`main`·결과 사용부를 포함한 `bench.cpp`가 있다고 가정한 발췌다):
 

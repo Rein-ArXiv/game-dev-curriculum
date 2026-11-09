@@ -39,7 +39,7 @@
 
 ### 1.1 Round-off Error (반올림 오차)
 
-각 부동소수점 연산 (+, -, *, /, sqrt) 이 *결과를 가장 가까운 표현 가능 값에 반올림*. 그 반올림 차이가 *machine epsilon (ULP)* 단위.
+round-to-nearest 환경에서 기본 부동소수점 연산의 정확한 결과는 가장 가까운 표현 가능 값으로 반올림된다. ULP는 해당 값 근처의 표현 간격이고, machine epsilon은 1과 그보다 큰 인접 표현값의 간격이다. 둘은 같은 개념이 아니다.
 
 ```mermaid
 flowchart LR
@@ -47,7 +47,7 @@ flowchart LR
     B --> C[오차 ≤ ULP/2]
 ```
 
-float (32-bit) 의 *machine epsilon* ≈ $1.19 \times 10^{-7}$. 한 연산의 오차 *작음*. 하지만 *누적* 되면 큰 문제.
+binary32의 *machine epsilon* 은 $2^{-23} \approx 1.19 \times 10^{-7}$, round-to-nearest의 unit roundoff $u$ 는 그 절반인 $2^{-24}$다. 반 ULP 경계는 정상적인 유한 결과와 이 반올림 모드에 대한 설명이며 overflow 등은 별도로 다룬다.
 
 ### 1.2 Truncation Error (절단 오차)
 
@@ -226,39 +226,43 @@ $b^2 \gg 4ac$ 이면 *판별식이 b² 와 거의 같음* — 한 해가 *catast
 
 ```cpp
 // 해의 개수를 반환한다. 2: 서로 다른 두 실근, 1: 중근, 0: 실근 없음,
-// -1: 항등식(모든 x 가 해), -2: 불능(해 없음) — 선형 퇴화 a=0 분기.
+// -1: 항등식, -2: 불능/입력 오류, -3: 근을 float 범위에 표현 불가.
 int SolveQuadratic(float a, float b, float c, float& x1, float& x2) {
     // 유한 계수만 받는다. inf/NaN 은 호출부 계약 위반이다.
     if (!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(c)) return -2;
 
-    float scale = std::max({std::fabs(a), std::fabs(b), std::fabs(c)});
+    double A = a, B = b, C = c;  // binary32 계수를 더 넓은 형식에서 계산
+    double scale = std::max({std::fabs(A), std::fabs(B), std::fabs(C)});
     if (scale == 0.0f) { x1 = x2 = 0.0f; return -1; }   // 0 = 0 항등식
 
-    // 스케일링은 계수 overflow 를 줄이는 보강이지, 계수가 극단으로 갈 때
-    // exact discriminant 부호 판별을 보장하지는 않는다.
-    a /= scale; b /= scale; c /= scale;
+    A /= scale; B /= scale; C /= scale;
+    auto store = [&](double r1, double r2, int count) {
+        const double limit = std::numeric_limits<float>::max();
+        if (!std::isfinite(r1) || !std::isfinite(r2) ||
+            std::fabs(r1) > limit || std::fabs(r2) > limit) return -3;
+        float f1 = static_cast<float>(r1), f2 = static_cast<float>(r2);
+        if ((r1 != 0.0 && f1 == 0.0f) || (r2 != 0.0 && f2 == 0.0f)) return -3;
+        x1 = f1; x2 = f2;
+        return count;
+    };
 
-    if (a == 0.0f) {                       // 선형 b x + c = 0
-        if (b == 0.0f) return (c == 0.0f) ? -1 : -2;
-        x1 = x2 = -c / b;
-        return 1;
+    if (A == 0.0) {                       // 선형 b x + c = 0
+        if (B == 0.0) return (C == 0.0) ? -1 : -2;
+        return store(-C / B, -C / B, 1);
     }
-    float disc = b * b - 4.0f * a * c;
+    double disc = B * B - 4.0 * A * C;
     if (disc < 0.0f) return 0;
     if (disc == 0.0f) {                    // 중근: q = 0 이 되어 c/q 가 NaN 이 된다
-        x1 = x2 = -b / (2.0f * a);
-        return 1;
+        return store(-B / (2.0 * A), -B / (2.0 * A), 1);
     }
-    float sqrtD = std::sqrt(disc);
+    double sqrtD = std::sqrt(disc);
     // 부호로 catastrophic cancellation 회피
-    float q = -0.5f * (b + std::copysign(sqrtD, b));
-    x1 = q / a;
-    x2 = c / q;                            // disc > 0 이므로 q != 0
-    return 2;
+    double q = -0.5 * (B + std::copysign(sqrtD, B));
+    return store(q / A, C / q, 2);        // disc > 0 이므로 q != 0
 }
 ```
 
-*Numerical Recipes* 의 표준 형태다. $b^2 \gg 4ac$ 에서 큰 쪽 근을 $\lvert q\rvert$ 로 골라 $x_1=c/q$ 로 다른 근을 얻으므로 두 근이 모두 안정적이고, 중근은 $q$ 가 0 이 되기 전에 분기해 NaN 을 막는다. $a=0$ 선형 입력은 별도 분기로 처리하며, 계수 크기 차이가 극단일 때 $disc=0$ 접선 판정은 스케일링으로도 부호가 흔들릴 수 있어 정확한 tangent 판정이 필요한 호출부는 추가 정책을 둔다. Ray-sphere 교차도 이 패턴을 활용한다.
+*Numerical Recipes* 의 표준 형태다. $b^2 \gg 4ac$ 에서 상쇄가 작은 쪽의 분자 $q$ 로 $x_1=q/a$ 를 구하고 $x_2=c/q$ 로 다른 근을 얻어 상쇄를 줄인다. 예제는 `float`이 binary32, `double`이 binary64이고 서브노멀을 보존하는 환경을 가정한다. 넓은 타입의 중간 계산 뒤 근이 `float` 범위를 넘거나 비영 근이 0으로 반올림되면 -3을 반환한다. 근접한 두 근은 float로 변환하면 같은 값이 될 수도 있다. 판별식 부호는 여전히 반올림에 흔들릴 수 있으므로 정확한 접선 판정에는 별도 정밀도·오차 정책이 필요하다. Ray-sphere 교차도 이 패턴을 활용한다.
 
 ## 3. Kahan Summation
 
@@ -673,7 +677,7 @@ GPU의 varying 보간은 일반적으로 vector 길이를 보존하지 않는다
 
 ### 7.6 NaN 의 전파
 
-*0 으로 나누기* 또는 *sqrt(음수)* 에서 NaN 발생. NaN 은 *모든 연산에서 NaN 으로 전파*.
+IEEE 부동소수점에서 `0/0`이나 `sqrt(음수)`는 NaN을 만들고, 유한한 비영 수를 0으로 나누면 보통 부호 있는 무한대가 나온다. NaN은 많은 산술 연산에 전파되지만 비교와 일부 함수의 동작은 별도로 정해져 있다.
 
 ```cpp
 vec3 dir = b - a;
@@ -764,7 +768,7 @@ bool SafeNormalize(vec3 v, vec3 fallback, vec3& out) {
 ### 8.8 NaN / Inf
 
 ```cpp
-[ ] sqrt(-x), 1/0, 0*Inf 같은 패턴이 NaN 안 만드는가
+[ ] sqrt(-x), 0/0, 0*Inf의 NaN 및 비영 수 / 0의 Inf를 처리하는가
 [ ] NaN 검출 (std::isnan) 이 디버그 빌드에 있는가
 [ ] NaN 이 한 번 등장하면 시스템 전체 망가질 수 있다 — 진입점 가드
 ```

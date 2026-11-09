@@ -118,13 +118,16 @@ void DistanceJoint::PrepareVelocityConstraint(float dt) {
     rB = Rotate(localB, bodyB->angle);
     vec2 d  = (bodyB->position + rB) - (bodyA->position + rA);
     float L = length(d);
-    u = (L > 1e-6f) ? d / L : vec2{0, 0};
+    // 양의 restLength에서 겹친 anchor도 분리하도록 결정적 대체축.
+    u = (L > 1e-6f) ? d / L : vec2{1, 0};
 
     float rAcrossU = Cross2D(rA, u);
     float rBcrossU = Cross2D(rB, u);
-    effMass = 1.0f / (bodyA->invMass + bodyB->invMass
-                      + rAcrossU * rAcrossU * bodyA->invInertia
-                      + rBcrossU * rBcrossU * bodyB->invInertia);
+    float invEffectiveMass = bodyA->invMass + bodyB->invMass
+                           + rAcrossU * rAcrossU * bodyA->invInertia
+                           + rBcrossU * rBcrossU * bodyB->invInertia;
+    effMass = (invEffectiveMass > 0) ? 1.0f / invEffectiveMass : 0.0f;
+    gamma = 0.0f; // 매 prepare에서 hard 기본값으로 재설정
 
     bias = (kBaumgarte / dt) * (L - restLength);
 }
@@ -146,7 +149,7 @@ void DistanceJoint::SolveVelocityConstraint() {
 }
 ```
 
-normal impulse 와 거의 같은 코드. equality 제약이라 *clamp 없음*.
+normal impulse 와 거의 같은 코드. equality 제약이라 *clamp 없음*. restLength=0이면 방향이 없는 distance row보다 2절의 point constraint로 다룬다. local anchor는 이 예제의 position(COM)을 기준으로 저장하며, 모델 원점 기준 API라면 local COM을 먼저 빼야 한다.
 
 ### 1.6 게임 활용
 
@@ -235,7 +238,7 @@ C_{axis}: \begin{pmatrix} \hat{a}_1 \cdot \hat{n}_B \\ \hat{a}_2 \cdot \hat{n}_B
 
 $\hat{n}_B$ = body B 의 hinge 축 (월드), $\hat{a}_1, \hat{a}_2$ = body A 기준 hinge 축에 수직인 두 벡터.
 
-축 정렬 = $\hat{n}_A$ 와 $\hat{n}_B$ 가 평행 ⇔ $\hat{a}_1 \cdot \hat{n}_B = 0$ 이고 $\hat{a}_2 \cdot \hat{n}_B = 0$.
+이 식은 축이 평행하거나 반평행인 두 해를 허용한다. 생성 시 같은 방향으로 축을 맞추고 그 근방에서 푸는 국소식이며, 큰 초기 오정렬을 허용한다면 방향 선택과 특이 배치 처리가 추가로 필요하다. 축 정렬 = $\hat{n}_A$ 와 $\hat{n}_B$ 가 평행 ⇔ $\hat{a}_1 \cdot \hat{n}_B = 0$ 이고 $\hat{a}_2 \cdot \hat{n}_B = 0$.
 
 ### 3.2 2D 의 단순화
 
@@ -576,6 +579,7 @@ void DistanceJointSoft::PrepareVelocityConstraint(float dt) {
     if (frequency > 0) {
         // soft 모드 — gamma 계산
         float mass = effMass;
+        if (!(mass > 0.0f)) return; // 반응할 자유도가 없는 행은 비활성
         float omega = 2 * kPi * frequency;
         float k = mass * omega * omega;          // spring constant
         float c = 2 * mass * damping * omega;    // damping
@@ -589,7 +593,7 @@ void DistanceJointSoft::PrepareVelocityConstraint(float dt) {
 }
 ```
 
-기본값 `frequency = 0` 은 위 게이트에 걸려 soft 모드가 꺼진 상태 — 즉 *rigid 모드* 다. 이때 `gamma = 0` 이므로 base solve 식이 hard 제약과 정확히 일치한다. soft 로 쓰려면 `frequency` 에 양수를 준다. 예를 들어 *진동수 1 Hz + 감쇠 0.5* 로 두면 distance joint 의 위반량이 *고무처럼 응답*. soft 로 둔 row 는 hard position projection 으로 다시 조이지 않는다. hard 투영을 덧대면 compliance 가 사라진다.
+기본값 `frequency = 0` 은 위 게이트에 걸려 soft 모드가 꺼진 상태 — 즉 *rigid 모드* 다. base prepare에서 매번 초기화한 `gamma = 0` 이므로 base solve 식이 hard 제약과 정확히 일치한다. soft 로 쓰려면 `frequency` 에 양수를 준다. 예를 들어 *진동수 1 Hz + 감쇠 0.5* 로 두면 distance joint 의 위반량이 *고무처럼 응답*. soft 로 둔 row 는 hard position projection 으로 다시 조이지 않는다. hard 투영을 덧대면 compliance 가 사라진다.
 
 ### 7.4 API 로 노출할 값
 

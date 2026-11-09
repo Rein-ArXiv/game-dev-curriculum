@@ -110,10 +110,14 @@ TCP는 신뢰성 있고 순서가 있는 **바이트 스트림**을 제공한다
 ```
 
 ```cpp
-std::uint32_t length{};
-ReadExactly(socket, &length, sizeof(length));
-ValidateLength(length);
-ReadExactly(socket, payload.data(), length);
+// 이 예의 길이 필드는 4바이트 big-endian이다.
+// 두 보조 함수는 읽기 실패나 상한 위반 시 예외로 이 처리 경로를 중단한다.
+std::array<std::byte, 4> header{};
+ReadExactly(socket, header.data(), header.size());
+std::uint32_t length = ReadU32BigEndian(header);
+ValidateLength(length); // 메시지·세션·전체 메모리 예산을 할당 전에 검사
+std::vector<std::byte> payload(length);
+ReadExactly(socket, payload.data(), payload.size());
 ```
 
 `ReadExactly`는 TCP가 제공하는 API가 아니라 필요한 보조 동작이다. EOF, 부분 수신, 타임아웃, 취소 시의 반환 계약도 명시한다. 한 번의 `recv`가 메시지 전체를 반환한다고 가정하면 안 된다. 메시지 길이 또는 구분자를 애플리케이션 프로토콜에 둬야 한다.

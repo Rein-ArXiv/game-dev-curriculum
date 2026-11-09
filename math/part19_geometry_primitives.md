@@ -98,23 +98,14 @@ bool PlaneFromTriangle(vec3 v0, vec3 v1, vec3 v2, Plane& out) {
 
 오른손 좌표계 + CCW winding → 외적의 *오른손 법칙* 으로 *외향 법선*. CW winding 이면 부호 반대.
 
-게임 엔진의 표준:
-
-| 엔진 | winding | 외향 법선 |
-|---|---|---|
-| OpenGL | CCW | 오른손 외적 |
-| DirectX | CW (전통), CCW (현대) | 좌우수에 따름 |
-| Unity | CW | 오른손 |
-| Unreal | CCW | 좌수 |
-
-메쉬 임포트 시 *winding 자동 변환* 이 흔한 처리. *front face* 결정에 영향.
+front face의 CW/CCW는 화면에 투영된 winding과 rasterizer 설정의 계약이고, 외적 성분식과 월드 좌표계의 손잡이는 별도다. 메쉬 임포트 때 축 반전이 있으면 winding과 법선 변환을 함께 확인한다. 같은 엔진이나 API라도 설정·변환에 따라 결과가 달라질 수 있다.
 
 ### 1.5 표현 변환
 
 세 표현 사이는 *상호 변환 가능*.
 
 ```cpp
-// 점 + 법선 → Hessian
+// 점 + 단위 법선 → Hessian (비단위 법선은 먼저 정규화)
 Plane HessianFromPointNormal(PlanePointNormal pn) {
     return { pn.normal, dot(pn.normal, pn.point) };
 }
@@ -460,7 +451,7 @@ bool PointInPolygon(vec2 p, const std::vector<vec2>& verts) {
 
 *수평 광선이 다각형 변과 교차하는 횟수*. 홀수면 내부, 짝수면 외부. 이 규칙은 *단순 다각형* 을 전제로 하고, 변 위에 정확히 놓인 점의 분류는 위 부등호 비교의 세부에 따라 달라진다. 경계를 내부로 볼지 외부로 볼지는 *API 계약으로 고정* 해야 하며, 경계 포함이 필요하면 변-점 거리를 먼저 검사한다.
 
-**Winding number** 는 더 일반화 (자기 교차 다각형도 OK) 이며, 자기 교차 다각형에는 위 parity 규칙이 정의되지 않으므로 이쪽을 쓴다.
+**Winding number** 는 각 영역을 감은 횟수를 사용한다. 자기 교차 경로도 parity (even-odd) 또는 nonzero winding 규칙으로 채울 수 있지만 두 규칙의 결과는 다를 수 있으므로 원하는 채움 규칙을 명시한다.
 
 ### 4.5 게임 응용
 
@@ -726,7 +717,7 @@ flowchart LR
 
 특성: 가능한 한 *동등삼각형 (equilateral)* 에 가깝게. 가는 sliver 가 적음.
 
-이 *최소각 최대화* 성질은 *2D* 의 정리다 — 2D Delaunay 는 가능한 삼각화 중 최소각을 최대화하고 sliver 가 적다. *3D tetrahedralization* 에서는 같은 보장이 성립하지 않아 *sliver (거의 평면인 tetrahedron)* 가 생길 수 있다. 또 점들이 *한 원 위 (cocircular, 3D 에서는 공면)* 에 있으면 외접원 조건을 만족하는 삼각화가 유일하지 않으므로 *일관된 tie-break 규약* 이 필요하다.
+이 *최소각 최대화* 성질은 *2D* 의 정리다 — 2D Delaunay 는 가능한 삼각화 중 최소각을 최대화한다. *3D tetrahedralization* 에서는 같은 보장이 성립하지 않아 *sliver (거의 평면인 tetrahedron)* 가 생길 수 있다. 또 점들이 *한 원 위* 에 있으면 외접원 조건을 만족하는 삼각화가 유일하지 않을 수 있다 (3D의 대응 퇴화는 한 구 위의 점들). 일관된 tie-break 규약이 필요하다.
 
 활용: *내비메쉬* (균형 잡힌 메쉬가 path-finding 에 좋음), *terrain* 메쉬, *FEM (Finite Element Method)* 메쉬.
 
@@ -801,7 +792,7 @@ flowchart LR
     Voronoi[Voronoi diagram] -->|쌍대| Delaunay[Delaunay triangulation]
     Voronoi --> Cells[셀의 생성점 - site<br/>centroid와 다름]
     Delaunay --> Tris[그 점들의 삼각형 분해]
-    Cells <-->|일대일 대응| Tris
+    Cells -->|site가 정점| Delaunay
 ```
 
 수학적 사실: *Voronoi 셀의 코너 = Delaunay 삼각형의 외접원 중심*. Voronoi diagram 의 *변* = Delaunay 의 *쌍대 변*.

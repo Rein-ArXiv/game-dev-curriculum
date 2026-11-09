@@ -147,13 +147,14 @@ dotnet run `
 
 ```powershell
 .\projects\mega\build\bin\Release\mega_defense_server.exe `
-  --port 27016 --server-id mega-local-1
+  --port 27016 --server-id mega-local-1 `
+  --match-id <MATCH_ID> --player-id <PLAYER_1_ID> --player-id <PLAYER_2_ID>
 
 .\projects\mega\build\bin\Release\mega_defense.exe `
   --join 127.0.0.1 27016 --token <GAME_TOKEN>
 ```
 
-Mega 서버는 토큰의 HMAC, `ServerId`, 만료, `TokenId`, `MatchId`를 오프라인 검증한다. API와
+외부 배정 모드의 매치·플레이어 인자는 API가 배정한 값과 같아야 하며 신뢰된 로컬 제어 프로세스가 전달한다. 두 클라이언트는 각자의 game token으로 입장한다. Mega 서버는 토큰의 HMAC, `ServerId`, 만료, `TokenId`, `MatchId`를 오프라인 검증한다. API와
 Mega에는 같은 `LIVE_SERVICE_TOKEN_SECRET`을 주입해야 한다. 현재 Mega 프로세스가 HTTP
 register·heartbeat·result를 직접 호출하지는 않는다. 그 호출은 배포 에이전트나 운영 스크립트가
 담당하며, 이 lab은 해당 API의 상태 전이와 인증 계약을 구현한다.

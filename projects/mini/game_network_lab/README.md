@@ -13,7 +13,7 @@
 | 손상된 header는 복구 대상이 아니라 종료 사유다. | 변조 위치(magic, version, 선언 길이, reserved), 누적 push byte 수 | 나머지 byte는 정상 frame·datagram 그대로 | `DecodeDatagram` 반환, `FrameDecoder::Pop`과 `Failed()`, `BufferedBytes()` | 네 종류 모두 거부되고 stream decoder는 영구 실패 상태로 남는다 | 마지막 byte 제거, 선언 길이 ±1, reserved 1, magic 1byte 반전, version 2, 선언 길이 65537, 상한 +1 byte push | `game_network_protocol` |
 | 오류 데이터그램이 preposted receive capacity를 영구 소비하지 않는다. | 정상 client 앞에 보내는 oversized UDP 개수(64) | 같은 서버 설정, oversized 뒤 정상 client 1명 | client exit code, decode한 snapshot 수 | `WSAEMSGSIZE` 완료 뒤에도 handshake·binding·snapshot이 성공한다 | 4KiB UDP 데이터그램 64개 | `game_network_process` |
 | socket close와 session 해제는 다르다. close 뒤 취소 completion을 회수할 때까지 operation의 `shared_ptr<Session>`이 수명을 유지한다. | `--duration` 종료 시점 | 같은 포트, 같은 client 시나리오 | 서버 process exit code와 종료 소요 시간, 정지한 backend를 다시 Start 했을 때의 `Connected` 이벤트 | drain 뒤 제한 시간 안에 exit 0. 같은 객체를 3회 Start/Stop 해도 매 round에서 loopback 연결이 accept된다 | 없음. 강제 종료 결과는 성공으로 세지 않는다 | `game_network_process`(종료 경로 간접), `game_network_lifecycle`(drain 뒤 재시작) |
-| 입력 순서는 wrap될 수 있다. 32bit serial number 비교로 오래된·중복 입력을 버린다. | sequence 쌍 `(0, 0xffffffff)`, `(0xffffffff, 0)`, `(17, 17)`, `(18, 17)`. 적용부는 `0xfffffff0` → 같은 값 → `0xffffffef` → `2` 순서 | 같은 비교 함수, 같은 결합 endpoint | `IsNewerSequence` 반환, snapshot의 ack와 권위 위치 | wrap 뒤 값이 더 새롭고 같은 값은 새롭지 않다. 중복·역행 입력은 `moveX`를 바꾸지 않고 ack도 갱신하지 않는다 | 같은 sequence 재전송, 역행 sequence 재전송 | `game_network_protocol`(순수 함수), `game_network_runtime`(적용부) |
+| 입력 순서는 wrap될 수 있다. 32bit serial number 비교로 오래된·중복 입력을 버린다(비교할 간격은 2³¹ 미만). | sequence 쌍 `(0, 0xffffffff)`, `(0xffffffff, 0)`, `(17, 17)`, `(18, 17)`. 적용부는 `0xfffffff0` → 같은 값 → `0xffffffef` → `2` 순서 | 같은 비교 함수, 같은 결합 endpoint | `IsNewerSequence` 반환, snapshot의 ack와 권위 위치 | wrap 뒤 값이 더 새롭고 같은 값은 새롭지 않다. 중복·역행 입력은 `moveX`를 바꾸지 않고 ack도 갱신하지 않는다 | 같은 sequence 재전송, 역행 sequence 재전송 | `game_network_protocol`(순수 함수), `game_network_runtime`(적용부) |
 | 권위 상태는 고정 tick에서만 전진하고 snapshot은 3 tick마다 나간다. 긴 정지 뒤 catch-up에는 상한이 있다. | 주입한 `Advance()` 시각 열(1 tick 간격 12회, 10 tick 점프 1회) | 같은 입력 `moveX=+3, moveY=-2`, 결합된 client 1명 | `RuntimeMetrics::ticks`, snapshot payload의 ack와 위치 | 12 tick 뒤 위치가 (36, -24)이고 snapshot이 정확히 4개. 10 tick 점프는 4 tick으로 잘리고 같은 시각 재호출은 0 tick이다 | 위치 적분 무력화, snapshot 주기 10배, ack 상수화, catch-up 상한 확대 | `game_network_runtime` |
 | I/O 완료 전 buffer를 재사용하지 않는다. IOCP operation이 `OVERLAPPED`, `WSABUF`, payload와 session 참조를 함께 소유한다. | — | — | operation이 소유하는 buffer 필드 | 완료가 회수될 때까지 buffer 주소와 내용이 유효하다 | 없음 | 구현만 있음 |
 | 느린 receiver를 무한 queue로 감추지 않는다. 연결별 queued send byte에 상한을 둔다. | `maxQueuedSendBytesPerConnection` 8KiB, 4KiB 송신을 최대 8192회 | 같은 backend, loopback, 수신 buffer 2KiB | `SendStream` 반환, 해당 connection의 `Disconnected` 이벤트 수와 `error` | 32MiB에 도달하기 전에 정확히 한 번 `kSendQueueOverflowError`로 종료된다. 두 번 이상이면 세션 해제 멱등성 회귀다 | `recv`를 한 번도 호출하지 않는 loopback TCP 피어 | `game_network_send_queue` |
@@ -224,7 +224,7 @@ Wait-Process $server.Id
 - congestion control과 pacing — 어디서도 검증되지 않음
 - 손실·고정 지연·재정렬 주입 — `projects/mega`에서 검증
 - delta snapshot, baseline, AOI — delta snapshot과 baseline은 `projects/mega`에서 검증, AOI는 어디서도 검증되지 않음
-- 입력 history replay 기반 server reconciliation — 어디서도 검증되지 않음
+- 입력 history replay 기반 server reconciliation — 이 lab에는 없음. Mega의 `avatar_predict`는 별도 아바타 예측·되감기 경로이므로 해당 프로젝트의 검증 범위를 확인한다
 - NAT traversal과 relay — 어디서도 검증되지 않음
 - reconnect와 host migration — 어디서도 검증되지 않음
 - multi-match process와 fleet allocation — 매치 할당과 server drain은 `projects/mini/live_service_lab`에서 검증, 자동 fleet agent는 어디서도 검증되지 않음

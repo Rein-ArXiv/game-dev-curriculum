@@ -107,7 +107,7 @@ OpenGL은 많은 상태 조합을 응용이 명시적 파이프라인 객체 수
 
 ## 2. 정점 셰이더와 정점 후처리
 
-정점 셰이더는 입력 정점을 클립 공간 위치와 varyings로 변환한다. 정점 하나당 정확히 한 번 호출되는 것이 원칙이지만, 인덱스 버퍼를 쓰면 GPU의 *post-transform vertex cache* 가 동일 인덱스의 결과를 재사용해 호출을 줄인다. 그래서 인덱스를 잘 정렬한 메시는 같은 삼각형 수라도 정점 셰이더 호출이 적다.
+정점 셰이더는 입력 정점을 클립 공간 위치와 varyings로 변환한다. 정점 입력을 처리하는 단계이지만, 논리 정점 하나당 셰이더가 정확히 한 번 실행된다고 의존해서는 안 된다. 인덱스 버퍼를 쓰면 GPU의 *post-transform vertex cache* 가 동일 인덱스의 결과를 재사용해 호출을 줄인다. 그래서 인덱스를 잘 정렬한 메시는 같은 삼각형 수라도 정점 셰이더 호출이 적다.
 
 최소 출력은 클립 공간 위치 하나다.
 
@@ -183,13 +183,13 @@ $$
 |---|---|---|---|
 | Vulkan | $[-1, 1]$ | $[0, 1]$ | 아래로 +y (위→아래) |
 | OpenGL | $[-1, 1]$ | $[-1, 1]$ | 위로 +y (아래→위) |
-| Direct3D | $[-1, 1]$ | $[0, 1]$ | 위로 +y |
+| Direct3D | $[-1, 1]$ | $[0, 1]$ | 아래로 +y (프레임버퍼 좌표) |
 
-Vulkan은 z가 $[0, 1]$이라 깊이 정밀도 분포가 OpenGL의 $[-1, 1]$과 다르다. OpenGL용 projection 행렬을 Vulkan에 그대로 넣으면 $z_{ndc}$가 음수인 절두체 앞쪽 절반이 클립 볼륨 밖으로 판정되어 잘려 나간다(유효 near가 약 $2n$으로 밀린다). 또 Vulkan은 클립 공간 y가 아래로 향하므로, OpenGL 코드를 옮기면 화면이 위아래로 뒤집힌다. 이를 맞추는 방법은 projection 행렬의 $m_{11}$ 부호를 뒤집거나, viewport의 height를 음수로 주는 것이다(`VK_KHR_maintenance1` 이후 표준).
+Vulkan은 z가 $[0, 1]$이라 깊이 정밀도 분포가 OpenGL의 $[-1, 1]$과 다르다. OpenGL용 projection 행렬을 Vulkan에 그대로 넣으면 음수 NDC z에 해당하는 가까운 구간이 클립 볼륨 밖으로 판정되어 잘려 나간다(유효 near가 약 $2n$으로 밀린다). 또 Vulkan의 양수 높이 viewport는 NDC y 증가를 프레임버퍼의 아래쪽 증가로 매핑하므로, OpenGL 코드를 옮기면 화면이 위아래로 뒤집힌다. 이를 맞추는 방법은 projection 행렬의 $m_{11}$ 부호를 뒤집거나, viewport의 height를 음수로 주는 것이다(`VK_KHR_maintenance1` 이후 표준).
 
 ### Reverse-Z와 깊이 정밀도
 
-깊이 버퍼의 정밀도는 near plane 근처에 몰린다. perspective projection에서 NDC z는 view 공간 깊이의 역수에 비례하므로, 24비트 정수 깊이 버퍼라도 먼 거리에서는 단계 간격이 수 미터로 벌어진다. 이를 완화하는 표준 기법이 *Reverse-Z* 다. near를 1.0, far를 0.0에 매핑하면 부동소수점 깊이의 정밀도 분포가 1/z의 분포와 거의 상쇄되어 전 거리에 걸쳐 균등에 가까운 정밀도가 나온다.
+깊이 버퍼의 정밀도는 near plane 근처에 몰린다. perspective projection에서 NDC z는 view 공간 깊이의 역수에 비례하므로, 24비트 정수 깊이 버퍼라도 먼 거리에서는 단계 간격이 수 미터로 벌어진다. 이를 완화하는 표준 기법이 *Reverse-Z* 다. near를 1.0, far를 0.0에 매핑하면 부동소수점 깊이의 정밀도 분포가 1/z의 분포와 거의 상쇄되어 넓은 거리 범위에서 거의 일정한 상대 정밀도를 얻는다. 절대 거리 간격이 일정해지는 것은 아니다.
 
 Reverse-Z를 쓰려면 z가 $[0,1]$인 Vulkan/D3D 규약, depth compare op를 `GREATER`로, depth clear 값을 0.0으로 함께 바꿔야 한다. z가 $[-1,1]$인 OpenGL은 `glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE)`로 z 범위를 $[0,1]$로 바꾼 뒤에야 Reverse-Z의 이점을 온전히 얻는다. Vulkan이 깊이 규약 면에서 Reverse-Z에 더 자연스럽다.
 
@@ -216,7 +216,7 @@ strip은 정점 수를 줄이지만 한 메시를 하나의 strip으로 잇기 �
 - *완전히 안* 이면 그대로 통과한다(trivial accept).
 - *경계에 걸치면* 새 정점이 경계 위에 생성되고, 그 정점의 varyings는 선형 보간으로 채워진다. 삼각형 하나가 클리핑으로 여러 삼각형으로 쪼개질 수 있다.
 
-대부분의 GPU는 비싼 평면 클리핑을 가능한 한 피하고, *guard band* 라는 확장된 영역 안의 프리미티브는 자르지 않고 래스터화 단계에서 화면 밖 픽셀을 버리는 식으로 처리한다. 클리핑이 실제로 일어나는 것은 카메라 평면(near)을 가로지르는 프리미티브 정도다.
+대부분의 GPU는 비싼 평면 클리핑을 가능한 한 피하고, *guard band* 라는 확장된 영역 안의 프리미티브는 자르지 않고 래스터화 단계에서 화면 밖 픽셀을 버리는 식으로 처리한다. guard band는 측면 평면 클리핑을 줄이는 구현 최적화이며, near/far 등 필요한 클리핑까지 일반적으로 사라진다고 가정해서는 안 된다.
 
 ### 면 방향과 컬링
 
@@ -233,7 +233,7 @@ rs.depthClampEnable = VK_FALSE;
 rs.rasterizerDiscardEnable = VK_FALSE;          // TRUE면 래스터화 자체를 끔
 ```
 
-백페이스 컬링은 닫힌 메시에서 보이지 않는 뒷면을 그리지 않아 프래그먼트 셰이더 호출을 절반 가까이 줄인다. 그런데 winding은 좌표 변환에 따라 뒤집힌다. 모델 행렬에 음수 스케일이 하나 있거나(거울 반사), 좌표계의 한 축을 뒤집거나, Vulkan에서 y-flip을 viewport로 처리하면 화면상 winding이 반대가 된다.
+백페이스 컬링은 뒷면 프리미티브의 래스터화를 생략한다. 프래그먼트 호출 절약량은 형상·시점·화면 가림과 early test에 따라 달라진다. 그런데 winding은 좌표 변환에 따라 뒤집힌다. 모델 행렬에 음수 스케일이 하나 있거나(거울 반사), 좌표계의 한 축을 뒤집거나, Vulkan에서 y-flip을 viewport로 처리하면 화면상 winding이 반대가 된다.
 
 모델이 통째로 사라지면 vertex shader보다 *컬링과 winding을 먼저 의심* 한다. 디버깅의 빠른 길은 `cullMode = VK_CULL_MODE_NONE`으로 컬링을 끄고 모델이 다시 보이는지 확인하는 것이다. 다시 보이면 winding이 뒤집힌 것이고, `frontFace`를 반대로 바꾸면 된다. `rasterizerDiscardEnable = VK_TRUE`로 둔 채 잊는 실수도 같은 증상을 낸다.
 
@@ -267,7 +267,7 @@ GPU는 픽셀을 한 개씩 처리하지 않고 *2×2 쿼드* 단위로 처리�
 
 `flat`을 빼먹는 것이 흔한 함정이다. 머티리얼 ID, 라이트 인덱스, 오브젝트 ID 같은 정수성 데이터는 삼각형 내부에서 보간되면 안 되는데, 기본 보간이 적용되면 두 정점 사이에서 ID가 섞여 깨진다. 정수 타입 varying은 *반드시* `flat`이어야 하고(정수는 보간 자체가 불가능), 어느 정점의 값을 쓸지는 `provoking vertex`(기본은 삼각형의 첫 정점) 규약을 따른다.
 
-`centroid`는 MSAA에서 픽셀 중심이 삼각형 밖이지만 일부 샘플이 안에 있을 때, 보간 위치를 덮인 영역 안으로 끌어당겨 색이 절두체 밖으로 외삽되는 artifact를 막는다. 비용은 약간의 정밀도 손실이다.
+`centroid`는 MSAA에서 픽셀 중심이 삼각형 밖이지만 일부 샘플이 안에 있을 때, 보간 위치를 덮인 영역 안으로 끌어당겨 값이 삼각형 밖으로 외삽되는 artifact를 줄인다. 다만 보간 위치가 픽셀마다 달라질 수 있어 centroid 입력의 미분을 텍스처 LOD 등에 사용할 때는 주의한다.
 
 ## 5. 프래그먼트 셰이더
 
@@ -301,6 +301,8 @@ void main() {
 `discard`(GLSL)는 SPIR-V의 `OpKill`(deprecated) 또는 `OpTerminateInvocation` 계열로 내려가 프래그먼트를 버리고 색과 깊이를 쓰지 않게 한다. 잎사귀나 철망 같은 cutout 텍스처에서 알파가 임계값 아래인 픽셀을 지울 때 쓴다. 문제는 `discard`가 *Early-Z를 방해* 할 수 있다는 점이다.
 
 GPU는 조건이 맞으면 프래그먼트 셰이더 실행 *전* 에 깊이 테스트를 수행해(Early-Z) 가려질 픽셀의 셰이더 실행을 건너뛴다. 여기서 조기 깊이 *테스트*와 조기 깊이 *갱신(update)* 은 구분된다. `discard`나 깊이 직접 쓰기(`gl_FragDepth`)는 구현이 조기 깊이 갱신을 적용하기 어렵게 만들며, 특히 side effect와 깊이 값 변경이 있으면 Late 처리가 필요할 수 있다. 반대로 GLSL `layout(early_fragment_tests) in;`나 보수적 깊이 한정자처럼 계약을 명시하면 조기 테스트의 의미를 고정할 수 있다. early test·early update·Hi-Z(계층적 깊이)는 서로 다른 단계이므로 “항상 Early-Z가 꺼진다”가 아니라 *Early-Z/early depth update 최적화를 제한할 수 있다* 고 이해해야 한다.
+
+명시적 `early_fragment_tests`에서는 깊이/스텐실 처리가 셰이더보다 먼저 일어나므로, 뒤의 `discard`가 이미 쓴 깊이를 되돌리지는 못한다. 알파 컷아웃에 무심코 강제하면 투명 부분까지 가릴 수 있다.
 
 cutout 머티리얼이 많은 장면(숲, 울타리)은 다음 대안을 고려한다.
 
@@ -380,7 +382,7 @@ att.blendEnable = VK_FALSE;   // 그냥 덮어쓰기
 
 ### 알파 블렌딩
 
-블렌딩을 켜면 소스(셰이더 출력)와 데스티네이션(렌더 타깃 기존 값)을 계수로 섞는다. 표준 알파 블렌딩(over operator)은 다음 식을 쓴다.
+블렌딩을 켜면 소스(셰이더 출력)와 데스티네이션(렌더 타깃 기존 값)을 계수로 섞는다. 불투명 배경 위에 straight-alpha 소스를 얹는 RGB 식은 다음과 같다. 중간 타깃의 누적 알파도 보존하려면 아래 상태처럼 $α_{out}=α_s+α_d(1-α_s)$로 갱신한다.
 
 $$
 C_{\text{out}} = C_{\text{src}} \, \alpha_{\text{src}} + C_{\text{dst}} \, (1 - \alpha_{\text{src}})
@@ -394,7 +396,7 @@ att.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
 att.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
 att.colorBlendOp = VK_BLEND_OP_ADD;
 att.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-att.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+att.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
 att.alphaBlendOp = VK_BLEND_OP_ADD;
 ```
 
@@ -413,7 +415,7 @@ premultiplied alpha는 텍스처의 색에 알파를 미리 곱해 저장하는 
 
 블렌딩은 *순서 의존적* 이다. $C_s\alpha + C_d(1-\alpha)$는 교환법칙이 성립하지 않아, 같은 투명 표면들이라도 그리는 순서가 바뀌면 결과 색이 달라진다. 그래서 렌더링 순서를 둘로 나눈다. 불투명 객체는 blending을 끄고 *front-to-back* 으로 그려 Early-Z 효율을 높이고, 투명 객체는 blending을 켜고 *back-to-front* 로 정렬해 시각 결과를 맞춘다. 서로 교차하거나 깊이가 얽힌 투명 객체는 정렬만으로 풀리지 않고, *Order-Independent Transparency*(weighted blended OIT, per-pixel linked list 등) 같은 별도 알고리즘이 필요하다.
 
-한 가지 정밀도 함정은 블렌딩이 *어느 색 공간에서* 일어나는가다. 블렌딩은 attachment에 저장된 값에 그대로 수행된다. attachment 포맷이 `UNORM`이면 sRGB로 인코딩된 비선형 값끼리 섞여 물리적으로 틀린 색이 나오고, `SRGB` 포맷이면 하드웨어가 읽을 때 선형으로 풀고 쓸 때 다시 인코딩해 *선형 공간에서* 올바르게 섞인다. 라이팅과 블렌딩을 정확히 하려면 color attachment를 `VK_FORMAT_*_SRGB`로 두거나 셰이더에서 명시적으로 감마를 처리한다. OpenGL의 `glEnable(GL_FRAMEBUFFER_SRGB)`가 같은 일을 한다.
+한 가지 정밀도 함정은 블렌딩이 *어느 색 공간에서* 일어나는가다. `UNORM`은 저장 코드값에 선형 연산을 적용한다. 그 값이 이미 sRGB 인코딩되어 있다면 잘못된 공간에서 섞이지만, 선형 중간 버퍼로 사용한다면 `UNORM` 블렌딩도 선형 공간에서 수행된다. `SRGB` 포맷이면 하드웨어가 읽을 때 선형으로 풀고 쓸 때 다시 인코딩해 *선형 공간에서* 올바르게 섞인다. 출력용 sRGB attachment를 쓰거나 선형 중간 타깃에서 블렌딩한 뒤 최종 패스에서 인코딩한다. 비선형 코드값을 저장한 UNORM 타깃에 셰이더 출력만 수동 인코딩해 보내는 것으로는 고정 기능 블렌딩을 선형으로 바꿀 수 없다. OpenGL의 `glEnable(GL_FRAMEBUFFER_SRGB)`가 같은 일을 한다.
 
 
 ---

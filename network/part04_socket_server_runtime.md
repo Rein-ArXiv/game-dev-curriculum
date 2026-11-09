@@ -139,6 +139,10 @@ TCP send는 요청한 byte보다 적게 완료될 수 있다. send operation은 
 void OnSendComplete(Session& session,
                     SendOperation& op,
                     std::uint32_t bytes) {
+    if (bytes == 0 || bytes > op.packet->Size() - op.offset) {
+        session.FailSend();  // 진행 없음 또는 유효하지 않은 완료
+        return;
+    }
     op.offset += bytes;
     if (op.offset < op.packet->Size()) {
         session.Backend().SubmitSend(op, op.packet->Subspan(op.offset));
@@ -150,7 +154,7 @@ void OnSendComplete(Session& session,
 }
 ```
 
-연결당 head packet 하나만 in-flight로 두면 응용 message 순서와 packet 수명이 단순해진다. 여러 send를 동시에 제출하는 최적화는 backend의 순서 보장, completion 재정렬, 종료 경쟁을 증명한 뒤 적용한다. 느린 receiver의 send queue에는 byte 상한과 deadline을 두며, 상한을 넘겼을 때 무한 재시도하지 않는다.
+이 골격은 성공 completion과 유효한 offset을 전제로 한다. 오류·취소 completion은 별도 종료 경로에서 처리하고, 재제출 실패도 회수해야 한다. 연결당 head packet 하나만 in-flight로 두면 응용 message 순서와 packet 수명이 단순해진다. 여러 send를 동시에 제출하는 최적화는 backend의 순서 보장, completion 재정렬, 종료 경쟁을 증명한 뒤 적용한다. 느린 receiver의 send queue에는 byte 상한과 deadline을 두며, 상한을 넘겼을 때 무한 재시도하지 않는다.
 
 ### 수신 경로
 

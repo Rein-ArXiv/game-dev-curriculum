@@ -46,7 +46,7 @@ std::function<void()> f3 = lambda;
 
 세 callable의 타입은 다음과 같다.
 
-- `free_func`의 타입: `void(*)()`.
+- `free_func` 자체의 타입: `void()` 함수 타입. 저장 시에는 `void(*)()` 함수 포인터로 decay한다.
 - `Functor{}`의 타입: `Functor`.
 - `lambda`의 타입: `__lambda_1_impl`(컴파일러 생성).
 
@@ -87,7 +87,7 @@ public:
 
 ### 해결: Small Buffer Optimization (SBO)
 
-`std::function`의 실제 구현은 더 영리하다.
+`std::function` 구현은 작은 callable을 내부에 저장할 수 있다. 다음은 그 원리를 보이는 축약 모형이며 실제 표준 라이브러리 소스는 아니다.
 
 ```cpp
 template<typename Signature>
@@ -143,6 +143,7 @@ public:
         using Functor = std::decay_t<F>;
 
         if constexpr (sizeof(Functor) <= BufferSize &&
+                      alignof(Functor) <= alignof(std::max_align_t) &&
                       std::is_nothrow_move_constructible_v<Functor>) {
             new(buffer_) Functor(std::move(f));
             vtable_ = &get_vtable_for<Functor, true>();
@@ -272,7 +273,7 @@ auto big = [data = std::array<int, 100>()]() { };  // sizeof(big) == 400 → 힙
 
 ### 임의의 타입 저장
 
-`std::function`은 시그니처가 고정되어 있다. `std::any`는 아무 타입이나 저장한다.
+`std::function`은 시그니처가 고정되어 있다. `std::any`는 복사 생성 가능한 여러 타입의 값을 저장한다. move-only 타입까지 아무 제약 없이 담는 컨테이너는 아니다.
 
 ```cpp
 std::any a = 42;                    // int
@@ -470,7 +471,7 @@ T any_cast(const any& operand) {
 
 ### any의 오버헤드 회피
 
-`std::any`는 RTTI에 의존하고, 캐스팅 실패 시 예외를 던진다. 게임에서는 둘 다 부담이다. `std::variant`는 타입 집합을 컴파일 타임에 고정하는 대신, RTTI 없이 작동한다.
+위 `any` 모형은 RTTI로 타입을 비교하지만 모든 구현의 `any_cast`가 반드시 RTTI를 쓰는 것은 아니다. 예를 들어 libstdc++는 타입별 manager 함수 주소도 비교한다. 포인터 형태 `any_cast`의 실패는 nullptr이고 값·참조 형태의 실패는 예외다. `std::variant`는 타입 집합을 컴파일 타임에 고정하고 discriminator로 구분하므로 별도 런타임 타입 탐색이 필요 없다.
 
 ```cpp
 std::variant<int, float, std::string> v;
@@ -715,7 +716,11 @@ private:
 
         static const VTable vt = {
             [](void* obj, Args... args) -> R {
-                return (*static_cast<Functor*>(obj))(std::forward<Args>(args)...);
+                if constexpr (std::is_void_v<R>) {
+                    (*static_cast<Functor*>(obj))(std::forward<Args>(args)...);
+                } else {
+                    return (*static_cast<Functor*>(obj))(std::forward<Args>(args)...);
+                }
             },
             [](void* obj) {
                 auto* f = static_cast<Functor*>(obj);
@@ -747,6 +752,8 @@ unique_function<int()> f = [p = std::move(ptr)]() { return *p; };
 unique_function<int()> f2 = std::move(f);  // OK
 int result = f2();  // 42
 ```
+
+이 골격은 비어 있거나 이동된 `unique_function`을 호출하지 않는 계약이다. `unique_function<void()>`에는 값을 반환하는 callable도 넣을 수 있으며 반환값은 버린다. 표준 C++23에는 같은 용도의 `std::move_only_function`도 있다.
 
 ### Delegate: 멤버 함수 포인터 지원
 
@@ -829,6 +836,8 @@ on_damage(25);  // player.health = 75
 ```
 
 크기 비교:
+
+다음은 64비트 구현의 크기 예시다. 라이브러리 버전과 ABI에 따라 달라지므로 사용하는 빌드에서 `sizeof`로 확인한다. 멤버 함수 delegate는 객체를 소유하지 않으므로 대상은 호출이 끝날 때까지 살아 있어야 하며, 빈 delegate는 호출하지 않는다.
 
 | 타입 | 크기 | 힙 할당 |
 |------|:----:|:-------:|
@@ -1087,9 +1096,9 @@ std::vector<shape_tagged> shapes_tagged;
 
 ### 분석
 
-가상 함수와 Type Erasure는 본질적으로 같은 동적 디스패치 메커니즘을 다른 형태로 구현한 것이므로 성능이 거의 같다. 차이를 만드는 것은 데이터 배치다.
+가상 함수와 Type Erasure 모두 간접 호출을 사용할 수 있지만 저장 정책, 인라이닝 가능성과 데이터 배치가 다르므로 전체 성능이 같다고 단정할 수는 없다.
 
-`variant`의 우월성은 다음에서 온다.
+`variant`가 이점을 얻을 수 있는 조건은 다음과 같다.
 
 - 타입이 컴파일 타임에 알려져 있으므로 점프 테이블이 인라인 가능.
 - 데이터가 연속 메모리에 위치(캐시 친화적).
@@ -1100,7 +1109,7 @@ Tagged Union의 극한 최적화:
 - 컴파일러가 switch를 완전히 최적화 가능.
 - 분기 예측이 잘 작동(패턴이 일정하면).
 
-직접 배열의 압도적 성능:
+타입별 직접 배열로 순회하는 경우:
 
 ```cpp
 std::vector<CircleData> circles;
@@ -1110,7 +1119,7 @@ for (auto& c : circles) total += c.area();
 for (auto& r : rectangles) total += r.area();
 ```
 
-가능하다면 이것이 최선이다. 데이터 지향 설계의 핵심이다.
+타입별로 일괄 처리할 수 있다면 유리한 후보지만, 타입 사이의 처리 순서를 보존해야 하거나 분류·이동 비용이 크면 그 비용까지 비교해야 한다.
 
 ## 7. 실전 적용: 게임 엔진의 선택
 
@@ -1276,7 +1285,12 @@ public:
         } else {
             control_ = new control_block();
         }
-        new(control_->buffer) T(std::forward<Args>(args)...);
+        try {
+            new(control_->buffer) T(std::forward<Args>(args)...);
+        } catch (...) {
+            if constexpr (!use_sbo) delete control_;
+            throw;
+        }
     }
 
     sbo_shared(const sbo_shared& other) : control_(other.control_) {
@@ -1397,7 +1411,7 @@ Type Erasure는 C++ 템플릿의 정수다. 컴파일 타임 타입 정보를 �
 언제 사용할까:
 
 - `std::function`: 콜백, 델리게이트.
-- `std::any`: 임의 타입 저장(RTTI 필요).
+- `std::any`: 복사 가능한 임의 타입 저장(타입 검사 방식은 구현에 따름).
 - `std::variant`: 고정된 타입 집합(RTTI 불필요).
 - 커스텀 구현: 특수 요구사항(move-only, 큰 SBO 등).
 
@@ -1405,8 +1419,8 @@ Type Erasure는 C++ 템플릿의 정수다. 컴파일 타임 타입 정보를 �
 
 - 가상 함수와 거의 동일(둘 다 간접 호출).
 - SBO로 힙 할당 회피 가능.
-- `std::variant`가 타입이 고정되어 있을 때 가장 빠름.
-- 타입별 배열이 궁극의 최적화(DoD).
+- `std::variant`는 닫힌 타입 집합의 인라인 저장과 분기 최적화를 활용할 수 있음.
+- 타입별 배열은 일괄 처리에 유리하지만 순서·분류·이동 비용도 비교해야 함.
 
 Sean Parent의 표현을 빌리자면, 좋은 C++ 코드는 복잡한 상속 계층이 아니라 일반 타입과 알고리즘에 관한 것이다. Type Erasure는 상속 없이 다형성을 달성하는 강력한 도구다. 다만 만능은 아니다. 성능이 중요하면 `std::variant`나 타입별 배열을, 유연성이 중요하면 Type Erasure를, 개발 편의성이 중요하면 가상 함수를 고른다. 트레이드오프를 이해하고 상황에 맞게 선택하는 것이 핵심이다.
 

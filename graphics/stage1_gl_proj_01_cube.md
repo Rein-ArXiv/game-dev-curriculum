@@ -81,7 +81,7 @@ glBindVertexArray(vao);
 glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);  // VAO에 기록된다
 
 glBindVertexArray(0);                         // VAO unbind 먼저
-glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);     // 이건 안전 (VAO 밖)
+// Core Profile에서는 VAO 0 상태의 EBO 바인딩을 변경하지 않는다.
 // 만약 순서가 반대였다면 VAO의 EBO 바인딩이 0으로 덮어써진다
 ```
 
@@ -306,7 +306,7 @@ flowchart LR
     N -->|glViewport| S[Screen<br/>픽셀]
 ```
 
-`uModel`까지는 셰이더에서 곱하고, 동차 나눗셈은 GPU가 자동으로 한다. 뷰포트 변환은 `glViewport(x, y, w, h)`가 정한 사각형으로 NDC를 매핑하며, 깊이는 `glDepthRange`가 정한 $[0, 1]$ 범위로 간다. 이 다섯 공간의 구분을 잡아두면 법선 변환이나 라이팅 계산을 어느 공간에서 할지 결정할 때 혼란이 없다.
+`uProj * uView * uModel`까지는 셰이더에서 곱하고, 동차 나눗셈은 GPU가 자동으로 한다. 뷰포트 변환은 `glViewport(x, y, w, h)`가 정한 사각형으로 NDC를 매핑하며, 깊이는 `glDepthRange`가 정한 $[0, 1]$ 범위로 간다. 이 다섯 공간의 구분을 잡아두면 법선 변환이나 라이팅 계산을 어느 공간에서 할지 결정할 때 혼란이 없다.
 
 ### GLM으로 행렬 만들기
 
@@ -356,7 +356,7 @@ glUniformMatrix4fv(locP, 1, GL_FALSE, glm::value_ptr(proj));
 
 `glGetUniformLocation`은 반환 타입이 `GLint`다. uniform이 셰이더에 없거나, 선언했지만 *어디에도 쓰이지 않아 컴파일러가 제거(active uniform이 아님)* 하면 `-1`을 반환한다. `-1`을 `glUniform*`에 넘기는 것은 에러가 아니라 *조용한 무동작* 이라, 이름 오타를 잡아내지 못한다. 디버그 빌드에선 `assert(loc != -1)`로 막는 편이 좋다.
 
-`glUniformMatrix4fv(loc, count, transpose, ptr)`의 `transpose = GL_FALSE`가 *column-major* 입력을 뜻한다. GLM이 column-major라 일치한다. *DirectX 측에서 가져온 row-major 행렬* 은 행벡터 관례이므로, 열벡터 셰이더에 쓰려면 오히려 `GL_FALSE`(column-major 해석)가 필요한 전치를 대신 만들어 준다. `GL_TRUE`를 주면 전치가 상쇄되지 않아 결과가 깨진다. uniform 값은 *프로그램별로* 저장되며 `glUseProgram` 전환 사이에 보존되므로, 매 프레임 다시 올릴 필요는 없고 바뀐 것만 올리면 된다.
+`glUniformMatrix4fv(loc, count, transpose, ptr)`의 `transpose = GL_FALSE`가 *column-major* 입력을 뜻한다. GLM이 column-major라 일치한다. *DirectXMath의 row-major 저장·행벡터 관례로 만든 행렬* 은, 열벡터 셰이더에 쓰려면 오히려 `GL_FALSE`(column-major 해석)가 필요한 전치를 대신 만들어 준다. `GL_TRUE`를 주면 전치가 상쇄되지 않아 결과가 깨진다. uniform 값은 *프로그램별로* 저장되며 `glUseProgram` 전환 사이에 보존되므로, 매 프레임 다시 올릴 필요는 없고 바뀐 것만 올리면 된다.
 
 ### 셰이더의 uniform
 
@@ -379,7 +379,7 @@ void main() {
 
 행렬 곱 순서가 *오른쪽 → 왼쪽* 으로 적용된다. 정점 위치는 (model space) → uModel → (world) → uView → (view) → uProj → (clip)을 거쳐 `gl_Position`에 닿는다. *clip space* 에서 GPU가 자동으로 *동차 나눗셈(perspective divide)* $w$를 적용해 NDC를 만든다.
 
-곱셈 순서를 거꾸로 `uModel * uView * uProj`로 쓰면 행렬이 전치된 것과 비슷한 엉뚱한 결과가 나온다. 행렬 곱은 비가환이므로 이 순서는 컨벤션이 아니라 수학적 강제다.
+곱셈 순서를 거꾸로 `uModel * uView * uProj`로 쓰면 행렬이 전치된 것과 비슷한 엉뚱한 결과가 나온다. 행렬 곱은 비가환이므로, 여기서 선택한 열벡터·각 행렬의 의미 아래에서는 이 적용 순서를 지켜야 한다. 행벡터 관례라면 대응 행렬과 곱 순서도 함께 바뀐다.
 
 ### dirty flag 캐싱
 
@@ -387,8 +387,8 @@ void main() {
 
 ```cpp
 class Transform {
-    glm::vec3 pos_, scale_;
-    glm::quat rot_;
+    glm::vec3 pos_{0.0f}, scale_{1.0f};
+    glm::quat rot_{1.0f, 0.0f, 0.0f, 0.0f};  // w, x, y, z: 항등 회전
     mutable glm::mat4 cached_;
     mutable bool dirty_ = true;
 
@@ -407,7 +407,7 @@ public:
 };
 ```
 
-매 프레임 회전이 바뀌는 큐브 같은 경우엔 dirty가 *항상 true* 라 캐시 의미가 없지만, *정적 오브젝트가 수천 개* 인 경우 dirty flag가 행렬 곱셈을 99% 줄인다. $4\times4$ 행렬 곱 한 번은 스칼라 곱셈 64회를 수행하므로, 정적 오브젝트 10,000개의 행렬 곱 한 번을 건너뛰면 프레임당 64만 회, 60fps에서 초당 3,840만 회의 스칼라 곱셈을 피한다. 실제 절감량은 모델 행렬 구성에 필요한 행렬 곱 수와 컴파일러·SIMD 구현에 따라 달라진다.
+매 프레임 회전이 바뀌는 큐브 같은 경우엔 dirty가 *항상 true* 라 캐시 의미가 없지만, *정적 오브젝트가 수천 개* 인 경우 dirty flag가 변경되지 않은 객체의 행렬 재계산을 생략한다. $4\times4$ 행렬 곱 한 번은 스칼라 곱셈 64회를 수행하므로, 정적 오브젝트 10,000개의 행렬 곱 한 번을 건너뛰면 프레임당 64만 회, 60fps에서 초당 3,840만 회의 스칼라 곱셈을 피한다. 실제 절감량은 모델 행렬 구성에 필요한 행렬 곱 수와 컴파일러·SIMD 구현에 따라 달라진다.
 
 ## 4. 큐브 정점 데이터 구성
 
@@ -515,7 +515,7 @@ glCullFace(GL_BACK);       // 뒷면 제거 (기본)
 glFrontFace(GL_CCW);       // CCW 가 앞면 (기본)
 ```
 
-컬링은 평균적으로 닫힌 볼록 메시의 삼각형 절반을 래스터라이저 이전에 제거한다. 큐브라면 시점에 따라 보이지 않는 3~5개 면이 버려진다. 순서가 어긋난 면이 있으면 큐브 한쪽 면만 *비어 보인다*. 디버깅 시 `glDisable(GL_CULL_FACE)`로 잠깐 끄고 어느 면이 사라졌는지 확인한 뒤 그 면의 인덱스 순서를 뒤집는다. 음의 스케일(`glm::scale`에 음수)을 적용하면 와인딩이 뒤집히므로, 거울 변환을 쓰면 `glFrontFace`를 같이 바꿔야 한다.
+컬링은 평균적으로 닫힌 볼록 메시의 삼각형 절반을 래스터라이저 이전에 제거한다. 큐브라면 시점에 따라 보이지 않는 3~5개 면이 버려진다. 순서가 어긋난 면이 있으면 큐브 한쪽 면만 *비어 보인다*. 디버깅 시 `glDisable(GL_CULL_FACE)`로 잠깐 끄고 어느 면이 사라졌는지 확인한 뒤 그 면의 인덱스 순서를 뒤집는다. 음의 행렬식인 반사 변환(예: 홀수 개 축의 음수 스케일)을 적용하면 와인딩이 뒤집히므로, 거울 변환을 쓰면 `glFrontFace`를 같이 바꿔야 한다.
 
 ### 회전하는 큐브
 
@@ -605,7 +605,7 @@ flowchart TB
 
 대부분의 현대 GPU는 *프래그먼트 셰이더를 실행하기 전* 에 깊이 테스트를 한다 — 통과 못 할 픽셀은 *셰이더 호출 자체를 생략* 한다. 이를 *Early-Z* 라고 부르고, 깊이 전용 패스에서 계층적 가림을 쓰는 것을 *Hi-Z* 라고 부른다. 프래그먼트 셰이더 비용을 크게 줄여주는 최적화다.
 
-단, 셰이더가 `gl_FragDepth`를 갱신하거나 `discard`를 호출하면 *early depth update*(early test 결과의 깊이 쓰기)가 제한되어, 통과하지 못할 프래그먼트도 셰이더가 실행되는 경우가 많다. 이것이 알파 컷오프 / 마스크 텍스처를 쓰는 풀잎 같은 메시가 *느려지는* 이유다. 여기서 early *test* 와 early *update*, 그리고 Hi-Z는 서로 다른 개념이며 구현·하드웨어 최적화에 따라 허용 범위가 다르다. GLSL 4.2의 `layout(early_fragment_tests) in;`으로 early test를 명시적으로 강제할 수 있고, `GL_ARB_conservative_depth`의 `layout(depth_greater/less) out float gl_FragDepth;` 같은 조건이면 early test를 유지하는 구현도 있다. discard된 픽셀의 깊이 쓰기는 보장되지 않는다.
+단, 셰이더가 `gl_FragDepth`를 갱신하거나 `discard`를 호출하면 *early depth update*(early test 결과의 깊이 쓰기)가 제한되어, 원래는 early-Z로 생략할 수 있던 프래그먼트까지 셰이더가 실행될 수 있다. 이것이 알파 컷오프 / 마스크 텍스처를 쓰는 풀잎 같은 메시가 *느려지는* 이유다. 여기서 early *test* 와 early *update*, 그리고 Hi-Z는 서로 다른 개념이며 구현·하드웨어 최적화에 따라 허용 범위가 다르다. GLSL 4.2의 `layout(early_fragment_tests) in;`으로 early test를 명시적으로 강제할 수 있고, `GL_ARB_conservative_depth`의 `layout(depth_greater/less) out float gl_FragDepth;` 같은 조건이면 early test를 유지하는 구현도 있다. `early_fragment_tests`를 명시하면 깊이·스텐실 처리가 셰이더보다 먼저 일어나므로, 뒤의 `discard`가 이미 수행된 깊이 쓰기를 되돌리지 못한다. 알파 컷아웃에 무심코 강제하면 투명한 부분까지 가릴 수 있다.
 
 | 셰이더 패턴 | early test | early depth update |
 |---|---|---|
@@ -628,7 +628,7 @@ $$
 z_{\text{NDC}} = \frac{f + n}{f - n} - \frac{2 f n}{(f - n) \cdot (-z_{\text{view}})}
 $$
 
-여기서 $n$은 near plane(양수 거리), $f$는 far plane(양수 거리), $-z_{\text{view}}$가 카메라부터의 거리다. 이 식이 뜻하는 것은 *카메라에 가까운 곳은 깊이 단계가 촘촘* 하고, *먼 곳은 듬성듬성* 하다는 것이다. near = 0.1, far = 100인 경우 *0.1 ~ 1m 구간* 이 깊이 버퍼의 약 *90%* 를 차지한다. 1 ~ 100m 구간은 남은 10%만으로 표현된다.
+여기서 $n$은 near plane(양수 거리), $f$는 far plane(양수 거리), $-z_{\text{view}}$가 카메라의 뷰 축을 따른 깊이다. 이 식이 뜻하는 것은 *카메라에 가까운 곳은 깊이 단계가 촘촘* 하고, *먼 곳은 듬성듬성* 하다는 것이다. near = 0.1, far = 100인 경우 *0.1 ~ 1m 구간* 이 깊이 버퍼의 약 *90%* 를 차지한다. 1 ~ 100m 구간은 남은 10%만으로 표현된다.
 
 | view-space z | 깊이 버퍼 값 $z_{\text{win}} = (z_{\text{NDC}}+1)/2$ |
 |---|---|
@@ -664,10 +664,10 @@ glDisable(GL_POLYGON_OFFSET_FILL);
 
 ### Reverse-Z
 
-업계의 *현대적 해법* 은 *깊이 비교 방향을 뒤집어* 가까운 곳을 $z = 1$, 먼 곳을 $z = 0$에 매핑하는 것이다. 부동소수의 정밀도가 0 근처에 집중되는 IEEE 754의 성질과, 원근 투영의 정밀도가 가까운 곳에 집중되는 성질이 *서로 상쇄* 되어, 전체 거리에 *거의 균등한 정밀도* 가 생긴다.
+업계의 *현대적 해법* 은 *깊이 비교 방향을 뒤집어* 가까운 곳을 $z = 1$, 먼 곳을 $z = 0$에 매핑하는 것이다. 부동소수의 정밀도가 0 근처에 집중되는 IEEE 754의 성질과, 원근 투영의 정밀도가 가까운 곳에 집중되는 성질이 *서로 상쇄* 되어, 전체 거리에 *거의 일정한 상대 정밀도* 가 생긴다(절대 거리 간격이 일정하다는 뜻은 아니다).
 
 ```cpp
-// 깊이 버퍼를 0..1 대신 그대로 두고 비교 방향과 클리어 값을 뒤집는다
+// 32F 깊이 첨부를 사용하고 클립 깊이·비교 방향·클리어 값을 함께 맞춘다
 glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);  // 4.5+ 또는 ARB_clip_control
 glDepthFunc(GL_GREATER);
 glClearDepth(0.0f);

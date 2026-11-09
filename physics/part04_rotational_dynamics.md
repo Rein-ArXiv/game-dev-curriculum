@@ -255,7 +255,7 @@ $$
 \vec{L} = \mathbf{I} \vec{\omega}
 $$
 
-3D 에서 $\mathbf{I}$ 가 텐서, $\vec{\omega}$ 가 벡터 → $\vec{L}$ 도 벡터. *일반적으로 $\vec{L}$ 과 $\vec{\omega}$ 가 평행하지 않다*. 비대각 관성 성분뿐 아니라 *주축 좌표계에서 관성이 대각이어도* 주관성모멘트가 서로 다르고 $\vec{\omega}$ 가 여러 주축 성분을 가지면 $\mathbf{I}\vec{\omega}$ 와 $\vec{\omega}$ 는 평행하지 않다. 예: $\mathbf{I} = \mathrm{diag}(1,2,3)$, $\vec{\omega} = (1,1,0)$ 이면 $\vec{L} = (1,2,0)$ 이고 $\vec{L} \times \vec{\omega} = (0,0,1) \ne 0$ 이다. $\vec{L} \parallel \vec{\omega}$ 인 경우는 *등방성* ($\mathbf{I} = c\mathbf{1}$) 이거나 $\vec{\omega}$ 가 *단일 고유축 방향* 일 때뿐이다.
+3D 에서 $\mathbf{I}$ 가 텐서, $\vec{\omega}$ 가 벡터 → $\vec{L}$ 도 벡터. *일반적으로 $\vec{L}$ 과 $\vec{\omega}$ 가 평행하지 않다*. 비대각 관성 성분뿐 아니라 *주축 좌표계에서 관성이 대각이어도* 주관성모멘트가 서로 다르고 $\vec{\omega}$ 가 여러 주축 성분을 가지면 $\mathbf{I}\vec{\omega}$ 와 $\vec{\omega}$ 는 평행하지 않다. 예: $\mathbf{I} = \mathrm{diag}(1,2,3)$, $\vec{\omega} = (1,1,0)$ 이면 $\vec{L} = (1,2,0)$ 이고 $\vec{L} \times \vec{\omega} = (0,0,-1) \ne 0$ 이다. $\vec{L} \parallel \vec{\omega}$ 인 경우는 *등방성* ($\mathbf{I} = c\mathbf{1}$) 이거나 $\vec{\omega}$ 가 *관성 텐서의 고유벡터 방향* 일 때다. 중복 고유값이 있으면 그 고유공간 안의 어느 방향도 가능하다.
 
 2D 에서 $L = I \omega$ — 스칼라 곱.
 
@@ -345,7 +345,7 @@ void WrapAngle(RigidBody2D& body) {
 }
 ```
 
-매 step 마지막에 *[0, 2π) 로 wrap*. 주기적이라 *시각적 차이 없음*. 정밀도 안정.
+매 step 마지막에 *[0, 2π)로 wrap*하면 같은 방향을 작은 수로 표현할 수 있다. 다만 2π 경계를 가로질러 렌더 보간하거나 회전수를 세는 joint·motor에는 최단각 차이 또는 별도 unwrapped 각도를 사용해야 한다. 숫자 자체를 단순 보간하면 거의 한 바퀴를 되돌 수 있다.
 
 ### 5.3 변환 행렬
 
@@ -355,7 +355,7 @@ void WrapAngle(RigidBody2D& body) {
 mat2 Rotation2D(float angle) {
     float c = std::cos(angle);
     float s = std::sin(angle);
-    return mat2{c, -s, s, c};
+    return mat2{c, -s, s, c}; // row-major 원소 나열 생성자를 전제. GLM처럼 열 나열이면 {c,s,-s,c}
 }
 ```
 
@@ -406,7 +406,7 @@ $$
 | $q$ 의 의미 | body → world (local → world) |
 | $\vec{\omega}$ | world frame |
 | 도함수 | $\dot{q} = \tfrac{1}{2}\omega_q q$ → `Multiply(omega_q, q)` |
-| 반대 라이브러리 | scalar-first 생성자면 `omega_q` 성분을 `(0, \omega_x, \omega_y, \omega_z)` 로 배치한다. $q$ 가 world → body 이거나 $\vec{\omega}$ 가 body frame 이면 곱셈 순서를 뒤집어 `Multiply(q, omega_q)` 를 쓴다. |
+| 반대 라이브러리 | scalar-first 생성자면 `omega_q` 성분을 `(0, \omega_x, \omega_y, \omega_z)` 로 배치한다. $q$가 body → world이고 ω가 body frame이면 qω 순서다. 역회전 p=q⁻¹(world → body)을 적분하면 world ω에 대해 ṗ=−½pω, body ω에 대해 ṗ=−½ωp이므로 부호도 바뀐다. 단순히 곱 순서만 바꾸면 안 된다. |
 
 ### 6.2 이산 적분
 
@@ -454,16 +454,19 @@ void StepRotation3DExp(RigidBody3D& body, float dt) {
     // ... 각속도 갱신 ...
     vec3 omega = body.angularVelocity;
     float angle = length(omega) * dt;
+    Quaternion dq;
     if (angle > 1e-8f) {
         vec3 axis = omega / length(omega);
-        Quaternion dq = QuaternionFromAxisAngle(axis, angle);
-        body.orientation = QuaternionMultiply(dq, body.orientation);
-        body.orientation = QuaternionNormalize(body.orientation);
+        dq = QuaternionFromAxisAngle(axis, angle);
+    } else { // 작은 각도에서 sin(angle/2)/|omega|의 극한을 사용
+        vec3 v = omega * (0.5f * dt);
+        dq = {v.x, v.y, v.z, 1.0f - angle * angle / 8.0f};
     }
+    body.orientation = QuaternionNormalize(QuaternionMultiply(dq, body.orientation));
 }
 ```
 
-작은 dt 에서 둘 다 비슷한 결과. 큰 dt + 큰 $\omega$ 일 때 exp map 이 *더 정확*. Bullet / PhysX 등이 이 방식.
+작은 dt 에서 둘 다 비슷한 결과. 스텝 동안 ω가 일정하다면 exp map은 그 회전을 정확히 표현한다. ω 자체가 변할 때의 동역학 적분 오차까지 없애지는 않는다. Bullet / PhysX 등이 이 방식.
 
 ### 6.5 토크 적용 (3D)
 
@@ -526,10 +529,7 @@ $\vec{\omega} \times (\mathbf{I} \vec{\omega})$ 항. 게임은 보통 *무시* �
 
 ```cpp
 float w_mag = length(omega);
-if (w_mag < 1e-8f) {
-    // 각속도 거의 0 — 회전 변경 없음
-    return;
-}
+if (w_mag == 0.0f) return; // 정확히0이면 항등회전. 작은 비영값은 §6.4의 극한 경로 사용
 vec3 axis = omega / w_mag;
 ```
 
@@ -539,9 +539,11 @@ vec3 axis = omega / w_mag;
 
 ```cpp
 const float kMaxAngularSpeed = 50.0f;     // rad/s
-float w_sq = dot(body.angularVelocity, body.angularVelocity);
-if (w_sq > kMaxAngularSpeed * kMaxAngularSpeed) {
-    body.angularVelocity *= kMaxAngularSpeed / std::sqrt(w_sq);
+// 입력 각속도는 유한한 float 성분이라는 계약. 크기는 double로 계산한다.
+double speed = std::hypot(double(body.angularVelocity.x),
+                          double(body.angularVelocity.y), double(body.angularVelocity.z));
+if (speed > kMaxAngularSpeed) {
+    body.angularVelocity *= static_cast<float>(kMaxAngularSpeed / speed);
 }
 ```
 
@@ -636,7 +638,7 @@ flowchart LR
 - *선형 운동량 $\vec{p}$* — 질량 × 질량중심 속도. 외력 없으면 보존.
 - *각운동량 $\vec{L}$* — (단일 body 의 질량중심 spin) 관성 × 각속도. 외토크 없으면 보존. 시스템 총량은 공통 원점에 대한 orbital 항 $\sum_i (\vec{x}_{COM,i} - O) \times m_i \vec{v}_i$ 를 더한 값이다.
 
-게임 충돌 시스템이 *두 보존 법칙을 자연스럽게 만족* 하도록 임펄스를 *대칭 분배* — 한 객체에 +J 면 다른 객체에 -J, 한 객체에 +τ 면 다른 객체에 대응 -τ.
+게임 충돌 시스템이 *두 보존 법칙을 자연스럽게 만족* 하도록 임펄스를 *대칭 분배* — 한 객체에 +J면 다른 객체에 −J를 같은 접촉점에 적용한다. 각 COM 주위의 각임펄스 rA×(−J), rB×J는 일반적으로 서로 반대가 아니다. 공통 원점에 대한 orbital+spin 합으로 보존을 확인해야 한다.
 
 
 ---

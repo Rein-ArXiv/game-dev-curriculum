@@ -67,13 +67,11 @@ for (auto it = entities.begin(); it != entities.end(); ++it) {
 메모리 레이아웃을 따라가보면:
 
 ```text
-Iterator -> ListNode -> GameObject* -> GameObject 실제 데이터
-   ^           ^            ^              ^
-   |           |            |              |
-역참조 1    역참조 2    역참조 3       최종 데이터
+Iterator가 보관한 ListNode* -> 노드 안의 GameObject* -> GameObject 멤버
+                              메모리 load 1             메모리 load 2
 ```
 
-실제로는 3단계의 역참조가 발생한다. 각 단계마다 잠재적인 캐시 미스가 발생할 수 있고, CPU의 프리페처(prefetcher)는 예측 불가능한 메모리 점프 패턴에서 무력화된다. 이는 파이프라인 스톨(pipeline stall)로 이어져 성능을 크게 저하시킨다.
+iterator의 노드 포인터가 레지스터에 있다고 보면, 노드에서 객체 포인터를 읽고 그 주소에서 멤버를 읽는 두 번의 의존 load가 필요하다. 다음 노드로 가는 `next` load는 별도다. iterator라는 추상화 자체가 추가 역참조를 반드시 만드는 것은 아니다. 객체가 흩어져 있으면 이 의존 load의 캐시 미스와 예측하기 어려운 접근이 순회 비용을 키운다.
 
 ### 캐시 미스의 폭발
 
@@ -179,30 +177,27 @@ intrusive라는 사실만으로 객체가 연속 배치되거나 전체 프레�
 Intrusive List에서는 역참조 횟수가 극적으로 감소한다:
 
 ```cpp
+// 현재 노드 포인터를 이미 얻었다고 가정한 payload 접근
 // std::list<GameObject*>
-Iterator -> ListNode -> GameObject* -> GameObject members
-   (1)         (2)          (3)
+ListNode* -> GameObject* -> GameObject member  // 두 load
 
 // Intrusive List
-Iterator -> GameObject (links embedded) -> members
-   (1)                                       (2)
+ListNode* -> 객체 주소를 offset으로 복원 -> member // 주소 계산 + 한 load
 ```
 
 x86-64 어셈블리 코드로 비교해보면 차이가 명확하다:
 
 ```nasm
-; std::list<T*> 순회
-mov rax, [rdi]        ; Iterator -> Node
-mov rbx, [rax + 16]   ; Node -> T* (data offset)
-mov rcx, [rbx + 8]    ; T* -> member
-call [rcx]            ; virtual function call
+; 레이아웃 설명용 코드. rax에는 현재 노드 주소가 이미 있다.
+; std::list<T*>의 payload에서 int 멤버 읽기
+mov rbx, [rax + 16]   ; 예시 노드 layout: data 포인터
+mov ecx, [rbx + 8]    ; 예시 객체 layout: int 멤버
 
-; Intrusive list 순회
-mov rax, [rdi]        ; Iterator -> Object
-mov rcx, [rax + 8]    ; Object -> member (직접)
-call [rcx]            ; virtual function call
+; offset hook을 쓰는 intrusive list에서 같은 멤버 읽기
+lea rbx, [rax - hook_offset] ; 객체 주소 복원: 메모리 load 아님
+mov ecx, [rbx + 8]
 
-명령어 1개 감소 + 메모리 접근 1회 감소
+의존 메모리 load 한 번 감소 (lea는 주소 산술이며 실제 명령 수는 최적화에 의존)
 ```
 
 이 비교는 iterator가 별도 owner 필드 없이 객체 주소를 복원하는 base/member-offset hook을 가정한다. owner 포인터를 hook에 저장하는 구현(아래 실전 예제)은 `node->owner` 로드 한 번과 hook당 8바이트가 추가되므로, 위 역참조 횟수와 메모리 계산에서 그 비용을 따로 센다.
@@ -239,7 +234,7 @@ visibleEntities.push_back(entity);
 collidableEntities.push_back(entity);
 ```
 
-`std::list`로는 이를 구현할 수 없다. 포인터를 여러 리스트에 추가할 수는 있지만, 각각 별도의 노드가 생성되므로 메모리 낭비와 관리 복잡도가 증가한다.
+`std::list<T*>`로도 같은 객체를 여러 리스트에 연결할 수 있지만, 각 소속마다 별도 노드가 필요하다. 여기서 비교하는 것은 다중 소속의 가능 여부보다 외부 노드 할당과 hook 저장 비용이다.
 
 ## 3. 구현의 핵심: container_of 매크로
 
@@ -547,17 +542,18 @@ struct task_struct {
     // ...
 };
 
-// 전역 프로세스 리스트
-LIST_HEAD(task_list);
-
 // 모든 프로세스 순회
 void print_all_tasks(void) {
     struct task_struct *task;
-    list_for_each_entry(task, &task_list, tasks) {
-        printk("PID: %d, Name: %s\n", task->pid, task->comm);
+    rcu_read_lock();
+    for_each_process(task) { // 실제 init_task에 연결된 프로세스 목록을 순회
+        printk("PID: %d\n", task->pid);
     }
+    rcu_read_unlock();
 }
 ```
+
+`LIST_HEAD(task_list)`로 새 헤드를 만들기만 하면 빈 사용자 정의 목록일 뿐 실제 프로세스가 들어오지 않는다. 위 예는 커널의 `for_each_process`와 RCU 수명 보호를 사용하며, RCU가 task의 모든 필드를 일관된 스냅샷으로 만들어 주는 것은 아니다.
 
 커널에서 Intrusive List를 사용하는 이유:
 
@@ -589,8 +585,8 @@ entities.push_back(*new GameObject());
 // Option 2: Member hook (멤버 방식)
 class GameObject {
     int health;
-    bi::list_member_hook<> hook;
 public:
+    bi::list_member_hook<> hook;
     void Update();
 };
 
@@ -606,6 +602,7 @@ typedef bi::list<
 class GameObject : public bi::list_base_hook<
     bi::link_mode<bi::auto_unlink>  // 소멸 시 자동 제거
 > {
+public:
     ~GameObject() {
         // 자동으로 리스트에서 제거됨
     }

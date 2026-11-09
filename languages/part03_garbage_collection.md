@@ -363,7 +363,7 @@ Age 15 (threshold 예시)
 Old Generation:     [obj1]  (Promoted!)
 ```
 
-HotSpot `MaxTenuringThreshold`의 기본값은 15지만 실제 승격 시점은 survivor 목표량과 age table 분포에 따라 collector가 동적으로 조정하며, G1의 humongous allocation처럼 Eden→Survivor→Old 흐름을 따르지 않는 예외도 있다. 모든 JVM·collector에 공통된 고정 15회 규칙이 아니다.
+HotSpot의 Parallel collector에서는 `MaxTenuringThreshold` 기본값이 15지만 실제 승격 시점은 survivor 목표량과 age table 분포에 따라 collector가 동적으로 조정하며, G1의 humongous allocation처럼 Eden→Survivor→Old 흐름을 따르지 않는 예외도 있다. 모든 JVM·collector에 공통된 고정 15회 규칙이 아니다.
 
 ### 문제: Old → Young 참조
 
@@ -435,7 +435,7 @@ Region 2: {Region 3}
 ```
 
 장점:
-- 참조를 담은 카드만 골라 스캔 (카드 전체 스캔 불필요)
+- 회수 대상 region으로 들어오는 참조를 담은 카드만 골라 스캔 (old 영역 전체 스캔 불필요)
 - Region 단위 독립적 GC 가능
 
 단점:
@@ -583,7 +583,7 @@ ZGC와 Shenandoah는 mark뿐 아니라 relocation/compaction의 많은 부분을
 
 ```c
 // 축소 모형: 처음 읽은 참조가 아직 slot의 현재 값일 때만 self-heal한다.
-Object* load(Object** slot) {
+Object* load(_Atomic(Object*)* slot) {
     Object* observed = atomic_load_explicit(slot, memory_order_acquire);
     Object* moved = ResolveForwarding(observed);
     if (moved != observed) {
@@ -1178,7 +1178,7 @@ for (int i = 0; i < 1000000; i++) {
     process(s);
 }
 
-// 좋음
+// 재사용 후보: builder의 버퍼는 재사용하지만 toString()의 결과 String은 매번 할당된다.
 StringBuilder sb = new StringBuilder();
 for (int i = 0; i < 1000000; i++) {
     sb.setLength(0);  // 재사용

@@ -217,7 +217,7 @@ void alarm_handler(int sig) {
 
 int main() {
     struct sigaction sa = {0};
-    sigset_t block, old;
+    sigset_t block, old, waitmask;
 
     /* 대상 시그널을 먼저 차단해 handler 실행과 대기 사이의 창을 없앤다 */
     sigemptyset(&block);
@@ -231,8 +231,10 @@ int main() {
     alarm(5);  // 5초 후 SIGALRM 발생
 
     /* 대기 mask에서 SIGALRM을 해제한 채 원자적으로 기다리고, 깨어나면 조건을 재검사한다 */
+    waitmask = old;
+    sigdelset(&waitmask, SIGALRM);
     while (!alarm_fired)
-        sigsuspend(&old);
+        sigsuspend(&waitmask);
 
     sigprocmask(SIG_SETMASK, &old, NULL);
 }
@@ -258,7 +260,7 @@ void sigchld_handler(int sig) {
 
 int main() {
     struct sigaction sa = {0};
-    sigset_t block, old;
+    sigset_t block, old, waitmask;
 
     /* fork 이전에 SIGCHLD를 차단해, 자식이 먼저 종료해도 대기에서 놓치지 않게 한다 */
     sigemptyset(&block);
@@ -273,14 +275,16 @@ int main() {
         _exit(0);  // 자식 종료 -> 부모에게 SIGCHLD
     }
 
+    waitmask = old;
+    sigdelset(&waitmask, SIGCHLD);
     while (!child_changed)   // 이미 통지됐으면 즉시 통과
-        sigsuspend(&old);    // 그 사이 도착한 시그널도 놓치지 않는다
+        sigsuspend(&waitmask);    // 그 사이 도착한 시그널도 놓치지 않는다
 
     sigprocmask(SIG_SETMASK, &old, NULL);
 }
 ```
 
-`pause()`로 조건을 기다리면 시그널이 `pause()` 호출 전에 처리됐을 때 lost-wakeup이 생긴다 — 위처럼 대상 시그널을 먼저 차단하고 조건을 검사한 뒤 `sigsuspend`로 원자적으로 기다리면 그 창이 사라진다.
+`pause()`로 조건을 기다리면 시그널이 `pause()` 호출 전에 처리됐을 때 lost-wakeup이 생긴다 — 위처럼 대상 시그널을 먼저 차단하고 조건을 검사한 뒤 `sigsuspend`로 원자적으로 기다리면 그 창이 사라진다. 이전 마스크에서 대상이 이미 차단되어 있었어도 대기 중에만 해제하도록 별도 `waitmask`를 쓴다.
 
 #### 사용자 정의 시그널
 
@@ -334,9 +338,10 @@ void rt_handler(int sig, siginfo_t *info, void *ucontext) {
     value_ready = 1;
 }
 
-struct sigaction sa;
+struct sigaction sa = {0};
 sa.sa_sigaction = rt_handler;
 sa.sa_flags = SA_SIGINFO;
+sigemptyset(&sa.sa_mask);
 sigaction(SIGRTMIN, &sa, NULL);
 ```
 
@@ -429,9 +434,10 @@ void job_done_handler(int sig, siginfo_t *info, void *ucontext) {
     completion_pending = 1;
 }
 
-struct sigaction sa;
+struct sigaction sa = {0};
 sa.sa_sigaction = job_done_handler;
 sa.sa_flags = SA_SIGINFO;
+sigemptyset(&sa.sa_mask);
 sigaction(SIGRTMIN, &sa, NULL);
 
 // 워커 프로세스
@@ -571,7 +577,7 @@ void handler(int sig) {
 }
 
 int main() {
-    struct sigaction sa;
+    struct sigaction sa = {0};
 
     sa.sa_handler = handler;
     sigemptyset(&sa.sa_mask);
@@ -606,7 +612,7 @@ void extended_handler(int sig, siginfo_t *info, void *ucontext) {
     notify_main_loop(&record);  // async-signal-safe하도록 별도 구현
 }
 
-struct sigaction sa;
+struct sigaction sa = {0};
 sa.sa_sigaction = extended_handler;
 sa.sa_flags = SA_SIGINFO;
 sigaction(SIGINT, &sa, NULL);
@@ -616,7 +622,7 @@ sigaction(SIGINT, &sa, NULL);
 - Linux/POSIX가 restart 대상으로 정한 일부 blocking 인터페이스를 자동 재시작할 수 있다
 
 ```c
-struct sigaction sa;
+struct sigaction sa = {0};
 sa.sa_handler = handler;
 sa.sa_flags = SA_RESTART;
 sigaction(SIGINT, &sa, NULL);
@@ -640,7 +646,7 @@ ssize_t n = read(fd, buf, sizeof(buf));
 - 자식이 종료될 때 wait 가능한 zombie를 남기지 않도록 요청한다
 
 ```c
-struct sigaction sa;
+struct sigaction sa = {0};
 sa.sa_handler = SIG_DFL;
 sa.sa_flags = SA_NOCLDWAIT;  // 좀비 프로세스 자동 정리
 sigaction(SIGCHLD, &sa, NULL);
@@ -717,7 +723,7 @@ void segv_handler(int sig, siginfo_t *info, void *ucontext) {
     _exit(128 + sig);
 }
 
-struct sigaction sa;
+struct sigaction sa = {0};
 sa.sa_sigaction = segv_handler;
 sa.sa_flags = SA_SIGINFO;
 sigaction(SIGSEGV, &sa, NULL);
@@ -823,7 +829,7 @@ void handler(int sig) {
     // handler가 실행 중인 동안 같은 번호가 생성되면 pending 상태가 된다.
 }
 
-struct sigaction sa;
+struct sigaction sa = {0};
 sa.sa_handler = handler;
 sigemptyset(&sa.sa_mask);
 sa.sa_flags = 0;  // SA_NODEFER가 없으면 자동 차단
@@ -833,7 +839,7 @@ sigaction(SIGINT, &sa, NULL);
 `sa_mask`를 사용하면 추가 시그널도 차단할 수 있다:
 
 ```c
-struct sigaction sa;
+struct sigaction sa = {0};
 sa.sa_handler = handler;
 sigemptyset(&sa.sa_mask);
 sigaddset(&sa.sa_mask, SIGQUIT);  // 핸들러 실행 중 SIGQUIT도 차단
@@ -1389,7 +1395,7 @@ void shutdown_handler(int sig) {
 }
 
 int main() {
-    struct sigaction sa;
+    struct sigaction sa = {0};
 
     // SIGINT, SIGTERM 핸들러 등록
     sa.sa_handler = shutdown_handler;
@@ -1434,7 +1440,7 @@ void sigchld_handler(int sig) {
 }
 
 int main() {
-    struct sigaction sa;
+    struct sigaction sa = {0};
 
     sa.sa_handler = sigchld_handler;
     sigemptyset(&sa.sa_mask);
@@ -1639,9 +1645,11 @@ int main() {
 static int sig_pipe[2];
 
 void handler(int sig) {
+    int saved_errno = errno;
     unsigned char byte = (unsigned char)sig;
     ssize_t ignored = write(sig_pipe[1], &byte, 1);
     (void)ignored;  // EAGAIN이면 이미 깨어날 이벤트가 있다고 보고 coalesce
+    errno = saved_errno;
 }
 
 int main() {

@@ -314,7 +314,7 @@ struct CompactPosition {
 };   // 6바이트, float 대비 50% 절감
 ```
 
-선택 기준은 `표현 구간 폭 / quantization step ≤ code count`다. signed 16-bit와 1cm step은 local origin 기준 약 `[-327.68m, 327.67m]`를 표현한다. world가 이 범위를 넘으면 chunk/sector origin을 함께 저장하거나 step·bit 수를 바꾼다. 표시 오차 budget은 camera distance, collision 판정 재실행 여부와 downstream interpolation까지 포함해 정한다.
+양 끝을 모두 표현하려면 필요한 code 수는 `구간 폭 / step + 1`이다(구간 폭이 step의 정수배라는 전제). 따라서 `구간 폭 / step ≤ code count - 1`이어야 한다. signed 16-bit와 1cm step은 local origin 기준 약 `[-327.68m, 327.67m]`를 표현한다. world가 이 범위를 넘으면 chunk/sector origin을 함께 저장하거나 step·bit 수를 바꾼다. 표시 오차 budget은 camera distance, collision 판정 재실행 여부와 downstream interpolation까지 포함해 정한다.
 
 함정 — *양자화 오차의 누적*. 리플레이 표시용 위치는 양자화해도 무방하나, *재생이 결정론적 재시뮬을 한다면* 양자화된 값을 다시 시뮬 입력으로 쓰면 안 된다 — 시뮬은 *원본 정밀도(fixed-point 풀값)*, 저장·표시만 양자화한다. 둘을 섞으면 재생이 원본과 갈린다.
 

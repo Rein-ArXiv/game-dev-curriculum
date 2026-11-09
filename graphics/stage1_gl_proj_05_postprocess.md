@@ -35,7 +35,7 @@ HDR(High Dynamic Range) 파이프라인은 이 문제를 두 단계로 분리해
 
 ### LDR 버퍼의 clamp 문제
 
-기본 프레임버퍼는 채널당 8비트 정규화 정수, 곧 RGBA8이다. 한 채널은 0에서 255까지의 정수를 가지고, 셰이더에서 출력하는 부동소수 값은 화면에 기록될 때 [0, 1]로 clamp된 뒤 255를 곱해 양자화된다. 이 모델에서 1.0을 넘는 밝기는 표현할 방법이 없다. 강한 광원에 정면으로 노출된 표면이 셰이더에서 `vec3(5.0, 4.5, 3.0)`을 계산해도, 프레임버퍼에 들어가는 순간 `vec3(1.0, 1.0, 1.0)`이 되어 흰색으로 뭉개진다.
+이 예제는 기본 프레임버퍼를 채널당 8비트 정규화 컬러로 가정한다. 실제 색 비트 수와 sRGB 인코딩은 윈도우 시스템의 픽셀 포맷에 따라 달라진다. 한 채널은 0에서 255까지의 정수를 가지고, 셰이더에서 출력하는 부동소수 값은 화면에 기록될 때 [0, 1]로 clamp된 뒤 255를 곱해 양자화된다. 이 모델에서 1.0을 넘는 밝기는 표현할 방법이 없다. 강한 광원에 정면으로 노출된 표면이 셰이더에서 `vec3(5.0, 4.5, 3.0)`을 계산해도, 프레임버퍼에 들어가는 순간 `vec3(1.0, 1.0, 1.0)`이 되어 흰색으로 뭉개진다.
 
 이 손실이 치명적인 이유는 *밝기 비율 정보가 사라지기* 때문이다. 톤 매핑이나 블룸 같은 후처리는 1.0을 넘는 값들 사이의 차이를 이용해 동작하는데, 메인 패스가 이미 잘라버린 값에서는 그 차이를 복원할 수 없다. 후처리를 적용하려면 셰이딩 결과를 *잘라내지 않고 보존하는* 렌더 타깃이 먼저 필요하다.
 
@@ -51,7 +51,7 @@ HDR(High Dynamic Range) 파이프라인은 이 문제를 두 단계로 분리해
 | `GL_RGBA32F` | 32 (float) | 16 | 약 ±3.4×10^38 | 정밀도 과잉 |
 | `GL_RGB10_A2` | 10/10/10/2 | 4 | [0, 1] 정수 | HDR 아님, 색 단계만 ↑ |
 
-게임 HDR의 사실상 표준은 `GL_RGBA16F`다. 반정밀도(half-precision) float은 부호 1비트, 지수 5비트, 가수 10비트로 약 65,504까지를 표현하고, 작은 값 근처에서는 가수 10비트의 상대 정밀도를 유지한다. 따라서 8비트 LDR보다 훨씬 넓은 범위를 담지만 *무손실은 아니다* — 예를 들어 0.1은 0.0999755859375로 반올림되고, pre-exposure 없이 65,504를 넘는 값은 `inf`가 된다. 장면 휘도 단위와 노출(pre-exposure)을 맞춰 이 범위 안에 들도록 관리하고, 메모리는 32비트 float의 절반이라는 이점을 취한다.
+게임 HDR의 사실상 표준은 `GL_RGBA16F`다. 반정밀도(half-precision) float은 부호 1비트, 지수 5비트, 가수 10비트로 약 65,504까지를 표현하고, 정규수 범위에서는 가수 10비트에 따른 상대 정밀도를 유지한다(아주 작은 subnormal 구간은 상대 정밀도가 낮아진다). 따라서 8비트 LDR보다 훨씬 넓은 범위를 담지만 *무손실은 아니다* — 예를 들어 0.1은 0.0999755859375로 반올림되고, 표현 범위를 벗어나는 큰 값은 반올림 과정에서 `inf`로 넘칠 수 있다. 장면 휘도 단위와 노출(pre-exposure)을 맞춰 이 범위 안에 들도록 관리하고, 메모리는 32비트 float의 절반이라는 이점을 취한다.
 
 `GL_R11F_G11F_B10F`는 픽셀당 4 byte로 RGBA16F의 절반이라 대역폭에 민감한 환경에서 쓰지만, 알파 채널이 없고 부호 비트가 없어 음수를 표현하지 못한다는 제약이 있다. `GL_RGB10_A2`는 부동소수가 아니라 정수 포맷이라 여전히 [0, 1]로 clamp되므로 HDR 누적에는 쓸 수 없다. 단지 색 밴딩(banding)을 줄이는 용도다.
 
@@ -91,7 +91,7 @@ glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
 `GL_TEXTURE_MIN_FILTER`와 `GL_TEXTURE_MAG_FILTER`를 `GL_LINEAR`로 두는 이유는 이후 후처리 패스가 이 텍스처를 화면 크기와 다른 해상도로 샘플링하거나, 블러에서 텍셀 사이를 보간해 읽기 때문이다. 부동소수 텍스처에 대한 bilinear 필터링은 데스크톱 GPU에서 기본 지원되지만, 일부 OpenGL ES 환경에서는 half-float용 `GL_OES_texture_half_float_linear` 확장이 있어야 한다(`GL_OES_texture_float_linear`는 32비트 float 전용이다).
 
-깊이는 텍스처가 아니라 renderbuffer로 잡았다. 깊이 버퍼를 셰이더에서 다시 읽을 필요가 없다면 renderbuffer가 더 가볍다. 깊이를 후처리 단계(예: SSAO, depth of field)에서 샘플링하려면 `GL_DEPTH_COMPONENT24` 텍스처로 바꿔 첨부한다.
+깊이는 텍스처가 아니라 renderbuffer로 잡았다. 깊이 버퍼를 셰이더에서 다시 읽을 필요가 없다면 renderbuffer를 사용할 수 있다. 실제 저장량·성능 이득은 구현과 사용 패턴에 달려 있다. 깊이를 후처리 단계(예: SSAO, depth of field)에서 샘플링하려면 `GL_DEPTH_COMPONENT24` 텍스처로 바꿔 첨부한다.
 
 ### 메모리 산정
 
@@ -126,6 +126,7 @@ FragColor = vec4(linearShadedColor, 1.0);    // 0~1 제한 없음
 // 1) HDR FBO 에 씬 렌더
 glBindFramebuffer(GL_FRAMEBUFFER, hdrFBO);
 glViewport(0, 0, width, height);
+glEnable(GL_DEPTH_TEST);  // 전 프레임의 후처리에서 껐던 상태 복구
 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 DrawScene();   // shadow map + 셰이딩
 
@@ -231,7 +232,7 @@ void main() {
 }
 ```
 
-합성은 더하기이지 섞기가 아니다. 블룸은 빛이 *추가되는* 효과이므로 `mix`가 아니라 `+`를 쓴다. 합성 결과는 여전히 HDR이라(원본과 번진 밝기가 더해져 값이 더 커진다) 톤 매핑 패스로 전달해야 한다.
+합성은 더하기이지 섞기가 아니다. 이 예제는 원본 위에 번짐을 추가하는 미술적 근사이므로 `mix`가 아니라 `+`를 쓴다. 실제 렌즈 산란은 기존 빛의 재분배이므로 이 단순 합성이 에너지를 보존하는 물리 모델인 것은 아니다. 합성 결과는 여전히 HDR이라(원본과 번진 밝기가 더해져 값이 더 커진다) 톤 매핑 패스로 전달해야 한다.
 
 ### 다단계 블룸
 
@@ -319,6 +320,8 @@ bool horizontal = true, firstIter = true;
 const int blurPasses = 10;   // 가로/세로 5쌍
 
 blurShader.Use();
+blurShader.SetInt("uImage", 0);
+glActiveTexture(GL_TEXTURE0);
 for (int i = 0; i < blurPasses; ++i) {
     glBindFramebuffer(GL_FRAMEBUFFER, pingFBO[horizontal ? 0 : 1]);
     blurShader.SetInt("uHorizontal", horizontal ? 1 : 0);
@@ -328,6 +331,7 @@ for (int i = 0; i < blurPasses; ++i) {
     horizontal = !horizontal;
     firstIter = false;
 }
+GLuint blurredBloom = pingColor[horizontal ? 1 : 0];  // 마지막으로 쓴 텍스처
 ```
 
 첫 패스만 밝기 분리 텍스처를 입력으로 받고, 이후로는 직전 패스가 쓴 ping 텍스처를 읽는다. 가로와 세로를 다섯 번씩 번갈아 총 10패스를 돌리면 부드러운 글로우가 나온다. 패스 수를 늘리면 더 넓게 번지지만, 다단계 블룸과 달리 단일 해상도 반복은 패스 수에 비례해 비용이 선형으로 늘어난다.
@@ -382,7 +386,7 @@ vec3 Reinhard(vec3 c) {
 }
 ```
 
-입력이 0이면 0, 무한대로 가면 1에 점근한다. 어떤 큰 값도 1을 넘지 않으므로 clamp가 필요 없다. 장점은 코드가 한 줄이고 어떤 입력에도 안정적이라는 것이다. 단점은 중간 휘도 영역의 대비가 약해 어두운 부분이 전반적으로 회색으로 떠 보인다는 것이다. $L_{in} = 1$에서 출력이 0.5이므로, 밝은 영역이 빠르게 0.5 근처로 몰린다.
+입력이 0이면 0, 무한대로 가면 1에 점근한다. 어떤 큰 값도 1을 넘지 않으므로 clamp가 필요 없다. 장점은 코드가 한 줄이고 유한한 비음수 입력에 적용하기 단순하다는 것이다(음수 -1에서는 분모가 0이 된다). 단점은 중간 휘도 영역의 대비가 약해 어두운 부분이 전반적으로 회색으로 떠 보인다는 것이다. $L_{in} = 1$에서 출력이 0.5이므로, 입력 1 부근을 중간 밝기로 낮춘다. 더 큰 입력은 0.5 근처에 머무는 것이 아니라 1에 점근한다.
 
 ### Reinhard Extended
 
@@ -449,11 +453,11 @@ vec3 Uncharted2(vec3 c, float exposure, float W) {
 
 ### 채널별 톤 매핑의 색 변형
 
-위 함수들은 모두 RGB 세 채널에 *독립적으로* 적용된다. 이 방식은 채도가 높은 밝은 색에서 색조가 변하는 부작용이 있다. 예를 들어 `vec3(8.0, 1.0, 0.5)` 같은 강렬한 주황색은 R 채널이 빠르게 1.0에 가까워지면서 세 채널이 모두 1에 수렴해 흰색으로 바래진다. 이 *hue shift*는 ACES 같은 곡선에서 오히려 자연스러운 필름 룩으로 받아들여지지만, 정확한 색 재현이 필요하면 휘도에만 톤 매핑을 적용하고 색상은 보존하는 별도 기법을 쓴다. 학습 코드에서는 채널별 적용으로 충분하다.
+위 함수들은 모두 RGB 세 채널에 *독립적으로* 적용된다. 이 방식은 채도가 높은 밝은 색에서 색조가 변하는 부작용이 있다. 예를 들어 `vec3(8.0, 1.0, 0.5)` 같은 강렬한 주황색은 R 채널이 빠르게 1.0에 가까워지면서 세 채널이 모두 1에 수렴해 흰색으로 바래진다. 이 *hue shift*는 ACES 같은 곡선에서 오히려 자연스러운 필름 룩으로 받아들여지지만, 정확한 색 재현이 필요하면 휘도에만 톤 매핑을 적용하고 RGB 비율을 보존하는 별도 기법을 검토한다. 이 방식도 출력 색역을 벗어날 수 있어 gamut mapping이 별도로 필요하다. 학습 코드에서는 채널별 적용으로 충분하다.
 
 ## 5. ACES Filmic 곡선
 
-ACES(Academy Color Encoding System)는 영화와 방송 산업의 컬러 파이프라인 표준이다. 카메라 입력은 IDT(Input Device Transform)로 ACES 장면 색공간에 들어오고, RRT(Reference Rendering Transform)와 ODT(Output Device Transform)를 거쳐 디스플레이 출력으로 변환된다. 실제 ACES는 여러 색공간 행렬과 곡선이 얽힌 무거운 변환이지만, Krzysztof Narkowicz가 RRT와 sRGB Output ODT의 조합을 유리함수 한 줄로 근사해 게임에서 널리 쓰인다.
+ACES(Academy Color Encoding System)는 영화와 방송 산업의 컬러 파이프라인 표준이다. 이 절에서 근사하는 ACES 1.x 경로에서는 카메라 입력이 IDT(Input Device Transform)로 ACES 장면 색공간에 들어오고, RRT(Reference Rendering Transform)와 ODT(Output Device Transform)를 거쳐 디스플레이 출력으로 변환된다. 실제 ACES는 여러 색공간 행렬과 곡선이 얽힌 무거운 변환이지만, Krzysztof Narkowicz가 RRT와 sRGB Output ODT의 조합을 유리함수 한 줄로 근사해 게임에서 널리 쓰인다.
 
 ```glsl
 vec3 ACESFilm(vec3 x) {
@@ -513,7 +517,7 @@ vec3 ACESFitted(vec3 color) {
 }
 ```
 
-입력 행렬이 sRGB 색을 ACES 작업 색공간으로 옮기고, `RRTAndODTFit`이 그 공간에서 톤 곡선을 적용하고, 출력 행렬이 다시 sRGB로 되돌린다. GLSL `mat3`는 *열 우선(column-major)*이므로 위 행렬 리터럴의 첫 세 숫자가 첫 번째 열이라는 점에 주의한다. 학습 코드는 Narkowicz의 간단 버전으로 충분하고, 영화나 AAA 게임에서는 Fitted를 쓴다.
+입력 행렬이 sRGB/Rec.709 원색의 선형 RGB를 ACES 작업 색공간으로 옮기고, `RRTAndODTFit`이 그 공간에서 톤 곡선을 적용하고, 출력 행렬이 다시 sRGB로 되돌린다. GLSL `mat3`는 *열 우선(column-major)*이므로 위 행렬 리터럴의 첫 세 숫자가 첫 번째 열이라는 점에 주의한다. 위 두 fit은 품질·비용을 비교할 학습용 선택지다. 실제 영화·게임 파이프라인은 목표 디스플레이와 색 관리 규약에 맞춰 기준 변환·LUT·전용 fit 등을 선택한다.
 
 ## 6. 감마 보정 출력
 
@@ -571,7 +575,7 @@ void main() {
 
 OpenGL은 `glEnable(GL_FRAMEBUFFER_SRGB)`로 *하드웨어 sRGB 변환*을 켤 수 있다. 이 모드에서는 프레임버퍼에 기록하는 선형 값이 자동으로 sRGB로 인코딩된다. 문제는 이것이 켜진 채로 셰이더가 `pow(c, 1/2.2)`까지 하면 감마가 *두 번* 적용된다는 것이다. 결과는 색이 지나치게 밝고 씻긴 듯이 떠 보인다.
 
-선택은 둘 중 하나다. 기본 프레임버퍼가 일반 LDR이라고 보고 셰이더에서 `pow`로 직접 변환하거나(`GL_FRAMEBUFFER_SRGB` 비활성), 아니면 `GL_FRAMEBUFFER_SRGB`를 켜고 셰이더의 `pow`를 제거한다. 단 후자는 그리는 첨부의 color encoding이 실제로 `GL_SRGB`일 때만 동작한다 — 기본 프레임버퍼가 sRGB-capable 픽셀 포맷으로 잡혔음을 `GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING` 조회로 확인한 경우에 한해 두 경로가 sRGB 변환을 정확히 한 번만 적용하는 동일한 결과를 낸다. 확인 없이 켜기만 하면 인코딩이 통째로 빠져 화면이 어두워진다. 위 셰이더는 전자를 전제로 작성되었다. 화면이 전반적으로 너무 밝거나 너무 어둡게 나오면, 가장 먼저 이 감마가 두 번 적용되었거나 빠졌는지 의심한다.
+선택은 둘 중 하나다. 기본 프레임버퍼가 일반 LDR이라고 보고 셰이더에서 `pow`로 직접 변환하거나(`GL_FRAMEBUFFER_SRGB` 비활성), 아니면 `GL_FRAMEBUFFER_SRGB`를 켜고 셰이더의 `pow`를 제거한다. 단 후자는 그리는 첨부의 color encoding이 실제로 `GL_SRGB`일 때만 동작한다 — 기본 프레임버퍼가 sRGB-capable 픽셀 포맷으로 잡혔음을 `GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING` 조회로 확인한 경우에 한해 두 경로 모두 출력 변환을 한 번 적용한다. 다만 `pow(1/2.2)` 근사와 정확한 sRGB 전달 함수의 값은 완전히 같지는 않다. 확인 없이 켜기만 하면 인코딩이 통째로 빠져 화면이 어두워진다. 위 셰이더는 전자를 전제로 작성되었다. 화면이 전반적으로 너무 밝거나 너무 어둡게 나오면, 가장 먼저 이 감마가 두 번 적용되었거나 빠졌는지 의심한다.
 
 ## 7. 인스턴스 렌더링
 

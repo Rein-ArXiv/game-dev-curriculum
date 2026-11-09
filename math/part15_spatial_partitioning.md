@@ -80,14 +80,14 @@ $$
 ```mermaid
 flowchart LR
     All[모든 객체 쌍] --> Broad[Broad Phase: 공간 분할]
-    Broad -->|후보 쌍 1%| Narrow[Narrow Phase: GJK·SAT]
+    Broad -->|후보 쌍| Narrow[Narrow Phase: GJK·SAT]
     Narrow --> Resolve[충돌 응답]
 ```
 
 - **Broad phase**: 공간 분할로 *충돌 가능성 있는 쌍* 만 추림. AABB 정도의 빠른 검사.
 - **Narrow phase**: 후보 쌍에 *정밀한 충돌 알고리즘* (GJK, SAT, EPA).
 
-브로드 페이즈가 *대부분의 쌍을 빠르게 컷*. narrow phase 는 *진짜 충돌하는 1% 미만* 의 쌍만 검사.
+브로드 페이즈가 분리된 쌍을 빠르게 걸러낸다. narrow phase는 실제 충돌과 false positive를 포함한 후보를 검사하며, 후보 비율은 장면의 밀도와 형상에 따라 달라진다.
 
 ### 1.4 가속 구조의 비용 모델
 
@@ -372,7 +372,7 @@ void Insert(QuadNode* node, int objId, AABB obj) {
             std::vector<int> retain;
             for (int id : node->objects) {
                 int childIdx = WhichChild(node, GetObjectAABB(id));
-                if (childIdx >= 0) node->children[childIdx]->objects.push_back(id);
+                if (childIdx >= 0) Insert(node->children[childIdx], id, GetObjectAABB(id));
                 else               retain.push_back(id);
             }
             node->objects = std::move(retain);
@@ -386,7 +386,7 @@ void Insert(QuadNode* node, int objId, AABB obj) {
 }
 ```
 
-*객체가 한 자식에 완전히 속하면* 그 자식으로, *경계에 걸치면* 부모에 머물기. *bowling pin 효과* — 작은 객체는 깊이 들어가고 큰 객체는 위에 머물기.
+*객체가 한 자식에 완전히 속하면* 그 자식으로, *경계에 걸치면* 부모에 머물기. 재분배도 `Insert` 를 거치므로 밀집한 자식이 임계값을 넘으면 다시 분할한다. 루트 깊이를 0으로 두고 각 자식의 깊이를 1씩 늘리는 계약과 유한한 `MAX_DEPTH` 덕분에, 같은 위치에 객체가 몰려도 재귀는 그 깊이에서 멈춘다. 깊이 한도에 도달한 leaf는 임계값을 넘는 객체를 그대로 보관한다. 작은 객체는 깊이 들어가고 큰 객체는 위에 머무는 방식이다.
 
 ### 4.3 영역 쿼리
 
@@ -739,7 +739,7 @@ void OnObjectMove(BroadPhase& bp, int objId, AABB oldAABB, AABB newAABB) {
 }
 ```
 
-*같은 셀 안에서 움직이면* 갱신 0. *셀을 옮기면* remove + insert. 객체의 평균 이동량이 *셀 크기보다 훨씬 작으면* 매우 효율적.
+*걸치는 셀 집합이 같으면* 그리드 membership 갱신은 생략할 수 있다. 객체의 실제 AABB는 별도로 갱신해야 최종 검사에 최신 형상이 쓰인다. 셀 집합이 바뀌면 remove + insert. 객체의 평균 이동량이 *셀 크기보다 훨씬 작으면* 효율적일 수 있다.
 
 ### 8.3 Lazy Update / Dirty Tracking
 

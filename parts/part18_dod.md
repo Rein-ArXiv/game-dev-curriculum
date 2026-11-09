@@ -163,7 +163,7 @@ Z:  [z0,z1,z2,z3,z4,z5,z6,z7,...]
 
 ### 캐시 라인 활용도
 
-CPU는 메모리를 캐시 라인 단위(64 bytes)로 읽는다. x 좌표만 필요한 바운딩 볼륨 검사를 생각해보자.
+여기서는 캐시 라인이 64 bytes인 CPU를 가정한다. x 좌표만 필요한 바운딩 볼륨 검사를 생각해보자.
 
 ```cpp
 // AoS: x만 필요한데 y, z, v도 같이 로드됨
@@ -237,7 +237,7 @@ __m256 xs = _mm256_set_ps(p[7].x, p[6].x, p[5].x, p[4].x,
 __m256 xs2 = _mm256_loadu_ps(&particles.x[i]);
 ```
 
-두 줄의 겉모습은 비슷하지만 아래쪽만 명령 하나로 끝난다. 위쪽은 흩어진 주소에서 값을 하나씩 모아 레지스터에 끼워 넣는 작업으로 펼쳐진다. 여기서 확인할 것은 인트린직의 세부가 아니라 **같은 배치 결정이 두 계층에서 같은 방향으로 작용한다**는 사실이다. 캐시 라인을 낭비 없이 채우는 배치가 벡터 레지스터도 낭비 없이 채운다.
+아래쪽은 연속된 8개 float를 한 벡터 load로 가져올 수 있다. 위쪽은 흩어진 값을 모아야 하므로 여러 load·shuffle로 합성되거나 지원되는 gather 명령을 사용할 수 있으며, 정확한 명령열은 컴파일러와 ISA에 달려 있다. 여기서 확인할 것은 인트린직 하나가 언제나 기계 명령 하나라는 뜻이 아니라 **같은 배치 결정이 두 계층에서 같은 방향으로 작용한다**는 사실이다. 필요한 필드가 연속되면 캐시 라인과 벡터 레지스터를 함께 채우기 쉽다.
 
 반대 방향의 사실도 같이 알아 두어야 한다. 루프가 구조체의 모든 필드를 읽는다면 어차피 모든 바이트를 가져와야 하므로 필드별 배열의 cache-line 이점은 사라진다. 레이아웃은 데이터 자체의 속성이 아니라 **그 데이터를 읽는 루프의 속성**에 따라 정해진다.
 
@@ -498,7 +498,7 @@ renderSystem.render();
 
 두 번째가 archetype이다. 이름은 자료구조처럼 보이지만 실제로 하는 일은 **비용을 순회에서 구조 변경으로 옮기는 것**이다. 매 프레임 반복되는 것은 순회이고 컴포넌트 조합이 바뀌는 일은 드물다는 관찰이 이 교환을 정당화한다. 그 관찰이 성립하지 않는 워크로드 — 매 프레임 상태 플래그를 컴포넌트로 붙였다 떼는 코드 — 에서는 같은 구조가 손해로 뒤집힌다.
 
-여기까지가 데이터 지향 관점에서 ECS에 대해 말할 수 있는 것이다. 어떤 배열을 어떤 단위로 묶고, 인덱스를 어떻게 사상하고, 조합이 바뀔 때 무엇을 복사하는지는 자료구조 설계의 문제이지 레이아웃 원칙의 문제가 아니다. 이 글이 소유하는 주장은 그 앞 단계다. **시스템이 실제로 읽는 필드만 연속으로 놓으면 캐시 라인 활용률이 계산 가능한 값으로 바뀌고, 그 계산이 자료구조 선택의 근거가 된다.**
+ECS를 선택할 때는 이 순회 비용과 구조 변경 비용을 함께 비교한다. 어떤 배열을 어떤 단위로 묶고, 인덱스를 어떻게 사상하고, 조합이 바뀔 때 무엇을 복사하는지가 실제 비용을 정한다. **시스템이 실제로 읽는 필드와 배치를 알면 캐시 라인 활용률을 계산할 수 있고, 그 계산이 자료구조 선택의 근거가 된다.**
 
 ## 5. 실전 적용: 파티클 시스템
 
@@ -513,6 +513,7 @@ class ParticleSystem {
     std::vector<vec3> velocities;
     std::vector<vec4> colors;
     std::vector<float> lifetimes;
+    std::vector<float> initialLifetimes;
     std::vector<float> sizes;
 
     size_t aliveCount = 0;
@@ -523,6 +524,7 @@ public:
         velocities.resize(capacity);
         colors.resize(capacity);
         lifetimes.resize(capacity);
+        initialLifetimes.resize(capacity);
         sizes.resize(capacity);
     }
 
@@ -539,7 +541,7 @@ public:
                 velocities[i] += GRAVITY * dt;
                 positions[i] += velocities[i] * dt;
 
-                float normalizedLife = lifetimes[i] / maxLifetime;
+                float normalizedLife = lifetimes[i] / initialLifetimes[i];
                 colors[i].a = normalizedLife;
 
                 ++i;
@@ -548,10 +550,12 @@ public:
     }
 
     void emit(const vec3& pos, const vec3& vel, float lifetime) {
+        if (!(lifetime > 0.0f) || !std::isfinite(lifetime)) return;
         if (aliveCount < positions.size()) {
             positions[aliveCount] = pos;
             velocities[aliveCount] = vel;
             lifetimes[aliveCount] = lifetime;
+            initialLifetimes[aliveCount] = lifetime;
             colors[aliveCount] = vec4(1.0f);
             sizes[aliveCount] = 1.0f;
             ++aliveCount;
@@ -564,6 +568,7 @@ private:
         std::swap(velocities[a], velocities[b]);
         std::swap(colors[a], colors[b]);
         std::swap(lifetimes[a], lifetimes[b]);
+        std::swap(initialLifetimes[a], initialLifetimes[b]);
         std::swap(sizes[a], sizes[b]);
     }
 };
@@ -577,7 +582,7 @@ private:
 
 ### SIMD 최적화
 
-SoA 덕분에 SIMD 최적화가 간단하다. 단, `std::vector<vec3>`는 성분이 12바이트 간격으로 인터리브되어 있어 `&velocities[i].y`에서 연속 8개를 로드할 수 없다. SIMD를 적용하려면 성분별로 분리된 float 배열(full SoA)이 필요하다.
+SoA 덕분에 SIMD 최적화가 간단하다. 단, 12바이트 `vec3`를 가정한 `std::vector<vec3>`는 성분이 인터리브되어 있어 `&velocities[i].y`에서 y 성분 8개를 연속 load할 수 없다. 아래처럼 한 성분을 벡터 load 하나로 가져오려면 성분별 float 배열(full SoA)로 나눈다. AoS에도 gather·shuffle이나 다른 벡터화 전략을 적용할 수 있으므로 full SoA가 모든 SIMD의 필수 조건은 아니다.
 
 아래 커널은 적분 부분만 발췌한 것으로, 만료 파티클 제거·색상 갱신과 스칼라 tail 본문은 생략했다.
 

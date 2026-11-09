@@ -273,7 +273,7 @@ BodyState Interpolate(const BodyState& prev, const BodyState& cur, float alpha) 
 }
 ```
 
-각 본 / 객체의 *이전 step 상태 + 현재 step 상태* 의 *Lerp* — 부드러운 렌더.
+각 본 / 객체의 *이전 step 상태 + 현재 step 상태* 의 *Lerp* — 부드러운 렌더. 이 보간은 현재 실시간 목표보다 물리 step 하나만큼 늦은 시각을 보여준다. 반응 지연과 외삽 오차 사이의 선택이다.
 
 각 body는 이전 step 상태와 현재 step 상태를 함께 보관한다. 생성·teleport·강제 순간 이동 시에는 previous=current 로 맞춰 잘못된 보간(제자리 미끄러짐)을 막는다. pause 중에는 step을 돌리지 않으므로 alpha를 진행시키지 않고, 4.5의 clamp/discard 정책으로 버린 시간은 보간 기준 시간에도 반영하지 않는다. render alpha는 accumulator와 kPhysicsDt로만 정의하며, debt-retain 정책으로 바꾸면 별도 alpha 규약이 필요하다.
 
@@ -408,7 +408,7 @@ fixed loop에서 한 frame의 physics tick 수는 0회일 수도 여러 회일 �
 
 ### 5.6 게임 시뮬 단계의 순서
 
-매 frame 권장 순서:
+렌더 frame에서는 입력을 수집하고, 아래의 AI·명령·물리·이벤트 단계는 각 고정 simulation tick마다 수행한다. 애니메이션은 kinematic target 생산과 렌더 pose 생성의 시점을 구분한다:
 
 ```mermaid
 flowchart TD
@@ -553,8 +553,8 @@ island 내 *모든 body가 정지* → island 전체 *sleep*. 적분과 solver �
 ```cpp
 bool IsInstantaneouslySlow(const Island& isl) {
     for (auto& body : isl.bodies) {
-        if (LengthSq(body.linearVel) > kSleepThreshold ||
-            LengthSq(body.angularVel) > kSleepThreshold) return false;
+        if (LengthSq(body.linearVel) > kLinearSleepSpeedSq ||
+            LengthSq(body.angularVel) > kAngularSleepSpeedSq) return false;
     }
     return true;
 }
@@ -700,7 +700,8 @@ history는 deque/ring이라 앞이 잘려 나가면 저장 인덱스와 절대 f
 TEST(Physics, BoxFallsAndLandsOnGround) {
     PhysicsWorld w;
     auto box    = w.CreateBox({1,1,1}, 1.0f);
-    auto ground = w.CreateStaticPlane();
+    auto ground = w.CreateStaticPlane(); // y=0, size는 전체 변 길이
+    w.SetTransform(box, Transform{{0, 2, 0}, quat::Identity()});
     constexpr float dt = 1.0f / 60.0f;
     for (int i = 0; i < 60; ++i) w.Step(dt);
     auto pos = w.GetTransform(box).position;

@@ -763,7 +763,7 @@ void update_all(GameState& state) {
 
 C++ 표준은 객체 레이아웃을 의도적으로 명세하지 않는다. 구현이 각자의 최적화 전략을 선택할 수 있게 하기 위해서다. 그 결과 두 갈래의 사실상 표준이 공존한다.
 
-Itanium C++ ABI(GCC, Clang, ICC):
+Itanium C++ ABI(이를 타깃으로 하는 GCC, Clang 등의 구성):
 
 | 오프셋 | 내용 |
 |--------|------|
@@ -801,7 +801,7 @@ class C : public A, public B { };
 | 항목 | Itanium ABI | MSVC |
 |------|-------------|------|
 | vbase offset 저장 | vtable 앞 | 별도 vbtable |
-| 추가 포인터 | 없음 | vbptr (8 bytes) |
+| 가상 기반 오프셋용 포인터 | 별도 vbptr 없이 vptr로 접근 | 별도 vbptr (이 표의 64비트 모형에서 8 bytes) |
 | 접근 방식 | vtable의 vbase offset 슬롯 읽기(offset_to_top보다 앞, 가상 기반 개수만큼 아래로 내려감) | vbtable 참조 |
 
 ### 실무적 함정
@@ -817,12 +817,12 @@ public:
 #include "LibA.h"
 
 Base* b = CreateObject();  // DLL에서 반환
-b->f();  // 크래시
+b->f();  // ABI가 다르면 안전한 동작을 보장할 수 없음
 ```
 
-단일 상속의 단순한 경우에는 두 ABI 모두 vptr을 객체 offset 0에 두지만, 이름 맹글링, 가상 소멸자가 차지하는 슬롯 수, RTTI 구조, 다중·가상 상속의 레이아웃이 서로 달라 한쪽이 만든 객체를 다른 쪽이 안전하게 호출할 수 없다. 해결책:
+단일 상속의 단순한 경우에는 두 ABI 모두 vptr을 객체 offset 0에 두지만, 이름 맹글링, 가상 소멸자가 차지하는 슬롯 수, RTTI 구조, 다중·가상 상속의 레이아웃이 서로 다르다. 위의 단순 호출이 우연히 작동하더라도 ABI 호환성을 증명하지는 않는다. ABI 선택은 컴파일러 이름만이 아니라 타깃과 옵션에 달려 있으며, 예를 들어 Clang도 Windows MSVC 호환 ABI를 타깃으로 할 수 있다. 해결책:
 
-1. 같은 컴파일러 사용.
+1. 호환되는 타깃 ABI·툴체인·빌드 설정 사용.
 2. C 인터페이스로 경계 노출.
  ```cpp
  extern "C" DLLEXPORT void Base_f(void* obj);

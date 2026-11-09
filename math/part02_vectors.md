@@ -138,7 +138,7 @@ $$
 k \vec{a} = (k a_x, k a_y, k a_z)
 $$
 
-기하학적으로 *벡터의 길이를 k 배* 로 늘리거나 줄임. $k$ 가 음수면 *방향 반전*.
+기하학적으로 *벡터의 길이를 $|k|$ 배* 로 늘리거나 줄임. $k$ 가 음수면 *방향 반전*, 0이면 영벡터가 된다.
 
 ```cpp
 vec3 doubled  = velocity * 2.0f;     // 속도 두 배
@@ -227,7 +227,7 @@ if (facing > std::cos(radians(30.0f))) {
 }
 ```
 
-`std::cos(radians(30°))` ≈ 0.866. 단위 벡터 둘의 내적이 이 값보다 크면 *60° 콘 안*. FOV 설계에 직접 쓴다.
+`std::cos(radians(30°))` ≈ 0.866. 단위 벡터 둘의 내적이 이 값보다 크면 *60° 콘 안*. `enemy.pos`와 `camera.pos`가 같거나 방향 벡터가 유한하지 않으면 정규화할 수 없으므로, 실제 판정에서는 해당 경우를 먼저 분리한다.
 
 ### 3.3 다른 형태의 응용
 
@@ -334,8 +334,10 @@ flowchart TB
 
 좌표계의 *손잡이 (handedness)* 가 *외적 결과의 시각적 해석* 에 영향을 준다. 외적 공식 자체는 두 좌표계에서 동일하게 쓰지만, *축 방향의 방향성* 과 *winding 규칙* 이 달라 결과가 의도와 다르게 보일 수 있다.
 
-- **오른손 좌표계** (OpenGL 기본): $\hat{x} \times \hat{y} = \hat{z}$ — 오른손 법칙으로 해석.
-- **왼손 좌표계** (DirectX 기본, Unity): $\hat{x} \times \hat{y} = \hat{z}$ — 식은 같지만 *Z축이 반대 방향* 이라 외적 결과의 시각적 의미가 뒤집힘.
+- **오른손 좌표계**: 위 성분 공식은 $\hat{x} \times \hat{y} = \hat{z}$이며 오른손 법칙으로 해석한다.
+- **왼손 좌표계에서 같은 성분 공식**: 결과 성분은 여전히 $\hat{x} \times \hat{y} = \hat{z}$지만 축의 실제 배치가 반대이므로 방향을 왼손 법칙으로 해석한다. Unity의 `Vector3.Cross` 문서가 이 관례를 사용한다.
+
+API 이름만으로 좌표계가 결정되는 것은 아니다. 예를 들어 DirectXMath는 왼손·오른손 변환을 모두 제공하며, 외적 함수는 같은 성분 공식을 사용한다. 수학적 오른손 외적을 왼손 기저에 표현하는 경우에는 부호가 달라지므로, 공간의 방향과 라이브러리의 연산 관례를 함께 확인해야 한다. [Unity 외적 문서](https://docs.unity3d.com/ScriptReference/Vector3.Cross.html), [DirectXMath 좌표계 설명](https://learn.microsoft.com/en-us/windows/win32/dxmath/pg-xnamath-getting-started)을 참고한다.
 
 게임 코드에서 *왼손↔오른손 좌표계* 사이 데이터를 옮길 때 *법선이 기대와 반대 방향* 으로 보이거나 *winding 순서* 가 어긋나 백페이스 컬링이 잘못 동작하는 일이 흔하다. 좌표계를 *명시* 한 후 *그 안에서 외적·winding·front-face 관례를 일관* 되게 쓴다.
 
@@ -388,9 +390,12 @@ $$
 vec3 ComputeFaceNormal(vec3 v0, vec3 v1, vec3 v2) {
     vec3 e1 = v1 - v0;
     vec3 e2 = v2 - v0;
+    // 퇴화 삼각형이 아니고 외적이 안전하게 정규화 가능한 범위라고 가정한다.
     return normalize(cross(e1, e2));
 }
 ```
+
+세 점이 같거나 일직선이면 외적이 영벡터라 단위 법선을 정의할 수 없다. 실제 메시 처리에서는 퇴화 삼각형을 거부하거나 별도 정책으로 처리한다.
 
 정점 순서 (winding) 가 법선 방향을 결정한다. 시계방향이면 한 쪽, 반시계방향이면 반대 쪽. 게임 엔진은 *winding 규칙을 일관* 되게 정해 (예: 반시계가 앞면) 백페이스 컬링과 결합한다.
 
@@ -422,7 +427,7 @@ $$
 |\vec{v}|^2 = v_x^2 + v_y^2 + v_z^2 = \vec{v} \cdot \vec{v}
 $$
 
-`sqrt` 없음. *비교 용도* 에는 length squared가 충분하다 — $|\vec{a}| < |\vec{b}|$ 와 $|\vec{a}|^2 < |\vec{b}|^2$ 가 *길이 ≥ 0 인 한 동치*.
+`sqrt` 없음. 실수 연산에서 *비교 용도* 에는 length squared가 충분하다 — $|\vec{a}| < |\vec{b}|$ 와 $|\vec{a}|^2 < |\vec{b}|^2$ 가 *길이 ≥ 0 인 한 동치*. 부동소수점에서는 제곱합이 overflow·underflow하거나 반올림으로 서로 같아질 수 있으므로 입력 범위가 보장되지 않으면 스케일링이나 더 넓은 타입이 필요하다.
 
 ```cpp
 // 잘못: 매 비교마다 sqrt 호출
@@ -457,7 +462,7 @@ vec3 normalize(vec3 v) {
 }
 ```
 
-위 코드의 *분모 0 함정* 이 게임 코드의 흔한 NaN 원천이다. `len` 이 0에 가까우면 *결과가 NaN 또는 Inf*. 정점 좌표가 같은 두 점 사이의 방향 벡터를 정규화하면 길이 0의 벡터가 들어가 폭주.
+위 코드의 *분모 0 함정* 이 게임 코드의 흔한 NaN 원천이다. 길이가 작다는 사실만으로 NaN이나 Inf가 생기는 것은 아니지만, 제곱합이 underflow해 0이 되거나 입력이 유한하지 않으면 결과가 깨질 수 있다. 정점 좌표가 같은 두 점 사이의 방향 벡터는 길이가 0이라 정규화할 수 없다.
 
 ### 5.4 안전한 정규화
 
@@ -473,8 +478,10 @@ vec3 NormalizeSafe(vec3 v, vec3 fallback = vec3(0, 0, 1)) {
 
 // 옵션 B: 최대 절대 성분으로 스케일해 overflow/underflow를 피한다.
 vec3 NormalizeScaled(vec3 v, vec3 fallback = vec3(0, 0, 1)) {
+    if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z))
+        return fallback;
     float m = std::max({std::fabs(v.x), std::fabs(v.y), std::fabs(v.z)});
-    if (!(m > 0.0f)) return fallback;   // 0 또는 NaN
+    if (!(m > 0.0f)) return fallback;   // 영벡터
     vec3 s = v / m;                     // 모든 성분 ≤ 1
     return s * (1.0f / std::sqrt(dot(s, s)));
 }

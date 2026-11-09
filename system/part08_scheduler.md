@@ -99,17 +99,17 @@ Linux에서 재스케줄링 필요성은 여러 경로에서 생긴다.
 - 커널·사용자 경계와 선점 가능 지점: `need_resched` 상태를 확인해 `schedule()`로 진입한다.
 
 ```c
-// 타이머 인터럽트 핸들러 (간소화)
+// 타이머 인터럽트의 개념적 처리
 void timer_interrupt(void)
 {
     update_process_times();
     scheduler_tick();  // 현재 프로세스의 vruntime 갱신
-
-    if (need_resched()) {
-        schedule();    // 다른 프로세스로 전환
-    }
+    // 필요하면 재스케줄 요청을 표시한다.
+    // 하드 IRQ 안에서 schedule()을 직접 호출하지 않는다.
 }
 ```
+
+인터럽트 처리를 마치고 선점 가능한 복귀 경로에 이르렀을 때 요청을 확인해 전환한다. 실제 경로는 커널 설정과 진입 문맥에 따라 달라진다.
 
 `CONFIG_HZ`는 periodic tick의 기준 빈도에 영향을 주지만, `HZ=1000`이 모든 CPU에서 정확히 1ms마다 스케줄러 선택을 강제한다는 뜻은 아니다. 고해상도 타이머, 동적 tick, `NO_HZ_IDLE`, `NO_HZ_FULL`과 이벤트 기반 wakeup이 함께 작동한다.
 
@@ -233,7 +233,7 @@ const int sched_prio_to_weight[40] = {
 
 nice 값 1 차이는 약 1.25배의 weight 차이를 만든다. 식으로는 다음과 같다.
 
-$$\text{weight} = 1024 \times 1.25^{-\text{nice}}$$
+$$\text{weight} \approx 1024 \times 1.25^{-\text{nice}}$$
 
 vruntime 증가분은 가중치에 반비례한다.
 

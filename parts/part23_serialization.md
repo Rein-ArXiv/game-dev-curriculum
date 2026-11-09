@@ -76,6 +76,7 @@ fclose(f);
 
 ```cpp
 void serialize_player(const Player& p, std::vector<uint8_t>& out) {
+    if (p.name.size() > UINT32_MAX) throw std::length_error("name too long");
     // ID (4바이트)
     uint32_t id = p.id;
     out.insert(out.end(), (uint8_t*)&id, (uint8_t*)&id + 4);
@@ -117,9 +118,9 @@ Player deserialize_player(const uint8_t* data, size_t& offset) {
 }
 ```
 
-이제 제대로 작동한다. 하지만 코드가 길고 실수하기 쉽다. 가변 길이 데이터를 다룰 때마다 등장하는 length-prefix 패턴이 여기서도 그대로 나타난다.
+이제 같은 표현을 사용하는 호스트 사이에서는 필드를 복원할 수 있다. 하지만 코드가 길고 실수하기 쉽다. 가변 길이 데이터를 다룰 때마다 등장하는 length-prefix 패턴이 여기서도 그대로 나타난다.
 
-이 예는 호출자가 `data`가 필요한 길이 이상이고 각 필드가 유효함을 미리 검증했다는 전제에 기댄다. 프로덕션 decoder는 버퍼 길이(`std::span` 등)를 함께 받아 각 `memcpy` 전에 `offset + n <= size`를 검사하고, 잘린 입력·큰 `len`·offset 합 overflow를 오류로 반환하며 소비한 offset을 되돌리는 정책을 정한다. float32와 byte order도 wire format에 명시한다.
+이 예는 IEEE 754 binary32 float와 같은 byte order를 쓰는 호스트를 가정하고, 호출자가 `data`가 필요한 길이 이상이며 각 필드가 유효함을 미리 검증했다는 전제에 기댄다. 프로덕션 decoder는 버퍼 길이(`std::span` 등)를 함께 받아 각 `memcpy` 전에 `offset <= size`와 `n <= size - offset`을 검사하고, 잘린 입력·큰 `len`·offset 합 overflow를 오류로 반환하며 소비한 offset을 되돌리는 정책을 정한다. float32와 byte order도 wire format에 명시한다.
 
 ## 2. 텍스트 vs 바이너리: 트레이드오프
 
@@ -372,7 +373,7 @@ message Player {
 2A = varint 인코딩된 42
 ```
 
-여기서 태그는 필드 번호와 와이어 타입을 함께 담고, 실제 길이 필드는 와이어 타입 2(length-delimited)에만 붙는다. 와이어 타입 0(varint)·1(64비트)·5(32비트)는 태그만으로 크기가 정해진다. 음수 `int32`/`int64`는 부호 확장 때문에 항상 10바이트가 되므로 음수가 가능한 값은 `sint32`/`sint64`의 ZigZag 인코딩을 쓴다.
+여기서 태그는 필드 번호와 와이어 타입을 함께 담고, 실제 길이 필드는 와이어 타입 2(length-delimited)에만 붙는다. 와이어 타입 1(64비트)·5(32비트)는 태그로 값의 크기를 알 수 있지만, 타입 0(varint)은 각 바이트의 continuation bit를 읽어 끝을 찾는다. 음수 `int32`/`int64`는 부호 확장 때문에 항상 10바이트가 되므로 음수가 가능한 값은 `sint32`/`sint64`의 ZigZag 인코딩을 고려한다.
 
 ### Varint 인코딩
 
@@ -453,7 +454,7 @@ root_type Player;
 **핵심 차이: 오프셋 기반**
 
 ```text
-바이트 레이아웃:
+table 시작 기준의 한 가지 배치 예 (전체 buffer 시작은 아님):
 0x00: [VTable 오프셋] (4바이트)
 0x04: [id]             (4바이트)
 0x08: [x]              (4바이트)
@@ -466,6 +467,8 @@ root_type Player;
 ```
 
 **VTable (Virtual Table):**
+
+전체 buffer의 첫 4바이트는 root table까지의 오프셋이다. table 첫 필드는 vtable까지의 signed 상대 오프셋이며, 각 필드의 물리 순서는 고정되지 않는다. 아래 vtable이 실제 필드 위치를 알려준다.
 
 ```text
 0x00: VTable 크기
@@ -547,7 +550,7 @@ Cap'n Proto의 목표는 wire buffer를 별도 객체 그래프로 복사·재�
 
 **Cap'n Proto 원칙:**
 1. 메모리 레이아웃 = 바이너리 포맷
-2. 포인터 → 오프셋 변환만 수행
+2. builder가 wire layout에 값을 구성하고 절대 주소 대신 인코딩된 상대 포인터 사용
 3. 엔디안 고정 (Little Endian)
 
 **스키마:**
@@ -573,6 +576,8 @@ struct Player {
       +0C: z (4바이트)
 0x18: [name 포인터]
 ```
+
+이 오프셋은 첫 segment 내부를 기준으로 한 예다. 파일·스트림의 framed 메시지에는 segment 개수와 크기를 기록한 헤더도 앞에 온다.
 
 ### 포인터 인코딩
 
@@ -655,15 +660,7 @@ mmap() → 커널 페이지 캐시 → reader가 wire buffer 직접 디코드 (�
 
 **1. 엔디안 고정**
 
-Cap'n Proto는 Little Endian 전용이다. Big Endian 시스템에서는 변환 필요.
-
-```cpp
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-#error "Cap'n Proto requires Little Endian"
-#endif
-```
-
-현재 사실상 모든 게임 플랫폼이 Little Endian (x86, x64, ARM iOS/Android, PS5, Xbox)이므로 실무에서는 문제 없다.
+Cap'n Proto의 **wire format**은 Little Endian으로 고정된다. 호스트가 반드시 Little Endian이어야 한다는 뜻은 아니다. Big Endian 호스트의 구현은 필드 접근 시 바이트 순서를 변환하며, 그 비용이 추가될 수 있다. 임의의 호스트 C++ 객체를 그대로 덤프하는 방식과 구분해야 한다.
 
 **2. 정렬 요구사항**
 
@@ -674,11 +671,11 @@ struct Data {
 };
 ```
 
-정렬을 위해 패딩이 자동 삽입되므로 파일 크기가 증가할 수 있다.
+wire format이 정한 필드 정렬과 word 경계 때문에 padding이 포함될 수 있다. 위 C++ 구조체의 컴파일러 의존 padding을 그대로 파일에 쓰는 것은 아니다.
 
-**3. 수정 불가**
+**3. 읽기와 수정의 계약**
 
-mmap된 데이터는 읽기 전용이다. 수정하려면 복사가 필요하다.
+위 예제는 `PROT_READ` 매핑과 Reader API이므로 읽기 전용이다. mmap 자체가 항상 읽기 전용인 것은 아니지만, 메시지 수정에는 builder와 저장 공간의 소유권·용량·동기화 규약이 필요하다. 단순히 매핑을 writable로 바꾸는 것만으로 크기가 변하는 메시지의 안전한 수정이 해결되지는 않는다.
 
 ## 6. 버전 호환성: 필드 추가와 제거
 
@@ -816,8 +813,8 @@ V2 코드가 V1 데이터 읽기:
 ### Schema Evolution 규칙
 
 **안전한 변경:**
-1. 필드 추가 (기본값 지정)
-2. 필드 이름 변경 (필드 번호 유지)
+1. optional/default 필드 추가 (FlatBuffers의 암묵적 ID는 기존 필드 뒤에 추가하며, 명시적 ID를 쓰면 그 규칙을 유지)
+2. 필드 이름 변경 (번호를 유지하는 바이너리 wire 기준. ProtoJSON·텍스트·생성 API의 이름 호환성은 별도)
 3. 주석 변경
 
 **위험한 변경:**
@@ -894,8 +891,8 @@ GameObject:
 ```
 
 **에셋 번들 (.bundle):**
-- LZ4 압축된 바이너리
-- 오프셋 테이블로 랜덤 액세스
+- 바이너리 archive이며 LZMA·chunk 기반 LZ4·비압축 중 선택
+- LZ4 청크는 필요한 범위만 압축 해제할 수 있고, LZMA는 전체 content stream 압축 해제가 필요
 
 **왜 YAML?**
 - **버전 관리 친화적**: Git diff가 의미 있음
@@ -904,8 +901,8 @@ GameObject:
 
 **왜 바이너리 번들?**
 - **런타임 성능**: 빠른 로딩
-- **압축**: YAML은 압축 효율이 낮음
-- **난독화**: 소스 코드 보호
+- **배포 형태**: 압축률과 필요한 자산의 부분 로딩 비용에 맞춰 압축 방식 선택
+- **코드와 자산 분리**: 일반 AssetBundle은 C# assembly를 포함하지 않는다. 바이너리 형식 자체가 암호화나 소스 코드 보호를 제공하는 것은 아니다
 
 ### Source Engine: KeyValues + BSP
 
@@ -998,7 +995,7 @@ int16_t x_fixed = encodable ? (int16_t)std::lround(x * 100.0f) : 0;
 float x_restored = x_fixed / 100.0f;  // 최대 오차 0.005
 ```
 
-게임 월드는 대부분 ±300 단위 내이고, 센티미터 정밀도면 충분하다.
+이 스케일은 단위가 미터이고 관심 영역이 위 범위에 들어오는 경우의 선택이다. 큰 월드는 sector·지역 원점과 상대 좌표를 쓰거나 더 넓은 정수 형식·다른 스케일을 골라야 한다. 필요한 위치·회전 오차도 게임별로 정한다.
 
 **델타 인코딩:**
 

@@ -374,12 +374,13 @@ def on_platform_refund_webhook(notification):
     with db.transaction() as txn:                    # 3) 멱등 전이·원장 commit
         # 4) refund/order ID 기준 중복·재전송은 같은 거래로 처리
         if not txn.mark_refund_if_absent(tx.refund_id):
-            return txn.load_refund_result(tx.refund_id)  # 기존 결과 재생
-        grant = find_grant_by_transaction(tx.order_id)
-        inventory.revoke(grant.player, grant.items)  # 회수·마커는 같은 commit(다른 서비스면 outbox)
-        if inventory.balance(grant.player) < 0:
-            flag_negative_balance(grant.player)      # 다 쓴 뒤 환불 → 어뷰징 의심
-        txn.append_audit("platform_refund_revoke", tx=tx.order_id)
+            pass                                     # 이미 처리됨: 커밋 후에도 ACK
+        else:
+            grant = find_grant_by_transaction(tx.order_id)
+            inventory.revoke(grant.player, grant.items)  # 회수·마커는 같은 commit(다른 서비스면 outbox)
+            if inventory.balance(grant.player) < 0:
+                flag_negative_balance(grant.player)      # 다 쓴 뒤 환불 → 검토
+            txn.append_audit("platform_refund_revoke", tx=tx.order_id)
     ack_platform(notification)                       # 5) durable commit 후 ACK
 ```
 

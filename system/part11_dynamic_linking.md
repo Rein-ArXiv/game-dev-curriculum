@@ -1,6 +1,6 @@
 ## 들어가며
 
-동적 링커는 모든 프로그램 실행의 첫 순간마다 동작하지만 가장 주목받지 못하는 구성 요소다. 동적 링킹이 없다면 모든 프로그램은 라이브러리 전체를 끌어안은 모놀리스가 됐을 것이다.
+동적 링커는 동적 링크된 프로그램이 시작할 때 동작하지만 가장 주목받지 못하는 구성 요소다. 정적 링크에서는 필요한 라이브러리 코드가 실행 파일에 포함된다.
 
 프로그램을 실행할 때 단순히 바이너리 파일을 로드하고 `main`을 호출한다고 생각하기 쉽다. 그러나 현실은 더 복잡하다. `printf`를 호출하면 어떻게 libc의 코드가 실행되는가? `libssl.so`는 언제 메모리에 올라가는가? 같은 라이브러리를 사용하는 수백 개의 프로세스가 어떻게 메모리를 공유하는가?
 
@@ -138,7 +138,7 @@ func:
 
 **케이스 2: 같은 모듈 내 함수 호출**
 
-같은 `.so` 내의 함수 호출은 PC-relative call로 처리된다.
+같은 `.so` 내에서 바인딩 대상이 고정된 함수는 PC-relative call로 직접 호출할 수 있다. 기본 visibility의 외부 공개 심볼은 인터포지션 가능성 때문에 같은 모듈에 정의되어도 PLT를 거칠 수 있다.
 
 ```asm
 main_func:
@@ -201,7 +201,7 @@ my_func:
 단계별로 보면 다음과 같다.
 
 ```text
-1. %rip = 0x7f1234001000 (my_func의 call 명령어)
+1. 다음 명령어의 주소 = 0x7f1234001000 (RIP 상대 주소 계산 기준)
 2. offset = 0x2f50 (GOT 엔트리까지의 거리)
 3. GOT entry address = 0x7f1234001000 + 0x2f50 = 0x7f1234003f50
 4. *GOT[external_func] = 0x7f5678005000 (런타임에 채워짐)
@@ -235,7 +235,7 @@ int main() {
     return 0;
 }
 
-$ gcc -o test test.c
+$ gcc -fno-builtin -no-pie -Wl,-z,lazy -o test test.c
 $ objdump -R test
 
 DYNAMIC RELOCATION RECORDS
@@ -245,13 +245,13 @@ OFFSET           TYPE              VALUE
 0000000000404018 R_X86_64_JUMP_SLOT  printf@GLIBC_2.2.5
 ```
 
-`R_X86_64_GLOB_DAT`는 "이 위치에 심볼의 절대 주소를 써라"라는 재배치 타입이다.
+출력은 링커와 환경에 따라 달라진다. `-fno-builtin`은 이 예제의 `printf`가 `puts`로 바뀌지 않게 한다. `R_X86_64_GLOB_DAT`는 "이 위치에 심볼의 절대 주소를 써라"라는 재배치 타입이다.
 
 ### GOT vs GOT.PLT
 
 실제로 GOT는 두 부분으로 나뉜다.
 
-1. `.got`: 전역 변수용
+1. `.got`: 전역 변수 등의 주소와 PLT를 거치지 않는 함수 참조 등에 사용
 2. `.got.plt`: 함수 호출용(PLT와 함께 사용)
 
 ```bash
@@ -348,8 +348,8 @@ $ gdb ./test
 (gdb) run
 (gdb) x/gx 0x404018        # 초기 GOT 엔트리
 0x404018: 0x0000000000401026  # PLT의 push 명령어
+(gdb) break printf          # 실제 함수에 진입한 뒤 확인
 (gdb) continue
-Hello
 (gdb) x/gx 0x404018        # 호출 후
 0x404018: 0x00007ffff7e3d8a0  # libc의 printf
 ```
@@ -423,7 +423,7 @@ void load_dependencies(struct link_map *map) {
 
 **작업 2: 심볼 테이블 구축**
 
-모든 라이브러리의 심볼을 해시 테이블에 등록한다.
+각 객체에 들어 있는 동적 심볼·해시 테이블을 이용할 수 있도록 검색 범위와 관련 정보를 준비한다. 하나의 전역 해시 테이블에 모든 심볼을 복사한다는 뜻은 아니다.
 
 ```c
 struct link_map {
@@ -443,7 +443,7 @@ struct link_map {
 
 **작업 3: 재배치 수행**
 
-모든 `R_X86_64_*` 타입의 재배치를 처리한다.
+필요한 재배치를 처리한다. 지연 바인딩이면 일부 PLT 함수 심볼의 해석은 첫 호출까지 미룬다. 아래는 일부 타입만 보이는 의사 코드다.
 
 ```c
 void do_relocations(struct link_map *map) {

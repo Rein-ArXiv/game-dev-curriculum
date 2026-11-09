@@ -79,7 +79,7 @@ graphics_gl_lab/
 ## 빌드와 실행
 
 ```bash
-# Linux / macOS
+# Linux (macOS 내장 OpenGL은 4.1까지이므로 이 4.5 랩 대상이 아님)
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ./build/graphics_gl_lab
@@ -146,7 +146,7 @@ ctest --test-dir build -C Release -R gl_step05 --output-on-failure   # step05 �
 | `GlCounters::Reset` | `src/measure/gl_counters.h` | 일곱 칸이 모두 0 으로 돌아가는가(프레임 경계) |
 | `KHRDebug` 링 | `src/measure/khr_debug.cpp` | 256 슬롯을 넘겨도 개수가 멈추고 최근 것만 남는가, 앱 메시지의 source/severity |
 | `CountBindingCost` / `BuildPerCallUniformNames` | `src/render/lighting_bindings.cpp` | 바인딩 모드별 uniform/buffer 갱신 수(`1 + 2N` vs `{1, 1}`)와 per-call uniform 이름 목록 |
-| `BlockBytesFor` | `src/render/texture_modes.cpp` | 포맷별 블록 바이트와 mip chain 합산, DXT1 = 1/8 · DXT5/BC7 = 1/4 압축비 |
+| `BlockBytesFor` | `src/render/texture_modes.cpp` | 포맷별 블록 바이트와 mip chain 합산, RGBA8 대비 큰 4×4 정렬 레벨에서 DXT1 = 1/8 · DXT5/BC7 = 1/4 (작은 mip은 최소 한 블록) |
 | `ExpectedDrawSubmissions` / `ExpectedBindingCost` / `ExpectedMipChainBytes` | 각 헤더 | 위 구현과 맞대는 예측 모델 |
 
 ### `graphics_gl_render_tests` — 실제 OpenGL 4.5 컨텍스트 필요
@@ -154,12 +154,12 @@ ctest --test-dir build -C Release -R gl_step05 --output-on-failure   # step05 �
 히든 GLFW 윈도우로 컨텍스트를 만든다. 만들 수 없는 환경에서는 77 로 종료하고 CTest 가 `Skipped` 로 표시한다.
 
 - **렌더 캡처 회귀** — 256×256 오프스크린 FBO 에 같은 64 오브젝트 씬을 Individual / Instanced / Multi-Draw Indirect 로 그려 `glReadPixels` 결과의 FNV-1a 해시가 셋 다 같은지 검사한다. '아무것도 안 그림' 이 3-way 일치로 통과하지 않도록 클리어만 한 프레임의 해시와도 대조한다.
-- **자원 수명** — `Scene::Rebuild` 를 1000 회 반복한 뒤 핸들이 유효한지, 드라이버가 발급한 이름 값이 누적되지 않는지(누수 시 1000 단위로 올라간다), GL 에러와 `KHR_debug` HIGH 메시지가 0 건인지 확인한다.
+- **자원 수명** — `Scene::Rebuild` 를 1000 회 반복한 뒤 핸들이 유효한지, 드라이버가 발급한 이름 값의 추이가 어떤지, GL 에러와 `KHR_debug` HIGH 메시지가 0 건인지 확인한다.
 - **동기화·폴백 상태** — `MsaaTarget` 이 4x 를 정상 생성하는 경로와, `GL_MAX_RENDERBUFFER_SIZE` 초과 요청으로 FBO 를 불완전하게 만든 경로를 둘 다 밟아 폴백 후 `Current()`/`Requested()` 가 Off 이고 폴백 통지가 정확히 한 번만 소비되는지 검사한다.
 - **런타임 카운터 대조** — `LightingBindings::Apply` 를 실제 셰이더에 대해 호출해 `GlCounters` 증가분이 `CountBindingCost` 예측과 일치하는지, `TextureRegistry` 가 드라이버에서 읽은 mip chain 바이트가 `ExpectedMipChainBytes` 와 일치하는지(어긋나면 로그 통지가 남는지) 확인한다.
 - **셰이더 perm 구성** — `ShaderRegistry::Pick` 이 uber 에서는 세 모델에 같은 프로그램을, static permutation 에서는 서로 다른 세 프로그램을 돌려주는지, `uShadingModel` uniform 이 uber 에만 있는지(`SetInt` 반환값), `ProgramChangedSinceLast` 가 전환을 정직하게 잡는지 검사한다.
 
-`ctest` 출력에 GPU 이름과 세 모드의 픽셀 해시, 재빌드 후 핸들 값, 포맷별 VRAM 실측치가 그대로 찍힌다. 세 드로우 모드의 CPU/GPU 시간 분포처럼 값 자체가 머신마다 달라지는 항목은 여전히 실행 후 패널로 확인한다.
+`ctest` 출력에 GPU 이름과 세 모드의 픽셀 해시, 재빌드 후 핸들 값, 포맷별 VRAM 실측치가 그대로 찍힌다. GL 객체 이름의 숫자 증가만으로 누수를 증명할 수는 없다. 삭제된 이름의 재사용 시점은 보장되지 않으므로 생성·삭제 회계와 실제 살아 있는 객체를 따로 확인한다. 세 드로우 모드의 CPU/GPU 시간 분포처럼 값 자체가 머신마다 달라지는 항목은 여전히 실행 후 패널로 확인한다.
 
 ## 시리즈 글과의 관계
 

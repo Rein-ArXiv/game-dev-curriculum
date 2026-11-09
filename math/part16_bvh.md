@@ -264,8 +264,12 @@ auto mid = std::partition(objs.begin() + begin, objs.begin() + end,
     [&](int id) { return ObjectCenter(id)[axis] < midpoint; });
 int splitIdx = (int)(mid - objs.begin());
 
-// 한쪽이 비어 버리는 케이스 (모든 객체가 평면 한쪽에 몰림) → median fallback
-if (splitIdx == begin || splitIdx == end) splitIdx = (begin + end) / 2;
+// 한쪽이 비면 중앙 인덱스로 다시 분할한다.
+if (splitIdx == begin || splitIdx == end) {
+    splitIdx = (begin + end) / 2;
+    std::nth_element(objs.begin() + begin, objs.begin() + splitIdx, objs.begin() + end,
+        [&](int a, int b) { return ObjectCenter(a)[axis] < ObjectCenter(b)[axis]; });
+}
 ```
 
 분포가 *치우쳐 있으면* median 보다 좋다. 단순 평균보다 robust. 한쪽 자식이 *0 객체* 가 되는 함정 — *median fallback* 으로 회피.
@@ -276,7 +280,7 @@ Surface Area Heuristic은 자식 경계 상자의 표면적 비율을 광선이 
 
 ### 3.6 빌드 비용
 
-- *Median 분할*: $O(n \log n)$ 평균 (nth_element 가 $O(n)$ 이지만 재귀 깊이 $\log n$). 객체 중심이 같은 값에 몰리면 분할이 편중돼 *최악 깊이가 $O(n)$* 까지 갈 수 있으므로 leaf/depth 상한을 둔다.
+- *Median 분할*: $O(n \log n)$ 평균 (`nth_element` 가 평균 $O(n)$ 이고 재귀 깊이는 $O(\log n)$). 위 구현은 중앙 인덱스로 나누므로 중심값이 같아도 객체 수 기준 트리 깊이는 균형을 유지한다. 다만 같은 중심의 큰 객체들은 자식 박스가 겹쳐 쿼리 품질이 나쁠 수 있다.
 - *SAH*: $O(n^2)$ naive, $O(n \log n)$ binned SAH. SAH 자체는 *개수 균형을 보장하지 않는다* — 위 $O(n \log n)$ 은 분할이 대체로 균형 잡힌다는 *평균적 가정* 에 기댄다.
 - *binned SAH* 도 후보 수를 고정 bin 으로 제한할 뿐, 트리 깊이의 최악 상한을 보장하지는 않는다.
 
@@ -696,13 +700,17 @@ bool RayAABB(vec3 ro, vec3 rd, AABB box, float& tNear, float& tFar) {
     tFar  = +INFINITY;
 
     for (int i = 0; i < 3; ++i) {
-        if (std::fabs(rd[i]) < 1e-8f) {
+        if (rd[i] == 0.0f) {
             // 평행 축: ro[i] 가 slab 밖이면 miss, 안이면 이 축은 구간을 제한하지 않는다.
             if (ro[i] < box.min[i] || ro[i] > box.max[i]) return false;
         } else {
-            float invD = 1.0f / rd[i];
-            float t0 = (box.min[i] - ro[i]) * invD;
-            float t1 = (box.max[i] - ro[i]) * invD;
+            auto toFloat = [](double t) {
+                if (t > std::numeric_limits<float>::max()) return INFINITY;
+                if (t < -std::numeric_limits<float>::max()) return -INFINITY;
+                return float(t);
+            };
+            float t0 = toFloat((double(box.min[i]) - ro[i]) / double(rd[i]));
+            float t1 = toFloat((double(box.max[i]) - ro[i]) / double(rd[i]));
             if (t0 > t1) std::swap(t0, t1);
             tNear = std::max(tNear, t0);
             tFar  = std::min(tFar,  t1);

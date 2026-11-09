@@ -464,13 +464,15 @@ trace event에는 `frame`, `tick`, `job`, `entity/world generation`을 넣어 �
 ```cpp
 void Runtime::RunFrame() {
     const double now = clock.NowMonotonic();
-    const double realDelta = ClampDelta(now - lastFrameTime_);
+    const double rawDelta = now - lastFrameTime_;
+    const double realDelta = ClampDelta(rawDelta);
+    droppedRealClamp_ += rawDelta - realDelta; // 계측은 clamp 이전 시간도 보존
     lastFrameTime_ = now;
 
     platform.PumpEvents();
     RawInput raw = input.CaptureSnapshot();
     network.DrainIncoming(networkCommands_);
-    commandQueue_.Enqueue(input.Quantize(raw, simulationTick_));   // held 상태 + 이번 tick edge
+    input.StageRaw(raw); // 타임스탬프가 붙은 전이를 보관; 0틱 프레임에서도 유지
     commandQueue_.Enqueue(networkCommands_);                        // 미래 tick 명령은 보존
 
     fixedAccumulator_ += realDelta;
@@ -479,7 +481,8 @@ void Runtime::RunFrame() {
         TickContext tick{
             .index = simulationTick_,
             .dt = fixedStep_,
-            .commands = commandQueue_.Take(simulationTick_),   // tick당 1회, 단조 증가
+            .commands = Merge(input.BuildForTick(simulationTick_),
+                              commandQueue_.Take(simulationTick_)), // held 유지·edge는 해당tick만
         };
         world.BeginTick(tick);
         jobs.Run(simulationGraph);
@@ -518,6 +521,8 @@ void Runtime::RunFrame() {
 
 `RunFrame`은 `Running` 상태 전용이다. `Paused`/`Loading`에서는 `platform.PumpEvents()`와 UI·플랫폼 이벤트만 처리하고 시뮬레이션·렌더 제출 구간은 상태 predicate로 감싸 건너뛴다. pause 진입/해제 시 accumulator를 유지할지 초기화할지, pause 중 도착한 edge 입력을 보존할지 폐기할지도 함께 정한다.
 
+`BuildForTick`은 입력 전이를 목표 tick에 배정하고, 전이가 없는 catch-up tick에도 직전 held 상태를 이어 간다. 프레임당 한 번 만든 command만 첫 tick에 넣고 나머지 tick을 빈 입력으로 만들면 버튼을 놓지 않았는데도 입력이 끊기므로, 상태 유지와 사건 소비를 이 helper에서 구분한다.
+
 `commands`에는 매 tick 지속되는 held 상태와 한 tick에만 소비되는 pressed/released edge를 구분해 담는다. edge 명령은 지정된 tick에서 정확히 한 번 `Take`되고 다시 나타나지 않는다. 고정 틱이 하나도 실행되지 않은 프레임의 입력은 다음 tick으로 보존한다. 지정 tick보다 늦게 도착한 네트워크 명령은 일반 `Take` 경로에 넣지 않고 별도의 rollback/지연 명령 경로로 보낸다.
 
 `jobs.Run`은 완료 barrier인 `RunAndWait`로 두거나 완료 continuation에서 `CommitTick`을 수행하게 한다. `renderer.Submit`이 snapshot lease를 이전하는지 복사하는지, `world.CommitDeferredDestruction`이 어느 reader 완료와 GPU fence를 기다리는지 명시하고 Part05의 에셋 수명 계약과 통일한다. 안정 ID만 저장해도 GPU buffer 수명이 자동 보장되지는 않는다.
@@ -539,4 +544,4 @@ void Runtime::RunFrame() {
 - Robert Nystrom, *Game Programming Patterns* — game loop, update method, event queue
 - Anthony Williams, *C++ Concurrency in Action*, 2nd ed. — 메모리 모델, 작업 큐, 동기화
 - ISO/IEC 14882, C++ 표준 — 객체 수명과 원자 연산의 happens-before 계약
-- Microsoft, “Game Timing and Multicore Processors” — 역사적 배경. 확인한 문서에서 저자(Bruce Dawson) 귀속은 확인되지 않았고, single-core affinity 같은 과거 multicore 권고는 현재의 보편 규칙이 아니다(현재 QPC 지침은 별도). monotonic timing과 프레임 계측의 배경으로만 인용한다.
+- Microsoft, “Game Timing and Multicore Processors” — 역사적인 multicore 타이밍 문제의 배경 자료. single-core affinity 같은 과거 권고를 그대로 적용하기보다 현재 플랫폼의 monotonic clock·QPC 지침과 대상 장치에서 동작을 확인한다.

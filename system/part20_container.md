@@ -404,7 +404,7 @@ unshare --user --map-auto --setuid 0 --setgid 0
 ```
 
 **보안 이점:**
-- 컨테이너 탈출 시에도 호스트에서 권한 없음
+- 내부 root를 호스트의 비특권 UID로 매핑해 일부 탈출 경로의 영향을 줄임. 커널 취약점이나 잘못 부여된 권한까지 무력화하는 보장은 아님
 - rootless container 가능
 
 ### Cgroup Namespace
@@ -535,7 +535,7 @@ echo "256M" > /sys/fs/cgroup/mycontainer/memory.high  # soft limit
 
 **메모리 계층:**
 ```text
-memory.max        ← Hard limit (초과 시 OOM kill)
+memory.max        ← Hard limit (reclaim이 충분하지 않으면 cgroup OOM 등이 발생할 수 있음)
 memory.high       ← Soft limit (초과 시 reclaim 압력)
 memory.low        ← Best-effort 보호
 memory.min        ← 절대 보호
@@ -1011,7 +1011,7 @@ docker run --runtime=runsc nginx
 - **Capabilities 제한**: `CAP_SYS_ADMIN`, `CAP_SYS_MODULE` 등 위험한 권한을 bounding set에서 제거하고, 컨테이너에 14개 안팎의 capability만 남긴다.
 - **Seccomp 프로필**: 약 300개 시스템 콜만 허용하고, `reboot`, `swapon`, `kexec_load` 같은 호출은 `SCMP_ACT_ERRNO`로 차단한다.
 - **LSM(AppArmor/SELinux) 프로필**: 컨테이너 프로세스가 호스트 경로나 디바이스에 접근하지 못하도록 강제 접근 통제(MAC) 정책을 부착한다.
-- **User Namespace**: 컨테이너 내부의 root(UID 0)를 호스트의 비특권 UID로 매핑한다. 탈출이 발생해도 호스트 권한이 없다.
+- **User Namespace**: 컨테이너 내부의 root(UID 0)를 호스트의 비특권 UID로 매핑해 권한 범위를 줄인다. 커널 취약점이나 다른 권한 부여까지 막는 보장은 아니다.
 - **읽기 전용 rootfs와 권한 옵션**: `--read-only`, `--privileged` 금지, `/var/run/docker.sock` 노출 금지 같은 운영 정책으로 공격 표면을 줄인다.
 
 가장 빈번한 사고는 메커니즘 자체의 결함이 아니라 운영 실수에서 나온다. `--privileged` 컨테이너, 호스트 `/proc` 마운트, Docker 소켓 마운트는 단일 명령으로 격리를 무력화한다. CVE-2022-0847(Dirty Pipe), CVE-2016-5195(Dirty COW) 같은 커널 버그는 컨테이너에서도 그대로 통하므로 호스트 커널 패치가 필수다.
@@ -1178,6 +1178,8 @@ int main(int argc, char *argv[]) {
 ```
 
 동기화 없이 `clone()` 뒤에 cgroup을 붙이면 자식이 먼저 `execve()`하여 제한 밖에서 실행되는 race가 생긴다. 실제 runtime은 위와 같은 parent-child gate를 두거나, 지원되는 커널에서는 `clone3()`의 `CLONE_INTO_CGROUP`으로 생성 시점부터 대상 cgroup에 넣는다.
+
+위 코드는 gate를 설명하는 골격이다. 자식은 쓰기 끝을 닫고 읽은 값이 정확히 허가 바이트일 때만 계속해야 한다. EOF나 read 오류는 실패로 종료해야 하며, 부모도 자식 생성·pipe·write 오류와 짧은 쓰기를 확인해야 한다.
 
 ### Network Namespace
 

@@ -89,7 +89,7 @@ void safe() {
 }                                       // b, a 자동 해제
 ```
 
-`std::make_unique`/`std::make_shared`가 권장되는 또 다른 이유다. C++14까지는 함수 인자 평가가 인터리브될 수 있어 `f(std::shared_ptr<T>(new T), may_throw)` 같은 호출에서 누수가 가능했다. C++17부터는 인자 간 인터리브가 금지되어 이 위험은 사라졌지만, 단일 할당 최적화와 가독성 때문에 make 함수가 여전히 권장된다.
+`std::make_unique`/`std::make_shared`가 권장되는 또 다른 이유다. C++14까지는 함수 인자 평가가 인터리브될 수 있어 `f(std::shared_ptr<T>(new T), may_throw())` 같은 호출에서 누수가 가능했다. C++17부터는 인자 간 인터리브가 금지되어 이 위험은 사라졌지만, 단일 할당 최적화와 가독성 때문에 make 함수가 여전히 권장된다.
 
 
 ## 2. Move Semantics와 Perfect Forwarding
@@ -101,7 +101,7 @@ C++11 이전에는 무거운 객체를 함수가 반환하려면 복사가 필�
 ```cpp
 // C++03: 큰 vector 반환은 복사 (NRVO 없으면 비싸다)
 std::vector<int> make_data();
-auto v = make_data();   // 잠재적으로 깊은 복사
+std::vector<int> v = make_data();   // 잠재적으로 깊은 복사
 ```
 
 C++11의 rvalue reference(`T&&`)와 이동 시멘틱은 이 비용을 제거했다. 이동은 자원의 소유권을 빼앗아 옮기는 것이다.
@@ -324,17 +324,27 @@ auto p2 = std::make_shared<Widget>();
 
 ```cpp
 // make_shared 내부 구현 개념
+template<typename T>
+struct control_block_with_object : control_block {
+    alignas(T) std::byte object_storage[sizeof(T)]; // 아직 T는 생성하지 않은 저장소
+};
+
 template<typename T, typename... Args>
 shared_ptr<T> make_shared(Args&&... args) {
     // 하나의 할당으로 control block + object
-    void* mem = operator new(sizeof(control_block_with_object<T>));
+    auto* block = new control_block_with_object<T>();
+    try {
+        ::new(static_cast<void*>(block->object_storage)) T(std::forward<Args>(args)...);
+    } catch (...) {
+        delete block;
+        throw;
+    }
 
-    auto* block = new(mem) control_block_with_object<T>();
-    new(&block->object) T(std::forward<Args>(args)...);
-
-    return shared_ptr<T>(block);
+    return shared_ptr<T>(block); // 가상의 내부 생성자: storage의 T와 이 block을 연결
 }
 ```
+
+여기서 제어 블록은 마지막 strong 참조 때 저장소 안의 `T`를 소멸시키고, 마지막 weak 참조까지 사라졌을 때 블록을 해제하는 동작을 별도로 구현한다고 가정한다. `T` 멤버를 기본 생성한 뒤 그 위에 다시 placement new하는 구조가 아니다.
 
 ### 참조 카운팅의 진짜 비용
 
@@ -480,6 +490,8 @@ public:
 | 크기 | 16 bytes (shared_ptr과 동일) |
 | `lock` | atomic load + 조건부 atomic increment |
 | 제어 블록 | weak_count로 인해 객체 해제 후에도 유지 |
+
+`make_shared`의 단일 할당에서는 마지막 strong 참조가 없어져 `T`의 소멸자가 실행되어도, weak 참조가 남으면 객체 저장소를 포함한 할당 블록은 유지될 수 있다. 소멸자가 해제하는 외부 자원과 `sizeof(T)`가 차지한 저장 공간의 반환 시점은 구분해야 한다.
 
 ### enable_shared_from_this
 
@@ -752,9 +764,9 @@ public:
 | 항목 | `shared_ptr<T>` | `IntrusivePtr<T>` |
 |------|:--------------:|:-----------------:|
 | 포인터 크기 | 16 bytes | 8 bytes |
-| 제어 블록 | 별도 할당 | 없음 (객체 내부) |
-| 총 오버헤드 | 32+ bytes | 4 bytes (카운트만) |
-| 캐시 라인 | 2-3개 | 1개 |
+| 제어 블록 | 객체 밖 (`make_shared`면 같은 allocation) | 카운터는 객체 내부 |
+| 총 오버헤드 | 제어 블록·할당자 metadata와 padding에 의존 | 카운터와 정렬 padding에 의존 |
+| 캐시 라인 | 객체·제어 블록 크기와 배치에 의존 | 같은 객체 안이어도 한 라인이라는 보장은 없음 |
 
 ### Unreal Engine의 TSharedPtr
 
@@ -932,6 +944,8 @@ void spawn_bullet(const Vec3& pos, const Vec3& dir) {
 ```
 
 풀은 일반 할당자의 탐색·동기화와 페이지 반환을 줄일 수 있지만, 생성자·소멸자 비용은 그대로이고 고정 용량의 미사용 슬롯이라는 내부 단편화를 만든다. 비교할 때는 같은 객체 생성자, 같은 peak live count, 같은 초기화 정책을 사용하고 풀 준비 비용과 메모리 상한도 포함한다. “풀이라 단편화가 없음”이 아니라 외부 단편화를 예측 가능한 예약 낭비와 맞바꾸는 설계다.
+
+`PooledPtr`는 pool을 빌린 포인터로 보관하므로 pool은 자신이 반환한 모든 `PooledPtr`보다 오래 살아야 한다. Pool의 mutex는 free-list 접근을 보호할 뿐, 살아 있는 `T`의 동시 변경까지 보호하지 않는다.
 
 
 ## 8. 커스텀 Deleter 활용

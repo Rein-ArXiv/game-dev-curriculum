@@ -2,7 +2,7 @@
 
 유한 상태 기계와 행동 트리는 본질적으로 if/else의 변형이다. 조건을 검사하고, 참이면 그 가지로 간다. 결정은 *이산적* 이다 — 조건은 참 아니면 거짓이고, 행동은 선택되거나 안 되거나다. 효용 기반 AI(Utility AI)는 발상을 뒤집는다. 가능한 모든 행동에 *연속적인 점수* 를 매기고, 가장 높은 점수의 행동을 고른다. 의사결정이 "어느 분기로 가는가"에서 "어느 점수가 가장 높은가"로 바뀐다.
 
-이 차이가 표현력의 차이를 만든다. "HP가 낮으면 도망"은 임계값 하나로 켜고 끄는 스위치지만, "HP가 낮을수록 도망의 매력이 부드럽게 올라간다"는 곡선이다. 후자는 HP 30%와 31%에서 갑자기 행동이 바뀌지 않고, 여러 요인(HP·탄약·적의 수·거리)이 *경쟁* 하며 상황에 맞는 행동이 자연스럽게 부상한다. The Sims의 NPC가 배고픔·피로·방광·사교 욕구 사이에서 끊임없이 우선순위를 바꾸는 모습, RimWorld 정착민이 일과 휴식과 식사를 오가는 모습이 이 모델의 산물이다.
+이 차이가 표현력의 차이를 만든다. "HP가 낮으면 도망"은 임계값 하나로 켜고 끄는 스위치지만, "HP가 낮을수록 도망의 매력이 부드럽게 올라간다"는 곡선이다. 후자는 HP 30%와 31% 사이에서도 선호 점수가 연속적으로 바뀌고, 여러 요인(HP·탄약·적의 수·거리)이 *경쟁* 하며 상황에 맞는 행동이 자연스럽게 부상한다. The Sims의 NPC가 배고픔·피로·방광·사교 욕구 사이에서 끊임없이 우선순위를 바꾸는 모습, RimWorld 정착민이 일과 휴식과 식사를 오가는 모습이 이 모델의 산물이다.
 
 이 글은 효용 점수를 *어떻게 설계하고 결합하는가* 에 집중한다. 월드 변수를 0~1로 정규화하는 Input Axis, 그 축 값에 형태를 주는 Response Curve, 둘을 묶은 단위인 Consideration, 여러 Consideration을 하나의 효용으로 합치는 결합 공식, 그리고 이를 데이터로 조직하는 Decision Score Evaluator와 Infinite Axis Utility System을 차례로 다룬다. 곡선의 수치적 거동, 결합 공식의 수학적 함정, 매 틱 수백 개의 점수를 평가하는 비용을 정량화하고, 마지막으로 점수 폭발과 예측 불가능성이라는 효용 AI의 비용과 그것을 길들이는 디버깅 도구를 정리한다.
 
@@ -65,7 +65,7 @@ const Action* SelectAction(const std::vector<Action>& actions, const Context& ct
 }
 ```
 
-이 단순함이 강점이다. 새 행동을 추가하려면 점수 함수 하나를 정의해 풀에 넣으면 된다 — FSM처럼 전이를 다시 그리거나 트리 위치를 고민할 필요가 없다. 행동들은 서로를 모른 채 *각자의 매력도만 보고* 경쟁하고, 시스템은 그중 최고를 고른다. 이 점에서 효용 AI는 *개방형(open)* 의사결정 구조다. 의사결정 로직의 복잡도가 행동 수에 선형이고, 행동 사이의 결합도가 0에 가깝다.
+이 단순함이 강점이다. 새 행동을 추가하려면 점수 함수와 실행 가능 조건을 정의해 풀에 넣으면 된다 — FSM처럼 전이를 다시 그리거나 트리 위치를 고민할 필요가 없다. 행동들은 서로를 모른 채 *각자의 매력도만 보고* 경쟁하고, 시스템은 그중 최고를 고른다. 이 점에서 효용 AI는 *개방형(open)* 의사결정 구조다. 의사결정 로직의 복잡도가 행동 수에 선형이고, 행동 사이의 결합도가 0에 가깝다.
 
 대신 두 가지 설계 결정이 모든 것을 좌우한다. *서로 다른 단위의 입력을 어떤 효용 척도로 변환하는가* 와 *여러 요인을 어떤 결합 규칙으로 하나의 점수에 모으는가* 다. 이 두 결정이 잘못되면 NPC가 명백히 어리석은 선택을 한다 — 적이 코앞인데 배고픔 때문에 밥을 먹으러 가는 식으로. 효용 AI의 튜닝은 주로 입력 변환과 결합 규칙, 행동 전환 안정성에 집중된다.
 
@@ -90,7 +90,8 @@ argmax가 의도대로 동작하려면 행동 점수의 의미를 같은 의사�
 ```cpp
 const Action* WeightedRandom(const std::vector<Scored>& scored, float topRatio = 0.85f) {
     float maxS = 0.0f;
-    for (auto& s : scored) maxS = std::max(maxS, s.score);
+    for (auto& s : scored)
+        if (std::isfinite(s.score)) maxS = std::max(maxS, s.score);
     // 최고점의 topRatio 이상이고 양수인 후보만 추림 — 명백히 나쁜 행동과 0 가중치 배제
     float sum = 0.0f;
     std::vector<const Scored*> pool;
@@ -107,7 +108,7 @@ const Action* WeightedRandom(const std::vector<Scored>& scored, float topRatio =
 }
 ```
 
-`topRatio` 컷오프가 중요하다. 컷오프 없이 전체에서 가중 랜덤을 하면, 점수 0.05짜리 어리석은 행동도 작은 확률로 선택되어 NPC가 가끔 바보처럼 군다. The Sims가 가중 랜덤을 써서 같은 상황에서도 심(Sim)마다 조금씩 다른 선택을 하게 만들되, 컷오프로 "방광이 터지기 직전인데 TV를 보는" 사태는 막는다. 가중치가 0 이하이거나 비유한 점수는 풀에서 제외하고, 살아남은 양수 총합이 없으면 첫 후보를 의도적 fallback으로 반환한다.
+`topRatio` 컷오프가 중요하다. 컷오프 없이 전체에서 가중 랜덤을 하면, 점수 0.05짜리 어리석은 행동도 작은 확률로 선택되어 NPC가 가끔 바보처럼 군다. The Sims가 가중 랜덤을 써서 같은 상황에서도 심(Sim)마다 조금씩 다른 선택을 하게 만들되, 컷오프로 "방광이 터지기 직전인데 TV를 보는" 사태는 막는다. 가중치가 0 이하이거나 비유한 점수는 풀에서 제외하고, 양수 유한 후보가 없으면 nullptr를, 후보가 있어도 총합이 overflow하면 첫 후보를 의도적 fallback으로 반환한다.
 
 ### 확률적 선택의 형식화 — 볼츠만 분포와 온도
 
@@ -121,7 +122,7 @@ $\tau > 0$는 *온도(temperature)* 다. 온도의 두 극한이 효용 AI의 �
 
 $$P(a_i) = \frac{\exp\big((u_i - u_{\max})/\tau\big)}{\sum_j \exp\big((u_j - u_{\max})/\tau\big)}$$
 
-이고, 최대가 아닌 $i$는 지수가 음수라 $\tau \to 0^+$에서 0으로 죽고 최댓값 항만 1로 남는다 — *순수 argmax*. 반대로 $\tau \to \infty$면 모든 $u_j/\tau \to 0$, $\exp \to 1$이라 *균등 분포* $1/n$. 즉 온도 하나가 결정론(탐욕)에서 완전 무작위(탐험)까지를 연속으로 잇는다. 비례 선택은 이 스펙트럼의 한 점도 정확히 짚지 못한다.
+이고, 최대가 아닌 $i$는 지수가 음수라 $\tau \to 0^+$에서 확률이 0으로 간다. 최고점이 유일하면 그 행동의 확률이 1인 *순수 argmax*다. 최고점이 여러 개면 그 동점 집합에 균등하게 나뉘므로, 첫 동점을 고르는 결정론적 argmax와는 다르다. 반대로 $\tau \to \infty$면 모든 $u_j/\tau \to 0$, $\exp \to 1$이라 *균등 분포* $1/n$. 즉 온도 하나가 결정론(탐욕)에서 완전 무작위(탐험)까지를 연속으로 잇는다. 비례 선택에는 온도처럼 분포를 연속 조절하는 독립 매개변수가 없다. 특정 점수 집합에서 두 분포가 같아질 수는 있지만 일반적으로 같은 정책은 아니다.
 
 볼츠만은 효용의 *절대값이 아니라 차이* 만 본다. 모든 $u_j$에 상수 $c$를 더해도 $\exp(c/\tau)$가 분자·분모에서 약분되어 분포가 불변이다(시프트 불변). 이것이 비례 선택의 척도 의존(상수 곱 불변·상수 합 가변)과 정반대이고, 가중치 때문에 0~1 범위를 벗어나거나 음수가 된 효용도 받을 수 있다. 두 행동의 선택 오즈는 오직 효용 차로 정해진다.
 
@@ -142,27 +143,34 @@ $$\frac{P(a_i)}{P(a_j)} = \exp\!\Big(\frac{u_i - u_j}{\tau}\Big)$$
 
 ```cpp
 const Action* BoltzmannSelect(const std::vector<Scored>& scored, float tau) {
-    if (scored.empty()) return nullptr;
-    if (tau <= 1e-6f) {                          // τ→0: argmax 분기 (0 나눗셈 회피)
+    if (scored.empty() || !std::isfinite(tau) || tau < 0.0f) return nullptr;
+    for (const auto& s : scored) if (!std::isfinite(s.score)) return nullptr;
+    if (tau == 0.0f) {                          // 정확히 0은 별도 정책: 첫 최고점 선택
         const Scored* best = &scored[0];
         for (auto& s : scored) if (s.score > best->score) best = &s;
         return best->action;
     }
     float maxU = -std::numeric_limits<float>::infinity();
     for (auto& s : scored) maxU = std::max(maxU, s.score);
-    std::vector<float> w(scored.size());
-    float sum = 0.0f;
+    std::vector<double> w(scored.size());
+    double sum = 0.0;
     for (size_t i = 0; i < scored.size(); ++i) {
-        w[i] = std::exp((scored[i].score - maxU) / tau);  // 최댓값 차감으로 오버플로 방지
+        w[i] = std::exp((double(scored[i].score) - double(maxU)) / double(tau));  // 최댓값 차감으로 오버플로 방지
         sum += w[i];
     }
-    float r = RandFloat() * sum;                          // [0, sum)
-    for (size_t i = 0; i < scored.size(); ++i) { r -= w[i]; if (r <= 0.0f) return scored[i].action; }
-    return scored.back().action;
+    double r = RandFloat() * sum;                         // RandFloat는 [0,1)
+    const Action* lastPositive = nullptr;
+    for (size_t i = 0; i < scored.size(); ++i) {
+        if (w[i] == 0.0) continue;                        // underflow된 0 가중치 제외
+        lastPositive = scored[i].action;
+        if (r < w[i]) return scored[i].action;
+        r -= w[i];
+    }
+    return lastPositive;  // 누적 반올림 오차의 fallback도 양수 가중치 후보
 }
 ```
 
-경계 조건 셋. (1) $\tau$를 정확히 0으로 두면 $u/\tau$가 0 나눗셈이라 위 코드처럼 작은 양수 임계에서 argmax로 분기해야 한다. (2) 볼츠만은 음수·0 효용도 받지만(시프트 불변), 그래서 효용 0인 행동도 *0이 아닌 확률* 을 갖는다 — 곱셈 결합이 "탄약 0 → 거부"로 만든 효용 0이 softmax에서는 작게나마 되살아난다. 명백히 나쁜 행동을 확실히 배제하려면 비례 선택의 `topRatio`처럼 후보를 먼저 거르거나, 그 행동을 풀에서 빼야 한다. (3) 같은 $\tau$라도 효용이 한곳에 뭉친 분포와 넓게 퍼진 분포에서 체감 무작위성이 다르므로(오즈가 효용 차에만 의존), 분포 폭에 맞춰 $\tau$를 적응시키기도 한다. 이 온도 손잡이는 강화학습의 볼츠만 탐험과 정확히 같은 장치다 — 효용을 행동가치로 바꾸면 같은 식이 $\epsilon$-greedy의 부드러운 대안이 된다.
+경계 조건 셋. (1) $\tau$를 정확히 0으로 두면 $u/\tau$가 0 나눗셈이라 위 코드처럼 0일 때의 별도 정책을 정해야 한다. 작은 양수도 임의로 argmax로 바꾸면 거의 동점인 효용에서 원래 softmax 분포를 바꾸게 된다. (2) 볼츠만은 음수·0 효용도 받지만(시프트 불변), 그래서 효용 0인 행동도 *0이 아닌 확률* 을 갖는다 — 곱셈 결합이 "탄약 0 → 거부"로 만든 효용 0이 softmax에서는 작게나마 되살아난다. 명백히 나쁜 행동을 확실히 배제하려면 비례 선택의 `topRatio`처럼 후보를 먼저 거르거나, 그 행동을 풀에서 빼야 한다. (3) 같은 $\tau$라도 효용이 한곳에 뭉친 분포와 넓게 퍼진 분포에서 체감 무작위성이 다르므로(오즈가 효용 차에만 의존), 분포 폭에 맞춰 $\tau$를 적응시키기도 한다. 이 온도 손잡이는 강화학습의 볼츠만 탐험과 정확히 같은 장치다 — 효용을 행동가치로 바꾸면 같은 식이 $\epsilon$-greedy의 부드러운 대안이 된다.
 
 ## 2. Consideration과 정규화
 
@@ -247,13 +255,23 @@ $$y = \frac{1}{1 + e^{-s(x - m)}}$$
 
 ```cpp
 float Logistic(float x, float s, float m) {
-    auto sig = [&](float t){ return 1.0f / (1.0f + std::exp(-s * (t - m))); };
-    float lo = sig(0.0f), hi = sig(1.0f);
-    return std::clamp((sig(x) - lo) / (hi - lo), 0.0f, 1.0f);   // [0,1] 재정규화
+    // 유한한 x,m∈[0,1], s>=0인 증가 곡선. 감소 곡선은 1-y로 표현한다.
+    assert(std::isfinite(x) && std::isfinite(s) && std::isfinite(m) &&
+           x >= 0 && x <= 1 && s >= 0 && m >= 0 && m <= 1);
+    if (s == 0.0f) return x;  // 재정규화된 곡선의 s→0 연속 극한
+    auto sig = [&](double t) {
+        const double z = double(s) * (t - double(m));
+        if (z >= 0) return 1.0 / (1.0 + std::exp(-z));
+        const double e = std::exp(z);
+        return e / (1.0 + e);
+    };
+    const double lo = sig(0.0), hi = sig(1.0);
+    if (hi == lo) return x;  // 아주 작은 s가 반올림으로 구분되지 않는 경우
+    return float(std::clamp((sig(x) - lo) / (hi - lo), 0.0, 1.0));
 }
 ```
 
-`std::exp`의 인자가 크게 양수, 즉 $x-m$이 크게 음수일 때 오버플로 위험이 있다. 예를 들어 $s=200, x=0, m=0.5$면 지수 인자가 +100이라 단정밀도 `exp` 범위를 넘는다. 게임에서 쓰는 $s$는 보통 1~20 범위라 문제가 적지만, 극단적 값을 허용하는 에디터라면 지수 인자를 클램프한다.
+`std::exp`의 인자가 크게 양수, 즉 $x-m$이 크게 음수일 때 오버플로 위험이 있다. 예를 들어 $s=200, x=0, m=0.5$면 지수 인자가 +100이라 단정밀도 `exp` 범위를 넘는다. 위 구현은 부호에 따라 exp의 인자를 항상 0 이하로 만들어 그 overflow를 피한다. 원래 로지스틱은 s=0이면 상수 0.5지만 끝점 재정규화 식은 0/0이 된다. 여기서는 재정규화된 증가 곡선의 연속 극한인 y=x를 선택했다.
 
 ### 지수 / 역지수
 
@@ -294,6 +312,8 @@ struct ResponseCurve {
 
 $$U = \frac{\sum_i w_i c_i}{\sum_i w_i}$$
 
+여기서는 $w_i\ge0$이고 $\sum_i w_i>0$인 가중 평균을 가정한다.
+
 직관적이고 익숙하지만 게임 AI에선 위험하다. 한 요인이 0이어도 다른 요인들이 높으면 전체 점수가 살아남기 때문이다. 구체적 예로 "공격" 행동이 거리 $c=0.9$, HP $c=0.8$, 탄약 $c=0.0$의 세 Consideration을 가중 1로 합치면,
 
 $$U = \frac{0.9 + 0.8 + 0.0}{3} = 0.567$$
@@ -312,7 +332,7 @@ $$U = 0.9 \times 0.8 \times 0.0 = 0.0$$
 
 ### 단조 감소 함정
 
-곱셈의 문제는 *단조 감소* 다. 모든 $c_i < 1$이므로, Consideration이 늘수록 곱이 계속 작아져, 고려요소가 많은 행동이 부당하게 불리해진다. 모든 요소가 0.8일 때 요소 수에 따른 곱을 보자.
+곱셈의 문제는 *단조 감소* 다. 각 $c_i\in[0,1]$이므로 곱은 증가하지 않고, 1보다 작은 항을 추가할수록 작아져, 고려요소가 많은 행동이 부당하게 불리해진다. 모든 요소가 0.8일 때 요소 수에 따른 곱을 보자.
 
 | 요소 수 $n$ | 곱 $0.8^n$ | 기하평균 $0.8^{n \cdot 1/n}$ |
 |---:|---:|---:|
@@ -332,26 +352,27 @@ $$U = \left(\prod_i c_i\right)^{1/n}$$
 
 $n$제곱근을 취하면 모든 요소가 같은 값일 때 결과가 요소 수와 무관해진다. 0 하나가 전체를 0으로 만드는 성질도 남는다. 그러나 AND 의미가 완전히 보존되는 것은 아니다. 하나가 0.1이고 나머지 아홉 개가 1이면 단순 곱은 0.1이지만 기하평균은 $0.1^{1/10}\approx0.794$다. 요소 수가 많을수록 단일한 낮은 비영점 값의 거부력이 희석된다. 따라서 기하평균은 *개수 보정* 이고, 하드 게이트나 필수 조건의 대체물이 아니다.
 
-Dave Mark가 제안한 또 다른 보정은 "make-up value"로, 요소 수가 곱을 낮추는 만큼을 곱에 가산해 끌어올린다.
+곱에 추가 보정을 하는 한 가지 예로, 다음처럼 raw 곱 p를 끌어올리는 함수를 생각할 수 있다.
 
 $$U = p + \left(1 - \frac{1}{n}\right)(1 - p)\,p, \quad p = \prod_i c_i$$
 
-요소가 1개면 $1 - 1/n = 0$이라 보정이 없고, 요소가 많아질수록 보정이 커진다. 기하평균보다 0 근처에서 부드럽다는 성질이 있어, 어느 쪽을 쓸지는 점수 분포를 보고 정한다. 어느 보정이든 raw 곱 $p$에만 적용하고 DSE 가중치(`baseWeight`)는 보정 뒤에 곱한다 — 가중치를 먼저 곱하면 보정 입력이 [0,1]을 벗어난다. 다음은 기하평균 보정 구현이다.
+요소가 1개면 $1 - 1/n = 0$이라 보정이 없다. 고정된 p에 대해서는 n이 클수록 보정항이 커지지만 결과는 2p를 넘지 않으므로, 같은 값의 요소를 계속 추가할 때 곱이 감소하는 문제를 없애지는 않는다. 기하평균보다 0 근처에서 부드럽다는 성질이 있어, 어느 쪽을 쓸지는 점수 분포를 보고 정한다. 어느 보정이든 raw 곱 $p$에만 적용하고 DSE 가중치(`baseWeight`)는 보정 뒤에 곱한다 — 가중치를 먼저 곱하면 보정 입력이 [0,1]을 벗어난다. 다음은 기하평균 보정 구현이다.
 
 ```cpp
 float CombineMultiplicative(const std::vector<float>& cons) {
     if (cons.empty()) return 1.0f;           // 곱의 항등원; 빈 행동 금지는 별도 검증
-    float product = 1.0f;
+    double logSum = 0.0;
     for (float c : cons) {
-        if (c <= 0.0f) return 0.0f;          // 한 요소라도 0이면 즉시 거부
-        product *= c;
+        assert(std::isfinite(c) && c >= 0.0f && c <= 1.0f);
+        if (c == 0.0f) return 0.0f;           // 0은 흡수원
+        logSum += std::log(double(c));
     }
-    // 동일한 분포의 요소 수가 점수 스케일을 낮추는 효과 완화
-    return std::pow(product, 1.0f / static_cast<float>(cons.size()));
+    // 직접 곱의 underflow를 피하면서 같은 기하평균을 계산한다.
+    return float(std::exp(logSum / double(cons.size())));
 }
 ```
 
-`c <= 0.0f`에서 즉시 0을 반환하는 것은 결합 규칙의 흡수원 성질을 이용한 조기 종료다. `pow(0, 1/n)` 같은 경계 계산을 피하고 남은 곱셈도 건너뛸 수 있다.
+`c == 0.0f`에서 즉시 0을 반환하는 것은 결합 규칙의 흡수원 성질을 이용한 조기 종료다. `pow(0, 1/n)` 같은 경계 계산을 피하고 남은 곱셈도 건너뛸 수 있다.
 
 ## 5. Decision Score Evaluator
 
@@ -425,19 +446,23 @@ float DSE::ScoreWithCutoff(const Context& ctx, float bestSoFar) const {
     if (bestSoFar >= weight)
         return 0.0f;   // 내부 기하평균의 최대가 1이므로 이길 수 없음
 
-    float product = 1.0f;
-    const float n = static_cast<float>(considerations.size());
-    const float ratio = std::max(bestSoFar, 0.0f) / weight;
-    const float bound = std::pow(ratio, n);
+    double logProduct = 0.0;
+    const double n = double(considerations.size());
+    const double logBound = bestSoFar > 0.0f
+        ? n * (std::log(double(bestSoFar)) - std::log(double(weight)))
+        : -std::numeric_limits<double>::infinity();
     for (const auto& c : considerations) {
-        product *= c.Eval(ctx);
-        if (product <= bound) return 0.0f;   // 이미 최고점 못 넘음 → 포기
+        const float v = c.Eval(ctx);
+        assert(std::isfinite(v) && v >= 0.0f && v <= 1.0f);
+        if (v == 0.0f) return 0.0f;
+        logProduct += std::log(double(v));
+        if (logProduct <= logBound) return 0.0f;  // 남은 항을 곱해도 상한은 증가하지 않음
     }
-    return weight * std::pow(product, 1.0f / n);
+    return weight * float(std::exp(logProduct / n));
 }
 ```
 
-조기 종료 한계(`bound`)는 "최종 효용 $w \cdot p^{1/n}$이 `bestSoFar`를 넘으려면 $p > (\text{bestSoFar}/w)^n$"을 푼 결과다. 모든 consideration 출력이 $[0,1]$일 때만 남은 곱이 현재 곱보다 커지지 않는다는 상한이 성립한다. 항이 많으면 곱과 `bound`가 underflow할 수 있으므로 로그 합 $\sum\log c_i$와 로그 한계를 비교하는 구현이 더 안정적이다.
+조기 종료 한계(`bound`)는 "최종 효용 $w \cdot p^{1/n}$이 `bestSoFar`를 넘으려면 $p > (\text{bestSoFar}/w)^n$"을 푼 결과다. 모든 consideration 출력이 $[0,1]$일 때만 남은 곱이 현재 곱보다 커지지 않는다는 상한이 성립한다. 직접 곱과 `bound`는 항이 많으면 underflow할 수 있으므로 위 구현은 로그 합과 로그 한계를 비교한다. 곡선 평가와 가중치는 유한하고, consideration은 [0,1], weight는 양수라는 계약이다. 부동소수점의 거의 동점인 후보를 엄밀히 구분해야 한다면 cutoff에 보수적 여유를 두거나 경계 후보는 끝까지 평가한다.
 
 평가 순서를 단순 비용 오름차순으로 고정하는 것도 최적이라고 보장할 수 없다. 약간 비싸더라도 거의 항상 낮은 값을 내어 조기에 탈락시키는 consideration을 먼저 보는 편이 유리할 수 있다. 각 항의 비용과 cutoff 유발 확률을 trace에서 측정해 실행 순서를 정하고, 순서를 바꿔도 부작용이 없도록 consideration을 순수 함수로 유지한다.
 
@@ -475,7 +500,7 @@ float AdvertisedScore(const Advertisement& ad, const Sim& sim) {
     const Need& need = sim.needs[ad.needType];
     float before = need.value;                    // 현재 욕구값 (낮을수록 부족)
     float after  = std::min(before + ad.amount, need.max);
-    // 부족할 때 채우는 가치가 크도록: 곡선의 before~after 구간 면적 차
+    // NeedCurve를 부족 비용 함수로 두고, 충족 전후 비용의 차를 계산
     return NeedCurve(before) - NeedCurve(after);   // NeedCurve는 감소 곡선
 }
 ```
@@ -635,7 +660,7 @@ Flee             = 0.640
     EnemyCount   : 1.000
 ```
 
-이 덤프에서 "Attack이 안 나온 이유는 탄약(0.07)"임이 즉시 보인다. 최종값 0.056만 봤다면 원인을 알 수 없다. 곱셈 결합을 쓰는 효용 AI에서 기여도 분해는 선택이 아니라 필수다.
+이 덤프는 가중치·기하평균 보정 전의 raw 곱을 표시한 예다. 가중치가 1이고 앞의 기하평균을 적용하면 Attack은 약 0.383, Flee는 0.800이므로 최종 trace에는 그 보정 결과도 함께 남겨야 한다. 이 경우 "Attack이 안 나온 이유는 탄약(0.07)"임이 보인다. 최종값 0.056만 봤다면 원인을 알 수 없다. 곱셈 결합을 쓰는 효용 AI에서 기여도 분해는 선택이 아니라 필수다.
 
 ### 화면 오버레이와 곡선 에디터
 
@@ -643,6 +668,7 @@ Flee             = 0.640
 
 ```cpp
 void Agent::DebugDraw(DebugRenderer& dr) const {
+    if (lastTrace_.empty()) return;
     const auto& top = lastTrace_.front();
     dr.DrawText3D(headPos_, top.action + " " + Fmt("%.2f", top.finalScore));
     if (target_) dr.DrawArrow(pos_, target_->pos, Color::Red);

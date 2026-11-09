@@ -1605,12 +1605,14 @@ public:
             CP_ACP, 0, input.c_str(), -1,
             nullptr, 0, nullptr, nullptr
         );
+        if (len == 0) throw std::runtime_error("ACP conversion failed");
 
         std::string ansi(len, '\0');
-        WideCharToMultiByte(
+        int written = WideCharToMultiByte(
             CP_ACP, 0, input.c_str(), -1,
             &ansi[0], len, nullptr, nullptr
         );
+        if (written != len) throw std::runtime_error("ACP conversion failed");
 
         // 레거시 API 호출
         legacy_ansi_process(ansi.c_str());
@@ -1811,7 +1813,7 @@ Encoding DetectEncoding(const uint8_t* data, size_t len) {
         return Encoding::Utf8;
 
     // BOM 없는 ASCII는 UTF-8과 legacy 인코딩이 구별되지 않는다.
-    return Encoding::Ansi;  // 또는 Unknown
+    return Encoding::Unknown;  // ASCII와 임의의 legacy 바이트는 인코딩을 확정할 수 없다
 }
 ```
 

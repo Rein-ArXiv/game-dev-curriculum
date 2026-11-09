@@ -2,7 +2,7 @@
 
 > 이 글의 전제는 Lambert 디퓨즈, Phong/Blinn-Phong 스페큘러, 하프 벡터, 방향광·점광·스폿의 광원 모델과 거리 감쇠, 접선 공간과 TBN 기저, sRGB/선형 공간 파이프라인, forward/deferred/Forward+ 같은 셰이딩 구조다. 여기서는 그 전제를 OpenGL 셰이더로 구현하는 데 집중한다. 핵심은 GLSL Phong/Blinn-Phong 코드, 광원별 uniform과 UBO(std140) 패킹, 노멀 맵 디코딩·Gram-Schmidt·handedness(glTF `vec4` 탄젠트)·MikkTSpace, `GL_SRGB8`/`GL_FRAMEBUFFER_SRGB` 감마 경로다.
 
-Phong 셰이딩은 Bui Tuong Phong이 1973년 박사 학위 논문에서 제안하고 1975년 논문 "Illumination for Computer Generated Pictures"로 발표한 모델이지만, 반세기가 지난 지금도 게임 프로그래밍 입문의 기준점이다. 물리적으로 엄밀하지 않은 경험적(empirical) 모델임에도 살아남은 이유는 단순하다. 표면이 빛을 받았을 때 사람 눈이 기대하는 세 가지 효과 — 전체적인 밝기, 면을 향한 정도에 따른 명암, 반짝이는 하이라이트 — 를 세 항의 덧셈으로 그럴듯하게 재현하기 때문이다. 그 후속인 Blinn-Phong은 하프 벡터(half vector) 하나를 도입해 같은 효과를 더 자연스럽고 더 싸게 낸다. 한 단계 더 나아가면 표면의 미세한 굴곡을 정점이 아닌 텍스처 한 장으로 표현하는 노멀 매핑(Normal Mapping)에 닿는다. 이 글은 셰이딩 모델의 진화 단계를 코드로 따라가며, 다중 광원의 셰이더 구조와 탄젠트 공간(tangent space) 변환의 수학을 정리한다.
+Phong 셰이딩은 Bui Tuong Phong이 1973년 박사 학위 논문에서 제안하고 1975년 논문 "Illumination for Computer Generated Pictures"로 발표한 모델이지만, 반세기가 지난 지금도 게임 프로그래밍 입문의 기준점이다. 물리적으로 엄밀하지 않은 경험적(empirical) 모델임에도 살아남은 이유는 단순하다. 표면이 빛을 받았을 때 사람 눈이 기대하는 세 가지 효과 — 전체적인 밝기, 면을 향한 정도에 따른 명암, 반짝이는 하이라이트 — 를 세 항의 덧셈으로 그럴듯하게 재현하기 때문이다. 그 후속인 Blinn-Phong은 하프 벡터(half vector) 하나를 도입해 하이라이트를 다른 각도 함수로 근사한다. 비용 이득은 광원·시선 방향을 미리 계산할 수 있는지와 구현에 달려 있다. 한 단계 더 나아가면 표면의 미세한 굴곡을 정점이 아닌 텍스처 한 장으로 표현하는 노멀 매핑(Normal Mapping)에 닿는다. 이 글은 셰이딩 모델의 진화 단계를 코드로 따라가며, 다중 광원의 셰이더 구조와 탄젠트 공간(tangent space) 변환의 수학을 정리한다.
 
 여기까지의 코드는 텍스처가 적용된 정적 메시를 그린다. 그러나 빛이 어느 방향에서 오는지, 표면이 어느 방향을 향하는지가 결과 색에 반영되지 않아 입체감이 없다. 텍스처만 입힌 구는 색이 칠해진 원판처럼 보일 뿐, 그것이 둥글다는 사실이 화면에 드러나지 않는다. 이 글의 모든 식은 "표면의 한 점이 카메라로 얼마만큼의 빛을 보내는가"를 법선·빛 방향·시점 방향이라는 세 벡터의 함수로 모델링한다. 그 함수가 면의 곡률을 명암으로 번역해 입체감을 만든다.
 
@@ -119,13 +119,15 @@ void main() {
 
     vec3 ambient  = 0.1 * albedo;
     vec3 diffuse  = max(dot(N, L), 0.0) * albedo * uLightColor;
-    vec3 specular = pow(max(dot(R, V), 0.0), uShininess) * uLightColor;
+    vec3 specular = (dot(N, L) > 0.0 ? pow(max(dot(R, V), 0.0), uShininess) : 0.0) * uLightColor;
 
     FragColor = vec4(ambient + diffuse + specular, 1.0);
 }
 ```
 
 `vNormal`을 다시 `normalize`하는 이유는, 정점에서 단위 길이였던 법선이 래스터라이저의 선형 보간을 거치며 길이가 흐트러지기 때문이다. 삼각형 내부 픽셀의 법선은 세 정점 법선의 가중 평균인데, 단위 벡터 셋의 평균은 일반적으로 단위 길이가 아니다. 정규화하지 않으면 디퓨즈 항의 $\hat{N} \cdot \hat{L}$이 코사인이 아니게 되어 명암이 어긋난다.
+
+위 직접광 코드는 광원이 표면 뒤에 있으면 스페큘러도 0으로 둔다. 디퓨즈만 클램프하면 뒷쪽 광원의 하이라이트가 새어 들어올 수 있다. `uShininess > 0`이며 광원·시점이 표면 점과 겹치지 않는 유효한 방향을 전제로 한다.
 
 shininess는 표면의 광택을 결정하는 가장 직관적인 손잡이다. 32 정도면 살짝 광택이 있는 플라스틱, 256이면 유리나 잘 닦인 금속처럼 강하고 좁은 하이라이트가 나온다. 8 이하로 내리면 거의 무광에 가까운 흐릿한 반사가 된다.
 
@@ -149,9 +151,9 @@ $$
 
 ### 왜 더 자연스러운가
 
-Phong의 $\hat{R} \cdot \hat{V}$와 Blinn-Phong의 $\hat{N} \cdot \hat{H}$는 표면이 거의 정면을 향할 때는 거의 같은 값을 낸다. 차이는 카메라와 광원이 표면을 스치듯 보는 각도(grazing angle)에서 드러난다. Phong에서는 반사 벡터 $\hat{R}$과 시점 $\hat{V}$의 사잇각이 90도를 넘어가는 순간 $\hat{R} \cdot \hat{V}$가 음수가 되어 하이라이트가 갑자기 잘려나간다. 매끄러운 바닥을 비스듬히 볼 때 멀리 뻗어야 할 하이라이트의 꼬리가 부자연스럽게 끊기는 현상이다. Blinn-Phong은 $\hat{N}$과 $\hat{H}$ 모두 표면 위쪽 반구에 머물러 이 급격한 절단이 없고, 지수가 커도 falloff가 부드럽게 이어진다. 1977년 이후 이 모델이 사실상의 표준이 된 것은 이 안정성 때문이다.
+두 내적은 하이라이트 중심에서 모두 1이지만 중심을 벗어난 감소율은 다르므로, 같은 지수를 사용하면 하이라이트 폭도 다르다. 차이는 카메라와 광원이 표면을 스치듯 보는 각도(grazing angle)에서 드러난다. Phong에서는 반사 벡터 $\hat{R}$과 시점 $\hat{V}$의 사잇각이 90도를 넘어가는 순간 $\hat{R} \cdot \hat{V}$가 음수가 되어 하이라이트가 갑자기 잘려나간다. 매끄러운 바닥을 비스듬히 볼 때 멀리 뻗어야 할 하이라이트의 꼬리가 부자연스럽게 끊기는 현상이다. Blinn-Phong은 $\hat{N}$과 $\hat{H}$ 모두 표면 위쪽 반구에 머물러 이 급격한 절단이 없고, 지수가 커도 falloff가 부드럽게 이어진다. 1977년 이후 이 모델이 사실상의 표준이 된 것은 이 안정성 때문이다.
 
-또 하나의 실용적 이점은 보간 친화성이다. 하프 벡터는 반사 벡터보다 정점 셰이더에서 계산해 보간했을 때 오차가 작다. 광원과 카메라가 둘 다 충분히 멀다고 가정할 수 있는 장면에서는 $\hat{L}$과 $\hat{V}$를 정점에서 구해 $\hat{H}$까지 계산하고, 프래그먼트에서는 보간된 값을 그대로 쓸 수 있다. 모바일이나 구형 GPU에서 프래그먼트 부하를 정점으로 옮기는 최적화에 유리하다.
+또 하나의 실용적 이점은 보간 친화성이다. 하프 벡터는 반사 벡터보다 정점 셰이더에서 계산해 보간했을 때 오차가 작다. 광원과 카메라가 둘 다 충분히 멀다고 가정할 수 있는 장면에서는 $\hat{L}$과 $\hat{V}$를 정점에서 구해 $\hat{H}$까지 계산하고, 프래그먼트에서는 보간된 하프 벡터를 다시 정규화해 쓸 수 있다. 방향이 위치에 따라 달라지는 가까운 점광·시점에서는 오차를 비교해야 한다. 모바일이나 구형 GPU에서 프래그먼트 부하를 정점으로 옮기는 최적화에 유리하다.
 
 ### 셰이더 코드
 
@@ -164,7 +166,7 @@ vec3 V = normalize(uViewPos - vFragPos);
 vec3 H = normalize(L + V);
 
 vec3 diffuse  = max(dot(N, L), 0.0) * albedo * uLightColor;
-vec3 specular = pow(max(dot(N, H), 0.0), uShininess) * uLightColor;
+vec3 specular = (dot(N, L) > 0.0 ? pow(max(dot(N, H), 0.0), uShininess) : 0.0) * uLightColor;
 ```
 
 `reflect(-L, N)` 한 줄이 `normalize(L + V)` 한 줄로 바뀌었다. 명령어 수로는 거의 같지만, 결과의 하이라이트가 더 부드럽고 grazing angle에서 끊기지 않는다.
@@ -180,7 +182,7 @@ Phong과 Blinn-Phong은 같은 shininess 값이라도 하이라이트 크기가 
 | 32 | 128 |
 | 64 | 256 |
 
-이유는 각도 관계에 있다. 반사 벡터 $\hat{R}$과 시점 $\hat{V}$ 사이의 각을 $\theta$라 할 때, 같은 기하에서 법선 $\hat{N}$과 하프 벡터 $\hat{H}$ 사이의 각은 약 $\theta/2$다. 따라서 $\hat{N} \cdot \hat{H} \approx \cos(\theta/2)$이고, $\cos(\theta/2)$를 $n'$제곱한 것이 $\cos(\theta)$를 $n$제곱한 것과 같은 모양이 되려면 지수가 대략 4배여야 한다(코사인 반각에서 오는 2배가 거듭제곱에서 다시 2배가 되어 합쳐 4배). 정확히 4배는 근사이고 각도에 따라 어긋나지만, 재질 자산을 Phong에서 Blinn-Phong으로 옮길 때 shininess에 4를 곱하는 것이 출발점으로 널리 쓰인다.
+이유는 각도 관계에 있다. 반사 벡터 $\hat{R}$과 시점 $\hat{V}$ 사이의 각을 $\theta$라 할 때, 같은 기하에서 법선 $\hat{N}$과 하프 벡터 $\hat{H}$ 사이의 각은 약 $\theta/2$다. 따라서 $\hat{N} \cdot \hat{H} \approx \cos(\theta/2)$이고, $\cos(\theta/2)$를 $n'$제곱한 것이 $\cos(\theta)$를 $n$제곱한 것과 같은 모양이 되려면 지수가 대략 4배여야 한다(작은 각에서 $\log\cos\theta \approx -\theta^2/2$이므로 각도를 절반으로 줄이면 같은 감소율에 약 4배 지수가 필요하다). 정확히 4배는 근사이고 각도에 따라 어긋나지만, 재질 자산을 Phong에서 Blinn-Phong으로 옮길 때 shininess에 4를 곱하는 것이 출발점으로 널리 쓰인다.
 
 ### 어느 것을 쓸까
 
@@ -248,7 +250,7 @@ float att = 1.0 / (uKc + uKl * d + uKq * d * d);
 vec3  H = normalize(L + V);
 
 vec3 diffuse  = max(dot(N, L), 0.0) * albedo * uPointColor * att;
-vec3 specular = pow(max(dot(N, H), 0.0), uShininess) * uPointColor * att;
+vec3 specular = (dot(N, L) > 0.0 ? pow(max(dot(N, H), 0.0), uShininess) : 0.0) * uPointColor * att;
 ```
 
 `length`로 거리 $d$를 구한 뒤 그 값으로 직접 나누어 정규화하면, `normalize`가 내부에서 다시 거리를 계산하는 중복을 피한다. 점광이 많은 장면에서 누적되는 작은 절약이다.
@@ -319,7 +321,7 @@ vec3 CalcPointLight(PointLight light, vec3 N, vec3 V, vec3 fragPos, vec3 albedo)
     vec3  H = normalize(L + V);
     float att = 1.0 / (light.kc + light.kl * d + light.kq * d * d);
     vec3 diffuse  = max(dot(N, L), 0.0) * albedo * light.color * att;
-    vec3 specular = pow(max(dot(N, H), 0.0), uShininess) * light.color * att;
+    vec3 specular = (dot(N, L) > 0.0 ? pow(max(dot(N, H), 0.0), uShininess) : 0.0) * light.color * att;
     return diffuse + specular;
 }
 
@@ -456,7 +458,7 @@ T와 B는 메시의 UV 매핑으로부터 계산된다. 삼각형 세 정점의 
 
 ### 정점 셰이더
 
-본 글의 셰이더는 glTF 표준 포맷을 따라 탄젠트를 `vec4`로 받는다.
+본 글의 셰이더는 glTF 표준 포맷을 따라 탄젠트를 `vec4`로 받는다. 앞 모델 로더의 vec3 tangent/bitangent 레이아웃을 그대로 연결하면 w가 없으므로, 로더와 VAO도 함께 변경한다. Assimp의 T·B·N이 주어졌다면 `w = dot(cross(N,T),B) < 0 ? -1 : 1`로 부호를 구해 T.xyz와 묶는다. 이 예제는 가역 모델 변환과 유효한 비영 탄젠트·법선을 전제로 한다.
 
 ```glsl
 // vertex shader
@@ -521,7 +523,7 @@ void main() {
     vec3 albedo = texture(texture_diffuse1, vUv).rgb;
     vec3 ambient  = 0.1 * albedo;
     vec3 diffuse  = max(dot(N, L), 0.0) * albedo * uLightColor;
-    vec3 specular = pow(max(dot(N, H), 0.0), uShininess) * uLightColor;
+    vec3 specular = (dot(N, L) > 0.0 ? pow(max(dot(N, H), 0.0), uShininess) : 0.0) * uLightColor;
     FragColor = vec4(ambient + diffuse + specular, 1.0);
 }
 ```
@@ -555,11 +557,11 @@ flowchart TB
 
 ### 감마의 정의
 
-감마 인코딩은 CRT의 응답 특성과 한정된 8비트를 지각적으로 균등하게 쓰려는 목적에서 나온 비선형 저장 방식이다. 여기서 필요한 사실은 하나다. 디퓨즈/albedo 텍스처에 저장된 8비트 값은 선형 휘도가 아니라 sRGB로 인코딩된 코드값이므로(픽셀 값 128은 휘도 0.5가 아니라 약 0.22), 곧바로 곱하고 더하면 빛의 산술이 틀어진다.
+감마 인코딩은 CRT의 응답 특성과 한정된 8비트를 지각적으로 균등하게 쓰려는 목적에서 나온 비선형 저장 방식이다. 여기서 필요한 사실은 하나다. 디퓨즈/albedo 텍스처에 저장된 8비트 값은 선형 휘도가 아니라 sRGB로 인코딩된 코드값이므로(픽셀 값 128은 선형 채널값 0.5가 아니라 약 0.216), 곧바로 곱하고 더하면 빛의 산술이 틀어진다.
 
 ### 선형에서 셰이딩, sRGB로 출력
 
-색의 모든 산술 — 텍스처 색과 빛 색의 곱, 여러 광원 기여의 합, 보간 — 은 선형 공간에서 이뤄져야 물리적으로 맞다. sRGB로 인코딩된 텍스처 값을 그대로 곱하면 곡선이 두 번 적용된 셈이 되어 결과가 의미를 잃는다. 표준 흐름은 다음과 같다.
+색의 모든 산술 — 텍스처 색과 빛 색의 곱, 여러 광원 기여의 합, 보간 — 은 선형 공간에서 이뤄져야 물리적으로 맞다. sRGB 코드값을 선형 광량처럼 곱하고 더하면 광량의 산술과 다른 결과가 나온다. 표준 흐름은 다음과 같다.
 
 | 단계 | 처리 |
 |---|---|
@@ -576,7 +578,8 @@ flowchart TB
 
 ```cpp
 GLuint LoadTexture(const std::string& path, bool srgb) {
-    // ... 이미지 디코드, ch = 채널 수 ...
+    // ... 이미지 디코드: 이 예제는 3채널 RGB 또는 4채널 RGBA만 받는다 ...
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     GLenum internal = srgb ? (ch == 4 ? GL_SRGB8_ALPHA8 : GL_SRGB8)
                            : (ch == 4 ? GL_RGBA8 : GL_RGB8);
     GLenum fmt = (ch == 4) ? GL_RGBA : GL_RGB;
@@ -620,7 +623,7 @@ void main() {
 
 ### 감마 처리의 효과
 
-감마를 올바로 처리한 장면과 무시한 장면은 특히 색을 곱하는 곳에서 갈린다. 디퓨즈 항은 텍스처 색과 빛 색과 $\hat{N} \cdot \hat{L}$을 모두 곱하는데, 이 곱이 선형 공간에서 이뤄져야 어두운 영역의 밝기가 맞다. 감마 없이 sRGB 값을 곱하면 곱의 결과가 예상보다 밝게 나와 그림자 경계가 흐릿해지고 전체 대비가 떨어진다. 올바른 감마 처리는 대비를 또렷하게 하고 색을 풍부하게 만든다.
+감마를 올바로 처리한 장면과 무시한 장면은 특히 색을 곱하는 곳에서 갈린다. 디퓨즈 항은 텍스처 색과 빛 색과 $\hat{N} \cdot \hat{L}$을 모두 곱하는데, 이 곱이 선형 공간에서 이뤄져야 어두운 영역의 밝기가 맞다. 예를 들어 sRGB 코드값 0.5에 선형 조명 계수 0.5를 바로 곱해 표시하면 코드값 0.25가 된다. 먼저 선형화한 뒤 계수를 곱하고 sRGB로 되돌린 올바른 결과는 약 0.361이다. 이 경우 잘못된 계산이 더 어두우며, 오류 방향과 룩은 입력·출력 변환 중 무엇이 빠졌는지에 달려 있다.
 
 디스크의 텍스처가 화면의 휘도까지 흐르는 전체 경로는 다음과 같다.
 

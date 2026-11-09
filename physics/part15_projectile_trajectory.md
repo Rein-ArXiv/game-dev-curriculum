@@ -197,7 +197,7 @@ $$
 
 $\rho$ = 공기 밀도, $C_d$ = 항력 계수 (drag coefficient, 도형 형태), $A$ = 단면적, $|\vec{v}| \vec{v}$ = 속도 크기 × 속도 벡터.
 
-여기서 $\vec{v}$ 는 물체에 대한 *주변 유체의 상대 속도* 다. 무풍일 때만 world velocity 와 같고, 바람이 있으면 `worldVelocity - windVelocity` 를 써야 한다. 가속도 식으로 옮기면 항력 계수는 $\rho C_d A / (2m)$ 이므로 `dragCoef` 에 질량과 기준 면적을 어떻게 접었는지 명시한다.
+여기서 $\vec{v}$ 는 주변 유체에 대한 *물체의 상대 속도* 다. 무풍일 때만 world velocity 와 같고, 바람이 있으면 `worldVelocity - windVelocity` 를 써야 한다. 가속도 식으로 옮기면 항력 계수는 $\rho C_d A / (2m)$ 이므로 `dragCoef` 에 질량과 기준 면적을 어떻게 접었는지 명시한다.
 
 크기는 *속도 제곱*, 방향은 *속도 반대*.
 
@@ -328,13 +328,16 @@ bool PredictHitTime(vec3 ps, float s, vec3 pt, vec3 vt, float& tOut) {
         return true;
     }
 
-    double a = (double)dot(vt, vt) - (double)s * s;
-    double b = 2.0 * (double)dot(d, vt);
-    double c = (double)dot(d, d);
+    auto dotD = [](vec3 x, vec3 y) {
+        return double(x.x)*y.x + double(x.y)*y.y + double(x.z)*y.z;
+    };
+    double a = dotD(vt, vt) - double(s) * s;
+    double b = 2.0 * dotD(d, vt);
+    double c = dotD(d, d);
 
-    if (std::fabs(a) < 1e-8 * std::max({1.0, std::fabs(b), std::fabs(c)})) {
+    if (a == 0.0) {
         // 발사체 속력 = 표적 속력 — 선형
-        if (std::fabs(b) < 1e-8 * std::max(1.0, std::fabs(c))) return false;
+        if (b == 0.0) return false;
         double t = -c / b;
         if (!(t > 0.0)) return false;
         tOut = (float)t;
@@ -350,7 +353,7 @@ bool PredictHitTime(vec3 ps, float s, vec3 pt, vec3 vt, float& tOut) {
     // -b ± sqrtD 가 가까울 때 작은 양근이 0 으로 소실되는 것을 막는 안정형
     double sqrtD = std::sqrt(disc);
     double q = -0.5 * (b + std::copysign(sqrtD, b));
-    if (std::fabs(q) < 1e-12) return false;
+    if (q == 0.0) return false;
     double t1 = q / a;
     double t2 = c / q;
 
@@ -371,7 +374,7 @@ bool PredictHitTime(vec3 ps, float s, vec3 pt, vec3 vt, float& tOut) {
 }
 ```
 
-`a` 와 `b` 는 단위가 다르므로 같은 절대값 대신 scale 을 고려한 tolerance 로 선형/상수를 판정한다. 이 풀이는 등속 무중력 가정이므로 `s > 0`, 유한 입력, 최대 예측 시간, 같은 위치(즉시 명중) 정책을 호출부 계약으로 둔다.
+`a`, `b`, `c`는 단위가 다르므로 그 크기를 직접 섞어 퇴화를 판정하지 않는다. 위 코드는 double로 계수를 계산하고 정확히 0인 계수만 선형 분기한다. 거의 같은 속력은 안정형 이차식으로 푼다. 유한한 예측 시간 범위에서 근사 선형화를 원한다면 먼저 시간과 거리를 무차원화하고 오차를 그 범위에서 평가해야 한다. 이 풀이는 등속 무중력 가정이므로 `s > 0`, 유한 입력, 최대 예측 시간, 같은 위치(즉시 명중) 정책을 호출부 계약으로 둔다.
 
 ### 4.5 발사 방향
 
@@ -464,14 +467,14 @@ struct LaunchSolution {
 std::vector<LaunchSolution> ComputeLaunchVelocity(vec3 r, vec3 a, float speed) {
     std::vector<LaunchSolution> out;
     if (!(speed > 0.0f)) return out;                 // 고정 발사 속력은 양수
-    if (!(length_squared(r) > 0.0f)) return out;     // 동일 위치는 미래 발사해가 없다
+    if (!(length_squared(r) > 0.0f)) return out;     // 이 API는 동일 위치 목표를 즉시 명중으로 따로 처리
 
     double A = 0.25 * (double)dot(a, a);
     double B = -((double)dot(r, a) + (double)speed * speed);
     double C = (double)dot(r, r);
 
     double T1, T2;
-    if (std::fabs(A) < 1e-12) {
+    if (A == 0.0) {
         T1 = T2 = C / ((double)speed * speed);       // 무중력 — 등속 직선
     } else {
         double disc = B * B - 4.0 * A * C;
@@ -480,7 +483,7 @@ std::vector<LaunchSolution> ComputeLaunchVelocity(vec3 r, vec3 a, float speed) {
         if (disc < -tol) return out;                 // 양의 실근 없음 — 도달 불가
         disc = std::max(0.0, disc);
         double q = -0.5 * (B + std::copysign(std::sqrt(disc), B));
-        if (std::fabs(q) < 1e-12) return out;
+        if (q == 0.0) return out;
         T1 = q / A;
         T2 = C / q;
     }
@@ -501,7 +504,7 @@ std::vector<LaunchSolution> ComputeLaunchVelocity(vec3 r, vec3 a, float speed) {
 }
 ```
 
-돌려준 두 해는 *비행시간 오름차순* 이다. 첫 해가 *낮은 각(직사)*, 둘째 해가 *높은 각(곡사)* 에 대응한다. 각도 자체가 필요하면 발사 속도를 어느 평면에서 정의하는지 밝히고 `atan2` 로 변환한다.
+돌려준 두 해는 *비행시간 오름차순* 이다. 일반적인 수평 거리 양수·수직 중력 배치에서는 첫 해가 *낮은 각(직사)*, 둘째 해가 *높은 각(곡사)* 에 대응한다. 수직 표적이나 임의 방향 가속도에서는 짧은/긴 비행시간 해로 구분하며 각도 이름을 그대로 적용하지 않는다. 각도 자체가 필요하면 발사 속도를 어느 평면에서 정의하는지 밝히고 `atan2` 로 변환한다.
 
 ### 5.3 사거리 부족
 
@@ -748,8 +751,10 @@ Worms / Angry Birds 의 *조준 UI*.
 진공 vs 선형 vs 이차 항력의 *세 궤적을 동시* — 같은 발사 조건에 *모델별 차이*.
 
 진공: 완벽한 포물선.
-선형 항력: 짧은 사거리, 더 빨리 떨어짐.
-이차 항력: 종단 속도까지 가속 후 떨어짐.
+선형 항력: 수평 속도가 지수 감쇠하고, 수직 속도는 종단 속도로 접근.
+이차 항력: 속력에 따라 감쇠가 강해지고, 수직 낙하에서는 종단 속도로 접근.
+
+항력은 상승 높이와 하강 속도를 모두 바꾸므로 진공보다 항상 더 빨리 착지한다고 단정할 수 없다.
 
 세 곡선이 *서서히 갈라짐* — 어떤 모델 선택할지 사용자가 직접 비교.
 

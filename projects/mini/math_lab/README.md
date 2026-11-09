@@ -7,7 +7,7 @@
 ## 짝 시리즈
 
 - **math** — 회전 표현, 보간, 노이즈, 충돌 검사, 공간 분할, SDF를 다루는 시리즈의 정의와 도식을 이 lab이 살아있는 시각화로 만든다.
-- **algorithms** — property·fuzz 검증 편이 가르치는 기법(property / 불변식 / oracle / 생성기 / shrink)을 이 lab의 `tests/property.h` 와 13종 property 가 실행 가능한 자산으로 만든다. lab 을 새로 늘리는 대신 기존 검증 절에 흡수한 형태다.
+- **algorithms** — property·fuzz 검증 편이 가르치는 기법(property / 불변식 / oracle / 생성기 / shrink)을 이 lab의 `tests/property.h` 와 property 검사에서 적용한다.
 
 ## 토글 항목
 
@@ -46,15 +46,15 @@
 
 ## 추적 단위
 
-`PROJECTS_PLAN.md` 의 mini lab 완료 기준 7항목을 이 lab 기준으로 적으면 다음과 같다.
+입력을 조작할 때 무엇을 고정하고 어떤 결과를 확인할지 다음 표로 정리한다.
 
 | 항목 | 이 lab 에서 |
 |---|---|
-| 이론 주장 | 쿼터니언 항등식(단위 norm, 샌드위치 회전, Hamilton 곱의 결합성, q 와 −q 의 이중 덮개, 짐벌락에서 바깥 두 축의 축약), Slerp 의 등각속도, 행렬 항등식(M·M⁻¹ = I, 직교행렬의 Rᵀ = R⁻¹ 과 det = 1, (AB)ᵀ = BᵀAᵀ, QuatToMatrix ⇔ 샌드위치 회전, 합성의 비가환성), SAT ⇔ GJK 판정 일치와 분리면의 존재, 강체 변환·균등 스케일에서의 판정 불변, BVH 트래버설이 brute force 와 같은 hit, smooth min 의 blend 구간, Perlin/Simplex/Value 의 출력 범위 상계, FBM 이 진폭 가중 평균이라는 것, Reverse-Z = 1 − Standard Z, Kahan 합산의 absorption 회복 |
+| 이론 주장 | 쿼터니언 항등식(단위 norm, 샌드위치 회전, Hamilton 곱의 결합성, q 와 −q 의 이중 덮개, 짐벌락에서 바깥 두 축의 축약), Slerp 의 등각속도, 행렬 항등식(M·M⁻¹ = I, 직교행렬의 Rᵀ = R⁻¹ 과 회전행렬의 det = 1, (AB)ᵀ = BᵀAᵀ, QuatToMatrix ⇔ 샌드위치 회전, 합성의 비가환성), SAT ⇔ GJK 판정 일치와 분리면의 존재, 강체 변환·균등 스케일에서의 판정 불변, BVH 트래버설이 brute force 와 같은 hit, smooth min 의 blend 구간, Perlin/Simplex/Value 의 출력 범위 상계, FBM 이 진폭 가중 평균이라는 것, Reverse-Z = 1 − Standard Z, Kahan 합산의 absorption 회복 |
 | 조작 변수 | Scene 토글(알고리즘 선택), 슬라이더(각도·t·scale·seed·octaves·k·near/far·N), 드래그 핸들 위치. 검증 쪽에서는 property 층의 master seed(`--seed=`)와 표본 배율(`--scale=`) |
 | 통제 변수 | 같은 입력 도형/제어점/좌표, 같은 seed, 같은 캔버스 해상도 — 토글만 바꾸고 나머지는 고정 |
 | 관측값 | 화면의 기하(호/곡선/분리축/노드 박스/등고선) + 패널의 수치(쿼터니언 성분, norm(q), GJK iteration, BVH 노드 수, naive vs kahan 합) + property 실행 요약(표본 수, 비퇴화 표본 수, 사전조건 탈락 수, 최악 관측/상계 비) |
-| 기대 결과 | norm(q) = 1, Slerp 가 호 위·Nlerp 가 현 근처, 분리축이 있으면 비충돌, 광선이 놓친 노드는 방문하지 않음, k→0 에서 smin→min, 생성된 모든 표본이 계약 상계 안 |
+| 기대 결과 | norm(q) = 1, Slerp와 Nlerp 모두 단위 구의 같은 짧은 호 위 (반대점 제외), t에 따른 각속도는 다름, 분리축이 있으면 비충돌, 광선이 놓친 노드는 방문하지 않음, k→0 에서 smin→min, 생성된 모든 표본이 계약 상계 안 |
 | 실패 주입 | Slerp: 큰 호(2.6 rad)에서 인접 샘플 각도의 max/min 비 — Nlerp 로 바꾸면 1.0 대에서 1.5 대로 튄다. SAT: B 의 면 법선에서만 분리되는 배치 — 후보축을 A 것만 쓰면 충돌로 오판한다. BVH: 노드별 median 분할 불변식과 brute force 대조 — 분할·정렬·가지치기 중 하나만 없애도 깨진다. 노이즈: 표본 분산 하한 — hash 나 그라디언트를 상수로 바꾸면 0 이 된다. Kahan: big=1e5, small=1e-4, N=1e5 에서 naive 와의 차이. property 층에는 13개 property 각각에 대응 변이를 하나씩 붙여 두었다(정규화 제거, Hamilton 곱 부호 반전, 짧은 호 뒤집기 제거, slerp 가중치 선형화, Perlin 2배, FBM 정규화 제거, 격자 오프셋 −1 누락, SAT 후보축에서 B 법선 탈락, 분리 문턱 0→0.05, A 법선을 월드축으로 고정, Gauss-Jordan 부호 반전, MatMul 전치, QuatToMatrix 부호 반전). 모두 실제로 주입해 대상 property 가 죽는 것을 확인하고 원본 바이트로 복원 후 SHA256 을 대조했다 |
 | 자동 테스트 | `tests/core_tests.cpp` — GUI 없이 도는 두 층. (a) 고정 사례 13개 함수: layout / quaternion(+slerp 등각속도/짐벌락) / curves / collision / sdf / bvh / noise / depth / kahan / vector / matrix. 무작위 교차 검증 3종(OBB 20,000쌍 SAT⇔GJK, 광선 3,000개 BVH⇔brute force, smin 500 표본)을 고정 seed 로 돌린다. (b) `tests/property.h` 하네스 위의 시드 무작위 property 13종(쿼터니언 4 · 노이즈 3 · 충돌 3 · 행렬 3), 기본 42,300 표본. 파일 끝의 `kCases` 표가 두 층을 모두 그것을 들여온 step 에 묶어, `ctest` 타깃이 step별로 나뉜다(`math_stepNN_*`). property 층만 도는 `math_property_layer` 타깃이 따로 있다 |
 
@@ -151,7 +151,7 @@ ctest --test-dir build -C Release -R math_step05_collision --output-on-failure
 
 ## 시리즈 글과의 관계
 
-math 시리즈의 모든 핵심 도식이 이 lab에서 살아있는 형태로 재현된다. 글에서 "Slerp는 단위 구 위의 호를 따라 움직인다"고 적은 문장이 이 lab에서는 점이 실제로 호를 따라 이동하는 모습으로 보인다. GJK가 simplex를 키워가는 과정, BVH가 median split으로 분할하는 과정, SDF가 Smooth Min으로 두 도형을 매끄럽게 합치는 과정이 모두 단계별로 실행 가능하다.
+위 대응 범위의 수학 도식을 이 lab에서 조작하며 확인할 수 있다. 글에서 "Slerp는 단위 구 위의 호를 따라 움직인다"고 적은 문장이 이 lab에서는 점이 실제로 호를 따라 이동하는 모습으로 보인다. GJK가 simplex를 키워가는 과정, BVH가 median split으로 분할하는 과정, SDF가 Smooth Min으로 두 도형을 매끄럽게 합치는 과정이 모두 단계별로 실행 가능하다.
 
 ## 거대 프로젝트와의 관계
 

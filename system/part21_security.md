@@ -265,10 +265,11 @@ if (value == CAP_SET) {
 #include <sys/prctl.h>
 
 // CAP_SYS_ADMIN을 bounding set에서 제거
-// → 현재 effective/permitted는 즉시 지워지지 않지만, 이후 execve에서 새로 획득되지 않는다
+// → 현재 effective/permitted는 즉시 지워지지 않는다.
+// file-permitted 경로는 제한하지만 inheritable 경로 등도 별도로 통제해야 한다.
 prctl(PR_CAPBSET_DROP, CAP_SYS_ADMIN);
 
-// 이제 root로 실행해도 execve 후 CAP_SYS_ADMIN 없음
+// 다른 capability 집합과 exec 대상의 설정도 함께 확인한다.
 execve("/bin/bash", ...);
 ```
 
@@ -687,17 +688,16 @@ int main() {
     printf("%d\n", a + b);
 }
 
-// 필요한 시스템 콜: read, write, exit (3개)
-// → 나머지 437개는 공격에만 사용됨
+// 실제 필요 syscall은 libc, 동적 로더, 초기화와 종료 경로에 따라 달라진다.
 ```
 
 ### Seccomp-BPF
 
 **Berkeley Packet Filter를 시스템 콜 필터링에 응용:**
 
-x86_64는 같은 프로세스에서 64-bit syscall과 32-bit (`int 0x80`/`x32`) ABI를 모두 호출할 수 있어, syscall 번호가 ABI마다 다르다. 따라서 필터의 첫 단계는 항상 `seccomp_data.arch`를 검사해, 알지 못하는 ABI에서 호출되면 거부해야 한다. 그렇지 않으면 32-bit ABI로 같은 번호를 가진 다른 syscall을 호출해 우회할 수 있다.
+x86-64 환경에서는 64-bit syscall과 호환 ABI의 syscall 번호가 다르다. 필터는 `seccomp_data.arch`를 검사하고 알지 못하는 ABI를 거부해야 한다. 다만 x86-64와 x32는 같은 `AUDIT_ARCH_X86_64` 값을 쓰므로 arch 검사만으로 둘을 구별할 수 없다. syscall 번호의 `__X32_SYSCALL_BIT`도 확인하거나 두 ABI를 모두 정확히 처리해야 한다. 아래는 소수의 정확한 번호만 허용하는 allowlist라 나머지 x32 번호를 거부한다. 오래된 커널의 ABI 예외까지 포함한 세부사항은 [seccomp(2)](https://man7.org/linux/man-pages/man2/seccomp.2.html)를 확인한다.
 
-또한 `PR_SET_NO_NEW_PRIVS`(NNP)는 root가 아닌 사용자가 seccomp 필터를 적용하기 위해 반드시 먼저 호출되어야 한다. NNP가 켜지면 setuid 비트로 권한이 올라가는 일이 차단되어 필터가 안전하게 동작한다.
+또한 seccomp 필터 설치에는 해당 user namespace의 `CAP_SYS_ADMIN` 또는 이미 설정된 `PR_SET_NO_NEW_PRIVS`(NNP)가 필요하다. NNP는 이후 exec에서 setuid 등으로 새 권한을 얻지 못하게 한다.
 
 ```c
 #include <linux/seccomp.h>
@@ -1275,8 +1275,8 @@ $ sysctl -p /etc/sysctl.d/99-security.conf
 - Cowan, C., et al. (2000). *SubDomain: Parsimonious Server Security*. USENIX LISA.
 - Edge, J. (2015). *A seccomp overview*. LWN.net. https://lwn.net/Articles/656307/
 - Kerrisk, M. (2013). *Namespaces in operation, part 5: User namespaces*. LWN.net. https://lwn.net/Articles/532593/
-- Intel Corporation. (2016). *Control-flow Enforcement Technology Specification*. — 판본·문서 번호·절 미확인(직접 근거로 쓰려면 리비전과 절을 명시할 것)
-- ARM Ltd. (2021). *Armv8-A Architecture Reference Manual*. — 판본(DDI 번호·리비전)·절 미확인
+- Intel, [Intel 64 and IA-32 Architectures Software Developer's Manuals](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html) — CET와 x86 메모리 보호
+- Arm, [Architecture reference manuals](https://developer.arm.com/documentation) — Arm 메모리 보호와 예외 수준
 - Linux v5.15 커널 소스 트리: `security/` 디렉터리
  - `security/selinux/avc.c` — `avc_has_perm`의 요청 권한 판정
  - `security/apparmor/` — 경로 기반 정책 판정(버전별 구현 차이 확인 필요)

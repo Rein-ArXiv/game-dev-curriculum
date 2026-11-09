@@ -109,6 +109,7 @@ void RenderObject(const glm::vec3& pos, float rotY, GLuint shader) {
     glm::mat4 proj  = glm::perspective(glm::radians(60.0f), 16.0f/9.0f, 0.1f, 100.0f);
     glm::mat4 mvp   = proj * view * model;
 
+    glUseProgram(shader);  // glUniform은 현재 사용 중인 프로그램을 갱신
     GLint loc = glGetUniformLocation(shader, "uMVP");
     glUniformMatrix4fv(loc, 1, GL_FALSE, glm::value_ptr(mvp));  // GLM은 column-major
 }

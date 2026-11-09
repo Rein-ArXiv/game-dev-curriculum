@@ -2,7 +2,7 @@
 
 OpenGL은 그 자체로 윈도우를 만들지 못한다. OpenGL은 GPU 드라이버가 제공하는 거대한 상태 머신(State Machine)에 대한 표준화된 호출 인터페이스다. 윈도우를 띄우고, OS의 그래픽스 표면을 잡고, 그 위에 OpenGL 상태 머신을 묶는 작업은 *컨텍스트 생성(Context Creation)* 이라 부르고, OS마다 달라서 OpenGL 표준이 아니라 플랫폼별 API의 영역이다.
 
-윈도우 시스템과 OpenGL의 분리는 1992년 SGI가 OpenGL을 표준화하면서부터 의도된 것이다. X11은 GLX, Win32는 WGL, macOS는 NSOpenGL, 모바일/웹은 EGL을 통해 컨텍스트를 만든다. 이 차이를 매번 직접 다루기는 어려우므로 GLFW나 SDL 같은 외부 라이브러리가 추상화 계층을 제공한다.
+윈도우 시스템과 OpenGL의 분리는 1992년 SGI가 OpenGL을 표준화하면서부터 의도된 것이다. X11은 GLX, Win32는 WGL, macOS는 NSOpenGL, 모바일 네이티브 환경에서는 EGL을 흔히 사용한다. 웹 애플리케이션은 브라우저의 WebGL 컨텍스트 API를 사용하며, 브라우저 내부의 EGL 사용 여부와는 구분해야 한다. 이 차이를 매번 직접 다루기는 어려우므로 GLFW나 SDL 같은 외부 라이브러리가 추상화 계층을 제공한다.
 
 이 글의 목표는 다음 다섯 가지다.
 
@@ -47,7 +47,7 @@ flowchart LR
 
 ### GLFW: 그래픽스 전용
 
-GLFW(Graphics Library Framework)는 OpenGL/Vulkan 컨텍스트, 윈도우, 입력만 다룬다. 오디오·네트워크·이미지 로딩 같은 게임 부수 기능은 빠져 있다.
+GLFW(Graphics Library Framework)는 OpenGL·OpenGL ES 컨텍스트, Vulkan 윈도우 표면, 윈도우와 입력을 다룬다. 오디오·네트워크·이미지 로딩 같은 게임 부수 기능은 빠져 있다.
 
 핵심 특성은 다음과 같다.
 
@@ -55,27 +55,27 @@ GLFW(Graphics Library Framework)는 OpenGL/Vulkan 컨텍스트, 윈도우, 입�
 - 윈도우 핸들은 `GLFWwindow*` 단일 추상 타입
 - 이벤트는 명시적 폴링(`glfwPollEvents`)
 - 입력 콜백 등록 모델 (`glfwSetKeyCallback` 등)
-- 약 30,000줄의 작은 라이브러리
+- 윈도우·입력·컨텍스트 관리에 범위를 둔 라이브러리
 
 ### SDL: 게임 풀 스택
 
-SDL(Simple DirectMedia Layer)은 윈도우·컨텍스트·오디오·입력·네트워크·파일 시스템·스레딩까지 한 프레임워크에 담는다.
+SDL(Simple DirectMedia Layer)은 윈도우·컨텍스트·오디오·입력·파일 시스템·스레딩 등을 제공한다. 네트워크는 SDL 코어가 아니라 SDL_net 같은 별도 라이브러리의 영역이다. 아래 코드는 SDL2 기준이며 SDL3의 함수 시그니처와 섞지 않는다.
 
 - C 인터페이스, zlib 라이선스
 - 윈도우는 `SDL_Window*`, OpenGL 컨텍스트는 `SDL_GLContext`
 - 이벤트는 큐 기반(`SDL_PollEvent`)
-- 입력은 폴링과 콜백 모두 지원
-- 약 200,000줄, 모바일 포함 광범위
+- 입력은 이벤트 큐와 상태 폴링을 중심으로 처리
+- 모바일을 포함한 여러 플랫폼의 멀티미디어 기능 제공
 
 ### 핵심 차이
 
 | 항목 | GLFW | SDL |
 |---|---|---|
-| 라이선스 | zlib/libpng (사실상 MIT) | zlib |
-| 코드 규모 | 작음 (~30K LoC) | 큼 (~200K LoC) |
+| 라이선스 | zlib/libpng | zlib |
+| 기능 범위 | 윈도우·입력·컨텍스트 | 오디오 등 멀티미디어 기능 포함 |
 | 오디오 | 없음 | 내장 |
 | 입력 모델 | 콜백 중심 | 큐 + 폴링 |
-| 이벤트 펌프 | 명시적 폴링 | 큐 자동 누적 |
+| 이벤트 펌프 | `glfwPollEvents` 또는 `glfwWaitEvents` | `SDL_PollEvent`/`SDL_WaitEvent` 등이 펌프 수행 |
 | 컨텍스트 핸들 | `GLFWwindow*` 내부 | 분리된 `SDL_GLContext` |
 | 모바일 지원 | 미지원 | 전면 지원 |
 | 멀티 윈도우 | 지원 | 지원 |
@@ -100,6 +100,7 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE); // macOS의 Core 요구
 
     GLFWwindow* window = glfwCreateWindow(800, 600, "GL", nullptr, nullptr);
     if (!window) {
@@ -140,6 +141,8 @@ int main(int argc, char** argv) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
                         SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS,
+                        SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG); // macOS Core
 
     SDL_Window* window = SDL_CreateWindow(
         "GL", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
@@ -194,16 +197,7 @@ Core에서 제거된 주요 기능은 다음과 같다.
 
 ### 벤더별 지원 정책
 
-| 벤더 | Compatibility 최적화 | macOS Compatibility |
-|---|---|---|
-| NVIDIA | 적극 최적화 (CAD 시장 때문) | (해당 없음) |
-| AMD | 부분 최적화 | (해당 없음) |
-| Intel | 최소 지원 | (해당 없음) |
-| Apple (macOS) | OpenGL 4.1까지 Core 전용 | Compatibility 미지원 |
-
-macOS는 OpenGL 4.1까지만 지원하고, Apple은 macOS 10.14 Mojave(2018)부터 OpenGL 전체를 deprecated로 선언했다. Apple은 자사 Metal로의 전환을 강하게 유도한다. 따라서 macOS 호환을 원하면 OpenGL 3.3 또는 4.1 Core를 타깃으로 잡아야 한다.
-
-NVIDIA가 Compatibility Profile을 적극 최적화하는 이유는 Maya·3ds Max·CATIA 같은 CAD/DCC 도구가 여전히 즉시 모드를 사용하는 레거시 코드 베이스를 가지고 있기 때문이다. 게임 개발에서는 거의 의미가 없다.
+macOS는 OpenGL 2.1의 legacy 경로와 3.2 이상 Core 경로를 구분한다. 3.2 이상 컨텍스트는 forward-compatible Core여야 하며, 지원 상한은 4.1이다. Compatibility가 모든 버전에서 지원되지 않는다는 뜻은 아니다. Apple은 macOS 10.14부터 OpenGL을 deprecated로 두었다. Windows·Linux에서는 설치한 드라이버의 버전·프로파일 지원을 확인한다. 벤더 이름만으로 Compatibility의 지원 수준이나 최적화 품질을 순위화할 수는 없다.
 
 ### Forward Compatible 컨텍스트
 
@@ -213,16 +207,16 @@ Core Profile에는 또 하나의 옵션이 있다. *Forward Compatible* 컨텍�
 glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 ```
 
-OpenGL 3.3에서 forward compatible을 켜면 3.3에서 deprecated인 와이드 라인(line width > 1)이나 일부 픽셀 전송 함수가 빠진다. macOS는 forward compatible 컨텍스트를 요구한다. 다른 플랫폼에서도 켜는 편이 미래 호환성에 안전하다.
+OpenGL 3.3에서 forward compatible을 켜면 Core에도 남아 있는 deprecated 기능인 와이드 라인(line width > 1) 등을 사용할 수 없게 된다. macOS는 forward compatible 컨텍스트를 요구한다. 다른 플랫폼에서도 켜는 편이 미래 호환성에 안전하다.
 
 ### 기본 선택
 
 OpenGL 3.3 Core + Forward Compatible을 기본으로 한다. 3.3은 다음 이유로 적합하다.
 
-- 2010년 발표되어 모든 데스크톱 GPU에서 안정 지원
+- 2010년 발표되어 널리 지원되지만 실제 드라이버의 컨텍스트 생성 성공과 버전 확인 필요
 - 셰이더 기반 모던 OpenGL의 기초가 모두 들어 있음 (VAO, UBO, Sampler Object)
 - macOS 4.1 Core와 호환
-- 모바일 OpenGL ES 3.0과 핵심 기능이 일치
+- 모바일 OpenGL ES 3.0과 많은 핵심 기능이 겹치지만 컨텍스트·GLSL·기능 지원은 별도 확인
 
 OpenGL 4.x의 추가 기능(Tessellation, Compute Shader, ARB_bindless 등)은 필요한 곳에서 확장 단위로 가져온다.
 
@@ -249,7 +243,7 @@ glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 #endif
 ```
 
-디버그 컨텍스트는 호출 검증, 깊은 오류 정보, `GL_KHR_debug` 콜백을 활성화한다. 릴리스에서는 약간의 오버헤드가 있으므로 디버그 빌드에만 켠다.
+디버그 컨텍스트는 지원되는 진단 경로에서 더 강한 오류 보고를 요청한다. OpenGL 3.3의 debug bit만으로 `GL_KHR_debug` 지원이 생기는 것은 아니며, 확장·함수 포인터 확인과 출력 활성화·콜백 등록은 별도 단계다. 릴리스에서는 약간의 오버헤드가 있으므로 디버그 빌드에만 켠다.
 
 ### 픽셀 포맷 힌트
 
@@ -271,7 +265,7 @@ OpenGL은 깊이 버퍼 비트 수에 따라 가까운 객체와 먼 객체의 �
 
 $$z_{ndc} = \frac{f + n}{f - n} + \frac{2 f n}{(f - n) \, z_{view}}$$
 
-여기서 $n$은 near plane(양수 거리), $f$는 far plane(양수 거리), $z_{view}$는 카메라 좌표계의 z 값이다. OpenGL의 오른손 좌표계 + 카메라 -Z 방향 컨벤션에서 카메라 *앞쪽 점* 의 $z_{view}$는 음수이고, $-z_{view}$가 카메라부터의 거리에 해당한다. 식의 분모에 $z_{view}$가 들어가므로 결과는 near 근처에 정밀도가 몰리는 비선형 분포를 가진다. near를 너무 작게 잡으면 멀리 있는 두 표면이 같은 깊이 값으로 양자화되어 *Z-fighting* 이 발생한다.
+여기서 $n$은 near plane(양수 거리), $f$는 far plane(양수 거리), $z_{view}$는 카메라 좌표계의 z 값이다. OpenGL의 오른손 좌표계 + 카메라 -Z 방향 컨벤션에서 카메라 *앞쪽 점* 의 $z_{view}$는 음수이고, $-z_{view}$가 카메라 축방향 깊이에 해당한다(유클리드 거리와는 다르다). 식의 분모에 $z_{view}$가 들어가므로 결과는 near 근처에 정밀도가 몰리는 비선형 분포를 가진다. near를 너무 작게 잡으면 멀리 있는 두 표면이 같은 깊이 값으로 양자화되어 *Z-fighting* 이 발생한다.
 
 24비트 깊이는 일반 게임에서 충분하다. 매우 넓은 야외 풍경(wide-range scene)에서는 32비트 부동소수점 + Reverse-Z 기법을 사용한다.
 
@@ -482,7 +476,7 @@ glfwSwapInterval(1);  // 기본은 V-Sync 활성
 
 OpenGL의 오류 보고 모델은 두 가지였다.
 
-1. **glGetError 폴링**: `glGetError`는 플래그에 처음 기록된 오류 코드 하나를 반환하고, 그 뒤에 난 오류는 플래그가 리셋될 때까지 기록되지 않는다. 어느 호출이 실패했는지 정확히 알기 어렵고, 호출마다 폴링하면 성능 저하가 크다.
+1. **glGetError 폴링**: `glGetError`는 설정된 오류 플래그 하나를 반환하고 그 플래그를 지운다. 여러 플래그가 있으면 반환 순서는 보장되지 않으며, 이미 설정된 플래그에 해당하는 반복 오류는 합쳐질 수 있다. 모든 플래그를 비우려면 `GL_NO_ERROR`까지 반복 호출한다. 어느 호출이 실패했는지 정확히 알기 어렵고, 호출마다 폴링하면 성능 저하가 크다.
 2. **디버그 출력**: `GL_KHR_debug` 확장(또는 ARB_debug_output 전신)이 콜백 모델을 추가한다.
 
 콜백 방식이 압도적으로 편하다. OpenGL 4.3에서 코어로 승격됐고, 3.3에서도 확장이 지원되면 사용 가능하다.
@@ -503,7 +497,7 @@ OpenGL의 오류 보고 모델은 두 가지였다.
 - 추가적인 호출 검증
 - 더 자세한 오류 정보
 
-릴리스 빌드에서는 디버그 컨텍스트를 끈다. 일반 컨텍스트에서도 콜백을 등록하면 동작은 하지만 출력되는 메시지가 거의 없다.
+릴리스 빌드에서는 디버그 컨텍스트를 끈다. 일반 컨텍스트에서도 지원되는 디버그 출력을 활성화하고 콜백을 등록할 수 있지만, 드라이버가 어떤 메시지를 생성할지는 debug 컨텍스트와 같은 수준으로 보장되지 않는다.
 
 ### 콜백 등록
 
@@ -527,7 +521,7 @@ void EnableGLDebug() {
     GLint flags = 0;
     glGetIntegerv(GL_CONTEXT_FLAGS, &flags);
     if (!(flags & GL_CONTEXT_FLAG_DEBUG_BIT)) {
-        // 디버그 컨텍스트가 아니다. 콜백이 동작하지 않는다.
+        // 이 예제는 정책상 debug 컨텍스트에서만 콜백을 사용한다.
         return;
     }
 
@@ -549,7 +543,7 @@ void EnableGLDebug() {
 }
 ```
 
-`GL_DEBUG_OUTPUT_SYNCHRONOUS`는 콜백이 *원래의 GL 호출 스레드* 에서 *호출 직후 즉시* 실행되도록 한다. 이 플래그가 없으면 드라이버가 임의 스레드에서 비동기로 콜백을 호출할 수 있어 디버거가 콜 스택을 정확히 보여주지 못한다.
+`GL_DEBUG_OUTPUT_SYNCHRONOUS`는 콜백이 메시지를 만든 *GL 호출 스레드* 에서 *그 호출이 반환되기 전* 실행되도록 한다. 이 플래그가 없으면 드라이버가 임의 스레드에서 비동기로 콜백을 호출할 수 있어 디버거가 콜 스택을 정확히 보여주지 못한다.
 
 ### 콜백 구현
 
@@ -637,14 +631,7 @@ glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE,
 
 같은 코드라도 드라이버별로 메시지 내용이 다르다.
 
-| 벤더 | 디버그 메시지 특성 |
-|---|---|
-| NVIDIA | 가장 상세. 셰이더 컴파일 경고, 메모리 사용 패턴까지 보고 |
-| AMD | 중간 정도. 주요 오류는 잡지만 상세도 낮음 |
-| Intel | 최소. 표준 오류 외에 거의 침묵 |
-| Mesa (Linux 오픈소스) | 표준 준수, 로그가 단순 |
-
-게임 개발 시 NVIDIA에서 한 번, AMD에서 한 번 점검하는 패턴이 일반적이다. Intel은 별도 검증이 필요할 만큼 다른 결과를 내지는 않지만, *특정 확장 미지원* 으로 인한 차이가 있다.
+메시지 ID·문구·심각도 분류는 구현에 따라 달라질 수 있다. 특정 벤더의 메시지가 항상 가장 상세하다거나 다른 벤더는 별도 검증이 필요 없다고 가정하지 않는다. 목표 드라이버에서 의도적 오류가 보고되는지 확인하고, 메시지가 없다는 사실과 렌더링 정확성을 구분한다.
 
 ### Push / Pop Group과 RenderDoc
 
@@ -660,7 +647,7 @@ DrawScene();
 glPopDebugGroup();
 ```
 
-이 마커들은 자체적으로는 영향이 없지만 RenderDoc, NVIDIA Nsight, AMD Radeon GPU Profiler에서 호출 트리를 명확히 보여 준다. 큰 게임의 디버그 가독성을 크게 개선한다.
+이 마커들은 자체적으로는 영향이 없지만 OpenGL 캡처를 지원하는 RenderDoc·NVIDIA Nsight Graphics 같은 도구에서 호출 트리를 명확히 보여 준다. 큰 게임의 디버그 가독성을 크게 개선한다.
 
 ### 디버그 콜백을 켜지 않은 컨텍스트의 폴백
 
@@ -688,12 +675,12 @@ OpenGL은 라이브러리에 정적으로 링크되는 형태가 아니라, 드�
 
 ```cpp
 // Win32 예시 (글래드 같은 로더가 내부에서 하는 일)
-typedef void (APIENTRY* PFNGLDRAWARRAYSPROC)(GLenum, GLint, GLsizei);
-PFNGLDRAWARRAYSPROC glDrawArrays =
-    (PFNGLDRAWARRAYSPROC)wglGetProcAddress("glDrawArrays");
+typedef void (APIENTRY* PFNGLGENBUFFERSPROC)(GLsizei, GLuint*);
+PFNGLGENBUFFERSPROC glGenBuffers =
+    (PFNGLGENBUFFERSPROC)wglGetProcAddress("glGenBuffers");
 ```
 
-Windows의 `opengl32.dll`은 OpenGL 1.1까지, Linux의 `libGL.so.1`은 ABI 규정상 OpenGL 1.2(+`ARB_multitexture`)까지의 함수만 정적으로 export한다. 그 위의 함수는 동적 로딩이다. 즉 `glGenBuffers`(1.5), `glCreateProgram`(2.0), `glBindVertexArray`(3.0) 모두 동적 로딩 대상이다.
+Windows의 `opengl32.dll`은 OpenGL 1.1 진입점을 export하고, 그 이후 함수는 보통 `wglGetProcAddress`로 얻는다. 위 예제는 1.5 함수이므로 이 경로를 보인다. 1.1 함수는 DLL의 `GetProcAddress` 경로가 필요할 수 있다. Linux의 전통적인 ABI가 보장하는 심볼 집합과 실제 구현이 추가 export하는 심볼은 구분해야 하므로, `libGL`이 새 함수를 절대로 export하지 않는다고 가정하지 않는다. 즉 `glGenBuffers`(1.5), `glCreateProgram`(2.0), `glBindVertexArray`(3.0) 모두 동적 로딩 대상이다.
 
 ### 직접 로딩의 부담
 
@@ -702,14 +689,16 @@ OpenGL 4.6에는 약 700개의 함수가 있다. 모두 타입 정의 + 함수 �
 | 라이브러리 | 모델 | 라이선스 | 특징 |
 |---|---|---|---|
 | GLAD | 코드 생성 | MIT | 웹 도구 또는 CLI로 헤더+소스 생성 |
-| GLEW | 사전 빌드 라이브러리 | MIT | 모든 확장 포함, 무겁다 |
-| glbinding | C++ 래퍼 | MIT | 함수 객체화, RAII |
+| GLEW | 사전 생성 헤더·소스/라이브러리 | BSD/MIT 계열 등 | 기본은 폭넓은 확장 포함, custom 생성도 가능 |
+| glbinding | C++ 바인딩 | MIT | 타입 안전한 함수 바인딩 |
 | epoxy | 런타임 로딩 | MIT | 사용 시점에 자동 로딩 |
 | GLAD2 | 차세대 GLAD | MIT | 멀티 컨텍스트, 멀티 API |
 
 ### GLAD 사용
 
 GLAD1은 https://glad.dav1d.de 에서, GLAD2는 https://gen.glad.sh 에서 필요한 OpenGL 버전과 확장을 선택해 *그 조합에 맞는 헤더와 소스* 를 다운로드한다. 이 절의 예제는 GLAD1 생성물(`glad/glad.h` + `gladLoadGLLoader`)을 기준으로 하므로, 헤더 경로와 초기화 API가 다른 GLAD2 생성물과 한 프로젝트에서 섞지 않는다.
+
+이 글의 통합 예제는 OpenGL 3.3 Core와 `GL_KHR_debug` 확장을 포함해 생성한 GLAD1 헤더를 전제로 한다. 그래야 debug 관련 선언을 컴파일할 수 있으며, 런타임 지원 여부는 여전히 별도로 확인한다.
 
 생성된 파일 구조:
 
@@ -752,7 +741,7 @@ int main() {
 
 ### GLEW 사용
 
-GLEW는 미리 빌드된 라이브러리다. 모든 확장의 함수 포인터 정의를 포함하고 있어 단일 헤더로 시작 가능하다.
+GLEW는 사전 생성된 헤더·소스를 라이브러리로 사용하며 소스 빌드와 바이너리 배포를 지원한다. 기본 배포는 폭넓은 확장의 함수 포인터 정의를 제공한다.
 
 ```cpp
 #define GLEW_STATIC
@@ -772,7 +761,7 @@ int main() {
 }
 ```
 
-`glewExperimental = GL_TRUE`는 GLEW가 Core Profile 컨텍스트에서도 동작하도록 강제한다. 이걸 빼먹으면 일부 함수 포인터가 NULL로 남는 문제가 있다.
+`glewExperimental = GL_TRUE`는 표준 확장 보고 경로에만 의존하지 않고 유효한 진입점이 있는 확장을 노출하도록 한다. 일부 Core Profile·드라이버 조합에서 필요한 설정으로 쓰였지만, 모든 버전에서 Core 지원을 켜는 필수 스위치와 같은 뜻은 아니다. 실제 사용은 컨텍스트 버전·확장 지원 확인과 함께 해야 한다.
 
 ### GLAD vs GLEW 비교
 
@@ -781,7 +770,7 @@ int main() {
 | 빌드 | 소스 동봉 | 라이브러리 링크 |
 | 크기 | 필요한 확장만 (수백 KB) | 전체 (~수 MB) |
 | 설정 | 웹 또는 CLI 생성 | 시스템 패키지 또는 빌드 |
-| Core Profile 지원 | 자연스러움 | `glewExperimental` 필요 |
+| Core Profile 지원 | 생성한 버전·프로파일에 따름 | GLEW 버전·드라이버 확인, 필요 시 `glewExperimental` |
 | 멀티 컨텍스트 | GLAD2 지원 | 부분 지원 |
 | 빌드 의존성 | 단일.c 파일 | 외부 lib |
 | 업데이트 | 새 OpenGL 버전 시 재생성 | 새 GLEW 빌드 |
@@ -792,7 +781,7 @@ int main() {
 
 여러 OpenGL 컨텍스트를 동시에 다루는 경우, 각 컨텍스트가 *서로 다른 함수 포인터 집합* 을 가질 수 있다. NVIDIA와 AMD의 GPU가 한 시스템에 동시에 있는 환경, 또는 여러 모니터의 별도 어댑터가 다른 케이스다.
 
-GLAD2는 *컨텍스트별 함수 포인터 테이블* 을 제공한다.
+GLAD2에서 `mx` 생성 옵션을 선택하면 *컨텍스트별 함수 포인터 테이블* 을 제공한다. 아래 `GladGLContext` 예제는 이 옵션으로 만든 헤더와 소스를 전제로 한다.
 
 ```cpp
 GladGLContext ctx1, ctx2;
@@ -807,7 +796,7 @@ glfwMakeContextCurrent(window2);
 ctx2.GenBuffers(1, &buf2);
 ```
 
-일반 GLAD는 전역 함수 포인터를 사용해 컨텍스트 분리를 지원하지 못한다. 단일 컨텍스트만 사용한다면 일반 GLAD로 충분하다.
+일반 GLAD는 전역 테이블 하나를 사용하므로 서로 다른 컨텍스트의 함수 포인터와 지원 정보를 동시에 보존하지 못한다. 같은 구현의 호환 컨텍스트에서 테이블을 공유하는 경우와, 전환 때 다시 로드하거나 별도 테이블이 필요한 경우를 구분한다. 단일 컨텍스트만 사용한다면 일반 GLAD로 충분하다.
 
 ### 확장 가용성 확인
 
@@ -1041,7 +1030,7 @@ bool GLContext::Init(int width, int height, const std::string& title) {
                               0, nullptr, GL_FALSE);
         std::puts("[GL] debug callback enabled");
     } else {
-        // 미지원 환경은 glGetError 폴링 폴백을 사용한다.
+        // 미지원 환경은 6절의 CheckGLError를 패스 경계에 연결해 폴백한다.
         std::puts("[GL] KHR_debug unavailable; fall back to glGetError polling");
     }
 #endif
@@ -1118,14 +1107,14 @@ GLSL:        3.30 NVIDIA via Cg compiler
 [GL] debug callback enabled
 ```
 
-이 시점에서 검은 윈도우가 뜨고 닫기 전까지 60Hz로 새 프레임을 swap한다. 디버그 메시지가 비어 있다면 정상이다.
+이 시점에서 어두운 윈도우가 뜨고 닫기 전까지 표시 주기에 맞춰 새 프레임을 swap한다. 디버그 메시지가 비어 있다면 정상이다.
 
 ### 의도적 오류로 디버그 콜백 검증
 
 콜백이 동작하는지 확인하려면 메인 루프 안에 의도적인 잘못된 호출을 넣는다.
 
 ```cpp
-glClear(0xDEAD);  // 잘못된 enum
+glClear(0xDEAD);  // 허용되지 않은 비트가 든 mask: GL_INVALID_VALUE
 ```
 
 다음과 같은 메시지가 매 프레임 출력되어야 한다.

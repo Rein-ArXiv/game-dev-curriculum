@@ -231,7 +231,8 @@ public:
         prevSendUs_ = sendUs;
         // 지터가 크면 버퍼를 늘려 안정성↑(지연↑), 작으면 줄여 지연↓.
         // 이 P95 버퍼 정책은 표준 RTP의 EWMA 추정기와는 다른 자체 정책이다.
-        targetDepthMs_ = Clamp(static_cast<int>(observedJitter_.P95() * 1.5f), kMin, kMax);
+        if (!observedJitter_.Empty())
+            targetDepthMs_ = Clamp(static_cast<int>(observedJitter_.P95() * 1.5f), kMin, kMax);
         queue_.Push(std::move(p));   // reorder/drop 정책은 Pop 계약으로 분리
     }
     bool Pop(Frame& out) { /* targetDepth만큼 찼을 때부터 일정 간격 방출 */ }

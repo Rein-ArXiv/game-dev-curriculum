@@ -637,6 +637,8 @@ tc class add dev eth0 parent 1:1 classid 1:20 htb rate 50mbit
 
 ### [5-6] 드라이버와 NIC
 
+아래는 설명을 위한 선형 skb 한 개짜리 축약 모델이다. non-linear skb의 `skb->len`에는 분산 조각도 포함되므로 이를 `dma_map_single`에 그대로 넘길 수 없다. 실제 드라이버는 선형 영역과 각 fragment를 따로 DMA 매핑하고 해당 descriptor들을 완료 후 각각 해제한다.
+
 ```c
 // drivers/net/ethernet/intel/e1000/e1000_main.c
 static netdev_tx_t e1000_xmit_frame(struct sk_buff *skb, struct net_device *netdev) {
@@ -653,7 +655,7 @@ static netdev_tx_t e1000_xmit_frame(struct sk_buff *skb, struct net_device *netd
     tx_desc = E1000_TX_DESC(*tx_ring, i);
     buffer_info = &tx_ring->buffer_info[i];
 
-    // 2. DMA 매핑 (linear 영역과 frags를 각각 매핑한다)
+    // 2. DMA 매핑 (이 축약 예제는 선형 skb만 가정)
     dma_addr_t dma = dma_map_single(&pdev->dev, skb->data, skb->len, DMA_TO_DEVICE);
     if (dma_mapping_error(&pdev->dev, dma)) {
         dev_kfree_skb_any(skb);
@@ -959,7 +961,7 @@ sysctl -w net.ipv4.tcp_fin_timeout=30  # FIN-WAIT-2 타임아웃
 # tcp_tw_reuse는 처음부터 outgoing(connect) 경로에만 적용되며, 4.18부터 값이 0/1(전역)/2(loopback 한정, 기본값)로 나뉘었다.
 ```
 
-TIME_WAIT은 마지막 ACK의 도착과 지연·재전송 패킷의 흡수를 보장하는 상태다. `SO_REUSEADDR`는 TIME_WAIT 객체를 즉시 없애는 명령이 아니라 로컬 주소 재바인딩을 허용하는 설정이며, 실제 회수 시점은 `2*MSL`(`TCP_TIMEWAIT_LEN`) 타이머가 결정한다. 문맥을 말할 때도 softirq가 항상 `ksoftirqd`에서 실행된다고 단정하지 않는다. IRQ 복귀 시점의 `irq_exit` 경로에서 먼저 처리되고, 밀린 경우에만 `ksoftirqd`로 넘어간다.
+TIME_WAIT은 마지막 ACK가 손실되면 재전송된 FIN에 다시 응답하고, 이전 연결의 지연 패킷이 새 연결과 혼동될 위험을 줄이는 상태다. ACK의 도착 자체를 보장하지는 않는다. `SO_REUSEADDR`는 TIME_WAIT 객체를 즉시 없애는 명령이 아니라 조건에 따라 로컬 주소 재바인딩을 허용하는 설정이다. 문맥을 말할 때도 softirq가 항상 `ksoftirqd`에서 실행된다고 단정하지 않는다. IRQ 복귀 시점의 `irq_exit` 경로에서 먼저 처리될 수 있고, 밀린 경우에는 `ksoftirqd`로 넘어간다.
 
 ## 7. 소켓 버퍼와 흐름 제어
 
@@ -1037,6 +1039,7 @@ static unsigned int tcp_window_allows(struct tcp_sock *tp, struct sk_buff *skb) 
 ### 혼잡 제어: Slow Start & AIMD
 
 **알고리즘 (Reno):**
+아래 증가량은 ACK 하나가 한 세그먼트를 새로 확인하는 단순 모델이다. delayed ACK나 한 ACK가 여러 세그먼트를 확인하는 경우에는 ACK의 개수만으로 증가량을 판단하지 않는다.
 ```text
 1. Slow Start: cwnd를 지수적으로 증가
    - ACK 받을 때마다: cwnd += 1

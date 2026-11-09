@@ -703,6 +703,8 @@ int main() {
 
 ### 파일 읽기
 
+다음 코드는 정상 완료 경로를 보여 주는 예제이며, 아래 설명처럼 대기 실패 시 outstanding 요청을 정리하지 않으므로 그대로 제품 코드에 사용하면 안 된다.
+
 ```c
 void read_file_io_uring(const char *filename)
 {
@@ -773,6 +775,8 @@ cleanup:
 SQE가 제출된 뒤에는 CQE를 회수하거나 요청을 취소하고 그 완료를 회수하기 전까지 `buffer`, `iov`, `fd`, ring을 파괴하면 안 된다. 위 함수는 제출 성공 뒤 하나의 CQE를 기다리므로 정상 경로에서는 stack buffer 수명이 유지되지만, `io_uring_wait_cqe`가 `-EINTR` 같은 오류를 돌려주는 경로는 CQE를 회수하지 않은 채 `cleanup`으로 빠지므로 그 경우에는 이 규약이 깨진다. timeout이나 조기 반환을 추가한다면 취소 요청의 CQE와 원래 요청의 CQE를 모두 구분해 drain하는 규약이 필요하다.
 
 ### 복수 파일 병렬 읽기
+
+다음 코드는 정상 완료 경로를 보여 주는 골격이다. 대기 오류 시 남은 요청의 완료를 회수하는 종료 처리가 생략되어 있으므로 그대로 사용하면 안 된다.
 
 ```c
 #define NUM_FILES 10
@@ -1201,65 +1205,7 @@ void multishot_accept_server(int port)
 
 **Multishot Recv (6.0+)**
 
-```c
-void multishot_recv(int client_fd)
-{
-    struct io_uring ring;
-    io_uring_queue_init(128, &ring, 0);
-
-    // 모든 buffer를 같은 group(BG_ID)에 등록한다. recv는 이 group에서 buffer를 고른다.
-    enum { BG_ID = 1 };
-    char buffers[16][4096];
-    for (int i = 0; i < 16; i++) {
-        struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-        // (sqe, addr, len, nr, bgid, bid): 버퍼 16개를 BG_ID 그룹에 i번 인덱스로 등록.
-        io_uring_prep_provide_buffers(sqe, buffers[i], 4096, 1, BG_ID, i);
-    }
-    io_uring_submit(&ring);
-
-    // multishot recv도 전용 helper를 쓴다.
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-    io_uring_prep_recv_multishot(sqe, client_fd, NULL, 0, 0);
-    sqe->flags |= IOSQE_BUFFER_SELECT;
-    sqe->buf_group = BG_ID;       // 위에서 등록한 그룹과 일치시켜야 한다
-    io_uring_submit(&ring);
-
-    while (1) {
-        struct io_uring_cqe *cqe;
-        io_uring_wait_cqe(&ring, &cqe);
-
-        // 1) 오류 CQE 검사 (실패 CQE에는 buffer id가 없을 수 있다)
-        if (cqe->res < 0) {
-            fprintf(stderr, "CQE error: %s\n", strerror(-cqe->res));
-            io_uring_cqe_seen(&ring, cqe);
-            break;
-        }
-
-        // 2) F_BUFFER가 있을 때만 buffer ID가 유효하다 (F_MORE는 continuation 여부로 별개)
-        if (!(cqe->flags & IORING_CQE_F_BUFFER)) {
-            // buffer가 선택되지 않은 응답(res=0 종료/오류 등) — 별도 처리
-            io_uring_cqe_seen(&ring, cqe);
-            continue;
-        }
-
-        int buf_id = cqe->flags >> IORING_CQE_BUFFER_SHIFT;
-
-        sqe = io_uring_get_sqe(&ring);
-        // 사용한 buffer를 같은 그룹에 다시 등록한다.
-        io_uring_prep_provide_buffers(sqe, buffers[buf_id], 4096, 1, BG_ID, buf_id);
-        io_uring_submit(&ring);
-
-        if (!(cqe->flags & IORING_CQE_F_MORE)) {
-            io_uring_cqe_seen(&ring, cqe);
-            break;
-        }
-
-        io_uring_cqe_seen(&ring, cqe);
-    }
-
-    io_uring_queue_exit(&ring);
-}
-```
+버퍼 그룹에 사용할 버퍼를 제공하고 각 제공 요청의 CQE 성공을 확인한 뒤 `recv_multishot`을 제출한다. 제공 완료와 recv 완료는 `user_data`로 구분한다. recv CQE마다 오류와 `IORING_CQE_F_BUFFER`를 확인하고, 유효한 버퍼 ID의 데이터를 처리한 뒤 그 버퍼를 다시 제공한다. `IORING_CQE_F_MORE`가 없으면 요청이 끝났으므로 필요하면 새로 제출한다. 종료할 때는 outstanding 요청을 취소하고 관련 CQE를 회수한 뒤 버퍼를 해제한다.
 
 ### SQPOLL (Kernel-side Submission)
 
@@ -1449,7 +1395,7 @@ void linked_operations(const char *filename)
 }
 ```
 
-`IOSQE_IO_LINK`는 앞 SQE가 실패하면 뒤 SQE를 취소한다는 의미일 뿐, 결과 값을 다음 SQE의 인자(예: fd)로 자동 주입하지 않는다. `IOSQE_IO_HARDLINK`는 실패해도 뒤 SQE 실행을 막지 않는다는 차이만 있다. fd 같은 결과를 후속 작업에 사용하려면 호출자가 CQE를 받아 직접 전달하거나, 등록된 fd/buffer 슬롯과 같은 별도의 자원 ID를 활용해야 한다.
+`IOSQE_IO_LINK`는 앞 SQE가 실패하면 뒤 SQE를 취소하며, 결과 값을 다음 SQE의 인자(예: fd)로 자동 주입하지 않는다. 따라서 위 골격에서 read 실패로 close가 취소되면 호출자가 CQE를 확인하고 fd를 별도로 닫아야 한다. `IOSQE_IO_HARDLINK`는 실패해도 뒤 SQE 실행을 막지 않는다는 차이가 있다. fd 같은 결과를 후속 작업에 사용하려면 호출자가 CQE를 받아 직접 전달하거나, 등록된 fd/buffer 슬롯과 같은 별도의 자원 ID를 활용해야 한다.
 
 ## 7. io_uring_setup 시스템 콜 내부
 
@@ -1852,74 +1798,7 @@ sysctl kernel.io_uring_disabled
 
 애플리케이션은 buffer group에 여러 userspace buffer를 등록하거나 제공하고, recv SQE는 특정 고정 주소 대신 그 group에서 사용할 buffer를 커널이 선택하게 할 수 있다. 커널이 payload buffer를 필요할 때 임의로 할당해 주는 기능은 아니다. CQE의 buffer ID를 확인해 처리한 뒤 버퍼를 적절한 시점에 다시 제공해야 한다.
 
-```c
-#define BGID 0  // Buffer Group ID
-#define NR_BUFS 128
-#define PROVISION_TAG 0x1  // provide_buffers 완료 CQE 식별
-#define RECV_TAG      0x2  // recv 완료 CQE 식별
-
-void provided_buffers_example()
-{
-    struct io_uring ring;
-    io_uring_queue_init(256, &ring, 0);
-
-    char buffers[NR_BUFS][4096];
-
-    for (int i = 0; i < NR_BUFS; i++) {
-        struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-        io_uring_prep_provide_buffers(sqe, buffers[i], 4096, 1, BGID, i);
-        io_uring_sqe_set_data64(sqe, PROVISION_TAG);
-    }
-    io_uring_submit(&ring);
-
-    int sockfd = /* ... */;
-
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-    io_uring_prep_recv(sqe, sockfd, NULL, 0, 0);
-    sqe->flags |= IOSQE_BUFFER_SELECT;
-    sqe->buf_group = BGID;
-    io_uring_sqe_set_data64(sqe, RECV_TAG);
-    io_uring_submit(&ring);
-
-    struct io_uring_cqe *cqe;
-    for (;;) {
-        io_uring_wait_cqe(&ring, &cqe);
-
-        // buffer 제공 완료 CQE는 recv 결과가 아니므로 user_data로 구분해 먼저 소비
-        if (cqe->user_data == PROVISION_TAG) {
-            int res = cqe->res;
-            io_uring_cqe_seen(&ring, cqe);
-            if (res < 0) {
-                fprintf(stderr, "provide_buffers failed: %s\n", strerror(-res));
-                io_uring_queue_exit(&ring);
-                return;
-            }
-            continue;
-        }
-
-        // user_data == RECV_TAG: recv 완료 처리
-        if (cqe->res < 0 || !(cqe->flags & IORING_CQE_F_BUFFER)) {
-            fprintf(stderr, "recv failed or no buffer (res=%d, flags=0x%x)\n",
-                    cqe->res, cqe->flags);
-            io_uring_cqe_seen(&ring, cqe);
-            io_uring_queue_exit(&ring);
-            return;
-        }
-
-        int buf_id = cqe->flags >> IORING_CQE_BUFFER_SHIFT;
-
-        sqe = io_uring_get_sqe(&ring);
-        io_uring_prep_provide_buffers(sqe, buffers[buf_id], 4096, 1, BGID, buf_id);
-        io_uring_sqe_set_data64(sqe, PROVISION_TAG);
-        io_uring_submit(&ring);
-
-        io_uring_cqe_seen(&ring, cqe);
-        break;
-    }
-
-    io_uring_queue_exit(&ring);
-}
-```
+먼저 각 버퍼 제공 요청의 완료 결과를 `user_data`로 구분해 확인한다. 제공이 성공한 뒤 recv를 제출하고, 완료의 `IORING_CQE_F_BUFFER`가 있을 때만 ID로 버퍼를 찾는다. 처리 후 재제공한 요청의 완료도 추적해야 한다. 제공과 recv를 단순히 연속 제출했다고 실행 순서가 보장되는 것은 아니다.
 
 ### File Update
 
@@ -2001,37 +1880,7 @@ void absolute_timeout(void)  // 절대 시각까지 대기
 
 **연결된 타임아웃**
 
-```c
-void linked_timeout()
-{
-    struct io_uring ring;
-    io_uring_queue_init(8, &ring, 0);
-
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-    int fd = open("test.dat", O_RDONLY);
-    char buf[4096];
-    io_uring_prep_read(sqe, fd, buf, sizeof(buf), 0);
-    sqe->flags |= IOSQE_IO_LINK;
-    sqe->user_data = 1;
-
-    struct __kernel_timespec ts = { .tv_sec = 1 };
-    sqe = io_uring_get_sqe(&ring);
-    io_uring_prep_link_timeout(sqe, &ts, 0);
-    sqe->user_data = 2;
-
-    io_uring_submit(&ring);
-
-    struct io_uring_cqe *cqe;
-    io_uring_wait_cqe(&ring, &cqe);
-
-    if (cqe->user_data == 1 && cqe->res == -ECANCELED) {
-        printf("Read timed out\n");
-    }
-
-    io_uring_cqe_seen(&ring, cqe);
-    io_uring_queue_exit(&ring);
-}
-```
+read SQE에 `IOSQE_IO_LINK`를 설정하고 이어서 link-timeout SQE를 제출한다. 두 요청은 각각 CQE를 생성하므로 둘 다 회수하고 `user_data`로 구분한다. 타임아웃과 read 완료는 경합할 수 있으므로 한쪽의 `-ECANCELED`만 보고 원인을 단정하지 말고 두 결과를 함께 해석한다. 원래 read가 완료되거나 취소 완료되기 전까지 read 버퍼를 유지한다.
 
 ### Cancel Operations
 

@@ -40,7 +40,7 @@ flowchart TB
     Cmd --> Submit[Acquire - Record - Submit - Present]
 ```
 
-이 골격에서 매 프레임은 swapchain image를 acquire하고, command buffer를 기록하고, graphics queue에 submit하고, present한다. 세마포어 두 개(image available, render finished)와 fence 하나(in-flight)가 이 흐름을 동기화한다. 큐브를 그린다고 이 동기화 구조가 바뀌지는 않는다. 바뀌는 것은 command buffer 안에서 발급하는 draw의 내용과, draw가 참조하는 자원이다.
+이 골격에서 매 프레임은 swapchain image를 acquire하고, command buffer를 기록하고, graphics queue에 submit하고, present한다. image available·render finished 세마포어와 in-flight fence가 이 흐름을 동기화한다. 앞 장처럼 acquire 세마포어와 fence는 frame 슬롯별, render finished는 swapchain image별로 재사용한다. 큐브를 그린다고 이 동기화 구조가 바뀌지는 않는다. 바뀌는 것은 command buffer 안에서 발급하는 draw의 내용과, draw가 참조하는 자원이다.
 
 ### 추가되는 네 묶음
 
@@ -67,7 +67,7 @@ flowchart LR
     Set -->|write| Tex[VkImageView + VkSampler]
 ```
 
-셰이더는 `set`, `binding` 번호만 컴파일 타임에 안다. 어떤 실제 buffer/image가 거기 들어갈지는 모른다. 애플리케이션이 descriptor set이라는 "자원 핸들 묶음"을 만들고, `vkUpdateDescriptorSets`로 실제 자원을 그 묶음에 써 넣은 뒤, draw 직전에 `vkCmdBindDescriptorSets`로 묶음 전체를 한 번에 바인딩한다. 이 간접성 덕분에 같은 셰이더로 텍스처만 바꿔 수천 번 draw하는 것이 set 교체 한 번으로 끝난다. 비용은 descriptor pool, layout, set이라는 객체를 직접 관리해야 한다는 점이다.
+셰이더는 `set`, `binding` 번호만 컴파일 타임에 안다. 어떤 실제 buffer/image가 거기 들어갈지는 모른다. 애플리케이션이 descriptor set이라는 "자원 핸들 묶음"을 만들고, `vkUpdateDescriptorSets`로 실제 자원을 그 묶음에 써 넣은 뒤, draw 직전에 `vkCmdBindDescriptorSets`로 묶음 전체를 한 번에 바인딩한다. 이 간접성 덕분에 같은 셰이더로 텍스처를 바꿔 그릴 때 해당 set을 교체하면 된다. 여러 객체를 그리는 draw 호출 자체가 하나로 합쳐지는 것은 아니다. 비용은 descriptor pool, layout, set이라는 객체를 직접 관리해야 한다는 점이다.
 
 ## 2. 정점 입력 확장
 
@@ -97,7 +97,7 @@ struct Vertex {
 };
 ```
 
-`VkVertexInputAttributeDescription`의 네 필드는 순서대로 `{location, binding, format, offset}`이다. location은 셰이더의 `layout(location=N)`과 매칭되고, binding은 어느 vertex buffer에서 가져올지, format은 GPU가 바이트를 어떻게 해석할지, offset은 stride 안에서 이 attribute가 시작하는 위치다. `offsetof`로 offset을 박는 것이 손계산보다 안전하다. 구조체에 멤버를 끼워 넣으면 자동으로 따라오기 때문이다.
+`VkVertexInputAttributeDescription`의 네 필드는 순서대로 `{location, binding, format, offset}`이다. location은 셰이더의 `layout(location=N)`과 매칭되고, binding은 어느 vertex buffer에서 가져올지, format은 GPU가 바이트를 어떻게 해석할지, offset은 stride 안에서 이 attribute가 시작하는 위치다. 위의 20바이트 stride는 GLM의 기본 packed 타입을 전제한다. 정렬 옵션에 따라 크기가 달라질 수 있으므로 실제 stride는 `sizeof(Vertex)`로 전달한다. `offsetof`로 offset을 박는 것이 손계산보다 안전하다. 구조체에 멤버를 끼워 넣으면 자동으로 따라오기 때문이다.
 
 ### Pipeline에 입력 레이아웃 연결
 
@@ -175,7 +175,7 @@ struct UniformData {
 
 ### GLM projection과 Vulkan NDC
 
-GLM은 기본적으로 OpenGL식 projection을 만든다. OpenGL NDC는 z가 $[-1, 1]$이고 화면 y축이 위를 향한다. Vulkan은 NDC z가 $[0, 1]$이고 화면 y축이 아래를 향한다. 이 차이를 무시하면 큐브가 위아래로 뒤집히고 깊이 비교가 어긋난다.
+GLM은 기본적으로 OpenGL식 projection을 만든다. OpenGL NDC는 z가 $[-1, 1]$이고 화면 y축이 위를 향한다. Vulkan은 NDC z가 $[0, 1]$이고, 이 예제의 양수 height viewport는 NDC의 y 증가를 framebuffer의 아래 방향으로 매핑한다. 이 차이를 무시하면 큐브가 위아래로 뒤집히고 깊이 비교가 어긋난다.
 
 z 범위는 GLM에 `GLM_FORCE_DEPTH_ZERO_TO_ONE`을 정의해 해결하고, y축은 projection 행렬의 $[1][1]$ 원소 부호를 뒤집어 해결한다.
 
@@ -310,7 +310,7 @@ CreateImage(w, h,
     textureMemory);
 ```
 
-`VK_IMAGE_TILING_OPTIMAL`은 GPU가 캐시 친화적으로 픽셀을 swizzle해 저장하도록 둔다. 이 배치는 드라이버 내부 형식이라 CPU가 직접 해석할 수 없고, 그래서 `LINEAR` tiling이 아닌 한 staging copy가 강제된다. `LINEAR` tiling은 CPU가 행 단위로 읽을 수 있지만 sampling 성능이 떨어지고 지원 포맷이 제한적이라, 텍스처에는 거의 쓰지 않는다.
+`VK_IMAGE_TILING_OPTIMAL`은 GPU가 캐시 친화적으로 픽셀을 swizzle해 저장하도록 둔다. 이 배치는 드라이버 내부 형식이라 CPU가 직접 해석할 수 없고, 그래서 단순히 map한 포인터에 RGBA 바이트를 복사하는 경로를 쓸 수 없다. 여기서는 staging copy를 사용한다. 지원되는 구현에서는 `VK_EXT_host_image_copy`(Vulkan 1.4 코어)의 별도 호스트 복사 API로 최적 타일링 이미지에 업로드할 수도 있다. `LINEAR` tiling은 CPU가 행 단위로 읽을 수 있지만 sampling 성능이 떨어지고 지원 포맷이 제한적이라, 텍스처에는 거의 쓰지 않는다.
 
 ### sRGB와 선형 포맷의 구분
 
@@ -463,7 +463,7 @@ vkCreateSampler(device, &si, nullptr, &textureSampler);
 
 `anisotropyEnable`은 물리 디바이스 feature를 활성화했을 때만 켤 수 있다. device 생성 시 `VkPhysicalDeviceFeatures::samplerAnisotropy = VK_TRUE`를 요청하지 않고 sampler에서 anisotropy를 켜면 검증 레이어가 오류를 낸다. `maxAnisotropy`는 디바이스의 `maxSamplerAnisotropy` 한계(흔히 16)를 넘으면 안 되므로 limit 값을 그대로 가져와 clamp하는 것이 안전하다.
 
-이방성 필터링은 큐브를 비스듬히 볼 때 효과가 크다. 표면이 시선과 예각을 이루는 면에서 일반 trilinear는 한 방향으로만 mip을 고르기 때문에 텍스처가 뭉개진다. 16× 이방성은 그 방향으로 최대 16개 샘플을 추가로 잡아 선명도를 유지한다. 비용은 메모리 대역폭으로, 같은 픽셀을 여러 번 읽는다.
+이방성 필터링은 큐브를 비스듬히 볼 때 효과가 크다. 표면이 시선과 예각을 이루는 면에서 일반 trilinear는 한 방향으로만 mip을 고르기 때문에 텍스처가 뭉개진다. 16×는 허용하는 이방성의 최대 비율이며, 정확히 16개 샘플을 추가한다는 보장은 아니다. 구현이 늘어진 footprint를 여러 위치에서 샘플해 선명도를 유지하므로 텍스처 읽기와 필터링 비용이 늘 수 있다.
 
 ### Combined Image Sampler descriptor 쓰기
 
@@ -513,17 +513,17 @@ std::vector<uint16_t> indices = {
 };
 ```
 
-`uint16_t` 인덱스는 정점 수가 65,536개 미만일 때 쓴다. 큐브는 24개라 여유가 충분하고, 인덱스 버퍼 크기가 절반이라 대역폭에 유리하다. 정점이 그 이상이면 `uint32_t`와 `VK_INDEX_TYPE_UINT32`로 바꾼다.
+`uint16_t` 인덱스는 인덱스가 0~65,535 범위에 들어갈 때 쓴다(primitive restart를 쓰지 않으면 정점 65,536개까지 참조 가능). 큐브는 24개라 여유가 충분하고, 인덱스 버퍼 크기가 절반이라 대역폭에 유리하다. 정점이 그 이상이면 `uint32_t`와 `VK_INDEX_TYPE_UINT32`로 바꾼다.
 
 ### Winding order와 culling
 
-인덱스 순서는 삼각형의 winding(정점 도는 방향)을 정한다. Vulkan 기본은 `VK_FRONT_FACE_COUNTER_CLOCKWISE`를 앞면으로 본다. back-face culling을 켜면 카메라 쪽을 향한 면만 그려진다. 인덱스 순서를 잘못 두면 큐브의 보이는 면이 컬링되어 안쪽이 보이거나 면이 통째로 사라진다. 큐브가 부분적으로만 보이면 winding과 `frontFace`/`cullMode` 설정을 먼저 의심한다.
+인덱스 순서는 삼각형의 winding(정점 도는 방향)을 정한다. Vulkan에는 암묵적인 앞면 상태가 없고 pipeline의 `frontFace`로 기준을 정한다. back-face culling을 켜면 카메라 쪽을 향한 면만 그려진다. 인덱스 순서를 잘못 두면 큐브의 보이는 면이 컬링되어 안쪽이 보이거나 면이 통째로 사라진다. 큐브가 부분적으로만 보이면 winding과 `frontFace`/`cullMode` 설정을 먼저 의심한다.
 
 ```cpp
 // rasterization state
 rs.cullMode = VK_CULL_MODE_BACK_BIT;
-// 정점은 CCW로 작성했지만 proj y-flip이 framebuffer winding을 뒤집으므로 CW가 앞면이 된다
-rs.frontFace = VK_FRONT_FACE_CLOCKWISE;
+// 위 +Z 면, RH view, projection y-flip, 양수 viewport height 조합에서는 CCW가 앞면이다
+rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 ```
 
 ### 정점/인덱스 버퍼 업로드
@@ -541,9 +541,22 @@ CreateBuffer(vertexSize,
 VkBufferCopy copyRegion{};
 copyRegion.size = vertexSize;
 vkCmdCopyBuffer(cmd, stagingBuffer, vertexBuffer, 1, &copyRegion);
+
+// 같은 graphics queue의 후속 draw가 transfer 결과를 읽도록 연결한다.
+VkBufferMemoryBarrier ready{};
+ready.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+ready.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+ready.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+ready.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+ready.buffer = vertexBuffer;
+ready.size = VK_WHOLE_SIZE;
+vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0,
+    0, nullptr, 1, &ready, 0, nullptr);
 ```
 
-usage에 `VERTEX_BUFFER_BIT`와 `TRANSFER_DST_BIT`를 함께 켜는 점이 핵심이다. 전자는 정점 입력으로 바인딩 가능하게 하고, 후자는 staging에서 복사받을 수 있게 한다. 인덱스 버퍼는 `INDEX_BUFFER_BIT`로 같은 패턴을 따른다.
+usage에 `VERTEX_BUFFER_BIT`와 `TRANSFER_DST_BIT`를 함께 켜는 점이 핵심이다. 전자는 정점 입력으로 바인딩 가능하게 하고, 후자는 staging에서 복사받을 수 있게 한다. 인덱스 버퍼는 `INDEX_BUFFER_BIT`로 같은 패턴을 따르며, barrier의 dst access는 `VK_ACCESS_INDEX_READ_BIT`로 둔다. 위 barrier는 같은 graphics queue를 전제한다. 별도 transfer family를 쓰면 semaphore와 ownership transfer까지 연결해야 한다.
 
 ### 렌더링 시 바인딩
 
@@ -598,7 +611,7 @@ for (int i = 0; i < MAX_FRAMES; ++i) {
 }
 ```
 
-`HOST_COHERENT`로 만들었으므로 `memcpy` 직후 별도 flush 없이 GPU가 새 값을 본다. coherent가 없다면 매 갱신마다 `vkFlushMappedMemoryRanges`가 필요하다.
+`HOST_COHERENT`로 만들었으므로 CPU 쓰기 뒤 별도 flush 없이 제출할 수 있다. 그래도 같은 슬롯의 GPU 읽기가 끝난 뒤 쓰고, 쓰기를 끝낸 뒤 제출해야 한다. coherent는 CPU·GPU 동시 접근을 안전하게 만드는 플래그가 아니다. coherent가 없다면 매 갱신마다 `vkFlushMappedMemoryRanges`가 필요하다.
 
 ### Frame-in-flight와 자원 분리
 
@@ -622,7 +635,7 @@ vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
                    0, sizeof(glm::mat4), &ubo.model);
 ```
 
-push constant는 크기 한계가 작다. 보장되는 최소치는 128바이트라, `mat4` 두 개(128바이트)가 사실상 상한이다. 그 이상은 uniform buffer를 쓴다. 큐브에서는 view·proj를 uniform buffer에 두고 자주 바뀌는 model만 push constant로 보내는 절충도 가능하다.
+push constant는 크기 한계가 작다. 보장되는 최소치는 128바이트라, 128바이트 안에 드는 `mat4` 두 개까지는 이 보장만으로 담을 수 있다. 실제 상한은 `maxPushConstantsSize`를 조회하고, pipeline layout의 push constant range와 셰이더 선언도 맞춘다. 더 큰 데이터는 uniform buffer를 쓰는 구성이 일반적이다. 큐브에서는 view·proj를 uniform buffer에 두고 자주 바뀌는 model만 push constant로 보내는 절충도 가능하다.
 
 ### 최종 draw 흐름
 
@@ -646,7 +659,7 @@ vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0);
 
 회전하는 텍스처 큐브는 Vulkan 자원 모델의 압축판이다. 정점·인덱스 버퍼는 staging buffer를 거쳐 device local memory에 올리고, MVP 행렬은 host visible uniform buffer로 매 프레임 전달하며, 텍스처는 staging copy와 두 번의 layout 전이를 거쳐 image view·sampler로 묶여 descriptor set에 연결된다. 다섯 단계(생성 → 메모리 할당 → 업로드 → layout/barrier → descriptor 연결)가 buffer든 image든 똑같이 반복된다는 점이 이 글의 핵심 수확이다.
 
-세 가지 트레이드오프가 자원 설계를 가른다. 첫째, *device local vs host visible* 메모리다. GPU가 매 프레임 읽기만 하는 정점·텍스처는 대역폭이 높은 device local에 staging으로 올리고, CPU가 매 프레임 갱신하는 uniform은 host visible에 둔다. 둘째, *uniform buffer vs push constant* 다. 128바이트 이하의 자주 바뀌는 데이터는 push constant가 descriptor 우회 없이 빠르고, 그 이상은 uniform buffer가 맞다. 셋째, *combined image sampler vs 분리* 다. 단일 텍스처는 combined가 단순하고, image 배열이나 sampler 재사용이 필요하면 분리 타입이 유연하다.
+세 가지 트레이드오프가 자원 설계를 가른다. 첫째, *device local vs host visible* 메모리다. GPU가 매 프레임 읽기만 하는 정점·텍스처는 대역폭이 높은 device local에 staging으로 올리고, CPU가 매 프레임 갱신하는 uniform은 host visible에 둔다. 둘째, *uniform buffer vs push constant* 다. 작고 자주 바뀌는 데이터는 push constant로 descriptor 접근을 줄일 수 있지만, 어느 방식이 빠른지는 GPU와 갱신 패턴에 달려 있다. 보장 크기를 넘는 데이터는 실제 한계를 확인하거나 uniform buffer를 쓴다. 셋째, *combined image sampler vs 분리* 다. 단일 텍스처는 combined가 단순하고, image 배열이나 sampler 재사용이 필요하면 분리 타입이 유연하다.
 
 핵심은 모든 자원이 명시적으로 연결된다는 점이다. 셰이더는 `set/binding` 번호만 알고, descriptor set은 실제 buffer·image·sampler를 담고, command buffer는 pipeline과 descriptor set과 vertex/index buffer를 바인딩해 draw를 발급한다. 여기까지의 코드는 한 개의 큐브를 화면에서 회전시킨다. 아직 깊이 버퍼를 활성화한 정확한 가림 처리, 여러 객체를 위한 동적 descriptor 관리, 외부 메시 로딩은 들어 있지 않다. 그 확장들은 모두 이 글에서 익힌 다섯 단계 위에 얹힌다.
 

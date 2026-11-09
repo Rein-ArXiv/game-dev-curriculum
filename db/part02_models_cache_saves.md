@@ -251,6 +251,7 @@ SET cooldown:1001 unique-token NX EX 30
 ```lua
 -- 재고가 있을 때만 차감하고 구매 기록까지 원자적으로
 local stock = tonumber(redis.call('GET', KEYS[1]))
+if redis.call('SISMEMBER', KEYS[2], ARGV[1]) == 1 then return 2 end -- 이미 구매
 if stock == nil or stock <= 0 then return 0 end
 redis.call('DECR', KEYS[1])
 redis.call('SADD', KEYS[2], ARGV[1])   -- 구매자 집합에 추가
@@ -258,6 +259,8 @@ return 1
 ```
 
 Cluster에서 script가 접근하는 key들은 일반적으로 같은 hash slot에 있어야 한다. `{event42}:stock`, `{event42}:buyers`처럼 hash tag로 함께 배치할 수 있지만, 한 hot slot의 처리량 한계와 장애 도메인도 함께 생긴다.
+
+이 예는 구매자당 한 개만 허용하며 반환값 2는 이미 기록된 구매다. 중복 요청이 다시 재고를 차감하지 않게 검사와 변경을 같은 script에서 수행한다. 앞서 밝힌 키 타입·입력 검증이 전제이며, Redis script는 후속 오류 시 이전 쓰기를 롤백하지 않는다.
 
 관계형 트랜잭션과의 차이도 분명히 해야 한다. Redis script의 원자성은 해당 Redis 실행 경계 안의 이야기다. Redis 변경과 관계형 DB 기록을 평범한 Redis transaction 하나로 묶을 수는 없다. 한 저장소를 업무 사실의 원본으로 정하고 outbox·멱등 consumer·보상 상태 기계로 다른 저장소에 반영하거나, 정말 필요하면 참여 제품이 지원하는 분산 트랜잭션 프로토콜을 별도로 구성한다.
 
@@ -542,7 +545,7 @@ UPDATE player_inventory_item
    AND item_id = :item_id;
 ```
 
-`UNIQUE (player_id, slot_index)` 위반이 나면 목적지 슬롯이 이미 찬 것이다. 이 오류는 "DB 실패"가 아니라 도메인 실패다. 반대로 갱신 행 수가 0이면 SQL 실패가 아니라 대상이 없거나 소유자가 다른 것이므로 `NotFound`/`NotOwned`로 구분한다. 서비스 계층은 이를 명시적 결과로 바꾼다.
+`UNIQUE (player_id, slot_index)` 위반이 나면 목적지 슬롯이 이미 찬 것이다. 이 오류는 "DB 실패"가 아니라 도메인 실패다. 반대로 갱신 행 수가 0이면 SQL 실패가 아니라 이 플레이어의 해당 로컬 ID가 없다는 뜻이다. 로컬 ID만으로 타인의 소유 여부를 구분할 수 없으며, 그 구분이 필요하면 전역 아이템 ID와 권한 검사 계약이 필요하다. 서비스 계층은 이를 명시적 결과로 바꾼다.
 
 ```cpp
 MoveResult MoveItem(Db& db, PlayerId player, ItemId item, int toSlot) {
@@ -550,8 +553,8 @@ MoveResult MoveItem(Db& db, PlayerId player, ItemId item, int toSlot) {
         // helper는 (player, item, toSlot)을 kMoveItemSql의 named parameter에 결합한다
         auto rows = db.ExecuteAffected(kMoveItemSql, player, item, toSlot);
         if (rows == 0) {
-            // 존재하지 않음(NotFound)과 타인 소유(NotOwned)는 별도 조회로 구분한다
-            return db.ItemExists(item) ? MoveResult::NotOwned() : MoveResult::NotFound();
+            // item_id는 player별 로컬 ID이므로 다른 player의 같은 숫자로 소유권을 추론할 수 없다.
+            return MoveResult::NotFound();
         }
         try {
             cache.Delete("inventory:" + ToString(player));  // DB 변경과 캐시 실패는 별개다

@@ -264,16 +264,20 @@ int PatternManager::WeightedPick(const std::vector<int>& cand, const BossContext
     std::vector<float> cum;
     cum.reserve(cand.size());
     for (int id : cand) {
-        float w = std::max(0.0f, patterns_[id].WeightFor(ctx));
+        float w = patterns_[id].WeightFor(ctx);
+        if (!std::isfinite(w) || w < 0.0f) return fallbackPattern;
         total += w;                              // 상황 의존 가중치
+        if (!std::isfinite(total)) return fallbackPattern;
         cum.push_back(total);
     }
     if (total <= 0.0f) return fallbackPattern;
-    float r = RandFloat() * total;                // [0, total)
+    float r = std::min(RandFloat() * total, std::nextafter(total, 0.0f));
     auto it = std::upper_bound(cum.begin(), cum.end(), r); // 0 가중치 건너뜀
     return cand[it - cum.begin()];
 }
 ```
+
+`RandFloat()`은 [0, 1)의 유한한 값을 반환한다고 가정한다. 부동소수점 곱셈이 `total`로 반올림되면 상한 바로 아래 값으로 제한해 배열 끝을 넘지 않도록 한다. 가중치나 누적 합이 유효하지 않으면 기본 패턴을 선택한다.
 
 `WeightFor(ctx)`가 동적 가중을 가능하게 한다. 예컨대 플레이어가 멀면 거리 좁히기 패턴의 가중치를 올리고, 가까우면 근거리 패턴의 가중치를 올린다. 하드 조건은 후보를 제거하고, 동적 가중치는 남은 후보의 확률만 바꾼다. 즉 같은 입력에 항상 같은 패턴을 강제하는 명시적 분기와 달리, 반응 경향을 확률 분포로 표현한다.
 
@@ -352,6 +356,8 @@ void Pattern::Update(float dt, Boss& boss) {
     }
 }
 ```
+
+큰 `dt`가 공격 유효 구간 전체를 한 번에 넘어가면 히트박스를 켰다가 같은 갱신에서 끄므로, 상태 전이만으로 충돌 판정이 보장되지는 않는다. 실제 시뮬레이션에서는 유효 구간을 작은 단계로 처리하거나 그 구간을 쓸어 검사해야 한다.
 
 ### 종단간 반응 예산
 

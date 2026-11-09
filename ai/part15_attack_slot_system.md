@@ -378,9 +378,10 @@ void SlotManager::AssignGlobally(std::vector<Agent*>& contenders, float now) {
                 slots_[j].cooldownUntil > now) continue;
             cost[i][j] = -ScoreSlotFor(slots_[j], contenders[i]); // 점수→비용
         }
+    // 금지 간선은 제외하고 유효 매칭 수를 먼저 최대화한 뒤 비용을 최소화한다.
     std::vector<int> match = HungarianMatch(cost);  // match[i] = 적 i 의 슬롯, 없으면 -1
     for (int i = 0; i < m; ++i)
-        if (match[i] >= 0) {
+        if (match[i] >= 0 && match[i] < k && cost[i][match[i]] < kInf) {
             slots_[match[i]].occupant = contenders[i];
             contenders[i]->AssignSlot(&slots_[match[i]]);
         }
@@ -531,13 +532,16 @@ std::optional<float> SlotManager::ScoreSlotFor(
 // 대기 요청 취소: 큐에서 제거하고, 승인된 lease 라면 generation 을 무효화한다.
 void SlotManager::CancelRequest(RequestId id) {
     waiting_.erase(id);                         // 유령 요청 방지
-    if (Lease* lease = FindLease(id); lease && lease->generation == currentGen_)
+    if (Lease* lease = FindActiveLease(id))
         Revoke(lease);
 }
 // 강제 회수: generation 을 올려 기존 토큰을 무효화하고 owner 에게 취소를 통보한다.
 void SlotManager::Revoke(Lease* lease) {
-    lease->generation = ++generationCounter_;
-    NotifyOwner(lease->owner, LeaseRevoked{lease->slotId, lease->generation});
+    auto oldOwner = lease->owner;
+    auto slotId = lease->slotId;
+    lease->active = false;                      // 먼저 권한을 무효화하고 슬롯을 회수
+    lease->generation = ++generationCounter_;  // 이후 요청은 새 generation 검증
+    NotifyOwner(oldOwner, LeaseRevoked{slotId, lease->generation});
 }
 ```
 

@@ -205,7 +205,7 @@ glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                            GL_RENDERBUFFER, depthRbo);
 ```
 
-렌더버퍼는 *그릴 수만 있고 읽을 수 없다*. 셰이더에서 페치할 수 없다. `glReadPixels`나 `glBlitFramebuffer`의 소스로 CPU 또는 다른 FBO에 옮길 수는 있지만, 셰이더 입력으로 바인딩하는 것은 불가능하다. 렌더버퍼는 밉맵도 없고 텍스처 좌표로 샘플링되지도 않는 *순수 출력 표면* 이다.
+렌더버퍼는 *셰이더에서 직접 샘플링할 수 없다*. `glReadPixels`나 `glBlitFramebuffer`의 소스로 CPU 또는 다른 FBO에 옮길 수는 있지만, 셰이더 입력으로 바인딩하는 것은 불가능하다. 렌더버퍼는 밉맵도 없고 텍스처 좌표로 샘플링되지도 않는 *순수 출력 표면* 이다.
 
 ### 어느 쪽이 빠른가
 
@@ -221,7 +221,7 @@ glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
 | 디퍼드 G-Buffer (라이팅 패스 입력) | 텍스처 |
 | 메인 패스 깊이 + 후처리는 깊이 무관 | 렌더버퍼 |
 | MSAA 후 화면 직접 표시만 | 렌더버퍼 |
-| MSAA 후 후처리에 입력 필요 | 텍스처 + multisampled |
+| MSAA 후 후처리에 입력 필요 | MSAA 텍스처에서 직접 페치하거나, MSAA 렌더버퍼/텍스처를 단일 샘플 텍스처로 resolve |
 
 명확한 결정 기준은 *다음 패스에서 셰이더가 읽느냐* 다. 읽으면 텍스처, 안 읽으면 렌더버퍼.
 
@@ -238,16 +238,16 @@ glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
 | `GL_DEPTH_COMPONENT16` | 16 | 0 | 2 byte | 모바일/저정밀 |
 | `GL_DEPTH_COMPONENT24` | 24 | 0 | 4 byte (24+8 padding) | 일반 |
 | `GL_DEPTH24_STENCIL8` | 24 | 8 | 4 byte | 스텐실 필요 시 표준 |
-| `GL_DEPTH_COMPONENT32F` | 32f | 0 | 4 byte | Reverse-Z, 광역 장면 (4.5+ `glClipControl` 필요) |
+| `GL_DEPTH_COMPONENT32F` | 32f | 0 | 4 byte | Reverse-Z, 광역 장면 (Reverse-Z의 정밀도 이득에는 `glClipControl` 경로 사용) |
 | `GL_DEPTH32F_STENCIL8` | 32f | 8 | 8 byte (32f+8+24 padding) | 정밀 + 스텐실 |
 
 ### 깊이는 왜 비선형으로 양자화되는가
 
-원근 투영(Perspective Projection)에서 깊이 값은 뷰 공간 거리에 *반비례* 하게 분포된다. NDC 깊이 $z_{ndc}$는 다음과 같이 변환된다.
+원근 투영(Perspective Projection)에서 깊이 값은 뷰 축 방향 거리의 역수에 상수항을 더한 형태로 분포된다. NDC 깊이 $z_{ndc}$는 다음과 같이 변환된다.
 
 $$z_{ndc} = \frac{f + n}{f - n} + \frac{2 f n}{(f - n) \, z_{view}}$$
 
-여기서 $n$은 near plane(양수 거리), $f$는 far plane(양수 거리), $z_{view}$는 카메라 좌표계의 z 값이다. OpenGL의 오른손 좌표계 + 카메라 -Z 방향 컨벤션에서 카메라 *앞쪽 점* 의 $z_{view}$는 음수이고, $-z_{view}$가 카메라부터의 거리에 해당한다. 분모에 $z_{view}$가 들어가므로 near 근처에 정밀도가 몰린다. 깊이 버퍼에 저장되는 값은 이 $z_{ndc}$를 $[0,1]$로 매핑한 것을 다시 정수 단계로 양자화한 것이다. 24비트 unorm은 그 $[0,1]$ 구간을 16,777,216(약 $2^{24}$) 단계로 *균등 분할* 한다. 비선형 분포 + 균등 분할이 겹치면, 먼 거리의 두 표면이 같은 정수 단계로 양자화되어 *Z-fighting* 이 발생한다.
+여기서 $n$은 near plane(양수 거리), $f$는 far plane(양수 거리), $z_{view}$는 카메라 좌표계의 z 값이다. OpenGL의 오른손 좌표계 + 카메라 -Z 방향 컨벤션에서 카메라 *앞쪽 점* 의 $z_{view}$는 음수이고, $-z_{view}$가 카메라의 뷰 축을 따른 깊이에 해당한다(카메라까지의 유클리드 거리는 아니다). 분모에 $z_{view}$가 들어가므로 near 근처에 정밀도가 몰린다. 깊이 버퍼에 저장되는 값은 이 $z_{ndc}$를 $[0,1]$로 매핑한 것을 다시 정수 단계로 양자화한 것이다. 24비트 unorm은 그 $[0,1]$ 구간을 16,777,216(약 $2^{24}$) 단계로 *균등 분할* 한다. 비선형 분포 + 균등 분할이 겹치면, 먼 거리의 두 표면이 같은 정수 단계로 양자화되어 *Z-fighting* 이 발생한다.
 
 수치로 보면 차이가 분명하다. $n = 0.1$, $f = 1000$인 투영에서 24비트 깊이 버퍼의 월드 공간 깊이 간격은 카메라에서 100m 떨어진 지점에서 약 6mm이고, far plane인 1000m 부근에서는 약 0.60m까지 커진다. $n$을 1.0으로 키우면 같은 거리의 분해능이 약 10배 좋아진다. *near plane을 가능한 한 크게 잡는 것* 이 Z-fighting을 줄이는 가장 값싼 방법인 이유다.
 
@@ -263,13 +263,13 @@ Reverse-Z를 켜려면 네 가지를 함께 바꿔야 한다. 투영 행렬을 n
 
 깊이 포맷의 픽셀당 비용을 해상도에 곱하면 프레임버퍼 메모리가 나온다.
 
-| 해상도 | D16 (2 byte) | D24S8 (4 byte) | D32FS8 (8 byte) |
+| 해상도 | D16 (MiB) | D24S8 (MiB) | D32FS8 (MiB) |
 |---|---:|---:|---:|
-| 1280×720 | 1.8 MB | 3.5 MB | 7.0 MB |
-| 1920×1080 | 4.0 MB | 7.9 MB | 16 MB |
-| 3840×2160 (4K) | 16 MB | 32 MB | 63 MB |
+| 1280×720 | 1.8 | 3.5 | 7.0 |
+| 1920×1080 | 4.0 | 7.9 | 16 |
+| 3840×2160 (4K) | 16 | 32 | 63 |
 
-깊이 버퍼 하나의 크기다. MSAA 4×를 켜면 여기에 다시 4배가 곱해진다. 4K + 4× MSAA D32FS8 깊이는 약 250 MB로, 단일 버퍼만으로도 무시할 수 없는 양이다. 정밀도 욕심으로 32f를 기본값으로 깔면 메모리 예산이 빠르게 잠식된다.
+위 값은 2²⁰ byte 단위인 MiB로 계산한, 압축·정렬 부가 비용을 제외한 깊이 버퍼 하나의 크기다. MSAA 4×를 켜면 논리적 샘플 저장량은 여기에 다시 4배가 곱해진다. 4K + 4× MSAA D32FS8 깊이는 약 250 MB로, 단일 버퍼만으로도 무시할 수 없는 양이다. 정밀도 욕심으로 32f를 기본값으로 깔면 메모리 예산이 빠르게 잠식된다.
 
 ### 스텐실 사용 사례
 
@@ -283,7 +283,7 @@ Reverse-Z를 켜려면 네 가지를 함께 바꿔야 한다. 투영 행렬을 n
 | 그림자 볼륨 | Stencil Shadow Volume (레거시) |
 | UI 마스크 | 클립 영역 정의 |
 
-스텐실이 필요 없는 패스는 `GL_DEPTH_COMPONENT24` 단독으로 두는 게 메모리 측면에서 약간 유리하지만, 게임 엔진은 일관성을 위해 보통 `GL_DEPTH24_STENCIL8`을 기본으로 둔다. D24와 D24S8은 어차피 둘 다 4바이트로 정렬되므로 스텐실 8비트를 곁들여도 메모리 비용 차이가 사실상 없다는 점도 한몫한다.
+스텐실이 필요 없는 패스는 `GL_DEPTH_COMPONENT24` 단독을 검토할 수 있지만, 실제 메모리 절감은 구현에 달려 있다. 게임 엔진은 일관성을 위해 보통 `GL_DEPTH24_STENCIL8`을 기본으로 둔다. D24와 D24S8이 모두 4바이트 저장량을 쓰는 구현에서는 스텐실을 곁들여도 저장량 차이가 없다는 점도 한몫한다.
 
 ### 깊이 텍스처와 셰이더 페치
 
@@ -366,7 +366,7 @@ glDrawBuffers(3, bufs);  // location 1의 출력은 폐기
 
 ### 출력 슬롯 분리의 한계
 
-같은 FBO 안에서 *샘플 수* 는 모든 첨부에서 일치해야 한다(불일치 시 INCOMPLETE_MULTISAMPLE). 포맷은 첨부마다 달라도 된다(한 FBO 안에서 `RGBA8`과 `RGBA16F`를 섞을 수 있다). 해상도는 3.3 Core 명세상 첨부마다 달라도 완전성 검사는 통과하지만(EXT_framebuffer_object 시절의 동일 크기 요구가 ARB/Core에서 완화됨), 렌더링 영역이 *모든 첨부의 교집합* 으로 제한되므로 실무에서는 동일하게 맞춘다. 이 제약이 까다로우면 FBO를 분리한다. 또한 블렌딩을 켜면 모든 활성 draw buffer에 같은 블렌드 상태가 적용되는데, 첨부별로 다른 블렌드가 필요하면 `glBlendFunci`/`glEnablei`(4.0+)로 인덱스별 블렌드 상태를 지정한다.
+같은 FBO 안에서 *샘플 수* 는 모든 첨부에서 일치해야 한다(불일치 시 INCOMPLETE_MULTISAMPLE). 포맷은 첨부마다 달라도 된다(한 FBO 안에서 `RGBA8`과 `RGBA16F`를 섞을 수 있다). 해상도는 3.3 Core 명세상 첨부마다 달라도 완전성 검사는 통과하지만(EXT_framebuffer_object 시절의 동일 크기 요구가 ARB/Core에서 완화됨), 렌더링 영역이 *모든 첨부의 교집합* 으로 제한되므로 실무에서는 동일하게 맞춘다. 이 제약이 까다로우면 FBO를 분리한다. 또한 블렌딩을 켜면 모든 활성 draw buffer에 같은 블렌드 상태가 적용되는데, 첨부별로 다른 블렌드가 필요하면 `glEnablei(GL_BLEND, i)`(3.0+)로 첨부별 활성화를, `glBlendFunci` 등(4.0+)으로 첨부별 블렌드 함수를 지정한다.
 
 ## 6. 완전성 검사
 
@@ -456,7 +456,7 @@ glBlitFramebuffer(
 
 - 필터는 `GL_NEAREST` 만 가능 (`GL_LINEAR` 사용 불가)
 - 소스가 MSAA면 소스/대상 사각형 크기가 동일해야 한다 (단일 샘플 깊이는 `GL_NEAREST` 스케일링이 명세상 허용되지만 품질이 보장되지 않아 실무에서는 피한다)
-- 소스와 대상의 포맷이 호환되어야 한다
+- 복사할 깊이/스텐실 포맷이 소스와 대상에서 일치해야 한다
 
 ```cpp
 // OK
@@ -468,7 +468,7 @@ glBlitFramebuffer(0, 0, w, h, 0, 0, w/2, h/2,
                   GL_DEPTH_BUFFER_BIT, GL_LINEAR);  // GL_INVALID_OPERATION
 ```
 
-깊이를 다른 해상도로 옮기고 싶으면 셰이더로 직접 다운샘플링한다. 깊이/스텐실을 동시에 옮기려면 `GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT`를 함께 넘기고, 양쪽 첨부가 모두 `D24S8` 같은 통합 포맷이어야 한다.
+깊이를 다른 해상도로 옮기고 싶으면 셰이더로 직접 다운샘플링한다. 깊이/스텐실을 동시에 옮기려면 `GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT`를 함께 넘기고, 복사하는 깊이·스텐실 포맷이 각각 양쪽에서 일치해야 한다. `D24S8` 통합 첨부를 양쪽에 쓰는 것이 한 예다.
 
 깊이 blit이 자주 쓰이는 곳은 디퍼드 + forward 혼합 파이프라인이다. 디퍼드 라이팅 후 투명 물체를 forward로 그릴 때, G-Buffer FBO의 깊이를 forward FBO로 blit해 깊이 테스트를 이어가야 한다. 이때 해상도가 같으므로 `GL_NEAREST` 깊이 blit이 정확히 들어맞는다.
 
@@ -498,7 +498,7 @@ glBlitFramebuffer(0, 0, w, h, 0, 0, w/2, h/2,
 
 ## 8. MSAA Framebuffer와 Resolve
 
-다중 표본 안티앨리어싱(Multisample Anti-Aliasing)은 한 픽셀당 여러 샘플을 잡아 가장자리를 부드럽게 만든다. 핵심은 *커버리지(coverage)와 셰이딩(shading)을 분리* 한다는 점이다. 픽셀 셰이더는 픽셀당 한 번만 실행되지만, 깊이 테스트와 커버리지 판정은 샘플별로 일어난다. 한 삼각형이 픽셀의 4개 샘플 중 2개만 덮으면, 셰이딩된 색이 그 2개 샘플에만 기록되고 resolve 시 평균되어 가장자리가 절반 밝기로 부드러워진다. 이 덕분에 4× MSAA가 *4배 셰이딩 비용 없이* 가장자리만 골라 품질을 올린다.
+다중 표본 안티앨리어싱(Multisample Anti-Aliasing)은 한 픽셀당 여러 샘플을 잡아 가장자리를 부드럽게 만든다. 핵심은 *커버리지(coverage)와 셰이딩(shading)을 분리* 한다는 점이다. 기본 MSAA에서는 보통 프리미티브가 덮은 픽셀마다 한 번 셰이딩하고(샘플 셰이딩을 켜면 더 자주 실행), 깊이 테스트와 커버리지 판정은 샘플별로 일어난다. 한 삼각형이 픽셀의 4개 샘플 중 2개만 덮으면, 셰이딩된 색이 그 2개 샘플에만 기록되고 resolve 시 평균되어 가장자리가 절반 밝기로 부드러워진다. 이 덕분에 4× MSAA가 *4배 셰이딩 비용 없이* 가장자리만 골라 품질을 올린다.
 
 FBO에서 MSAA를 활용하려면 첨부물도 *멀티샘플 버전* 이어야 한다.
 
@@ -568,7 +568,7 @@ glBlitFramebuffer(0, 0, w, h, 0, 0, w, h,
                   GL_COLOR_BUFFER_BIT, GL_NEAREST);
 ```
 
-MSAA → 비-MSAA blit은 *해상도 동일* 이 강제되고 컬러의 필터 인자는 무시된다(깊이/스텐실은 `GL_NEAREST`만, 7절 참고). 다른 해상도로 가려면 resolve 후 별도 blit으로 두 단계. blit resolve는 단순 평균(box filter)을 쓰므로, 더 정교한 resolve가 필요하면 위의 `sampler2DMS` 수동 경로로 가중 평균을 직접 구현한다.
+MSAA → 비-MSAA blit은 *해상도 동일* 이 강제되고 컬러의 필터 인자는 무시된다(깊이/스텐실은 `GL_NEAREST`만, 7절 참고). 다른 해상도로 가려면 resolve 후 별도 blit으로 두 단계. 정규화·부동소수점 컬러 resolve의 표본 결합 방식은 구현에 달려 있으며, 단순 평균이 흔한 모델이다. 정확히 정해진 가중치나 더 정교한 resolve가 필요하면 위의 `sampler2DMS` 수동 경로로 가중 평균을 직접 구현한다.
 
 ### 깊이 첨부는 resolve가 까다롭다
 
@@ -728,10 +728,12 @@ while (!glfwWindowShouldClose(window)) {
     // 1) HDR 메인 패스
     glBindFramebuffer(GL_FRAMEBUFFER, hdr.fbo);
     glViewport(0, 0, hdr.w, hdr.h);
+    glEnable(GL_DEPTH_TEST);  // 이전 프레임의 후처리 상태에서 복구
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     DrawScene();  // RGBA16F에 HDR 컬러를 그린다
 
+    glDisable(GL_DEPTH_TEST);  // 이후 풀스크린 후처리
     // 2) Bright Pass: 임계값 넘는 픽셀만 추출
     glBindFramebuffer(GL_FRAMEBUFFER, bloom.fboBright);
     glViewport(0, 0, bloom.w, bloom.h);
@@ -766,7 +768,7 @@ while (!glfwWindowShouldClose(window)) {
 }
 ```
 
-각 패스마다 *FBO 바인딩 → viewport 갱신 → 그리기* 순서가 반복된다. 블룸 패스들은 저해상도(`bloom.w`, `bloom.h`)이고 최종 패스만 풀 해상도(`W`, `H`)이므로 viewport를 패스마다 다시 잡는 점이 핵심이다. 풀스크린 사각형 패스에서는 깊이 테스트가 의미 없으므로 `glDisable(GL_DEPTH_TEST)`를 한 번 걸어 두면 불필요한 깊이 비교를 건너뛴다.
+각 패스마다 *FBO 바인딩 → viewport 갱신 → 그리기* 순서가 반복된다. 블룸 패스들은 저해상도(`bloom.w`, `bloom.h`)이고 최종 패스만 풀 해상도(`W`, `H`)이므로 viewport를 패스마다 다시 잡는 점이 핵심이다. 풀스크린 사각형 패스에서는 깊이 테스트가 의미 없으므로 `glDisable(GL_DEPTH_TEST)`로 깊이 비교를 끈다. 다음 프레임의 메인 패스에서는 다시 켜야 한다.
 
 ### 톤 매핑 셰이더
 
@@ -794,7 +796,7 @@ void main() {
 }
 ```
 
-톤 매핑은 HDR(0~수십) 범위를 LDR(0~1)로 압축한다. ACES 곡선이 밝은 영역을 부드럽게 굴려 클리핑을 줄인다. 최종 출력은 선형 색이고, `glEnable(GL_FRAMEBUFFER_SRGB)`가 켜져 있으면 하드웨어가 sRGB 인코딩을 자동으로 적용한다. 셰이더에서 직접 `pow(color, 1.0/2.2)`를 또 적용하면 sRGB가 이중으로 걸려 색이 바래므로, 둘 중 하나만 쓴다.
+톤 매핑은 HDR(0~수십) 범위를 LDR(0~1)로 압축한다. 위 ACESFilm은 ACES 자체의 전체 색 변환이 아니라, 그 룩에 맞춘 근사 톤 매핑 곡선이다. 밝은 영역을 부드럽게 굴려 클리핑을 줄인다. 최종 출력은 선형 색이고, `glEnable(GL_FRAMEBUFFER_SRGB)`가 켜져 있으면 하드웨어가 sRGB 인코딩을 자동으로 적용한다. 셰이더에서 직접 `pow(color, 1.0/2.2)`를 또 적용하면 sRGB가 이중으로 걸려 색이 바래므로, 둘 중 하나만 쓴다.
 
 ### 디버깅 체크리스트
 
@@ -817,7 +819,7 @@ FBO는 *어디에 그릴지* 의 추상화다. 텍스처 첨부는 셰이더 입
 
 1. **텍스처 첨부 vs 렌더버퍼 첨부**: 명확한 결정 기준은 *다음 패스에서 셰이더가 읽느냐* 다. 읽으면 텍스처, 안 읽으면 렌더버퍼. 성능 차이는 일반화하지 않고 구체 케이스에서 측정한다.
 2. **24bit unorm vs 32f Reverse-Z**: 일반 게임은 24+8 통합 포맷이 메모리·정밀도·스텐실의 균형점. 광역 야외 장면은 32f + Reverse-Z가 Z-fighting을 거의 없앤다. Reverse-Z는 투영 행렬·깊이 함수·클리어 값을 함께 뒤집어야 동작한다.
-3. **MSAA의 메모리 비용 vs 품질**: 4× MSAA는 4 배 메모리. 모바일은 lazy resolve로 비용을 줄이지만 데스크톱에선 그대로 4 배. 후처리에 입력해야 하면 MSAA 텍스처 + 별도 resolve FBO로 두 단계 비용이 추가되고, 깊이는 평균이 의미 없어 resolve가 까다롭다.
+3. **MSAA의 메모리 비용 vs 품질**: 4× MSAA는 픽셀당 4개의 논리적 샘플을 보관한다. 실제 외부 메모리 트래픽·저장 비용은 압축·타일 메모리·resolve 전략에 따라 달라진다. 후처리에 입력해야 하면 MSAA 텍스처 + 별도 resolve FBO로 두 단계 비용이 추가되고, 깊이는 평균이 의미 없어 resolve가 까다롭다.
 
 여기까지의 코드는 화면이 아닌 텍스처에 그리는 모든 기법의 토대다. 그림자 매핑은 깊이 텍스처 FBO를 쓰고, 후처리는 컬러 텍스처 FBO 체인을 쓰며, 디퍼드 셰이딩은 G-Buffer MRT를 쓴다. 이 도구들이 갖춰져야 단순한 "정점→픽셀" 한 패스를 넘어 *여러 패스로 구성된 렌더 그래프* 가 가능해진다.
 

@@ -71,7 +71,7 @@ convex hull의 선형 검색은 $O(V)$다. adjacency가 있는 convex polytope�
 
 ### tie-breaker
 
-여러 vertex가 같은 최대 dot을 가질 때 임의 iteration 순서로 하나를 고르면 feature ID와 simplex가 흔들린다. dot 차이가 tolerance 안이면 가장 작은 stable vertex ID를 선택하는 방식으로 canonicalize한다.
+여러 vertex가 같은 최대 dot을 가질 때 임의 iteration 순서로 하나를 고르면 feature ID와 simplex가 흔들린다. 정확히 같은 최대 dot이면 가장 작은 stable vertex ID를 선택하는 방식으로 canonicalize한다. tolerance 안의 더 작은 dot도 선택한다면 근사 support다. 아래 거리 하한을 인증하려면 단위 방향에서 최대 dot의 과소평가 오차 상한을 알고 그만큼 하한을 더 낮춰야 한다.
 
 ## 2. 변환된 도형과 feature 보존
 
@@ -127,7 +127,8 @@ enum class GjkStatus {
 
 struct GjkResult {
     GjkStatus status;
-    float distance;
+    float distance;      // simplex witness가 주는 거리 상한
+    float lowerBound;    // support 평면에서 인증한 거리 하한
     Vec3 normal;
     Vec3 witnessA;
     Vec3 witnessB;
@@ -152,9 +153,9 @@ $$
 \epsilon_{\text{rel}}d_{\text{old}}^2
 $$
 
-이면 수렴으로 본다. scale에 독립적인 절대 epsilon 하나만 쓰지 않는다.
+이면 진전이 작다고 본다. 이것만으로 거리 오차가 작다는 뜻은 아니다. scale에 독립적인 절대 epsilon 하나만 쓰지 않는다.
 
-simplex까지의 현재 거리는 전체 Minkowski 차까지 거리의 *상계*일 뿐이다. 감소량이 작거나 반복 상한에 도달했다는 사실만으로 양의 현재 거리에서 분리를 확정할 수 없다. support 평면에서 얻는 lower bound/dual gap과 simplex upper bound를 함께 기록한다. 수렴 실패는 오류 범위 없이 Separated로 승격하지 않고 불확실 상태로 남긴다. 부정확한 support tie도 progress 판정에 영향을 준다.
+simplex까지의 현재 거리는 전체 Minkowski 차까지 거리의 *상계*일 뿐이다. 감소량이 작거나 반복 상한에 도달했다는 사실만으로 양의 현재 거리에서 분리를 확정할 수 없다. support 평면에서 얻는 lower bound/dual gap과 simplex upper bound를 함께 기록한다. 현재 최근접점이 $v\ne0$이고 $\hat d=-v/\|v\|$, $w=\operatorname{support}_{A-B}(\hat d)$이면 하한은 $\max(0,-w\cdot\hat d)$다. 단위 방향 support dot의 과소평가 오차가 최대 $\eta$라면 $\max(0,-w\cdot\hat d-\eta)$로 낮춘다. 상한과 하한의 차이가 거리 오차 범위를 준다. 수렴 실패는 오류 범위 없이 Separated로 승격하지 않고 불확실 상태로 남긴다. 부정확한 support tie도 progress 판정에 영향을 준다.
 
 ### Duplicate support
 
@@ -165,15 +166,18 @@ $$
 \le\epsilon_{\text{duplicate}}^2
 $$
 
-feature pair의 ID 동일성이 위치 tolerance보다 강한 duplicate 신호가 되는 것은 유한 vertex polytope의 vertex pair에서만이다. 구·캡슐처럼 원형 표면이 있는 smooth shape는 방향이 바뀌면 support 위치가 달라져도 같은 shape/feature ID를 가질 수 있으므로 ID 동일성으로 duplicate를 판정하지 않는다. smooth/margin 지원은 위치·방향 기준을 쓰고, cache 복원에는 local witness 또는 support direction도 함께 보관한다. duplicate에서 현재 closest point가 contact slop 안이면 Touching, 충분히 멀면 Separated, 애매하면 별도 실패 상태로 남긴다.
+feature pair의 ID 동일성이 위치 tolerance보다 강한 duplicate 신호가 되는 것은 유한 vertex polytope의 vertex pair에서만이다. 구·캡슐처럼 원형 표면이 있는 smooth shape는 방향이 바뀌면 support 위치가 달라져도 같은 shape/feature ID를 가질 수 있으므로 ID 동일성으로 duplicate를 판정하지 않는다. smooth/margin 지원은 위치·방향 기준을 쓰고, cache 복원에는 local witness 또는 support direction도 함께 보관한다. duplicate에서 현재 거리 상한이 contact slop 안이면 접촉 띠의 Touching으로 처리할 수 있다. 인증된 하한이 slop보다 클 때만 Separated로 확정하고, 두 조건 사이면 DuplicateSupport로 남긴다. 큰 상한만으로 분리를 확정하지 않는다.
 
 ### Iteration cap
 
 반복 상한은 무한 루프 방어다. 상한 도달을 정상적인 `Intersecting`으로 바꾸지 않는다. 평균 iteration뿐 아니라 상한 도달 shape pair와 seed를 기록한다.
 
 ```cpp
+DistanceBounds bounds; // 초기 하한0, 상한은 초기 simplex witness로 설정
 for (uint32_t iteration = 0; iteration < maxIterations; ++iteration) {
     SupportVertex vertex = SupportMinkowski(a, b, direction);
+    // helper는 direction을 정규화해 support dot/오차를 같은 거리 단위로 바꾼다.
+    bounds.UpdateSupportPlane(vertex, direction);
     if (IsDuplicate(simplex, vertex))
         return FinishDuplicate(simplex, iteration);
     simplex.Add(vertex);
@@ -181,7 +185,7 @@ for (uint32_t iteration = 0; iteration < maxIterations; ++iteration) {
     if (step.containsOrigin)
         return FinishIntersecting(simplex, iteration);
     if (Converged(step))
-        return FinishSeparatedOrTouching(simplex, iteration);
+        return FinishCertifiedOrUncertain(simplex, bounds, iteration);
     direction = -step.closestPoint;
 }
 return FinishIterationLimit(simplex);
@@ -319,11 +323,11 @@ non-manifold 입력이나 수치 오차로 horizon이 닫힌 loop를 이루지 �
 
 ### 용량과 상한
 
-EPA는 vertex·face 수가 증가한다. 고정 용량을 사용하면 초과를 `OutOfCapacity`로 보고하고 현재 best face를 보수적 근사로 사용할지 dispatcher가 결정한다. silent overwrite는 메모리 손상이다.
+EPA는 vertex·face 수가 증가한다. 고정 용량을 사용하면 초과를 `OutOfCapacity`로 보고한다. 현재 polytope는 실제 Minkowski 차의 내부 근사이므로 best face의 거리는 침투 깊이의 하한이다. 그만큼 이동해도 완전히 분리된다는 보장은 없다. dispatcher는 이 근사 접촉을 사용할지 별도 detector로 넘길지 결정한다. silent overwrite는 메모리 손상이다.
 
 ## 6. EPA에서 접촉 manifold로
 
-수렴 face의 normal과 distance는 Minkowski 공간의 penetration vector를 준다.
+수렴 face의 normal과 distance는 Minkowski 공간의 penetration vector 근사를 준다. 정확 support와 유효한 내부 polytope를 전제로 실제 최소 깊이는 $d_{face}$와 $d_{support}$ 사이에 있다. $\Delta$와 수치 오차를 무시하고 하한만큼 이동하면 작은 겹침이 남을 수 있다.
 
 $$
 \operatorname{MTV}=n\,d
@@ -344,7 +348,7 @@ result.witnessB =
 
 EPA witness 하나는 법선과 대표 접촉 위치를 주지만 box가 바닥에 놓인 face-face 접촉에서 안정적인 네 점을 자동으로 만들지 않는다. polyhedral shape는 EPA normal을 이용해 reference/incident face를 고르고 clipping해 manifold를 확장할 수 있다.
 
-smooth shape는 한 점이 자연스럽다.
+구처럼 매끄럽고 곡률이 있는 접촉은 한 점이 자연스럽다. 평행한 캡슐의 측면처럼 선 접촉이 가능한 경우에는 안정성을 위해 추가 접촉점 정책이 필요할 수 있다.
 
 | 도형 쌍 | manifold 생성 |
 |---|---|
@@ -452,7 +456,7 @@ for (uint64_t seed = 0; seed < sampleCount; ++seed) {
 2. 같은 rigid rotation을 적용하면 normal과 witnesses도 같이 회전한다.
 3. 입력 순서를 바꾸면 상태는 같고 A/B witness와 normal이 뒤집힌다.
 4. 분리 결과에서 $\|p_B-p_A\|$는 reported distance와 일치한다.
-5. 침투 결과에서 B를 `normal * (depth + margin)`만큼 옮기면 분리되어야 한다.
+5. 수렴한 침투 결과에서 B를 `normal * (depth + margin)`만큼 옮겨 분리를 검사한다. 이 보장을 요구한다면 margin이 support gap과 수치 오차를 덮어야 하며, 실패·용량 초과 결과의 depth 하한에는 같은 보장을 적용하지 않는다.
 6. 모든 status에서 반환 숫자는 finite다.
 
 ### 퇴화 fuzzing

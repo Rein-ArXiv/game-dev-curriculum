@@ -86,7 +86,7 @@ Vector2 LimitAcceleration(Vector2 cur, Vector2 target, float maxAccel, float dt)
 }
 ```
 
-이 구조에서는 국소 회피가 경로의 목적을 잃지 않는다. 회피는 원하는 속도에서 *최소한만* 벗어나며, 그 최소화가 모든 회피 알고리즘의 공통 목적함수다 — "충돌하지 않는 속도 중 `desired`에 가장 가까운 것". 알고리즘마다 다른 것은 "충돌하지 않는 속도 집합"을 어떻게 표현하느냐뿐이다.
+이 구조에서는 국소 회피가 경로의 목적을 잃지 않는다. VO 샘플링이나 ORCA에서는 충돌 제약을 만족하는 속도 중 `desired`에 가장 가까운 것을 찾는 목적을 자주 쓴다. 반면 다음 절의 steering은 힘을 합성하는 방식이다.
 
 ## 2. Steering 기반 충돌 회피
 
@@ -211,7 +211,7 @@ bool WillCollide(const Agent& self, Vector2 v,
 이 `WillCollide`는 VO 멤버십 검사의 닫힌 형식이다 — 후보 $v$가 잘린 원뿔 안에 있으면 `true`다. 이제 후보들을 훑어 최선을 고른다.
 
 ```cpp
-Vector2 ChooseSampledVelocity(const Agent& self, Vector2 desired,
+std::optional<Vector2> ChooseSampledVelocity(const Agent& self, Vector2 desired,
                               Span<Agent*> neighbors) {
     Vector2 best = {0, 0};
     float bestCost = FLT_MAX;
@@ -223,9 +223,10 @@ Vector2 ChooseSampledVelocity(const Agent& self, Vector2 desired,
         float cost = LengthSquared(v - desired);     // desired에서 벗어난 정도
         if (cost < bestCost) { bestCost = cost; best = v; }
     }
-    // 0도 안전하다는 보장은 없다. 안전 후보가 없으면 비상 감속값을 반환하고
+    // 0도 안전하다는 보장은 없다. 안전 후보가 없으면 실패를 반환하고
     // 호출자가 겹침 해소·최소 TTC 선택·전역 조율 같은 폴백을 실행한다.
-    return bestCost < FLT_MAX ? best : Vector2{0, 0};
+    if (bestCost == FLT_MAX) return std::nullopt;
+    return best;
 }
 ```
 
@@ -490,14 +491,17 @@ struct PassageGate {
         return admitted.count(id) != 0 && CurrentGen(id) == gen;
     }
 
-    void CancelRequest(AgentId id) {                   // 대기 중 취소: 유령 요청 제거
+    void CancelRequest(AgentId id) {                   // 진행 중이면 실제 통과를 먼저 중단
         auto it = std::find(queue.begin(), queue.end(), id);
         if (it != queue.end()) queue.erase(it);
-        if (admitted.erase(id)) ++leaseGen[id];        // 이미 승인됐다면 lease 무효화
+        if (admitted.erase(id)) {
+            ++leaseGen[id];                            // 기존 lease 무효화
+            Promote();                                 // 빈 슬롯을 대기자에게 전달
+        }
     }
 
-    // 강제 슬롯 회수. true를 반환하면 호출자가 그 id의 실제 통과 액션을 취소 통지한다.
-    // 데이터 owner를 비우는 것만으로는 진행 중 사용이 멈췄다고 보장되지 않는다.
+    // 호출 전 실제 통과 액션을 동기적으로 중단하고 통로에서 비웠어야 한다.
+    // 비동기 취소는 완료 확인 뒤에 이 함수를 호출한다.
     bool Revoke(AgentId id) {
         auto it = std::find(queue.begin(), queue.end(), id);
         if (it != queue.end()) queue.erase(it);
@@ -526,7 +530,7 @@ private:
 
 `TryEnter`가 `false`면 그 에이전트의 목표 속도를 *문 앞 대기 위치* 로 돌린다. 그러면 국소 회피는 "문으로 밀고 들어가는 충돌"이 아니라 "대기열에 서는 회피"를 푼다 — 같은 회피 알고리즘이 전혀 다른 거시 행동을 낳는다.
 
-이 게이트가 실제로 안전하려면 데이터 소유권과 *실제 액션* 을 함께 묶는 계약이 필요하다. 대기 중 취소된 요청이 queue에 남으면 자리가 날 때 유령 요청이 승인되므로, 소멸·취소 경로는 `CancelRequest`로 queue에서 제거해야 한다. 승인은 `(id, generation)` lease로 발급하고, 통과 행동은 매 tick `IsCurrent`로 자기 lease가 아직 유효한지 확인한다. 강제 회수(`Revoke`)는 데이터 owner를 비우는 것만으로 끝나지 않는다 — generation을 올려 기존 lease를 stale로 만들고, 호출자가 그 id의 진행 중 액션을 취소 통지해야 새 owner와 실제 사용이 겹치지 않는다. 큐 공정성(선입선출)은 요청이 유효하고 보유 시간이 유한하다는 조건 아래에서만 보장된다.
+이 게이트가 실제로 안전하려면 데이터 소유권과 *실제 액션* 을 함께 묶는 계약이 필요하다. 대기 중 취소된 요청이 queue에 남으면 자리가 날 때 유령 요청이 승인되므로, 소멸·취소 경로는 `CancelRequest`로 queue에서 제거해야 한다. 이미 통과 중인 경우 `CancelRequest`나 `Revoke`를 호출하기 전에 실제 통과를 안전하게 중단하고 공간을 비워야 한다. 비동기 취소라면 완료 확인까지 기존 슬롯을 유지한 뒤 회수한다. 승인은 `(id, generation)` lease로 발급하고, 통과 행동은 매 tick `IsCurrent`로 자기 lease가 아직 유효한지 확인한다. generation 무효화나 취소 통지 자체가 실제 공간이 비워졌다는 뜻은 아니다. 큐 공정성(선입선출)은 요청이 유효하고 보유 시간이 유한하다는 조건 아래에서만 보장된다.
 
 이런 구조는 국소 회피가 아니다. crowd control이다. 중요한 점은 병목 문제를 속도 회피만으로 해결하려 하지 않는 것이다. 국소 회피는 단기 충돌을 줄이고, 병목의 정책은 별도 시스템이 정한다. 대규모 RTS의 flow field, lane 분리, density control도 같은 발상이다 — 전역에서 흐름을 만들고 국소에서 충돌만 막는다.
 
@@ -628,7 +632,7 @@ void Agent::DebugDraw(DebugRenderer& dr) const {
 
 ## 결론
 
-국소 회피는 전역 길찾기와 실제 이동 사이의 계층이다. 전역 경로는 큰 길을 정하고, 경로 추종은 원하는 속도를 만들며, 국소 회피는 그 속도를 주변 에이전트와 충돌하지 않는 속도로 조정한다. 모든 회피 알고리즘은 같은 목적함수를 푼다 — "충돌하지 않는 속도 중 `desired`에 가장 가까운 것". 다른 것은 그 "충돌하지 않는 속도 집합"을 표현하는 방식뿐이다.
+국소 회피는 전역 길찾기와 실제 이동 사이의 계층이다. 전역 경로는 큰 길을 정하고, 경로 추종은 원하는 속도를 만들며, 국소 회피는 주변 에이전트와의 충돌을 줄이도록 속도를 조정한다. VO 샘플링이나 ORCA는 "충돌 제약을 만족하는 속도 중 `desired`에 가장 가까운 것"을 찾을 수 있지만, steering은 힘을 합성한다.
 
 steering separation은 현재 거리 중심이라 정면 접근에 늦게 반응할 수 있다. VO는 finite horizon의 충돌을 속도 공간으로 옮기지만 상대가 현재 속도를 유지한다고 가정해 상호 과회피가 생길 수 있다. RVO는 책임 분담으로 이를 줄이고, ORCA는 이웃마다 허용 반평면을 만들어 고정 차원 최적화로 속도를 고른다. 공간 분할과 이웃 상한은 밀도가 유계인 평균 상황에서 비용을 선형에 가깝게 만들 수 있지만, 밀집 최악 상황과 제외된 이웃의 안전성은 별도 crowd policy가 처리해야 한다.
 

@@ -259,7 +259,7 @@ void *ptr = vmalloc(1024 * 1024 * 16);  // 16MB
 
 **특징**:
 - 큰 할당 가능 (수 GB까지)
-- 페이지가 물리적으로 흩어지므로 huge page를 받지 못해 TLB 효율이 낮다
+- 물리적으로 흩어진 페이지를 매핑할 수 있다. 매핑 크기와 huge-vmalloc 지원·설정에 따라 페이지 테이블 크기와 TLB 효율이 달라지며, 모든 vmalloc 매핑이 항상 기본 페이지만 쓴다고 단정할 수 없다.
 - 일반적인 streaming DMA API에 곧바로 넘길 물리 연속 버퍼가 아니다. scatter-gather DMA, IOMMU, `dma_map_sg`, 별도 매핑 같은 추가 작업이 들어가면 vmalloc 영역도 디바이스에 줄 수는 있다.
 
 ### kmem_cache_create
@@ -333,7 +333,7 @@ remote penalty는 CPU 세대, socket topology, memory load, cache 상태와 acce
 unsigned long nodemask = 1 << 0;  // Node 0
 set_mempolicy(MPOL_BIND, &nodemask, 2);
 
-void *ptr = malloc(1024 * 1024);  // Node 0에만 할당
+void *ptr = malloc(1024 * 1024);  // 정책 적용 후 확보한 페이지에 영향; 반환값·정책 오류 확인 필요
 ```
 
 ### 커널의 NUMA 최적화
@@ -420,7 +420,7 @@ void *ptr = mmap(NULL, 2 * 1024 * 1024,
 
 **문제**: Huge Page는 사전 예약 필요 + 프로그램 수정 필요.
 
-**THP 해결책**: 커널이 자동으로 2MB 페이지 생성.
+**THP 해결책**: 커널이 정책과 조건에 따라 큰 페이지를 자동으로 사용한다. x86의 PMD 크기 2MiB가 대표적이며, 지원 커널에서는 더 작은 크기의 multi-size THP도 있다.
 
 **작동 방식:**
 ```c
@@ -524,10 +524,12 @@ cat /proc/swaps
 
 다중 테넌트 환경에서 메모리 고립:
 ```text
-컨테이너 A: 최대 2GB
-컨테이너 B: 최대 4GB
-→ A가 B의 메모리를 침범 불가
+컨테이너 A: memory.max 2GB
+컨테이너 B: memory.max 4GB
+→ 각 계층의 메모리 charge와 회수·OOM을 제한
 ```
+
+이는 물리 RAM을 각각 예약하거나 두 워크로드의 성능 간섭을 없앤다는 뜻은 아니다. 상위 cgroup 한도와 공통 캐시·메모리 압박도 영향을 준다.
 
 ### 설정
 

@@ -197,7 +197,7 @@ void multiply(std::vector<float>& v, float scalar) {
     }
 }
 
-// 컴파일러는 이를 AVX2 명령어로 벡터화:
+// 대상 CPU·옵션과 의존성 조건이 맞으면 다음과 같은 AVX 벡터화가 가능:
 // 한 번에 8개의 float를 처리 (256-bit register)
 // vmulps ymm0, ymm1, ymm2  (8x 병렬 곱셈)
 ```
@@ -356,11 +356,11 @@ private:
     }
 
     void grow_to(size_type new_size) {
-        size_type new_cap = capacity();
+        size_type new_cap = std::max<size_type>(capacity(), 1);
 
         // 지수 성장하되, jemalloc의 size class에 맞춤
         while (new_cap < new_size) {
-            new_cap = goodMallocSize(new_cap * 1.5);
+            new_cap = goodMallocSize(new_cap + std::max<size_type>(new_cap / 2, 1));
         }
 
         reserve(new_cap);
@@ -398,6 +398,8 @@ Iterator invalidation은 C++ vector 사용 시 가장 흔한 버그 원인 중 �
 ### 무효화 규칙 완전 정리
 
 **읽기 전용 연산 (무효화 없음):**
+무효화가 없다는 뜻과 접근 전제는 별개다. 아래 `v[0]`·`front()`에는 벡터가 비어 있지 않다는 전제가 필요하다.
+
 ```cpp
 const std::vector<int>& v = /* ... */;
 v.size();      // 안전
@@ -413,8 +415,8 @@ v.front();     // 안전
 | `reserve(n)` | 모든 이터레이터/참조 무효화 | 무효화 없음 |
 | `push_back(x)` | 모든 이터레이터/참조 무효화 | `end` 무효화, 나머지 유효 |
 | `emplace_back(...)` | 모든 이터레이터/참조 무효화 | `end` 무효화, 나머지 유효 |
-| `insert(pos, x)` | 모든 이터레이터/참조 무효화 | `pos` 이후 무효화 |
-| `resize(n)` | 모든 이터레이터/참조 무효화 | 변경 부분 무효화 |
+| `insert(pos, x)` | 모든 이터레이터/참조 무효화 | `pos`를 포함한 그 이후 무효화 |
+| `resize(n)` | 모든 이터레이터/참조 무효화 | 증가하면 기존 `end`, 감소하면 제거 원소와 그 이후(기존 `end` 포함), 같은 크기면 무효화 없음 |
 
 **삭제 연산:**
 
@@ -576,7 +578,7 @@ v.push_back(4);  // 재할당 발생
 *it;  // 런타임 에러: "vector iterator not dereferenceable"
 ```
 
-GCC/Clang의 경우 `-D_GLIBCXX_DEBUG` 플래그로 유사한 검사를 활성화할 수 있다.
+libstdc++를 쓰는 GCC/Clang 구성에서는 `-D_GLIBCXX_DEBUG`로 유사한 검사를 활성화할 수 있다. libc++ 등 다른 표준 라이브러리는 해당 버전의 hardening/debug 설정을 확인한다.
 
 ## 4. Small Vector Optimization
 
@@ -644,7 +646,7 @@ public:
         size_t NewCapacity = Capacity ? Capacity * 2 : 1;  // N == 0도 1 이상으로
         // malloc은 기본 정렬만 보장하므로 alignof(T)가 크면 aligned allocation이 필요하다.
         T* NewElts = static_cast<T*>(malloc(NewCapacity * sizeof(T)));
-        if (!NewElts) return;  // 할당 실패는 호출자 계약으로 처리
+        if (!NewElts) throw std::bad_alloc(); // grow 실패 후 push_back이 계속 쓰지 않게 중단
 
         // 이동한 뒤 옛 원소는 소멸시킨다.
         for (unsigned i = 0; i < Size; ++i) {
@@ -679,7 +681,7 @@ public:
 template <typename T, unsigned N>
 class SmallVector : public SmallVectorImpl<T> {
     // 인라인 스토리지: N개의 T를 저장할 공간
-    alignas(T) char InlineElts[N * sizeof(T)];
+    alignas(T) char InlineElts[(N == 0 ? 1 : N) * sizeof(T)]; // 표준 C++의 0길이 배열 회피
 
 public:
     SmallVector() : SmallVectorImpl<T>(N) {
@@ -737,10 +739,12 @@ bool isSmall() const {
 ```cpp
 void grow() {
     // 새 메모리 할당
-    T* NewElts = malloc(NewCapacity * sizeof(T));
+    T* NewElts = static_cast<T*>(malloc(NewCapacity * sizeof(T)));
+    if (!NewElts) throw std::bad_alloc();
 
     // 요소 이동
     std::uninitialized_move(BeginX, BeginX + Size, NewElts);
+    std::destroy_n(BeginX, Size); // 옛 객체 수명 종료는 inline/heap 양쪽 모두 필요
 
     // 이전 메모리 해제 (힙이었다면)
     if (!isSmall()) {
@@ -751,6 +755,8 @@ void grow() {
     Capacity = NewCapacity;
 }
 ```
+
+이 두 `grow` 모형은 크기 산술이 유효하고 `T`의 이동이 예외를 던지지 않는 경우의 수명 흐름을 보여 준다. `push_back`의 인자가 기존 원소를 가리키는 자기 별칭과 over-aligned 타입의 저장소는 별도 처리가 필요하다. 실제 LLVM `SmallVector`도 표준 `vector`와 같은 예외 안전성을 목표로 하지 않으므로 두 컨테이너의 계약을 혼동하지 않는다.
 
 ### N 선택 가이드라인
 
@@ -1112,20 +1118,20 @@ Vector<int> v3 = v1;  // 또 포인터 복사
 // 메모리: 단일 VectorData만 할당됨
 
 // 읽기도 저렴
-int x = v1[0];  // 복사 없음
-int y = v2[0];  // 복사 없음
+int x = v1.get(0);  // backing 배열 복사 없음
+int y = v2.get(0);  // backing 배열 복사 없음
 ```
 
 **단점:**
 
 ```cpp
 // 첫 쓰기가 비쌈 (O(n) 복사)
-v2[0] = 100;
+v2.set(0, 100);
 // _cow() 호출 → 전체 배열 복사
 
-// 멀티스레드에서 atomic 오버헤드
+// v1이 이미 1000000개 원소를 가진다는 전제에서 반복 쓰기 비용 관찰
 for (int i = 0; i < 1000000; ++i) {
-    v1[i] = i;
+    v1.set(i, i);
     // 매번 refcount 체크 (atomic load)
     // 첫 번째만 복사하지만 체크는 항상 발생
 }
@@ -1141,13 +1147,13 @@ for (int i = 0; i < 100; ++i) {
 
 **Godot의 선택 이유:**
 
-GDScript의 `Array`는 참조 시맨틱스를 따른다. 값 스냅샷이 필요하면 `duplicate()`로 복사한다:
+GDScript의 `Array`는 참조 시맨틱스를 따른다. 배열의 구성 목록을 따로 보관하려면 `duplicate()`로 복사한다:
 
 ```gdscript
 var enemies = [enemy1, enemy2, enemy3]
 
 func backup_state():
-    var backup = enemies.duplicate()  # 독립적인 복사본
+    var backup = enemies.duplicate()  # 배열 자체의 얕은 복사본
     # duplicate() 없이 대입하면 같은 Array를 공유한다
     return backup
 
@@ -1155,7 +1161,7 @@ func modify_enemies():
     enemies.append(enemy4)  # enemies만 변경되고 backup은 그대로
 ```
 
-스크립트 레벨에서는 복사가 빈번하지만 대부분 읽기 전용이다. C++ 내부 `Vector`의 COW와 스크립트 `Array`의 참조 시맨틱스는 구분해서 봐야 한다.
+`duplicate()`의 기본값은 얕은 복사이므로 배열 원소인 enemy 객체의 내부 상태까지 저장하는 스냅샷은 아니다. 중첩 Array/Dictionary는 `duplicate(true)`로 복제할 수 있지만 Object 파생 원소는 별도의 복제·상태 저장 계약이 필요하다. C++ 내부 `Vector`의 COW와 스크립트 `Array`의 참조 시맨틱스는 구분해서 봐야 한다.
 
 **성능 트레이드오프 정리:**
 
@@ -1274,7 +1280,7 @@ void push_back(const T& value) {
 }
 ```
 
-이 구현은 **강력한 예외 보장(strong exception guarantee)** 을 제공한다. 즉, `push_back`이 예외를 던지면 벡터는 호출 전 상태를 유지한다. 단, 이동 생성자가 `noexcept`가 아니고 복사까지 불가능한 move-only throwing 타입에서는 원본이 이미 moved-from이 될 수 있어 강력 보장이 불가능하며, 이때는 표준도 기본 보장에 그친다.
+이 구현은 복사가 가능하거나 이동이 `noexcept`인 조건에서 **강력한 예외 보장(strong exception guarantee)** 을 제공한다. 즉, `push_back`이 예외를 던지면 벡터는 호출 전 상태를 유지한다. 별도의 rvalue 삽입이나 `reserve`에서 복사가 불가능한 move-only 타입의 이동 생성자가 예외를 던지면 원본이 이미 moved-from일 수 있다. 표준은 이 경우 효과를 미지정으로 두므로 “언제나 기본 보장은 남는다”고 가정해서는 안 된다.
 
 ### reserve: 용량 확장의 핵심
 

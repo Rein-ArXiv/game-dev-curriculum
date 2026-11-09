@@ -190,6 +190,8 @@ while (read(pipefd[0], &data, sizeof(data)) > 0) {  // EOF면 종료
 }
 ```
 
+파이프는 바이트 스트림이라 한 번의 `read`가 정수 하나의 전체 크기를 돌려준다는 보장은 없다. 위 소비자 코드는 흐름만 보인 것이다. 실제로는 `sizeof(data)` 바이트를 모은 뒤 처리하고 중간 EOF와 오류를 구분해야 한다.
+
 **3) 원자성 보장**
 
 POSIX는 `PIPE_BUF` 크기 이하의 쓰기는 **원자적**임을 보장한다:
@@ -1175,6 +1177,8 @@ char buf[100];
 read(received_fd, buf, sizeof(buf));  // secret.txt 읽기 가능!
 ```
 
+이 코드는 제어 메시지의 배치를 보여 주는 골격이다. 실제 수신에서는 `recvmsg`의 반환값과 `MSG_CTRUNC`, 제어 메시지의 존재·길이·`SOL_SOCKET`/`SCM_RIGHTS` 타입을 검사한 뒤 fd를 꺼내야 한다. 그렇지 않으면 메시지 부재나 잘림을 정상 fd로 해석할 수 있다.
+
 **활용 사례:**
 - systemd의 socket activation
 - 웹 서버의 worker 프로세스에게 클라이언트 소켓 전달
@@ -2091,7 +2095,11 @@ static void handle_request(int client_fd);
 // 마스터 프로세스
 int main() {
     // 공유 메모리 생성
-    int shm_fd = shm_open("/webserver_stats", O_CREAT | O_RDWR, 0600);
+    int shm_fd = shm_open("/webserver_stats", O_CREAT | O_EXCL | O_RDWR, 0600);
+    if (shm_fd == -1) {
+        perror("shm_open");
+        return 1;
+    }
     ftruncate(shm_fd, sizeof(struct server_stats));
     struct server_stats *stats = mmap(NULL, sizeof(struct server_stats),
                                        PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
@@ -2103,6 +2111,7 @@ int main() {
     pthread_mutex_init(&stats->mutex, &attr);
 
     stats->total_requests = 0;
+    memset(stats->worker_requests, 0, sizeof(stats->worker_requests));
 
     // 리스닝 소켓 생성
     int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -2337,7 +2346,7 @@ UNIX의 IPC는 "mechanism, not policy" 철학을 따른다:
 | 특성 | 파이프 | 메시지 큐 | 공유 메모리 | 소켓 |
 |------|--------|----------|-----------|------|
 | 단순성 | 최고 | 중간 | 낮음 | 중간 |
-| 성능 | 중간 | 낮음 | 최고 | 중간 |
+| 성능 | 작업·대기 방식에 따라 측정 | 작업·큐 설정에 따라 측정 | 동기화·배치 방식에 따라 측정 | 작업·프로토콜에 따라 측정 |
 | 유연성 | 낮음 | 중간 | 중간 | 최고 |
 | 안전성 | 높음(자동 동기화) | 높음 | 낮음(직접 동기화) | 높음 |
 

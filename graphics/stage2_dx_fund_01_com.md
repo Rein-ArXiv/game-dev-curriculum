@@ -31,7 +31,7 @@ DirectX는 처음부터 COM(Component Object Model) 기반으로 설계됐다. O
 
 ## 1. COM 인터페이스 모델
 
-DirectX의 모든 객체는 `IUnknown`을 상속한 순수 가상 인터페이스(pure virtual interface)다. `IUnknown`이 강제하는 세 메서드가 사실상 COM의 전부이며, 이 세 메서드만 이해하면 DirectX의 객체 수명과 인터페이스 모델 전체를 따라갈 수 있다.
+이 글에서 다루는 Direct3D 11·DXGI 객체는 `IUnknown`을 상속한 순수 가상 인터페이스(pure virtual interface)로 노출된다. `IUnknown`이 강제하는 세 메서드가 사실상 COM의 전부이며, 이 세 메서드만 이해하면 DirectX의 객체 수명과 인터페이스 모델 전체를 따라갈 수 있다.
 
 ```cpp
 class IUnknown {
@@ -46,7 +46,7 @@ public:
 
 ### v-table 레이아웃과 언어 중립 ABI
 
-COM 인터페이스가 C++ 가상 함수의 v-table 레이아웃과 정확히 호환되도록 설계됐다는 점이 중요하다. 인터페이스 포인터는 첫 워드가 v-table 포인터를 가리키고, v-table은 함수 포인터의 배열이다. 이 구조는 컴파일러나 언어에 종속되지 않으므로, C++로 만든 객체를 C 코드가 그대로 호출할 수 있다.
+COM 인터페이스가 C++ 가상 함수의 v-table 레이아웃과 정확히 호환되도록 설계됐다는 점이 중요하다. 인터페이스 포인터는 첫 워드가 v-table 포인터를 가리키고, v-table은 함수 포인터의 배열이다. 이 구조는 COM 호출 규약과 해당 플랫폼의 ABI를 지키는 언어·컴파일러 사이에서 공유되므로, C++로 만든 객체를 C 코드가 그대로 호출할 수 있다.
 
 ```cpp
 // C에서 COM 객체를 호출하는 형태 — this를 첫 인자로 명시적으로 넘긴다
@@ -91,7 +91,7 @@ flowchart TD
 ```cpp
 HRESULT hr = device->CreateBuffer(&desc, &data, &buffer);
 if (FAILED(hr)) {
-    // hr의 하위 16비트가 구체적 오류 코드다 (DXGI_ERROR_DEVICE_REMOVED 등)
+    // HRESULT 전체를 기록한다. 하위 16비트 code만으로 facility가 다른 오류를 구분할 수 없다
     LogHR(hr);
     return false;
 }
@@ -131,7 +131,7 @@ if (SUCCEEDED(hr)) {
 }
 ```
 
-`QueryInterface`가 성공하면 반환되는 포인터는 이미 `AddRef`가 한 번 적용된 상태다. COM 규약상 "포인터를 돌려주는 함수는 호출자에게 참조 소유권을 넘긴다". 따라서 `device1` 사용이 끝나면 `Release`를 정확히 한 번 불러야 한다. 이 규칙을 사람이 손으로 지키는 것이 누수와 이중 해제의 가장 흔한 원인이며, 3절의 `ComPtr`이 바로 이 책임을 자동화한다.
+`QueryInterface`가 성공하면 반환되는 포인터는 이미 `AddRef`가 한 번 적용된 상태다. `QueryInterface`처럼 소유 참조를 돌려주는 COM 함수는 호출자에게 해당 참조의 해제 책임을 넘긴다. 빌린 포인터를 반환하는 별도 API도 있으므로 각 함수의 계약을 확인한다. 따라서 `device1` 사용이 끝나면 `Release`를 정확히 한 번 불러야 한다. 이 규칙을 사람이 손으로 지키는 것이 누수와 이중 해제의 가장 흔한 원인이며, 3절의 `ComPtr`이 바로 이 책임을 자동화한다.
 
 ### __uuidof와 GUID
 
@@ -309,7 +309,7 @@ extern "C" {
 
 ## 5. Output과 디스플레이 모드
 
-각 어댑터는 하나 이상의 Output을 가진다. Output은 그 GPU에 연결된 모니터에 대응한다. `IDXGIAdapter::EnumOutputs`로 인덱스를 늘려 가며 열거한다.
+각 어댑터는 0개 이상의 Output을 가진다. 화면이 연결되지 않은 render-only 어댑터는 Output이 없을 수 있다. Output은 그 GPU에 연결된 모니터에 대응한다. `IDXGIAdapter::EnumOutputs`로 인덱스를 늘려 가며 열거한다.
 
 ```cpp
 ComPtr<IDXGIOutput> output;
@@ -333,6 +333,8 @@ for (UINT i = 0;
 `GetDisplayModeList`는 해상도, 주사율, 픽셀 포맷의 조합 전체를 돌려준다. DXGI의 흔한 두 번 호출 패턴 — 먼저 개수를 받고, 그 크기로 버퍼를 잡아 다시 호출 — 을 따른다.
 
 ```cpp
+// 위 열거가 끝나면 output은 비워져 있으므로, 사용할 출력(여기서는 0번)을 다시 얻는다.
+ThrowIfFailed(bestAdapter->EnumOutputs(0, output.ReleaseAndGetAddressOf()));
 UINT modeCount = 0;
 output->GetDisplayModeList(DXGI_FORMAT_R8G8B8A8_UNORM,
                            DXGI_ENUM_MODES_INTERLACED,
@@ -367,7 +369,7 @@ if (SUCCEEDED(output.As(&output6))) {
 }
 ```
 
-HDR10 디스플레이는 최대 휘도 1,000 nits 이상을 표준으로 삼는다. SDR 모니터의 기준 휘도가 대략 80~120 nits인 것과 비교하면 한 자릿수 차이다. 게임의 톤 매핑 곡선은 이 `MaxLuminance`를 런타임에 읽어 모니터마다 다르게 조정해야 한다. 동일한 장면을 200 nits 모니터와 1,000 nits 모니터에 같은 곡선으로 내보내면 어느 한쪽이 뭉개지거나 과포화된다. `ColorSpace`가 ST.2084(PQ) 색 공간을 가리키는지 확인하는 것이 HDR 경로 진입의 첫 관문이다.
+HDR10이라는 신호 형식만으로 디스플레이의 최대 휘도가 1,000 nits 이상이라고 보장할 수는 없다. 장치별 휘도 능력과 현재 표시 경로를 조회해야 한다. 게임의 출력 톤 매핑은 `MaxLuminance`뿐 아니라 전체 화면에서의 한도인 `MaxFullFrameLuminance`, 출력 색공간과 사용자의 보정값을 함께 고려한다. 동일한 장면을 200 nits 모니터와 1,000 nits 모니터에 같은 곡선으로 내보내면 어느 한쪽이 뭉개지거나 과포화된다. `ColorSpace`가 ST.2084(PQ) 색 공간을 가리키는지 확인하는 것이 HDR 경로 진입의 첫 관문이다.
 
 ## 6. Device와 Immediate Context
 
@@ -478,6 +480,11 @@ if (SUCCEEDED(device.As(&debug))) {
 현대 코드는 `CreateSwapChainForHwnd`에 `DXGI_SWAP_CHAIN_DESC1`을 넘겨 생성한다.
 
 ```cpp
+BOOL allowTearing = FALSE;
+factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                             &allowTearing, sizeof(allowTearing));
+UINT swapChainFlags = allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+
 DXGI_SWAP_CHAIN_DESC1 desc{};
 desc.Width  = 1920;
 desc.Height = 1080;
@@ -490,7 +497,7 @@ desc.BufferCount = 2;                               // 최소 2 (FLIP 모델 요
 desc.Scaling     = DXGI_SCALING_NONE;
 desc.SwapEffect  = DXGI_SWAP_EFFECT_FLIP_DISCARD;   // 권장
 desc.AlphaMode   = DXGI_ALPHA_MODE_IGNORE;
-desc.Flags       = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+desc.Flags       = swapChainFlags;
 
 ComPtr<IDXGISwapChain1> swapChain;
 factory->CreateSwapChainForHwnd(
@@ -523,7 +530,7 @@ BLT(Bit Block Transfer) 모델은 swap chain 내용을 DWM redirection surface�
 
 ```cpp
 swapChain->Present(1, 0);                            // V-Sync 켬 — vsync 1회마다 표시
-swapChain->Present(0, DXGI_PRESENT_ALLOW_TEARING);   // V-Sync 끔 — 즉시 표시, 티어링 허용
+swapChain->Present(0, allowTearing ? DXGI_PRESENT_ALLOW_TEARING : 0); // 창 모드에서 티어링 지원 시 허용
 ```
 
 `SyncInterval=1`은 각 프레임을 최소 한 번의 수직 갱신 동안 표시하도록 요청하므로 60Hz 고정 주사율 경로에서 새 이미지의 표시율은 최대 약 60회/초다. `2`는 최소 두 갱신 동안 유지하는 요청이다. 응용과 GPU는 큐 깊이만큼 앞서갈 수 있어 렌더 계산률이나 입력 지연이 그 숫자로 자동 고정되지는 않는다. `0`도 즉시 scanout과 최소 지연을 보장하지 않으며, compositor·큐·VRR 경로가 남는다. 티어링 허용 여부는 swap chain 플래그, Present 플래그, 창 모드, 시스템 지원을 함께 만족해야 한다.
@@ -531,9 +538,8 @@ swapChain->Present(0, DXGI_PRESENT_ALLOW_TEARING);   // V-Sync 끔 — 즉시 �
 가변 주사율(VRR) 디스플레이 — NVIDIA G-Sync, AMD FreeSync, VESA Adaptive-Sync — 는 티어링 없이 낮은 지연을 얻는 길을 연다. 단, 이를 쓰려면 스왑체인 생성 시 `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING` 플래그를 켜고, Present 시 `SyncInterval` 0과 `DXGI_PRESENT_ALLOW_TEARING` 플래그를 함께 넘겨야 한다. 두 가지가 모두 갖춰져야 DXGI가 티어링을 허용하는 경로로 들어간다. `ALLOW_TEARING` 자체는 OS와 어댑터가 지원할 때만 유효하므로, `IDXGIFactory5::CheckFeatureSupport`로 `DXGI_FEATURE_PRESENT_ALLOW_TEARING`을 먼저 질의하는 것이 정석이다.
 
 ```cpp
-BOOL allowTearing = FALSE;
-factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,
-                             &allowTearing, sizeof(allowTearing));
+// 위 생성 코드처럼 CheckFeatureSupport로 확인한 allowTearing을
+// 생성 Flags와 창 모드 Present Flags에 함께 반영한다.
 ```
 
 ### Present의 실패 처리
@@ -567,7 +573,7 @@ ComPtr<ID3D11RenderTargetView> rtv;
 device->CreateRenderTargetView(backBuffer.Get(), &rtvDesc, rtv.GetAddressOf());
 ```
 
-스왑체인의 포맷은 `UNORM`, RTV의 포맷은 `UNORM_SRGB`로 둔 것이 핵심이다. 같은 텍셀 메모리를 RTV가 sRGB로 해석하므로, 셰이더가 선형 색을 출력하면 RTV가 기록 시점에 자동으로 sRGB 감마 보정을 적용한다. OpenGL에서 `glEnable(GL_FRAMEBUFFER_SRGB)`가 하던 역할을, Direct3D 11은 RTV의 포맷 선택으로 표현한다. 스왑체인 자체를 sRGB 포맷으로 만들지 않고 RTV에서 분리하는 이유는, FLIP 모델 스왑체인이 `_SRGB` 포맷을 직접 받지 않기 때문이며, 이렇게 분리하면 같은 백 버퍼를 sRGB 쓰기와 선형 읽기 두 용도로 유연하게 다룰 수 있다.
+스왑체인의 포맷은 `UNORM`, RTV의 포맷은 `UNORM_SRGB`로 둔 것이 핵심이다. 같은 텍셀 메모리를 RTV가 sRGB로 해석하므로, 셰이더가 선형 색을 출력하면 RTV가 기록 시점에 자동으로 sRGB 감마 보정을 적용한다. OpenGL에서 `glEnable(GL_FRAMEBUFFER_SRGB)`가 하던 역할을, Direct3D 11은 RTV의 포맷 선택으로 표현한다. 스왑체인 자체를 sRGB 포맷으로 만들지 않고 RTV에서 분리하는 이유는, FLIP 모델 스왑체인이 `_SRGB` 포맷을 직접 받지 않기 때문이며, 이렇게 분리하면 백 버퍼 저장 포맷과 쓰기 시 인코딩을 분리할 수 있다. 저장된 sRGB 코드값을 UNORM 뷰로 읽는 것만으로 선형 RGB가 복원되지는 않는다.
 
 ### Resize 처리
 
@@ -583,7 +589,7 @@ void OnResize(UINT w, UINT h) {
 
     ThrowIfFailed(swapChain->ResizeBuffers(
         0, w, h, DXGI_FORMAT_UNKNOWN,
-        DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING));          // 0/UNKNOWN = 기존 값 유지
+        swapChainFlags));                            // 생성 때의 플래그 유지, 0/UNKNOWN = 개수/포맷 유지
 
     // RTV 재생성
     swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));

@@ -81,7 +81,7 @@ character.position = MoveAndSlide(character.position,
 - *즉시 반응*: 입력 = 즉시 속도. 가속 / 감속 사용자 제어.
 - *외력 차단*: 폭발 force 가 *영향 없음*. 게임플레이 결정에 따라.
 - *경사 / 점프 / 사다리* 같은 *특수 동작 처리 자연*.
-- *Determinism*: 같은 월드 상태 + 같은 입력 = 같은 결과 (다른 강체 영향 최소화).
+- *재현성 제어*: 같은 collision snapshot과 입력을 쓰기 쉽다. 다만 query 순서·동률 처리·부동소수점 환경까지 고정해야 결정론을 보장할 수 있다.
 
 단점:
 
@@ -467,7 +467,7 @@ if (!isJumping && wasOnGround) {
 }
 ```
 
-`wasOnGround` = 이전 frame 에 지면. 점프 직후 frame 만 snap 비활성.
+`wasOnGround` = 이전 frame 에 지면. `isJumping`은 점프 버튼의 한 프레임 이벤트가 아니라 snap을 금지하는 점프 상태여야 한다. 점프 직후 상향 운동 중에 다시 지면을 잡아 끌어내리지 않도록 상태와 수직 속도를 함께 확인한다.
 
 ### 5.5 미끄러짐과 활강
 
@@ -489,7 +489,7 @@ if (onGround && !IsWalkable(groundNormal)) {
 
 캐릭터가 *절벽 가장자리* 에 서 있을 때 — 캡슐 일부가 *허공*. 일반 충돌은 안 떨어짐 (캡슐 중심이 *지면 위*).
 
-미세 조정으로 *자연스러운 떨어짐* — 캡슐 중심의 *지면 위 비율* 계산 후 절반 미만이면 떨어짐.
+미세 조정으로 *자연스러운 떨어짐* — 발밑 support probe의 분포나 발 지지 영역을 정의해 지지가 부족하면 떨어지도록 정한다. 캡슐 중심은 점이므로 그 자체의 “지면 위 비율”은 정의되지 않으며, 절반 같은 임계값은 게임 정책이다.
 
 ## 6. Push out
 
@@ -511,10 +511,10 @@ void PushOutFromOverlaps(UprightCapsule& cap, const World& world) {
         auto overlaps = OverlapCapsule(cap, world);
         if (overlaps.empty()) break;
 
-        for (auto& o : overlaps) {
-            vec3 pushOut = o.normal * (o.penetration + kSkin);
-            cap.center += pushOut;
-        }
+        // 한 번 이동하면 기존 overlap 깊이가 stale해지므로 다음 반복에서 재질의한다.
+        const auto& o = overlaps.front(); // 동률 선택 순서도 고정한다.
+        vec3 pushOut = o.normal * (o.penetration + kSkin);
+        cap.center += pushOut;
     }
 }
 ```

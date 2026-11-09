@@ -346,7 +346,7 @@ private:
 };
 ```
 
-기록량이 관건이다. NPC 200마리 × 64바이트 × 600프레임 = 약 7.7MB. 위치·facing·활성 노드·압축 blackboard만 남기고 *재구성 가능한 것은 버린다* (예: 애니메이션 본 포즈는 위치에서 재계산). 비싼 raycast 결과나 인지 캐시처럼 *재구성 불가능한* 입력은 반드시 남긴다 — 이것이 시간 의존 버그의 단서이기 때문이다.
+기록량이 관건이다. NPC 200마리 × 64바이트 × 600프레임 = 약 7.7MB. 위치·facing·활성 노드·압축 blackboard만 남기고 *재구성 가능한 것은 버린다* (예: 결정적으로 재현 가능한 파생값은 원본 상태에서 재계산). 비싼 raycast 결과나 인지 캐시처럼 *재구성 불가능한* 입력은 반드시 남긴다 — 이것이 시간 의존 버그의 단서이기 때문이다.
 
 ### 결정적 replay
 
@@ -667,7 +667,7 @@ std::optional<long long> ApproxRequiredSamplePerGroup(
         return std::nullopt;       // 비유한 입력 또는 정의역 밖
     double s = zAlpha + zBeta;
     double n = std::ceil(s * s * 2.0 * pBar * (1.0 - pBar) / (delta * delta));
-    if (!std::isfinite(n) || n > (double)std::numeric_limits<long long>::max())
+    if (!std::isfinite(n) || n >= (double)std::numeric_limits<long long>::max())
         return std::nullopt;       // 변환 전 유한성·상한 검사
     return (long long)n;           // int가 아닌 넓은 정수로 반환
 }

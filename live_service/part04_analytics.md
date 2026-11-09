@@ -184,16 +184,20 @@ $$\text{ARPU} = \text{전환율} \times \text{ARPPU}$$
 
 ```sql
 -- 직전 이벤트와 30분 이상(>=1800초) 벌어지면 새 세션 시작
-SELECT user_id, event_time,
+SELECT user_id, event_time, event_id,
   SUM(is_new_session) OVER (
-    PARTITION BY user_id ORDER BY event_time
+    PARTITION BY user_id ORDER BY event_time, event_id ROWS UNBOUNDED PRECEDING
   ) AS session_index
 FROM (
   SELECT *,
-    CASE WHEN event_time - LAG(event_time) OVER (
-      PARTITION BY user_id ORDER BY event_time
-    ) >= 1800 THEN 1 ELSE 0 END AS is_new_session
-  FROM events
+    CASE WHEN previous_time IS NULL OR event_time - previous_time >= 1800
+         THEN 1 ELSE 0 END AS is_new_session
+  FROM (
+    SELECT *, LAG(event_time) OVER (
+      PARTITION BY user_id ORDER BY event_time, event_id
+    ) AS previous_time
+    FROM events
+  )
 )
 ```
 

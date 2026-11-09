@@ -349,9 +349,14 @@ bool RayAABBSafe(vec3 ro, vec3 rd, AABB box, float& tNear, float& tFar) {
             if (ro[i] < box.min[i] || ro[i] > box.max[i]) return false;
             // 안에 있으면 그 축의 t 구간이 [-∞, +∞] — 다른 축으로 결정.
         } else {
-            float invD = 1.0f / rd[i];
-            float t0 = (box.min[i] - ro[i]) * invD;
-            float t1 = (box.max[i] - ro[i]) * invD;
+            // double에서 나눠 작은 float 방향의 역수가 먼저 overflow하지 않게 한다.
+            auto toFloat = [](double t) {
+                if (t > std::numeric_limits<float>::max()) return INFINITY;
+                if (t < -std::numeric_limits<float>::max()) return -INFINITY;
+                return float(t);
+            };
+            float t0 = toFloat((double(box.min[i]) - ro[i]) / double(rd[i]));
+            float t1 = toFloat((double(box.max[i]) - ro[i]) / double(rd[i]));
             if (t0 > t1) std::swap(t0, t1);
             tNear = std::max(tNear, t0);
             tFar  = std::min(tFar,  t1);
@@ -363,7 +368,7 @@ bool RayAABBSafe(vec3 ro, vec3 rd, AABB box, float& tNear, float& tFar) {
 }
 ```
 
-NaN 안 남. *축별 분기* 가 들어가 4.3 의 분기 없는 코드보다 *약간 느림*. BVH hot path 는 *4.3 의 빠른 코드 + 별도 디버그 가드*, 일반 사용은 *4.5 의 안전 코드*.
+유한 입력과 비영 방향에서 0에 무한대를 곱하는 NaN을 피한다. 극단적 범위에서는 결과의 float 변환이 무한대가 될 수 있으므로 실제 유효 거리 범위와 입력을 함께 관리한다. 축별 분기의 비용은 대상에서 측정한다. BVH에서도 평행 경계의 false negative를 피하려면 이 버전이나 해당 경계를 처리하는 검증된 SIMD 버전을 사용한다.
 
 평행 판정은 *정확한 0* 으로만 한다. 방향이 비정규화되어도 된다는 계약에서 `fabs(rd[i]) < 1e-8` 같은 임계값은 방향을 *스케일만 바꿔도* 교차 판정을 뒤집는다 — 축 방향 성분이 작지만 0 이 아니면 슬랩을 언젠가 지나므로 교차가 존재할 수 있는데, 임계값이 그 축을 평행으로 오인하면 miss 로 사라진다. 정확한 0 분기에서는 그 축을 건너뛰고 나머지 축이 t 구간을 결정하며, 0 이 아닌 작은 성분은 큰 t 를 낳을 뿐 *유한 tMax* 구간 검사가 걸러낸다. 즉 이 함수의 유효성은 *유한 tMax* 와 *허용 이동 오차* 계약 위에서 읽어야 하고, RayPlane 의 분모 임계값도 같은 단위·축척 정책을 따른다.
 
@@ -699,7 +704,6 @@ BVH 트래버설을 *광선 트래버설 코드* 로.
 
 ```cpp
 bool RayMeshBVH(Ray ray, BVH& bvh, RayHit& bestHit) {
-    vec3 invRd = 1.0f / ray.direction;
     bestHit.t = ray.tMax;
     bool any = false;
 
@@ -710,7 +714,7 @@ bool RayMeshBVH(Ray ray, BVH& bvh, RayHit& bestHit) {
         BVHNode& node = bvh.nodes[idx];
 
         float tNear, tFar;
-        if (!RayAABB(ray.origin, invRd, node.bounds, tNear, tFar)) continue;
+        if (!RayAABBSafe(ray.origin, ray.direction, node.bounds, tNear, tFar)) continue;
         if (tNear > bestHit.t || tFar < ray.tMin) continue;  // 가지치기
 
         if (node.leftChild < 0) {
@@ -745,8 +749,8 @@ bool RayMeshBVH(Ray ray, BVH& bvh, RayHit& bestHit) {
 ```cpp
 // 두 자식 박스 각각 광선 검사 후 t_near 정렬
 float tL_near, tL_far, tR_near, tR_far;
-bool hL = RayAABB(ray.origin, invRd, leftNode.bounds,  tL_near, tL_far);
-bool hR = RayAABB(ray.origin, invRd, rightNode.bounds, tR_near, tR_far);
+bool hL = RayAABBSafe(ray.origin, ray.direction, leftNode.bounds,  tL_near, tL_far);
+bool hR = RayAABBSafe(ray.origin, ray.direction, rightNode.bounds, tR_near, tR_far);
 
 if (tL_near < tR_near) {
     if (hR) stack.push(right);

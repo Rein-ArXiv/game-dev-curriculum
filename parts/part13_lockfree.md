@@ -33,7 +33,7 @@ CAS(Compare-And-Swap) 명령 하나로 스택과 큐를 만들 수 있다면, �
 동시성 알고리즘은 진행 보장(progress guarantee) 수준에 따라 분류된다.
 
 - **Wait-free**: 각 연산이 다른 스레드의 실행과 무관하게 유한 단계 안에 완료된다. 이론상 개별 연산의 starvation을 배제한다.
-- **Lock-free**: 유한한 전체 실행 구간에서 시스템 차원의 연산 완료가 계속 발생한다. 특정 스레드는 반복해서 실패할 수 있다.
+- **Lock-free**: 스레드들이 계속 단계를 수행하는 무한 실행에서는 시스템 차원의 연산 완료도 계속 발생한다. 특정 스레드는 반복해서 실패할 수 있다.
 - **Obstruction-free**: 한 스레드가 충분한 시간 동안 간섭 없이 실행되면 연산을 완료한다.
 - **Blocking (Mutex 기반)**: 위 세 비차단 진행 보장과 같은 계층의 하위 항목이 아니다. 소유자가 정지하면 다른 스레드도 기다릴 수 있는 별도 설계 범주다.
 
@@ -261,7 +261,7 @@ void push(T const& data) {
 }
 ```
 
-128비트 CAS가 필요하다(x86-64: `cmpxchg16b`, ARM: `CASP`).
+64비트 포인터와 64비트 태그를 함께 비교하는 이 배치에는 128비트 원자 연산이 필요하다. 지원되는 x86-64에서는 `cmpxchg16b`, 해당 확장을 지원하는 AArch64에서는 `CASP` 같은 명령을 사용할 수 있다. 실제 C++ atomic 매핑과 lock-free 여부는 타깃·컴파일러별로 확인한다.
 
 ```cpp
 // 플랫폼 체크
@@ -472,7 +472,7 @@ class HazardPointerManager {
     static constexpr size_t HP_PER_THREAD = 2;  // Queue는 2개 필요
 
     struct HPRecord {
-        std::atomic<void*> hazards[HP_PER_THREAD];
+        std::atomic<void*> hazards[HP_PER_THREAD]{};  // 처음에는 모두 nullptr
         std::atomic<bool> active{false};
     };
 
@@ -531,7 +531,7 @@ public:
     void retire(T* ptr) {
         // 함수 템플릿(T)별 TLS이지 manager 인스턴스별 도메인이 아니다.
         // 한 스레드가 같은 T를 쓰는 manager를 둘 이상 만들면 회수 목록을 공유하므로,
-        // domain+thread record 소유로 바꾸기 전에는 manager당 하나만 사용한다.
+        // domain+thread record 소유로 바꾸기 전에는 같은 T에 manager 하나만 사용한다.
         thread_local std::vector<T*> retired_list;
         retired_list.push_back(ptr);
         if (retired_list.size() < 64) return;
@@ -699,7 +699,7 @@ static void BM_LockFreeQueue(benchmark::State& state) {
     LockFreeQueue<int> q;
     for (auto _ : state) {
         q.enqueue(42);
-        q.dequeue();
+        delete q.dequeue();  // 반환 payload는 호출자 소유
     }
 }
 
@@ -784,7 +784,7 @@ rcu_read_unlock();
 
 ## 9. Happens-before와 메모리 순서
 
-C++ 메모리 모델에서 동기화되지 않은 동일 메모리의 동시 접근 중 하나가 쓰기면 데이터 경쟁이며 동작은 미정의다. CPU가 실제로 원자적으로 읽어 주는 것처럼 보여도 컴파일러는 데이터 경쟁이 없다고 가정하고 코드를 변환할 수 있다.
+C++ 메모리 모델에서 서로 다른 스레드의 충돌하는 접근 중 하나 이상이 비원자적이고, 두 접근 사이에 happens-before가 없으면 데이터 경쟁이며 동작은 미정의다. 읽기끼리는 충돌하지 않으며 relaxed atomic끼리의 접근도 그 자체로 데이터 경쟁은 아니다. CPU가 비원자 변수도 원자적으로 읽어 주는 것처럼 보여도 컴파일러는 언어 차원의 데이터 경쟁이 없다고 가정하고 코드를 변환할 수 있다.
 
 메모리 가시성을 이해하는 핵심은 happens-before 관계다.
 

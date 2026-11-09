@@ -275,6 +275,7 @@ PersistentEntityId picked = (pickedToken < tokenToId.size())
 
 ```cpp
 std::optional<float> DragAlongAxis(Vec3 axis, Vec3 origin, Ray mouseRay, const Camera& cam) {
+    if (LengthSquared(axis) < kEps) return std::nullopt; // 0에 가까운 축은 정규화할 수 없다
     axis = Normalize(axis);                             // 단위 축 조건을 명시적으로 만든다
     // 축을 포함하고 시선에 최대한 수직인(카메라를 향하는) 평면을 만들어 마우스 광선을 교차
     Vec3 planeNormal = Cross(axis, Cross(axis, cam.forward));

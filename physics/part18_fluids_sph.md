@@ -203,6 +203,7 @@ $$
 자기 자신도 합의 한 항이다($j = i$). 입자가 많이 모여 있으면 *큰 $\rho$*. 이웃 목록이 self를 제외하는 API라면 $m_i W(0)$ 을 명시적으로 더하고, self를 포함하는 API라면 목록에 self가 정확히 한 번만 들어오도록 규약을 고정한다. 힘 단계에서는 $r=0$ 인 쌍을 건너뛴다.
 
 ```cpp
+// W_poly6는 아래 코드에서 거리 제곱 r2를 받는 helper다.
 void ComputeDensity(std::vector<Particle>& ps, float h, float m) {
     for (size_t i = 0; i < ps.size(); ++i) {
         Particle& pi = ps[i];
@@ -469,7 +470,7 @@ $$
 \Delta t \le C \frac{h}{|\vec{v}_{max}| + c_s}
 $$
 
-$C_{\mathrm{CFL}}$ 은 적분기와 이산화에 의존하는 안전 계수이며 고정된 보편 상수가 아니다. $c_s$ 는 EOS에서 얻는 인공 음속이다. 선형 EOS에서는 대략 $c_s^2 = k$, 위 Tait EOS에서는 기준 밀도에서 $c_s^2 = B\gamma/\rho_0$ 다.
+$C_{\mathrm{CFL}}$ 은 적분기와 이산화에 의존하는 안전 계수이며 고정된 보편 상수가 아니다. $c_s$ 는 EOS에서 얻는 인공 음속이다. 선형 EOS에서는 대략 $c_s^2 = k$, 위 Tait EOS에서는 기준 밀도에서 $c_s^2 = B\gamma/\rho_0$ 다. 실제 압축률이 달라지면 $c_s^2=dp/d\rho=(B\gamma/\rho_0)(\rho/\rho_0)^{\gamma-1}$도 바뀌므로, 시간 간격에는 현재 입자들의 음속 상한을 사용한다.
 
 ### 5.2 음속의 영향
 

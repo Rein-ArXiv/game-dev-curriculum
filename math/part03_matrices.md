@@ -501,7 +501,7 @@ vec3 worldNormal = normalize(normalMatrix * modelNormal);
 
 ### 5.4 음수 스케일과 반사
 
-스케일 인자가 음수면 *축 방향이 뒤집힘* — *반사 (reflection)* 가 포함됨.
+스케일 인자가 음수면 해당 축 방향이 뒤집힌다. 음수 축이 홀수 개면 행렬식이 음수라 방향을 뒤집는 반사가 포함되고, 두 축이 음수면 행렬식이 양수라 전체 방향은 보존된다.
 
 $$
 S(-1, 1, 1) = \begin{pmatrix} -1 & 0 & 0 & 0 \\ 0 & 1 & 0 & 0 \\ 0 & 0 & 1 & 0 \\ 0 & 0 & 0 & 1 \end{pmatrix}
@@ -558,7 +558,7 @@ flowchart TD
     Translated -->|R: 원점 회전| Final2[R·T 결과<br/>원점 둘레로 휘어진 메쉬]
 ```
 
-같은 R과 T라도 *순서에 따라 결과 위치/방향이 다르다*.
+같은 R과 T의 순서를 바꾸면 일반적으로 결과 위치가 다르다. 이 두 경우의 선형 부분은 모두 R이므로, 이동이 물체의 방향 자체를 바꾸지는 않는다.
 
 ### 6.3 키포인트 회전 (피봇 회전)
 
@@ -613,7 +613,7 @@ mat4 GetWorldMatrix(GameObject* obj) {
 }
 ```
 
-캐싱이 흔한 최적화 — *부모 transform이 변하지 않으면 월드 매트릭스를 다시 계산하지 않는다*. 게임 엔진의 transform invalidation 시스템.
+캐싱이 흔한 최적화 — *자신의 로컬 transform과 조상들의 월드 transform이 모두 변하지 않으면* 월드 매트릭스를 재사용한다. 어느 쪽이든 바뀌면 해당 캐시를 무효화해야 한다.
 
 ### 6.5 변환 분해 (decomposition)
 
@@ -877,13 +877,17 @@ flowchart LR
 SIMD 행렬 곱은 *메모리 레이아웃에 민감*. *4×4 행렬 곱* 의 SSE 구현은 *한 행 또는 한 열을 한 SIMD 레지스터에 로드* 하므로, 레이아웃이 *접근 패턴* 을 결정.
 
 ```cpp
-// SSE 4×4 곱 (column-major 가정)
+// SSE 4×4 곱 (m[col][row] 저장, A·B). 각 열에는 float 4개가 있다.
 mat4 MulSSE(mat4 A, mat4 B) {
     mat4 R;
     for (int j = 0; j < 4; ++j) {
-        // B의 j번째 열을 4번 곱해 R의 j번째 열을 만듦
-        __m128 col = _mm_load_ps(&B.m[j][0]);
-        // ... A의 각 행과 곱 + 합
+        __m128 sum = _mm_setzero_ps();
+        for (int k = 0; k < 4; ++k) {
+            __m128 aCol = _mm_loadu_ps(&A.m[k][0]);
+            __m128 b = _mm_set1_ps(B.m[j][k]);
+            sum = _mm_add_ps(sum, _mm_mul_ps(aCol, b));
+        }
+        _mm_storeu_ps(&R.m[j][0], sum);
     }
     return R;
 }

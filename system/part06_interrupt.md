@@ -68,7 +68,7 @@ Intel 아키텍처에서는 실행 흐름을 변경하는 모든 이벤트를 **
 
 **2) Non-Maskable Interrupts (NMI)**
 - NMI 핀을 통해 전달된다
-- 차단할 수 없다
+- 일반적인 IF 비트로 마스크할 수 없다. NMI 처리 중 재진입 차단과 플랫폼별 제어는 별도다.
 - 하드웨어 오류, 메모리 패리티 에러 등 치명적 상황에 사용된다
 
 ### 예외 (Exceptions)
@@ -543,7 +543,7 @@ PCI Express 시대에는 **MSI(Message Signaled Interrupts)**가 표준이 되�
 
 **장점:**
 - 물리적 인터럽트 라인 불필요
-- 더 많은 인터럽트 벡터 (최대 2048개)
+- MSI-X 테이블은 장치당 최대 2048개 엔트리를 표현할 수 있다. 실제 할당 수는 장치·OS·CPU 벡터 자원에 제한된다.
 - 더 나은 성능 (레이턴시 감소)
 - 디바이스별 전용 인터럽트
 
@@ -819,13 +819,13 @@ local_bh_enable();
  3. Bottom half 스케줄링
 - 인터럽트 비활성화 상태에서 실행 (인터럽트 게이트)
 
-**Bottom Half (소프트 IRQ 컨텍스트)**
+**Bottom Half / 지연 처리**
 - 지연 가능한 작업 수행:
  1. 데이터 처리
  2. 프로토콜 스택 통과
  3. 사용자 공간에 데이터 전달
-- 인터럽트 활성화 상태에서 실행
-- atomic context이므로 스케줄러 선점과 슬립은 불가능
+- softirq와 tasklet은 일반적으로 슬립할 수 없는 문맥에서 실행
+- workqueue는 커널 워커 스레드의 프로세스 문맥에서 실행하므로 슬립 가능
 
 ```text
 하드웨어 인터럽트 발생
@@ -1254,7 +1254,7 @@ static irqreturn_t goodix_ts_irq_handler(int irq, void *dev_id)
 ```
 
 **IRQF_ONESHOT:**
-Primary handler 없이 threaded handler만 사용할 때 필수. IRQ가 threaded handler 완료까지 비활성화된다. 그렇지 않으면 인터럽트 스톰이 발생한다.
+threaded handler가 완료될 때까지 IRQ 라인을 마스크하는 정책이다. primary handler가 없을 때 필요 여부는 IRQ 컨트롤러의 oneshot-safe 특성과 커널 검사에 따라 달라지며, 레벨 트리거 장치에서 반복 인터럽트를 막는 데 흔히 사용한다.
 
 ### 실시간 커널에서의 Threaded IRQ
 

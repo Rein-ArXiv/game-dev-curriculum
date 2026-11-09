@@ -93,7 +93,7 @@ flowchart LR
 
 결과적으로 open 큐에 드는 노드 수가 극적으로 줄어든다. 빈 영역을 가로지를 때 A*가 수백 노드를 전개한다면, JPS는 jump point 몇 개만 전개한다. 그러면서도 *최단 경로는 그대로 보장* 한다 — 건너뛴 중간 칸들은 어차피 최단 경로의 일부이고, 단지 큐에 명시적으로 넣지 않았을 뿐이다. JPS는 그리드 위에서, 전처리 없이, 같은 최단 경로를 더 적은 작업으로 찾는다.
 
-JPS의 전제는 *균일 비용 8-방향 그리드* 다. 간선 비용이 균일해야 "직선 점프 중간 칸은 분기하지 않는다"는 가정이 성립한다. 가중치 지형(늪·도로)이 섞이면 JPS의 가정이 깨진다 — 비용이 다르면 직선 점프 중간 칸이 분기 후보가 될 수 있기 때문이다.
+이 글의 JPS는 *코너 컷을 허용하는 균일 비용 8-방향 그리드* 를 전제한다. 대각선의 목적지가 열려 있으면 양옆 직교 셀의 막힘과 무관하게 이동할 수 있는 모델이다. 앞 글의 엄격한 코너 컷 금지 모델과는 다르며, 실제 충돌 규칙에 맞추려면 가지치기 규칙도 함께 바꿔야 한다. 직선 비용 1·대각 비용 √2가 위치마다 동일해야 대칭 경로를 교환해도 비용이 같다는 가정이 성립한다. 가중치 지형(늪·도로)이 섞이면 JPS의 가정이 깨진다 — 비용이 다르면 직선 점프 중간 칸이 분기 후보가 될 수 있기 때문이다.
 
 ### 자연 이웃과 가지치기
 
@@ -248,9 +248,9 @@ void ExpandJPS(Node x, const Grid& g, Cell goal, OpenList& open) {
 
 ### 복잡도와 함정
 
-JPS의 직선 점프는 최악의 경우 한 방향으로 그리드 너비 $N$만큼 진행하므로 $O(N)$이고, 대각 점프는 대각 한 칸마다 두 직선 성분을 다시 점프하므로 빈 격자에서 최악 $O(N^2)$이다. 하지만 그 점프가 다수의 A* 노드 전개를 대체하므로, 전체적으로는 open 큐 연산이 크게 줄어 순이득이다. 실측에서 빈 영역이 많은 맵일수록 이득이 커진다. 함정은 셋이다.
+JPS의 직선 점프는 최악의 경우 한 방향으로 그리드 너비 $N$만큼 진행하므로 $O(N)$이고, 대각 점프는 대각 한 칸마다 두 직선 성분을 다시 점프하므로 빈 격자에서 최악 $O(N^2)$이다. 그 점프가 다수의 A* 노드 전개를 대체해 open 큐 연산을 줄이지만, 스캔 비용이 이를 상쇄할 수도 있으므로 전체 순이득은 측정해야 한다. 실측에서 빈 영역이 많은 맵일수록 이득이 커진다. 함정은 셋이다.
 
-- *균일 비용 가정*: 가중치 지형에서는 정확성이 깨진다. JPS는 모든 통행 칸의 비용이 같아야 한다.
+- *균일 비용 가정*: 가중치 지형에서는 정확성이 깨진다. 이 모델은 위치마다 같은 직선·대각 이동 비용을 써야 한다.
 - *대각 코너 컷 정책*: "대각으로 모서리를 자를 수 있는가"(두 직선 칸 중 하나만 막혀도 대각 통과 허용 여부)에 따라 forced neighbor 규칙이 달라진다. 코너 컷 금지면 forced 조건과 walkable 검사가 더 엄격해진다 — 이 정책을 점프와 `HasForcedNeighbor` 양쪽에서 *일관* 되게 적용하지 않으면 경로가 벽을 뚫는다.
 - *경로 복원*: 큐에는 jump point만 들어가므로, 최종 경로는 jump point 사이를 직선 보간해 채워야 한다. 인접 jump point 사이는 항상 한 방향 직선이므로 보간은 단순하다.
 
@@ -263,11 +263,11 @@ JPS는 런타임에 매번 점프를 계산한다. 그리드가 *정적* 이라�
 JPS+는 각 칸에서 8방향 각각으로 다음 값을 사전 계산해 둔다.
 
 - 그 방향에 jump point가 있으면, *jump point까지의 거리*(양수).
-- jump point가 없고 벽으로 막히면, *벽까지의 거리*(음수로 인코딩).
+- jump point가 없고 벽으로 막히면, *벽 직전까지 이동할 수 있는 칸 수*(0 또는 음수로 인코딩). 바로 옆이 벽이면 0이다.
 
 ```cpp
 struct JumpTable {
-    // [cell][8 directions] = 그 방향 jump point까지 거리 (음수면 벽까지)
+    // [cell][8 directions] = jump 거리(양수), 아니면 마지막 통행 칸까지 거리의 음수
     std::vector<std::array<int, 8>> dist;
 };
 ```
@@ -285,9 +285,9 @@ std::optional<Cell> JumpFast(Cell c, int dirIdx, const JumpTable& jt, Cell goal)
         int dx = goal.x - c.x, dy = goal.y - c.y;
         if (dx * delta.x > 0 && dy * delta.y > 0) {       // 목표가 이동 사분면 안
             int n = std::min(std::abs(dx), std::abs(dy)); // 목표의 행/열 도달 거리
-            int reach = (d > 0) ? d : -d;                 // jump(양수) 또는 벽(음수)까지
-            // 벽으로 막히기 전이면(음수 d는 벽 칸 직전까지) 중간 점 반환
-            if (d > 0 ? n <= reach : n < reach) return c + delta * n;
+            int reach = (d > 0) ? d : -d;                 // jump(양수) 또는 마지막 통행 칸(0/음수)까지
+            // 마지막 통행 칸과 같은 거리도 허용한다
+            if (n <= reach) return c + delta * n;
         }
     }
 
@@ -318,7 +318,7 @@ flowchart LR
     Dyn[동적 그리드] -.->|테이블 무효화| X[부적합]
 ```
 
-전처리로 각 방향의 도달 가능 목표 집합을 구하는 방법은, 각 칸을 시작으로 *역방향 Dijkstra* 를 돌려 "이 칸에서 어느 방향으로 첫발을 떼면 어느 칸들이 최단 경로상에 오는가"를 모아 경계 상자로 압축하는 것이다. 이 전처리는 비싸지만(맵당 한 번), 런타임 이득이 크다.
+전처리로 각 방향의 도달 가능 목표 집합을 구하는 방법은, 각 칸을 시작으로 *정방향 Dijkstra* 를 돌려 "이 칸에서 어느 방향으로 첫발을 떼면 어느 칸들이 최단 경로상에 오는가"를 모아 경계 상자로 압축하는 것이다. 이 전처리는 비싸지만(맵당 한 번), 런타임 이득이 크다.
 
 ### 대가
 
@@ -409,28 +409,33 @@ void UpdateVertex(Node n, Node neighbor) {
 ```cpp
 // 셀 중심을 잇는 선분이 통과하는 셀 전체를 검사한다 (Amanatides–Woo DDA).
 bool LineOfSight(Cell a, Cell b, const Grid& g) {
-    float x = a.x + 0.5f, y = a.y + 0.5f;              // 셀 중심
-    const float x1 = b.x + 0.5f, y1 = b.y + 0.5f;
-    const float dx = x1 - x, dy = y1 - y;
-
-    const int   stepX = (dx > 0) - (dx < 0);
-    const int   stepY = (dy > 0) - (dy < 0);
-    const float tDeltaX = (dx != 0) ? std::abs(1.0f / dx) : INF;
-    const float tDeltaY = (dy != 0) ? std::abs(1.0f / dy) : INF;
-    float tMaxX = (dx != 0) ? (stepX > 0 ? (std::floor(x) + 1 - x) : (x - std::floor(x))) * tDeltaX : INF;
-    float tMaxY = (dy != 0) ? (stepY > 0 ? (std::floor(y) + 1 - y) : (y - std::floor(y))) * tDeltaY : INF;
-
+    // 전제: 정수 셀 좌표, 각 축 변위 <= 10^9 (아래 곱이 int64_t에 들어감).
+    const int64_t dx = int64_t(b.x) - a.x, dy = int64_t(b.y) - a.y;
+    const int64_t ax = std::abs(dx), ay = std::abs(dy);
+    const int stepX = (dx > 0) - (dx < 0), stepY = (dy > 0) - (dy < 0);
     int cx = a.x, cy = a.y;
+    int64_t crossedX = 0, crossedY = 0;
     while (cx != b.x || cy != b.y) {
-        if (!g.Walkable({cx, cy})) return false;        // 지나는 모든 셀 검사
-        if (tMaxX < tMaxY) { cx += stepX; tMaxX += tDeltaX; }
-        else               { cy += stepY; tMaxY += tDeltaY; }
+        if (!g.Walkable({cx, cy})) return false;
+        if (ax == 0) { cy += stepY; continue; }
+        if (ay == 0) { cx += stepX; continue; }
+        // 다음 경계 교차 t=(2*crossed+1)/(2*abs(delta))의 분수 비교.
+        const int64_t tx = (2 * crossedX + 1) * ay;
+        const int64_t ty = (2 * crossedY + 1) * ax;
+        if (tx < ty) { cx += stepX; ++crossedX; }
+        else if (ty < tx) { cy += stepY; ++crossedY; }
+        else { // 정확한 꼭짓점 통과: 두 직교 셀도 비어 있어야 한다.
+            if (!g.Walkable({cx + stepX, cy}) ||
+                !g.Walkable({cx, cy + stepY})) return false;
+            cx += stepX; cy += stepY;
+            ++crossedX; ++crossedY;
+        }
     }
     return g.Walkable(b);
 }
 ```
 
-선분이 셀 *내부*를 지나는 것과 경계·꼭짓점에 닿기만 하는 것은 정책 문제다. 경계 접촉을 통과로 볼지, 대각 꼭짓점 접촉을 금지할지, 에이전트 반경을 셀 크기에 대해 어떻게 볼지를 먼저 고정한 뒤 그 규칙을 코드에 반영한다. 위 코드는 셀 중심을 잇는 선분 기준이며, 반경을 반영하려면 셀 확장 판정이나 실제 collision sweep을 쓴다. 일반 Bresenham 표본열은 선분이 실제로 지나는 셀을 모두 검사하지 않으므로 기하학적 LoS로 쓸 수 없다.
+선분이 셀 *내부*를 지나는 것과 경계·꼭짓점에 닿기만 하는 것은 정책 문제다. 경계 접촉을 통과로 볼지, 대각 꼭짓점 접촉을 금지할지, 에이전트 반경을 셀 크기에 대해 어떻게 볼지를 먼저 고정한 뒤 그 규칙을 코드에 반영한다. 위 코드는 정수 셀 중심을 잇고 꼭짓점에 닿는 두 직교 셀도 비어 있어야 하는 정책이다. 경계 교차 순서를 정수 분수로 비교하므로 반복 float 덧셈의 반올림으로 동시 교차를 놓치지 않는다. 축별 변위 상한에서 비교 곱은 약 $2\times10^{18}$ 이하로 int64_t 범위 안이다. 반경을 반영하려면 셀 확장 판정이나 실제 collision sweep을 쓴다. 일반 Bresenham 표본열은 선분이 실제로 지나는 셀을 모두 검사하지 않으므로 기하학적 LoS로 쓸 수 없다.
 
 ### 후처리 평활화와의 차이
 
@@ -474,6 +479,7 @@ void SetVertex(Node n) {
         // 가정이 틀렸음 → 실제 이웃 중 g가 최소인 가시 이웃으로 부모 재설정
         float best = INF; Node bp;
         for (Node nb : VisibleNeighbors(n)) {
+            if (!closed[nb]) continue; // 검증된 경로가 있는 확장 완료 이웃만
             float c = g[nb] + EuclidDistance(nb, n);
             if (c < best) { best = c; bp = nb; }
         }
@@ -483,9 +489,11 @@ void SetVertex(Node n) {
 }
 ```
 
+시작점은 `parent[start]=start`로 초기화한다. 큐에서 꺼낸 뒤 `SetVertex`로 연결을 검증하고 나서 목표 검사·closed 등록·이웃 확장을 수행한다. 폴백 이웃을 closed로 제한해야 아직 검증되지 않은 낙관 경로를 다시 부모로 선택하지 않는다.
+
 ### 검사 횟수의 차이
 
-낙관적 가정 덕분에 *전개되지만 확정되지 않는* 노드들의 시야 검사를 통째로 건너뛴다. 확정되는 노드(최종 경로에 가까운 노드)에서만 검사하므로, 시야 검사 횟수가 크게 준다. Theta\*가 노드 전개마다(중복 갱신 포함) 시야를 보는 데 비해, Lazy Theta\*는 *큐에서 꺼내 확정하는 횟수* 만큼만 본다 — 보통 후자가 훨씬 적다.
+낙관적 가정 덕분에 *발견되어 큐에 들어가지만 확장되지 않는* 노드들의 시야 검사를 통째로 건너뛴다. 확정되는 노드(최종 경로에 가까운 노드)에서만 검사하므로, 시야 검사 횟수가 크게 준다. Theta\*가 노드 전개마다(중복 갱신 포함) 시야를 보는 데 비해, Lazy Theta\*는 *큐에서 꺼내 확정하는 횟수* 만큼만 본다 — 보통 후자가 훨씬 적다.
 
 | 항목 | Theta* | Lazy Theta* |
 |---|---|---|
@@ -494,7 +502,7 @@ void SetVertex(Node n) {
 | 노드당 비용 | 높음 | 낮음 |
 | 경로 품질 | 동등 | 거의 동등(낙관 폴백) |
 
-시야 검사가 비싼 환경(큰 맵, 복잡한 장애물)에서 Lazy Theta\*는 Theta\*보다 빠르면서 비슷한 품질의 경로를 낸다. 다만 any-angle 계열은 grid graph의 *엄밀한* 최단 경로 보장이 아니라, 자연스러운 직선 경로와 실용 성능을 우선하는 절충으로 이해해야 한다 — 낙관 가정이 틀려 path 1로 폴백할 때 약간의 차선 경로가 나올 수 있으나, 실측 품질 손실은 작다.
+시야 검사가 비싼 환경(큰 맵, 복잡한 장애물)에서 Lazy Theta\*는 Theta\*보다 빠르면서 비슷한 품질의 경로를 낸다. 다만 Basic/Lazy Theta*는 연속 공간의 *전역* 최단 경로를 보장하지 않으며, 자연스러운 직선 경로와 실용 성능을 우선하는 절충으로 이해해야 한다 — 낙관 가정이 틀려 path 1로 폴백할 때 약간의 차선 경로가 나올 수 있으나, 실측 품질 손실은 작다.
 
 ## 7. HPA*: 계층적 길찾기
 
@@ -546,12 +554,17 @@ Path HPAStar(Cell s, Cell t, AbstractGraph& ag, const Grid& g) {
     //    entrance 노드들과 intra-edge(클러스터 내 A*)로 연결
     Node ns = InsertTemp(s, ag, g);
     Node nt = InsertTemp(t, ag, g);
+    if (SameCluster(ns, nt)) AddDirectIntraEdge(ns, nt, ag, g);
     // 2) 추상 그래프에서 A* — 노드가 훨씬 적어 빠르다
     std::vector<Node> absPath = AStar(ns, nt, ag);
     // 3) 추상 경로가 지나는 각 클러스터 내부만 상세 A*로 채움
     Path detailed;
-    for (size_t i = 0; i + 1 < absPath.size(); ++i)
-        detailed += AStarInCluster(absPath[i], absPath[i+1], g);
+    for (size_t i = 0; i + 1 < absPath.size(); ++i) {
+        if (SameCluster(absPath[i], absPath[i+1]))
+            detailed += AStarInCluster(absPath[i], absPath[i+1], g);
+        else
+            detailed += StoredInterEdge(absPath[i], absPath[i+1]); // 경계 연결 구간
+    }
     RemoveTemp(ns, nt, ag);
     return detailed;
 }
@@ -658,7 +671,9 @@ for (Edge e : changedEdges) {
 ComputeShortestPath();
 ```
 
-간선 (3,4)가 끊기면 칸 3의 $rhs$가 후속자 4를 통한 경로를 잃는다. 칸 3은 불일치가 되어 큐에 들어가고, 그 영향이 *칸 3과 그 선행자(칸 2, 1)* 로만 전파된다. 만약 칸 4 너머로 우회로가 없으면 칸 0~3의 $g$가 ∞로 갱신되며 경로 실패가 즉시 드러난다. 우회로가 있으면 그 분기만 새로 계산되고, 변화와 무관한 목표 쪽 칸들의 $g$는 *그대로 재사용* 된다. 핵심은 칸 5(goal) 근처 계산을 다시 만지지 않는다는 점이다 — 역방향 탐색과 국소 전파의 효과다.
+이 예의 큐는 빈 경우 TopKey를 `[INF, INF]`로 반환하며, 초기에는 모든 g/rhs를 INF로 두고 goal의 rhs만 0으로 설정해 큐에 넣는다.
+
+간선 (3,4)가 끊기면 칸 3의 $rhs$가 후속자 4를 통한 경로를 잃는다. 칸 3은 불일치가 되어 큐에 들어가고, 그 영향이 *칸 3과 그 선행자(칸 2, 1)* 로만 전파된다. 우회로가 없으면 현재 start인 칸 1까지 불일치가 전파되어 $g(1)=rhs(1)=\infty$로 도달 불가를 판정한다. 이미 지나온 칸 0까지 반드시 갱신하고 끝나는 것은 아니다. 우회로가 있으면 그 분기만 새로 계산되고, 변화와 무관한 목표 쪽 칸들의 $g$는 *그대로 재사용* 된다. 핵심은 칸 5(goal) 근처 계산을 다시 만지지 않는다는 점이다 — 역방향 탐색과 국소 전파의 효과다.
 
 ```mermaid
 flowchart TB
@@ -700,7 +715,7 @@ D* Lite의 상태 유지(노드별 $g$, $rhs$, 큐) 비용이 작지 않아, *�
 
 ### 조합
 
-실전에서는 이들을 *조합* 한다. 축이 서로 다르므로 충돌하지 않고 쌓인다.
+실전에서는 이들을 *조합* 한다. 서로 다른 축을 맡아 조합할 수 있지만, 비용·코너 통과 정책과 추상 그래프 무효화를 일관되게 연결해야 한다.
 
 ```mermaid
 flowchart TB
@@ -709,12 +724,12 @@ flowchart TB
     Per --> JorD{클러스터 내부 정적?}
     JorD -->|정적| JPSp[JPS+ 룩업으로 빠른 격자 경로]
     JorD -->|동적| D[D* Lite로 변화분만 갱신]
-    JPSp --> Sm[Theta* 시야 평활화로 직선화]
+    JPSp --> Sm[LoS 후처리 평활화로 직선화]
     D --> Sm
     Sm --> Final[자연스러운 최종 경로]
 ```
 
-전형적 조합은 이렇다. 거대 맵의 장거리 골격은 HPA\*의 추상 그래프로 잡는다. 골격이 지나는 각 클러스터의 상세 경로는, 그 클러스터가 정적이면 JPS+ 룩업으로 즉시 채우고 동적이면 D* Lite로 변화분만 갱신한다. 마지막으로 완성된 셀 경로 위에 Theta\* 계열의 시야 평활화를 한 번 돌려 격자 계단과 entrance 우회 꺾임을 펴 직선으로 만든다.
+전형적 조합은 이렇다. 거대 맵의 장거리 골격은 HPA\*의 추상 그래프로 잡는다. 골격이 지나는 각 클러스터의 상세 경로는, 그 클러스터가 정적이면 JPS+ 룩업으로 즉시 채우고 동적이면 D* Lite로 변화분만 갱신한다. 마지막으로 완성된 셀 경로 위에 시야 기반 후처리 평활화를 한 번 돌려 격자 계단과 entrance 우회 꺾임을 펴 직선으로 만든다.
 
 ### 공통 한계: 표현
 
@@ -727,7 +742,7 @@ flowchart TB
 
 고급 길찾기는 표준 A*를 대체하지 않고, A*의 특정 비효율을 표적해 개선한다. JPS는 그리드 대칭($\binom{dx}{dy}$개의 동등 경로)을 이웃 가지치기로 하나의 정준 경로로 묶고, forced neighbor가 생기는 jump point만 큐에 넣어 같은 최단 경로를 훨씬 적은 노드로 찾는다. JPS+는 정적 그리드에서 점프 거리와 goal bounding을 사전 계산해 룩업 한 번으로 가속한다. Theta\*는 grandparent 시야로 격자를 벗어난 임의 각도 경로를 탐색 도중 만들고, Lazy Theta\*는 시야 검사를 확정 시점으로 지연해 그 비용을 줄인다.
 
-HPA\*는 맵을 클러스터로 계층화해 거대 맵의 장거리 쿼리를 추상 그래프에서 먼저 풀고 경로가 지나는 클러스터만 정제한다. D\* Lite는 역방향 탐색과 $rhs$ 기반 불일치 전파로 동적 환경의 변화분만 재계산하며, $k_m$ 보정으로 에이전트 이동에도 큐를 재사용한다. 각 기법은 속도(JPS), 품질(Theta\*), 규모(HPA\*), 동적성(D\* Lite)이라는 서로 다른 축을 맡으며, 축이 직교하므로 한 파이프라인에 함께 쌓을 수 있다.
+HPA\*는 맵을 클러스터로 계층화해 거대 맵의 장거리 쿼리를 추상 그래프에서 먼저 풀고 경로가 지나는 클러스터만 정제한다. D\* Lite는 역방향 탐색과 $rhs$ 기반 불일치 전파로 동적 환경의 변화분만 재계산하며, $k_m$ 보정으로 에이전트 이동에도 큐를 재사용한다. 각 기법은 속도(JPS), 품질(Theta\*), 규모(HPA\*), 동적성(D\* Lite)이라는 서로 다른 축을 맡으며, 전제와 캐시 갱신을 맞추면 한 파이프라인에 조합할 수 있다.
 
 이 모든 변형의 공통 한계는 그리드라는 표현 자체에 있다. 셀 크기 선택, 메모리, 3D 경사면 표현의 어려움은 알고리즘이 아니라 표현의 문제다. 걸을 수 있는 표면을 볼록 폴리곤으로 직접 분해하는 NavMesh가 이 표현의 한계를 다른 방식으로 푼다 — 그 위에서도 결국 A*가 돌지만, 무엇 위에서 도는가가 달라진다.
 

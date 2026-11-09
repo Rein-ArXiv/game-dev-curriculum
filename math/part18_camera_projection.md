@@ -745,6 +745,7 @@ bool SphereOutsideFrustum(vec3 center, float radius, const Plane* planes, int co
 //   OpenGL 표준        : nearZ = -1, farZ = 1
 //   DX / Vulkan 표준   : nearZ =  0, farZ = 1
 //   Reverse-Z          : nearZ =  1, farZ = 0
+// 전제: 역행렬이 존재하고 선택한 두 깊이의 역변환 결과 w != 0.
 std::array<vec3, 8> FrustumCornersWorld(mat4 viewProj, float nearZ, float farZ) {
     mat4 invVP = inverse(viewProj);
     std::array<vec3, 8> corners;
@@ -762,7 +763,7 @@ std::array<vec3, 8> FrustumCornersWorld(mat4 viewProj, float nearZ, float farZ) 
 }
 ```
 
-NDC 의 *8 정점을 world 로 역변환*. API · convention 에 따라 *nearZ, farZ 매개변수* 로 분리. 그림자 맵의 *cascade frustum* 결정 등에 활용.
+NDC 의 *8 정점을 world 로 역변환*. API · convention 에 따라 *nearZ, farZ 매개변수* 로 분리. 무한 far 투영의 far 끝은 $w=0$ 이므로 이 함수에 그대로 넣지 않고 유한한 슬라이스 거리에 대응하는 깊이를 골라야 한다 (7.6절). 그림자 맵의 *cascade frustum* 결정 등에 활용.
 
 ### 8.6 Cascaded Shadow Map (CSM)
 

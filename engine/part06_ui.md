@@ -166,6 +166,7 @@ struct FlexContainer {
     float gap = 8.0f;                 // 자식 간 간격
 
     void Arrange(const Rect& self) {
+        if (children.empty()) return; // size()-1의 unsigned underflow와 불필요한 분배 방지
         float fixedSum = 0, flexSum = 0;
         for (auto* c : children) {
             if (c->flexGrow > 0) flexSum += c->flexGrow;
@@ -317,7 +318,7 @@ struct Binding {
 class Widget {
     std::vector<SubscriptionToken> bindings_;   // 내가 건 구독들
 public:
-    ~Widget() {
+    virtual ~Widget() {
         for (auto& t : bindings_) t.Unsubscribe();  // 죽기 전에 전부 해제
     }
 };
@@ -461,7 +462,7 @@ Widget* HitTest(Widget* node, Vec2 p) {
 }
 ```
 
-그리기와 히트 테스트는 부모 경계를 같은 규칙으로 처리해야 한다. `clipChildren=false`면 자식이 부모 rect 밖으로 나가도 그려지므로 히트 테스트도 그 자식을 통과시키고, 자르려면 `BuildBatch`도 같은 경계에서 자식 순회를 멈춘다. 스크롤·캡처·외부 scissor가 경계를 만든다면 그 clip을 `worldRect`에 반영해 셋이 같은 사각형을 쓴다. 회전·스케일이 있으면 점을 역 local 변환으로 자식 공간에 옮겨 hit한다.
+그리기와 히트 테스트는 부모 경계를 같은 규칙으로 처리해야 한다. `clipChildren=false`면 자식이 부모 rect 밖으로 나가도 그려지므로 히트 테스트도 그 자식을 통과시키고, 자르려면 `BuildBatch`는 누적 clip과 자식의 그리기 영역을 교차시키고 같은 scissor·stencil 규칙을 적용한다. 일부만 보이는 자식까지 순회에서 통째로 빼면 안 된다. 스크롤·외부 scissor의 누적 clip은 별도로 유지하고 hit-test에서도 그 clip을 검사한다. worldRect 자체를 clip 사각형으로 덮어쓰면 원래 geometry와 좌표 변환을 잃는다. 회전·스케일이 있으면 점을 역 local 변환으로 자식 공간에 옮겨 hit한다.
 
 히트 테스트의 함정은 비직사각 위젯과 투명 영역이다. 원형 버튼은 원·다각형 같은 명시적 hit shape를 쓰는 편이 빠르고 접근성 영역도 예측 가능하다. 텍스처 알파 테스트가 꼭 필요하면 CPU용 마스크·저해상도 비트맵을 따로 보관하며, 시각적으로 투명하더라도 의도한 최소 터치 영역은 유지해야 한다. 전체 화면 투명 패널은 `hitTestVisible`과 모달 정책을 명시하지 않으면 아래 입력을 조용히 삼킬 수 있다.
 
@@ -731,13 +732,14 @@ flowchart LR
 ```cpp
 struct VirtualList {
     int   totalItems;            // 1000
-    float itemHeight = 48;
+    float itemHeight = 48;       // 유한한 양수; 0이면 윈도잉 나눗셈 불가
     float scrollY = 0;
     int   visibleCount = 0;      // 이번 프레임에 쓰는 위젯 수 (pool_ capacity와 구분)
     std::vector<Widget*> pool_;  // 화면 분량 + 여유분만 (예: 24개)
 
     void Update(float viewportH) {
-        if (!std::isfinite(viewportH) || viewportH < 0 || !std::isfinite(scrollY)) return;
+        if (!std::isfinite(viewportH) || viewportH < 0 || !std::isfinite(scrollY) ||
+            !std::isfinite(itemHeight) || itemHeight <= 0) return;
         int total = std::max(0, totalItems);
         float extent = total * itemHeight;
         // 데이터 shrink·overscroll 뒤에도 scroll을 현재 content extent로 clamp
@@ -797,7 +799,7 @@ int FindFirstVisible(float scrollY) {
 
 ### UI는 안 보이는 게 많다
 
-UI 버그의 절반은 *화면에 안 나타나는 것* 이다 — 위젯이 분명 있는데 0×0 크기로 접혔거나, 투명 패널이 입력을 삼키거나, 부모가 visible=false라 통째로 안 보이거나, 캔버스 재빌드가 매 프레임 도는데 화면은 멀쩡하거나. 이런 문제는 화면만 봐서는 원인을 모른다. 그래서 *시각화 도구* 가 UI 디버깅의 필수다.
+UI 버그에는 *화면만 봐서는 원인이 드러나지 않는 것* 이 있다 — 위젯이 분명 있는데 0×0 크기로 접혔거나, 투명 패널이 입력을 삼키거나, 부모가 visible=false라 통째로 안 보이거나, 캔버스 재빌드가 매 프레임 도는데 화면은 멀쩡하거나. 이런 문제는 화면만 봐서는 원인을 모른다. 그래서 *시각화 도구* 가 UI 디버깅의 필수다.
 
 ### 위젯 인스펙터
 

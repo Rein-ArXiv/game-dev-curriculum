@@ -486,13 +486,16 @@ UPDATE player_item
  WHERE item_id = :item_id
    AND owner_id = :from_id;
 
--- affected_rows가 1이 아니면 소유자가 아니거나 이미 거래됨
+-- 여기서 애플리케이션이 affected_rows를 검사한다.
+-- 1이 아니면 ROLLBACK하고 아래 INSERT와 COMMIT을 실행하지 않는다.
 
 INSERT INTO item_trade(trade_id, item_id, from_id, to_id)
 VALUES (:trade_id, :item_id, :from_id, :to_id);
 
 COMMIT;
 ```
+
+위 SQL은 애플리케이션의 분기와 함께 실행하는 절차다. 주석만 있는 SQL을 그대로 일괄 실행하면 갱신된 행이 없어도 거래 기록이 삽입된다. 재시도는 확실히 롤백된 직렬화·데드락 오류에 적용하며, 커밋 응답을 잃어 결과가 불명확한 경우에는 `trade_id`로 기존 결과를 조회하는 멱등성 계약이 별도로 필요하다.
 
 애플리케이션 코드는 DB 오류를 "예외가 났다"로만 취급하면 안 된다. 어떤 오류는 재시도해야 하고, 어떤 오류는 사용자에게 실패로 반환해야 한다.
 

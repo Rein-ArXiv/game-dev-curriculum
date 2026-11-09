@@ -1,10 +1,10 @@
 # 게임 네트워킹 시리즈
 
-인터넷의 packet 전달에서 시작해 실제 서버 socket runtime, 게임용 전송 protocol, 권위 simulation, 상태 복제와 지연 은폐까지 하나의 데이터 경로로 이해하기 위한 시리즈다. `network`와 `multiplayer`를 별도 축으로 나누지 않는다. 전송 계층과 게임 netcode 사이의 경계가 실제 session·queue·tick 계약으로 연결돼야 하기 때문이다.
+인터넷의 packet 전달에서 시작해 실제 서버 socket runtime, 게임용 전송 protocol, 권위 simulation, 상태 복제와 지연 은폐까지 하나의 데이터 경로로 이해하기 위한 시리즈다. 전송 계층의 동작이 게임의 session·queue·tick 계약에 어떻게 이어지는지 살펴본다.
 
 ## 공통 핵심
 
-| # | 문서 | 소유하는 모델 |
+| # | 문서 | 다루는 내용 |
 |---|---|---|
 | 01 | [인터넷과 경로](part01_internetworking.md) | 계층·IP·routing·latency·NAT·IPv6 |
 | 02 | [전송 계층](part02_transport.md) | UDP·TCP·신뢰성·흐름 제어·혼잡 제어 |
@@ -27,11 +27,11 @@
 | 14 | [음성 통신](part14_voice.md) | codec·jitter buffer·SFU·안전·품질 운영을 다룰 때 |
 | 15 | [신뢰 경계와 Anti-Cheat](part15_anticheat_trust.md) | 서버 검증·행동 탐지·오탐 예산·제재 정책을 설계할 때 |
 
-## 시리즈 경계
+## 함께 읽을 내용
 
-이 시리즈는 실시간 데이터 경로를 소유한다. 로그인, 계정, 영속 경제, 파티, 매치메이킹, 서버 할당과 fleet 운영은 `live_service`의 제어 경로다. 경계는 짧은 수명의 접속 권한이다. 제어 경로가 server endpoint와 token을 발급하고, 게임 서버가 token을 검증해 실시간 session을 만든다.
+로그인, 계정, 영속 경제, 파티, 매치메이킹, 서버 할당과 fleet 운영은 `live_service`에서 이어서 다룬다. 매치메이커가 server endpoint와 token을 발급하고 게임 서버가 token을 검증해 실시간 session을 만드는 흐름으로 연결된다.
 
-운영체제별 I/O의 내부 의미는 `system`이 소유한다. 이 시리즈의 socket runtime은 readiness와 completion의 공통 수명 계약을 다루며, Linux `epoll`·`io_uring`과 Windows IOCP의 커널 내부를 반복하지 않는다.
+운영체제별 I/O의 내부 의미는 `system`에서 확인할 수 있다. 이 시리즈의 socket runtime에서 다루는 readiness와 completion의 수명 계약을 Linux `epoll`·`io_uring`과 Windows IOCP의 동작과 연결해 보자.
 
 ## 완료 조건
 
@@ -42,5 +42,5 @@
 - socket close와 in-flight I/O completion 사이에서 session 수명이 안전한가?
 - 권위 server tick과 client render clock을 분리하고 prediction 오차를 재현할 수 있는가?
 - snapshot byte budget과 AOI 전이가 congestion과 정보 노출을 함께 통제하는가?
-- packet trace와 initial state만으로 실패 session을 deterministic하게 재생할 수 있는가?
+- packet 내용과 적용 순서, 초기 상태, 빌드·에셋과 외부 사건을 보존해 실패 session을 재현할 수 있는가?
 

@@ -47,7 +47,7 @@ flowchart LR
 
 게임 엔진이 다루는 입력은 결국 OS와 드라이버가 만든 신호다. 그 신호가 게임에 도달하는 형태는 크게 둘이다. 하나는 *이벤트(event)* — OS가 메시지 큐에 "키 1번이 눌림", "마우스가 (x,y)로 이동"을 *밀어 넣는다*. 다른 하나는 *폴링(polling)* — 게임이 매 프레임 "지금 1번 키 상태가 뭐냐", "스틱 좌표가 얼마냐"를 *직접 묻는다*.
 
-Windows의 경우 키보드·마우스의 표준 메시지(`WM_KEYDOWN`, `WM_MOUSEMOVE`)는 이벤트 모델이고, Raw Input(`WM_INPUT`)도 메시지로 도착하지만 가속·탄도 곡선이 적용되지 않은 원시 값을 준다. `RAWMOUSE`의 `usFlags`는 *상대 이동(`MOUSE_MOVE_RELATIVE`)* 과 *절대 이동(`MOUSE_MOVE_ABSOLUTE`)* 을 구분하며, 절대 이동은 가상 데스크톱 좌표(장치에 따라 정규화 범위일 수 있음)를 보고한다 — 상대 카운트와 화면 좌표를 같은 필드로 섞으면 안 된다. 게임패드의 XInput은 *폴링 전용* 이다 — `XInputGetState`로 매 프레임 패드 상태 전체를 한 번에 긁어온다. 즉 현실의 엔진은 두 모델을 *동시에* 다룬다.
+Windows의 경우 키보드·마우스의 표준 메시지(`WM_KEYDOWN`, `WM_MOUSEMOVE`)는 이벤트 모델이고, Raw Input(`WM_INPUT`)도 메시지로 도착하지만 가속·탄도 곡선이 적용되지 않은 원시 값을 준다. `RAWMOUSE`의 `usFlags`는 *상대 이동(`MOUSE_MOVE_RELATIVE`)* 과 *절대 이동(`MOUSE_MOVE_ABSOLUTE`)* 을 구분하며, 절대 이동은 0~65535의 정규화 좌표를 보고한다. MOUSE_VIRTUAL_DESKTOP이면 전체 가상 데스크톱, 아니면 주 모니터에 매핑한다 — 상대 카운트와 화면 좌표를 같은 필드로 섞으면 안 된다. 게임패드의 XInput은 *폴링 전용* 이다 — `XInputGetState`로 매 프레임 패드 상태 전체를 한 번에 긁어온다. 즉 현실의 엔진은 두 모델을 *동시에* 다룬다.
 
 ### 두 모델의 트레이드오프
 
@@ -91,7 +91,7 @@ void BeginFrame(InputState& s) {
     for (Event& e : DrainEventQueue()) {
         if (e.type == KeyDown && !s.down[e.key]) {
             s.down[e.key] = true;  s.pressedEdge[e.key] = true;
-        } else if (e.type == KeyUp) {
+        } else if (e.type == KeyUp && s.down[e.key]) {
             s.down[e.key] = false; s.releasedEdge[e.key] = true;
         } else if (e.type == MouseMove) {
             s.mouseDx += e.dx;     s.mouseDy += e.dy;   // 델타는 합산
@@ -192,7 +192,7 @@ $$\mathrm{Var}(L_{\text{total}})\approx\sum_i\frac{T_i^2}{12}+\sum_j\mathrm{Var}
 
 수집 위치는 입력이 마감 시각을 통과하느냐를 바꾼다. 시뮬레이션의 입력 마감 직전에 읽으면 더 최근 사건을 같은 틱에 넣을 수 있지만, OS 이벤트 펌프와 작업 의존성을 무시한 채 무조건 늦추면 오히려 마감 실패와 지터가 생긴다. 그래서 저지연 설계는 수집, 시뮬레이션, 카메라 late update의 마감 시각을 따로 측정한다.
 
-실패 경계 둘. 재샘플링 클록들이 *상관* 되면(예: 입력 장치가 vsync에 동기된 드문 경우) 균등 가정이 깨져 지연이 0 또는 $T$로 잠기고, 매끄러운 지터 대신 주기적 비트 스터터가 난다. 또 프레임레이트가 미고정(언캡)이면 $T_{\text{frame}}$가 비정상(non-stationary)이라 실제 퍼짐이 정상 상태 $\sigma$보다 넓어진다.
+실패 경계 둘. 재샘플링 클록들이 *상관* 되면(예: 입력 장치가 vsync에 동기된 드문 경우) 균등 가정이 깨져 특정 위상의 대기시간에 고정되거나 클록 차이에 따른 주기적 변동이 생길 수 있다. 언캡 프레임레이트에서는 주기 자체가 변하므로 고정 T의 분산식을 그대로 적용하지 않는다. 다만 주기가 가변이라는 사실만으로 통계적 비정상성이나 더 큰 분산이 필연인 것은 아니다.
 
 ### vsync와 입력 지연의 관계
 
@@ -401,7 +401,7 @@ void OnDeviceDisconnected(DeviceId id) {
 ```cpp
 // 가상 조이스틱: 첫 터치를 원점으로 잡고 그 포인터를 캡처한다
 void UpdateVirtualStick(TouchPoint t) {
-    if (t.phase == Began) { activeId_ = t.id; origin_ = t.pos; }  // owner ID 캡처
+    if (t.phase == Began && activeId_ == kNoTouch) { activeId_ = t.id; origin_ = t.pos; }  // owner ID 캡처
     if (t.id != activeId_) return;                                // 다른 손가락 무시
     if (t.phase == Ended || t.phase == Cancelled) {               // 끝·취소(포커스 상실 포함)
         SetAxis(Action::MoveX, 0.0f);                             // 중립화
@@ -432,10 +432,15 @@ struct BufferedInput {
 std::deque<BufferedInput> buffer_;
 const double kBufferWindow = 0.15;   // 제품 플레이테스트용 예시 값
 
-void PushInput(Action a, double now) { buffer_.push_back({a, now}); }
+void PushInput(Action a, double now) {
+    PruneExpired(now); // timestamp가 정렬된 큐의 만료 항목을 앞에서 제거
+    if (buffer_.size() == kMaxBufferedInputs) buffer_.pop_front(); // 예제 정책: 가장 오래된 입력 폐기
+    buffer_.push_back({a, now});
+}
 
 // 액션이 가능해진 순간 호출: 윈도우 내 입력이 있으면 소비
 bool ConsumeBuffered(Action a, double now) {
+    PruneExpired(now);
     for (auto it = buffer_.begin(); it != buffer_.end(); ++it) {
         if (it->action == a && now - it->timestamp <= kBufferWindow) {
             buffer_.erase(it);
@@ -471,7 +476,7 @@ void UpdateButton(bool down, bool pressedEdge, bool releasedEdge, double now) {
 }
 ```
 
-`now`는 단조 증가해야 하고 각 엣지는 시간순으로 한 번만 전달한다. 임계값을 넘긴 채 떼면 홀드이고, release 시점의 `duration`이 임계값과 *같으면* 이 예제에서는 홀드로 정한다(제품 정책에 따라 탭으로 둘 수도 있다). 이미 홀드를 발행했으면 release에서 중복 발행하지 않으며, 포커스 상실·장치 분리는 이 판정과 별도로 `Cancel`로 상태를 중립화한다.
+`now`는 같은 단조 시계 기준이며 각 엣지는 그 사건의 timestamp와 함께 시간순으로 한 번씩 전달한다. 이 함수에는 1절의 프레임 집계 pressed/released를 한 번에 넣지 않는다. 한 프레임 안의 down+up을 합쳐 같은 now로 호출하면 실제 hold 시간을 잃으므로, 원시 전이 큐를 순회하고 전이 사이에는 현재 시각으로 hold 진행을 검사한다. 임계값을 넘긴 채 떼면 홀드이고, release 시점의 `duration`이 임계값과 *같으면* 이 예제에서는 홀드로 정한다(제품 정책에 따라 탭으로 둘 수도 있다). 이미 홀드를 발행했으면 release에서 중복 발행하지 않으며, 포커스 상실·장치 분리는 이 판정과 별도로 `Cancel`로 상태를 중립화한다.
 
 ### 시퀀스 인식
 
@@ -497,7 +502,7 @@ bool MatchMotion(const std::vector<int>& pattern, double maxGap, double now) {
 
 ### 버퍼 오버플로우
 
-버퍼는 무한하지 않다. 입력이 폭주하거나(연타) 프레임이 길게 멈추면 버퍼가 찬다. *고정 크기 링 버퍼* 로 오래된 입력을 자동 폐기하는 것이 안전하다 — 어차피 선입력 윈도우를 넘긴 입력은 무효이므로, 윈도우보다 넉넉한 크기면 충분하다. 동적 할당으로 버퍼를 키우면 실시간성을 해친다.
+버퍼는 무한하지 않다. 입력이 폭주하거나(연타) 프레임이 길게 멈추면 버퍼가 찬다. *고정 크기 링 버퍼* 로 오래된 입력을 자동 폐기하는 것이 안전하다 — 어차피 선입력 윈도우를 넘긴 입력은 무효이므로, 허용 입력률과 윈도우로부터 용량을 정하되 초과 시 폐기·진단 정책을 둔다. 시간 윈도우만으로 유한 개수를 보장하지는 않는다. 동적 할당으로 버퍼를 키우면 실시간성을 해친다.
 
 ## 7. 결정론과 리플레이
 
@@ -585,7 +590,7 @@ sequenceDiagram
 
 ```cpp
 struct InputLatencyProbe {
-    double deviceTimestamp;   // OS가 준 입력 발생 시각
+    double deviceTimestamp;   // OS/API timestamp를 공통 단조 시계로 환산한 시각(실제 센서 시각과 다를 수 있음)
     double collectedTime;     // 게임이 수집한 시각
     double simulatedTime;     // 시뮬레이션에 반영된 시각
     double renderedTime;      // 렌더 제출 시각
@@ -642,7 +647,7 @@ void InjectScripted(uint32_t tick, const std::vector<ScriptedInput>& script) {
 
 ## 결론
 
-입력 시스템의 모든 결정은 *반응성 ↔ 일관성* 의 줄다리기 위에 놓인다. 입력을 시뮬레이션 직전에 가장 늦게 읽으면 지연이 줄지만, 고정 타임스텝에 가두면 재현성이 생긴다. 폴링은 단순하지만 프레임 사이 사건을 놓치고, 이벤트는 정확하지만 비동기로 밀린다. 데드존은 드리프트를 막지만 미세 입력을 죽이고, 선입력 버퍼는 관용을 주지만 의도치 않은 발동을 부른다 — 모두 이 두 축 사이에서 어디에 무게를 둘지의 선택이다.
+입력 시스템의 모든 결정은 *반응성 ↔ 일관성* 의 줄다리기 위에 놓인다. 입력을 시뮬레이션 직전에 가장 늦게 읽으면 지연이 줄지만, 고정 틱에 입력을 배정하면 재현 조건을 명시하기 쉬워진다. 폴링은 단순하지만 프레임 사이 사건을 놓치고, 이벤트는 전이 이력을 보존할 수 있지만 보고·병합·큐 지연의 제약이 있다. 데드존은 드리프트를 막지만 미세 입력을 죽이고, 선입력 버퍼는 관용을 주지만 의도치 않은 발동을 부른다 — 모두 이 두 축 사이에서 어디에 무게를 둘지의 선택이다.
 
 이 줄다리기를 다루는 기반 구조는 일관된다. 이벤트로 수집해 프레임 상태로 합성하고, 물리 입력을 액션으로 추상화해 리바인딩·다중 장치·접근성을 한 겹의 간접으로 흡수하며, 데드존과 응답 곡선이 아날로그 신호를 길들이고, 선입력 버퍼와 엣지 검출이 타이밍 관용을 만들고, 틱 단위 입력 명령의 직렬화가 결정론·리플레이·롤백·테스트를 한 데이터 모델로 통일한다. 마우스 델타와 스틱 기울기를 혼동하지 않는 것, 엣지 정보를 잃지 않는 것 같은 작은 규율이 이 모든 것의 바닥에 깔린다.
 

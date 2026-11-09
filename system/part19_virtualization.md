@@ -196,7 +196,7 @@ static void vmx_vcpu_run(struct kvm_vcpu *vcpu) {
     // exit trampoline으로 진입한다. 따라서 아래 C 문장은 VM-exit 복귀
     // 지점이 아니라, VMLAUNCH가 VM-fail(CF=1 또는 ZF=1)로 실패했을 때만
     // fall-through하는 경로다.
-    u32 cf, zf;
+    u8 cf, zf;  // setcc는 1바이트 결과를 쓴다
     asm volatile(
         "vmlaunch\n\t"
         "setc %0\n\t"   // VM-fail(CF)
@@ -403,7 +403,7 @@ memcpy((void *)region.userspace_addr, guest_code, sizeof(guest_code));
 1. `KVM_RUN` → VM Entry
 2. 게스트 코드 실행 (`mov`, `out`)
 3. `out` 명령어 → VM Exit (EXIT_REASON_IO_INSTRUCTION)
-4. QEMU가 UART 에뮬레이션 수행
+4. 위 예제의 사용자 공간 `handle_io_out`이 포트 출력을 처리 (QEMU를 VMM으로 쓸 때는 QEMU가 장치를 에뮬레이션)
 5. VM Entry로 복귀
 6. `hlt` → VM Exit (EXIT_REASON_HLT)
 7. 종료
@@ -542,6 +542,7 @@ struct vring_used {
 ```
 
 **패킷 전송 흐름:**
+다음은 split virtqueue의 소유권 흐름을 축약한 의사 코드다. 실제 전송은 virtqueue API가 scatter-gather 매핑과 descriptor chain, index 게시 전 메모리 순서, feature 협상을 처리한다. `virt_to_phys`와 단일 길이만으로 임의의 non-linear skb를 제출할 수 없다.
 ```c
 // 게스트 (drivers/net/virtio_net.c)
 static int virtnet_xmit(struct sk_buff *skb, struct net_device *dev) {
@@ -555,7 +556,7 @@ static int virtnet_xmit(struct sk_buff *skb, struct net_device *dev) {
     vring->avail.idx++;
 
     // 3. 호스트에게 알림 (kick)
-    virtqueue_kick(vq);  // VM Exit 발생 (ioeventfd 사용)
+    virtqueue_kick(vq);  // 필요하면 backend에 알림 (전송·설정에 따라 경로가 달라짐)
 
     return NETDEV_TX_OK;
 }
@@ -596,7 +597,7 @@ static void handle_tx(struct vhost_net *net) {
 used slot index는 shared `used.idx`를 매번 새로 읽는 대신 로컬에서 monotonic하게 증가시켜 `% queue_size`로 위치를 구한다. 여러 completion을 게시해도 각기 다른 slot을 갱신하려면 이 로컬 index를 전진시켜야 한다. descriptor body를 먼저 쓴 뒤 `smp_wmb()` 같은 publish barrier로 shared `used.idx`를 공개하고, 게스트는 index를 acquire로 관측한 뒤 slot을 읽는다. used ring에 게시된 뒤에는 해당 descriptor를 게스트가 다시 소유하므로 하이퍼바이저는 재사용하지 않는다.
 
 **성능 개선:**
-- VM Exit 횟수: 패킷당 1회 → 배치 단위 1회
+- 여러 descriptor를 묶어 알림을 줄이면 패킷당 VM Exit 비용을 낮출 수 있다. 실제 횟수는 알림 억제와 backend 경로에 달려 있다.
 - 처리량은 packet size, batching, offload, queue 수와 host CPU 예산에 따라 달라지므로 특정 배수를 일반화하지 않는다. 같은 조건에서 packets/s, CPU time, p99 latency와 drop을 함께 비교한다.
 
 ### vhost: 커널 공간 가속

@@ -530,7 +530,7 @@ $$
 
 첫째, *상관* 이다. "정밀도가 더해진다"는 독립 가정에서만 성립한다. 같은 원관측을 두 분대원이 중계하면 두 측정은 거의 완전 상관이라, 독립으로 융합하면 융합 분산이 실제보다 작게 나와 *과신* 한다. 출처 ID와 관측 계보로 중복을 제거하고, 상관을 알고 있으면 교차 공분산까지 추적하는 track-to-track fusion을 사용한다. 상관을 알 수 없으면 covariance intersection처럼 과신하지 않는 보수적 융합이 필요하다.
 
-둘째, *잘못 보고된 분산* 이다. $1/\sigma^2$ 가중은 작은 $\sigma$를 강하게 신뢰하므로, 이상치가 작은 `positionSigma`로 들어오면 융합을 지배한다. 융합 전에 게이팅 — 마할라노비스 거리 $d_i^2 = (x_i-\hat\mu)^2/\sigma_i^2$가 $\chi^2$ 임계를 넘는 측정을 배제 — 이 필요하다. 본문이 말한 "거리 임계 클러스터링"이 바로 이 게이팅이다.
+둘째, *잘못 보고된 분산* 이다. $1/\sigma^2$ 가중은 작은 $\sigma$를 강하게 신뢰하므로, 이상치가 작은 `positionSigma`로 들어오면 융합을 지배한다. 융합 전에 측정과 예측이 같은 대상을 가리키는지 게이팅한다. 서로 독립인 1차원 예측과 측정이라면 혁신의 분산은 두 분산의 합이므로 $d_i^2=(x_i-\hat\mu)^2/(\sigma_i^2+\sigma_{\text{pred}}^2)$를 쓴다. 상관이 있으면 교차 공분산도 반영해야 하며 단순 거리 임계 클러스터링과 같은 검사는 아니다.
 
 셋째, *모순 측정은 모델 오설정* 이다. BLUE는 모든 측정이 *같은* $\mu$를 추정한다고 가정한다. 앞과 뒤에서 동시에 난 두 소리가 서로 다른 대상이라면 평균은 둘 다 아닌 유령점이다. 거리 임계로 클러스터를 먼저 분리하고 클러스터 *내부* 만 융합해야 한다.
 
@@ -542,13 +542,14 @@ $$
 // 역분산(정밀도) 가중 융합 — 정적 칼만 갱신과 동형.
 // 게이팅을 통과해 같은 대상으로 묶인 record 만 넘긴다.
 // 서로 다른 timestamp 의 측정은 공통 기준 시각 now 로 예측한 위치에서 융합한다.
+// PredictedSigma는 관측 시각의 positionSigma에 now까지의 과정 잡음을 반영한다.
 // 위치 정확도는 positionSigma(1σ)로만 가중하고, confidence 는 게이팅에서 별도 처리한다.
 std::optional<Vector3> FusePositionsBLUE(const std::vector<MemoryRecord>& cluster,
                                          double now, float& outFusedSigma) {
     Vector3 weighted{0, 0, 0};
     float   precisionSum = 0.0f;                  // Σ 1/σ²  → 융합 정밀도
     for (const auto& r : cluster) {
-        float sigma = std::max(r.positionSigma, kMinSigma); // 위치 1σ, 0 나눗셈 바닥
+        float sigma = std::max(PredictedSigma(r, now), kMinSigma); // 예측된 위치 1σ
         float prec  = 1.0f / (sigma * sigma);      // 위치 정확도만 — confidence 는 섞지 않는다
         weighted     += PredictedPosition(r, now) * prec;
         precisionSum += prec;
@@ -622,6 +623,7 @@ void UpdateCombatBlackboard(WorldModel& model, Blackboard& bb, double now) {
         bb.Set(TargetPos, model.PositionOf(*enemy));
         bb.Set(HasTarget, true);
     } else {
+        bb.Clear(Target);            // 유효 후보가 없으면 이전 대상 ID를 지운다
         bb.Set(HasTarget, false);
         // target entity는 잃었지만 마지막 위치는 별도 키로 보존해 수색에 사용한다.
     }
@@ -713,7 +715,7 @@ void WorldModel::DebugDraw(DebugRenderer& dr, double now) const {
 
 이 한 뷰가 "NPC가 빈 벽을 쏘는" 버그의 원인을 즉시 드러낸다 — 거기에 신뢰도 0.8짜리 시야 record가 남아 있고 불확실성 반경이 아직 작으면, decay가 너무 느린 것이다. 반경이 거대하면 query가 불확실성을 무시하고 중심점만 겨냥하는 것이다. 색으로 출처를 보면 "소리를 시야처럼 신뢰"하는 버그가 노란 구를 정확히 조준하는 모습으로 보인다.
 
-World Overlay가 읽는 `entities_`는 writer가 동시에 갱신할 수 있다. 다중 스레드라면 이 디버그 뷰가 라이브 컨테이너를 직접 순회하지 않고 *게시된 스냅샷*을 읽어야 한다. 게시(publish)는 release, 그 스냅샷의 읽기 완료는 acquire로 짝을 맞추고, 이전 버퍼는 모든 reader가 다 읽은 뒤(reuse barrier/epoch)에만 다음 write용으로 재사용한다. 단일 스레드이거나 프레임 완료 barrier가 있으면 이 수명 계약이 자동으로 성립한다.
+World Overlay가 읽는 `entities_`는 writer가 동시에 갱신할 수 있다. 다중 스레드라면 이 디버그 뷰가 라이브 컨테이너를 직접 순회하지 않고 *게시된 스냅샷*을 읽어야 한다. 게시(publish)의 release는 reader의 획득 acquire와 짝을 맞추고, 읽기 완료 신호의 release는 재사용하려는 writer의 acquire와 짝을 맞춘다. 이전 버퍼는 모든 reader가 다 읽은 뒤(reuse barrier/epoch)에만 다음 write용으로 재사용한다. 단일 스레드이거나 프레임 완료 barrier가 있으면 이 수명 계약이 자동으로 성립한다.
 
 ### Memory Timeline
 

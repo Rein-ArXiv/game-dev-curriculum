@@ -215,7 +215,7 @@ flowchart LR
 
 위 문단의 "오프셋 밀림"은 정성적 비유로 끝낼 문제가 아니다. *어디에 청크 경계를 긋느냐* 가 델타 크기를 결정 단위로 바꾸고, 그 차이는 닫힌 식으로 유도된다. 청크 스토어 방식(클라이언트가 가진 청크 해시와 매니페스트를 비교해 *없는 청크만* 받는 방식, 3절 매니페스트 절)을 전제로 두 경계 전략을 비교한다.
 
-전제: 청크 스토어와 매니페스트 비교(매니페스트 절). 이론적 모델만 여기서 소유한다.
+전제: 청크 스토어와 매니페스트를 비교하는 이상화된 모델이다.
 
 **고정 블록의 경계 이동 비용.** 파일 크기를 $N$, 블록 크기를 $B$로 고정하면 블록은 $N/B$개이고 경계는 위치 $0,B,2B,\dots$에 *못 박힌다*. 새 버전이 위치 $p$에 $\delta$바이트를 삽입하면 $p$ 이후의 모든 바이트가 $\delta$만큼 뒤로 밀린다. 블록 경계는 위치에 못 박혀 있으므로 $\delta\bmod B \neq 0$이고 데이터가 비반복적이면, 블록 $j=\lfloor p/B\rfloor$ 이후는 *담는 내용* 이 어긋나 해시가 달라진다. 반대로 $\delta$가 $B$의 배수면 뒤쪽 블록은 정확히 $\delta/B$블록만큼 이동한 옛 블록과 내용이 같아, 내용 해시 기반 청크 스토어에서는 재사용된다(모든 뒤쪽 청크가 항상 달라지는 것은 아니다). 즉 아래 근사는 *비정렬 삽입* 과 *중복 청크 없음* 을 전제로 한다. 재전송 블록 수는
 
@@ -241,7 +241,7 @@ $$
 
 에 머무는 규모이며(결정적 상한이 아니다), 그 이전·이후의 청크는 바이트가 동일하므로 해시가 일치해 재전송되지 않는 것으로 모델링된다. 이 모델에서 재전송 규모는 $N$에 의존하지 않는다.
 
-**정량 이득.** 삽입 한 곳에 대해 고정 블록은 기대 $N/2$를 재전송하고, CDC는 편집을 머금은 한두 청크만, 즉 $\delta + c\,\bar B$($c\approx 2$)를 재전송한다. $\delta \gg \bar B$가 아닐 때의 비율은
+**정량 이득.** 삽입 한 곳에 대해 고정 블록은 기대 $N/2$를 재전송하고, CDC는 삽입 데이터와 경계의 청크를 합쳐 대략 $\delta + c\,\bar B$($c\approx 2$)를 재전송한다. 특히 $\delta \gg \bar B$일 때의 비율은
 
 $$
 \frac{N/2}{\delta + 2\bar B}\;\xrightarrow{\ \delta \gg \bar B\ }\;\frac{N}{2\delta}.
@@ -512,7 +512,7 @@ ALTER TABLE players ADD COLUMN nickname_v2 VARCHAR(32) NULL;
 ```cpp
 // 2. 이중 쓰기: 새 코드는 두 컬럼 모두에 쓴다 (옛 코드와 공존 가능)
 void UpdateNickname(PlayerId id, const std::string& name) {
-    db.Exec("UPDATE players SET nickname=?, nickname_v2=? WHERE id=?",
+    db.Exec("UPDATE players SET nickname=?, nickname_v2=? WHERE player_id=?",
             name, Normalize(name), id);
 }
 ```

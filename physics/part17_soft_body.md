@@ -352,7 +352,7 @@ tet이 뒤집히면 signed volume의 부호가 바뀌고 deformation gradient의
 
 ### 4.7 corotational FEM (한 발 앞서)
 
-PBD/XPBD와 마찬가지로 FEM도 *deformation gradient* $F = \partial \vec{x} / \partial \vec{X}$ 에서 응력을 계산하는 구성 모델을 쓸 수 있다. *선형 소변형(linear small-strain)* strain $S - I$ 를 그대로 쓰면 큰 회전에서 객관성(objectivity)이 깨져 비물리적 응력이 생긴다. polar decomposition $F = R S$ 에서 $R$ 을 분리해 회전을 제거한 *corotational FEM* 은 이 문제를 줄이는 한 가지 모델이다.
+PBD/XPBD와 마찬가지로 FEM도 *deformation gradient* $F = \partial \vec{x} / \partial \vec{X}$ 에서 응력을 계산하는 구성 모델을 쓸 수 있다. *선형 소변형(linear small-strain)* strain $\varepsilon=\tfrac12(F+F^T)-I$를 큰 회전에 그대로 적용하면 객관성(objectivity)이 깨져 비물리적 응력이 생긴다. polar decomposition $F = R S$ 에서 $R$ 을 분리해 회전을 제거하고 $S-I$ 같은 회전 불변 변형률을 사용하는 *corotational FEM*은 이 문제를 줄이는 한 가지 모델이다.
 
 따라서 “회전 시 stress 발산”은 일반 FEM 전체의 한계가 아니라 선형 소변형 strain 모델의 한계다. 선형 FEM, corotational FEM, 비선형 hyperelastic FEM은 서로 다른 에너지를 정의하고, 그 에너지를 어떤 solver로 최소화하는지는 별도 축이다. PBD + shape matching이 corotational과 근사적으로 유사한 시각 효과를 줄 수 있지만, corotational FEM은 PBD의 자연 확장이나 동의어가 아니다.
 

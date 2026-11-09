@@ -47,9 +47,9 @@ HLSL과 GLSL은 둘 다 C에서 갈라져 나온 문법을 가져 표면적으�
 | 텍스처 | `Texture2D<float4>` | `sampler2D`에 결합 |
 | 샘플러 | `SamplerState` | `sampler2D`에 결합 |
 | 정수 | `int`, `uint` | `int`, `uint` |
-| 16비트 부동소수 | `float16_t` (SM 6.2+) | `float16_t`, `mediump` |
+| 16비트 부동소수 | `float16_t` (SM 6.2+, 옵션·기능 지원 필요) | 확장 `float16_t`; `mediump`는 정밀도 한정자로 정확히 16비트 타입을 뜻하지 않음 |
 
-가장 구조적인 차이는 텍스처와 샘플러의 관계다. GLSL에서 `sampler2D`는 텍스처 이미지와 샘플링 상태(필터링, 래핑)를 한 객체로 묶는다. HLSL은 `Texture2D`(이미지 데이터)와 `SamplerState`(어떻게 읽을지)를 분리한다. 이 분리는 하나의 텍스처를 여러 샘플러로 읽거나, 하나의 샘플러를 여러 텍스처에 공유하는 조합을 자연스럽게 표현한다. DX10 이후의 분리 모델이 그대로 언어에 반영된 것이고, Vulkan도 `texture2D` + `sampler`로 같은 분리를 따른다.
+가장 구조적인 차이는 텍스처와 샘플러의 관계다. GLSL의 `sampler2D` uniform은 결합된 이미지·샘플러 접근을 표현한다. 이것이 OpenGL의 텍스처 객체와 sampler 객체가 항상 하나라는 뜻은 아니다. OpenGL 3.3부터 객체 상태를 분리해 같은 유닛에 묶을 수 있다. HLSL은 `Texture2D`(이미지 데이터)와 `SamplerState`(어떻게 읽을지)를 분리한다. 이 분리는 하나의 텍스처를 여러 샘플러로 읽거나, 하나의 샘플러를 여러 텍스처에 공유하는 조합을 자연스럽게 표현한다. DX10 이후의 분리 모델이 그대로 언어에 반영된 것이고, Vulkan도 `texture2D` + `sampler`로 같은 분리를 따른다.
 
 ### 행렬 곱 순서와 메모리 packing
 
@@ -85,7 +85,7 @@ vec4 clipPos  = projMatrix * viewMatrix * worldPos;
 row_major float4x4 modelMatrix;    // 변수 단위로도 지정 가능
 ```
 
-`row_major`를 지정하면 HLSL이 16바이트 블록을 행으로 해석하므로, DirectXMath의 행 우선 저장과 그대로 일치한다. 이 일치가 깨지면 화면의 객체가 무작위로 회전하거나 스케일이 어긋나는 형태로 나타난다. 디버깅하기 까다로운 종류의 버그인데, 셰이더 컴파일은 정상적으로 끝나고 오류 메시지도 없이 결과만 틀어지기 때문이다. cbuffer를 처음 연결할 때 단위 행렬을 하나 넘겨 보고 객체가 제자리에 있는지 확인하는 것이 가장 빠른 검증이다.
+`row_major`를 지정하면 HLSL이 16바이트 블록을 행으로 해석하므로, DirectXMath의 행 우선 저장과 그대로 일치한다. 이 일치가 깨지면 화면의 객체가 무작위로 회전하거나 스케일이 어긋나는 형태로 나타난다. 디버깅하기 까다로운 종류의 버그인데, 셰이더 컴파일은 정상적으로 끝나고 오류 메시지도 없이 결과만 틀어지기 때문이다. cbuffer를 처음 연결할 때는 이동과 비대칭 회전을 포함한 변환을 넘겨 예상 좌표와 비교한다. 단위 행렬은 전치해도 같으므로 이 packing 오류를 검출하지 못한다.
 
 ### 자원 선언과 바인딩 슬롯
 
@@ -371,7 +371,7 @@ SM 6.6에서는 디스크립터 힙을 셰이더에서 직접 인덱싱할 수 �
 
 ```hlsl
 // SM 6.6 — DXC, Bindless
-struct PSInput { float2 uv : TEXCOORD0; uint texIdx : TEXIDX; };
+struct PSInput { float2 uv : TEXCOORD0; nointerpolation uint texIdx : TEXIDX; };
 
 float4 PSMain(PSInput input) : SV_Target {
     Texture2D<float4> tex = ResourceDescriptorHeap[NonUniformResourceIndex(input.texIdx)]; // 인덱스가 드로우 안에서 달라지므로 필수
@@ -410,19 +410,20 @@ GPU는 스레드를 하나씩 실행하지 않는다. 32개 또는 64개의 스�
 StructuredBuffer<float>   input  : register(t0);
 RWStructuredBuffer<float> output : register(u0);
 
-[numthreads(128, 1, 1)]   // 128 은 4~128 인 모든 wave 폭의 배수라 wave 마다 출력 슬롯이 겹치지 않는다
+[numthreads(128, 1, 1)]   // 1차원 dispatch; input/output은 전체 dispatch 스레드 수만큼 확보
 void CSMain(uint tid : SV_DispatchThreadID) {
     float v = input[tid];
 
     // Wave 안의 모든 활성 레인의 합
     float sum = WaveActiveSum(v);
 
-    // Wave의 첫 레인만 결과를 기록
-    if (WaveIsFirstLane()) {
-        output[tid / WaveGetLaneCount()] = sum;
-    }
+    // wave leader의 고유한 dispatch ID 위치에 부분합, 나머지는 0을 기록한다.
+    // tid / wave폭이 wave ID라는 가정은 하지 않는다.
+    output[tid] = WaveIsFirstLane() ? sum : 0.0;
 }
 ```
+
+이 예제의 출력은 wave leader의 위치에 부분합이 놓이는 희소 배열이다. 입력과 출력은 서로 다른 버퍼이며, 후속 합산 패스가 이 배열 전체를 더하면 전체 합을 얻는다. 스레드 ID와 wave 배치 사이의 순서를 가정하지 않고 각 스레드가 고유 슬롯에 쓰므로 wave별 쓰기 충돌을 피한다. `WaveActiveSum`의 부동소수 덧셈 순서는 보장되지 않으므로 비트 단위 재현성은 별도 문제다.
 
 `WaveActiveSum`은 Wave 안의 활성 스레드 값을 한 번에 합산한다. 같은 작업을 공유 메모리와 동기화 배리어로 구현하면 여러 단계의 메모리 왕복이 필요하지만, Wave Intrinsic은 하드웨어의 레인 간 통신 경로를 직접 쓴다. 리덕션(reduction), 스캔(scan), 비트 패킹 같은 알고리즘에서 성능이 크게 개선된다.
 
@@ -430,7 +431,7 @@ Wave 크기는 벤더와 아키텍처마다 다르다. NVIDIA는 32, AMD의 GCN�
 
 ### Mesh Shader
 
-전통적인 지오메트리 파이프라인은 VS → HS → DS → GS → 래스터라이저로 이어진다. 이 고정된 단계 구성은 유연성이 떨어지고, 특히 지오메트리 셰이더는 출력량을 미리 알 수 없어 성능 함정이 잦았다. SM 6.5의 메시 셰이더는 이 앞단을 증폭 셰이더(Amplification Shader) → 메시 셰이더 → 래스터라이저로 대체한다.
+전통적인 지오메트리 파이프라인은 VS → HS → DS → GS → 래스터라이저로 이어진다. 이 고정된 단계 구성은 유연성이 떨어지고, 특히 지오메트리 셰이더는 출력량을 미리 알 수 없어 성능 함정이 잦았다. SM 6.5의 메시 셰이더는 이 앞단을 선택적인 증폭 셰이더(Amplification Shader) → 메시 셰이더 → 래스터라이저 경로로 대체한다.
 
 메시 셰이더는 컴퓨트 셰이더처럼 스레드 그룹 단위로 동작하며, 한 그룹이 작은 메시 조각(meshlet)을 직접 생성해 래스터라이저로 넘긴다. 증폭 셰이더는 그 앞에서 어떤 meshlet을 그릴지 결정하고 메시 셰이더 그룹의 수를 조절한다. 이 구조는 화면 밖이나 가려진 meshlet을 GPU에서 직접 걸러내는 클러스터 컬링(cluster culling)의 표준 백엔드가 된다. 정점을 일일이 입력 어셈블러로 흘려보내는 대신, GPU가 그릴 단위를 스스로 추려 내는 모델이다.
 
@@ -489,7 +490,7 @@ cbuffer SceneCB DX_REGISTER(b0) {
 };
 ```
 
-SPIR-V로 컴파일하면 `VK_BINDING`만 살아남고 `DX_REGISTER`는 사라진다. DXIL로 컴파일하면 그 반대다. 셰이더 본문의 산술과 자원 접근 코드는 양쪽에서 동일하므로, 분기되는 부분은 바인딩 선언에 한정된다. 이 패턴이 게임 엔진의 공통 셰이더 인프라가 한 벌의 소스로 두 API를 동시에 지원하는 표준 방식이다.
+SPIR-V로 컴파일하면 `VK_BINDING`만 살아남고 `DX_REGISTER`는 사라진다. DXIL로 컴파일하면 그 반대다. 셰이더 본문의 산술과 자원 접근 코드는 양쪽에서 동일하므로, 위 최소 예제에서 분기되는 부분은 바인딩 선언이다. 일반 셰이더는 좌표·스테이지 기능·버퍼 레이아웃 등 백엔드 차이도 검증해야 한다. 이 패턴이 게임 엔진의 공통 셰이더 인프라가 한 벌의 소스로 두 API를 동시에 지원하는 표준 방식이다.
 
 ### DXIL과 SPIR-V 도구 체인
 
@@ -538,7 +539,7 @@ device->CreateRootSignature(
     IID_PPV_ARGS(&rootSig));
 ```
 
-셰이더 코드를 바꾸면 서명도 같은 파일에서 함께 바뀌므로, 수동 동기화가 사라진다. 작은 데모에서 Root Signature와 셰이더의 불일치는 가장 흔한 디버깅 시간 낭비인데, 이 패턴 하나로 그 부류의 버그가 구조적으로 제거된다.
+셰이더 코드를 바꾸면 서명도 같은 파일에서 함께 바뀌므로, 수동 동기화가 사라진다. 작은 데모에서 Root Signature와 셰이더의 불일치는 가장 흔한 디버깅 시간 낭비인데, 한 소스에서 함께 관리해 불일치를 줄일 수 있다. 다만 변경한 슬롯과 문자열을 자동으로 함께 수정해 주는 것은 아니므로 PSO 생성 검증도 확인한다.
 
 ### Root Signature의 구성 요소
 
@@ -574,7 +575,7 @@ Root Signature 전체는 64 DWORD(256바이트)의 크기 제한을 가진다. �
 
 이 글은 셰이더 작성에서 컴파일, 바인딩까지의 체인 전체를 정리했다. HLSL의 구조체 기반 진입점, Semantic, cbuffer, `register`는 DX의 데이터 모델과 1:1로 대응한다. 입력 레이아웃이 Semantic 이름으로 정점 버퍼와 연결되고, cbuffer가 16바이트 정렬 규칙으로 GPU에 올라가며, `register`가 자원을 슬롯에 묶는다. 이 대응 관계를 이해하면 셰이더 측에서 본 자원 슬롯과 C++ 측에서 정의한 데이터가 한 그림 안에 들어온다.
 
-세 가지가 이 글의 실전 핵심이다. 첫째, 행렬의 메모리 packing과 곱 컨벤션은 별개의 문제이며, C++ 측 저장 순서와 HLSL 측 해석을 명시적으로 일치시켜야 한다. 둘째, cbuffer의 16바이트 레지스터 경계 규칙은 C++ 구조체와 어긋나기 쉬우므로 `float4` 단위 패킹과 `static_assert`로 방어한다. GLSL std140은 `vec3`에 16바이트 base alignment를 적용하지만 HLSL cbuffer는 레지스터 경계를 넘지 않는 `float3`를 남은 성분에 채울 수 있으므로 둘을 같은 레이아웃으로 가정하지 않는다. 셋째, Root Signature in Shader 패턴은 셰이더와 서명의 동기화 버그를 구조적으로 없앤다.
+세 가지가 이 글의 실전 핵심이다. 첫째, 행렬의 메모리 packing과 곱 컨벤션은 별개의 문제이며, C++ 측 저장 순서와 HLSL 측 해석을 명시적으로 일치시켜야 한다. 둘째, cbuffer의 16바이트 레지스터 경계 규칙은 C++ 구조체와 어긋나기 쉬우므로 `float4` 단위 패킹과 `static_assert`로 방어한다. GLSL std140은 `vec3`에 16바이트 base alignment를 적용하지만 HLSL cbuffer는 레지스터 경계를 넘지 않는 `float3`를 남은 성분에 채울 수 있으므로 둘을 같은 레이아웃으로 가정하지 않는다. 셋째, Root Signature in Shader 패턴은 셰이더와 서명을 한 소스에서 관리해 동기화 실수를 줄인다.
 
 DXC의 DXIL과 SPIR-V 이중 백엔드는 한 벌의 HLSL 소스를 DX12와 Vulkan이 공유하게 만든다. 공유의 조건은 행렬·상수 버퍼·descriptor binding의 레이아웃을 백엔드별 컴파일 옵션과 reflection 결과로 고정하는 것이다. 소스가 같다는 사실만으로 두 API의 메모리 계약까지 같아지지는 않는다.
 

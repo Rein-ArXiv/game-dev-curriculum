@@ -320,6 +320,14 @@ best: 최대 연속 부분합
 
 tag의 합성 순서가 중요하다. 대입 뒤 덧셈과 덧셈 뒤 대입은 같지 않다. 여러 갱신 종류를 지원하면 `apply(tag,node)`와 `compose(new,old)`의 대수적 계약을 먼저 정의해야 한다. `apply`는 tag를 노드 요약에 작용시키는 $mapping(tag,summary)$이고, `compose(new,old)`는 새 갱신을 기존 tag 뒤에 겹치는 합성이다. 이때 $mapping(compose(g,f),s)=mapping(g,mapping(f,s))$라는 작용 호환성과, 작용이 $O(1)$에 요약을 갱신한다는 조건이 필요하다. 구간 덧셈과 합 질의는 노드 구간 길이가 있어야 `sum += length * delta`로 $O(1)$에 작용하므로 요약에 길이를 함께 저장한다.
 
+요약에 갱신을 한 번 적용한 결과와 두 자식에 각각 적용한 뒤 합친 결과도 같아야 한다.
+
+$$
+mapping(f,combine(a,b))=combine(mapping(f,a),mapping(f,b))
+$$
+
+이 결합 호환성이 없으면 전파 전후에 답이 달라진다. 예를 들어 구간의 합만 저장하면서 각 원소를 제곱하는 갱신을 지원하려고 합 자체를 제곱하면, `[1,2]`에서 $3^2=9$를 얻지만 실제 새 합은 $1^2+2^2=5$다. 갱신하지 않는 항등 tag도 필요하며 $mapping(id,s)=s$여야 한다. 이 조건들과 합성 규약은 [AtCoder Library의 lazy segment tree 계약](https://atcoder.github.io/ac-library/production/document_en/lazysegtree.html)에서도 명시한다.
+
 ### 언제 쓰지 않는가
 
 원소가 수십 개이고 매 프레임 전체를 순회한다면 선형 스캔이 더 빠르고 단순할 수 있다. 동적 트리의 분기와 넓은 메모리 footprint는 캐시 비용을 만든다. 질의·갱신 비율과 $n$의 실제 분포를 측정해야 한다.

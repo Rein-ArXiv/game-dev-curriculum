@@ -4,7 +4,7 @@
 
 텍스처(Texture)는 GPU 메모리에 적재된 이미지 데이터다. 셰이더가 이 데이터를 읽으려면 *어떻게 읽을지* 가 함께 정해져야 한다. 같은 텍스처라도 가까운 표면에서는 부드럽게 보간해 읽고, 멀리 있는 표면에서는 미리 줄여 둔 작은 버전(mipmap)에서 읽고, 비스듬히 보는 표면에서는 한 픽셀에 여러 번 샘플링해야 한다. 이 *읽는 방법* 이 샘플러(Sampler) 상태에 모인다.
 
-OpenGL 3.3 이전에는 텍스처 객체에 *데이터* 와 *읽는 방법* 이 한 덩어리로 묶여 있었다. 같은 이미지를 여러 방식으로 읽고 싶으면 텍스처를 통째로 복제해야 했다. OpenGL 3.3 이후 도입된 *샘플러 객체(Sampler Object)* 가 이 두 가지를 분리한다. 텍스처는 데이터만, 샘플러는 필터링·랩핑·LOD 같은 읽기 상태를 담는다.
+OpenGL 3.3 이전에는 텍스처 객체에 *데이터* 와 *읽는 방법* 이 한 덩어리로 묶여 있었다. 패스 사이에 샘플링 상태를 바꿀 수는 있었지만, 같은 드로우에서 같은 이미지를 서로 다른 상태로 읽으려면 별도 텍스처 객체 등이 필요했다. OpenGL 3.3 이후 도입된 *샘플러 객체(Sampler Object)* 가 이 두 가지를 분리한다. 텍스처는 데이터만, 샘플러는 필터링·랩핑·LOD 같은 읽기 상태를 담는다.
 
 이 글의 목표는 다음 다섯 가지다.
 
@@ -119,7 +119,7 @@ glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 텍스처는 *완전(complete)* 해야 샘플링된다. 불완전한 텍스처를 샘플링하면 결과가 `(0,0,0,1)` 또는 구현 정의 값이 되어 *까만 표면* 으로 나타난다. 2D 텍스처의 완전성 조건은 다음과 같다.
 
 - min filter가 밉맵을 쓰는 모드(`*_MIPMAP_*`)인데 밉맵 체인이 채워지지 않았다 → 불완전. 기본값인 `GL_NEAREST_MIPMAP_LINEAR`도 밉맵을 요구하므로 `glGenerateMipmap`을 빠뜨리면 정확히 이 상태가 된다.
-- `GL_TEXTURE_BASE_LEVEL`부터 `MAX_LEVEL`까지 모든 레벨의 크기가 *일관된 절반 체인* 을 이뤄야 한다.
+- `GL_TEXTURE_BASE_LEVEL`부터 필요한 마지막 레벨(1×1까지의 체인과 `MAX_LEVEL` 중 먼저 끝나는 곳)까지 크기가 *일관된 절반 체인* 을 이뤄야 한다. 기본 `MAX_LEVEL = 1000`이라고 1000개 레벨을 만드는 것은 아니다.
 - 모든 레벨의 내부 포맷이 동일해야 한다.
 
 까만 텍스처를 만나면 바인딩 누락 다음으로 의심할 것이 *밉맵 미완성* 이다. 빠른 진단법은 min filter를 잠시 `GL_LINEAR`(밉맵 안 씀)로 바꿔 보는 것이다. 그것으로 색이 나오면 원인은 밉맵 체인이다.
@@ -247,7 +247,7 @@ glTexSubImage2D(GL_TEXTURE_2D, 0,
 | format (`GL_RGBA`) | 7번째 | CPU 측 데이터의 *채널 구성* |
 | type (`GL_UNSIGNED_BYTE`) | 8번째 | CPU 측 데이터의 *채널당 타입* |
 
-internalFormat은 GPU 측이 무엇으로 저장하느냐, format/type은 지금 넘기는 CPU 바이트가 어떻게 생겼느냐다. 이 둘은 다를 수 있다 — `GL_SRGB8_ALPHA8`(GPU 저장)에 `GL_RGBA, GL_UNSIGNED_BYTE`(CPU 데이터)를 넘기면 드라이버가 적재 중 변환한다. 3.3 Core에서 internalFormat을 `GL_RGBA`처럼 *비크기(unsized)* 로 주는 것은 권장되지 않는다 — 정밀도가 구현에 맡겨진다. 항상 `GL_RGBA8`처럼 *크기 명시(sized)* 포맷을 쓴다.
+internalFormat은 GPU 측이 무엇으로 저장하느냐, format/type은 지금 넘기는 CPU 바이트가 어떻게 생겼느냐다. 이 둘은 다를 수 있다 — `GL_SRGB8_ALPHA8`(GPU 저장)에 `GL_RGBA, GL_UNSIGNED_BYTE`(CPU 데이터)를 넘기면 입력 바이트를 sRGB 인코딩된 RGB로 해석해 저장한다. 이 업로드가 선형 RGB를 sRGB로 자동 인코딩해 주는 것은 아니다. 3.3 Core에서 internalFormat을 `GL_RGBA`처럼 *비크기(unsized)* 로 주는 것은 권장되지 않는다 — 정밀도가 구현에 맡겨진다. 항상 `GL_RGBA8`처럼 *크기 명시(sized)* 포맷을 쓴다.
 
 ### glTexStorage2D — 불변 스토리지 (4.2+, ARB_texture_storage)
 
@@ -317,7 +317,7 @@ $$
 \lambda = \log_2 \rho
 $$
 
-여기서 $\rho$는 *한 화면 픽셀에 대응하는 텍셀 수의 최대값* 이다. $\rho = 1$이면 한 화면 픽셀 = 한 텍셀이라 밉맵 레벨 0이 적절하다. $\rho = 4$면 한 픽셀이 4×4 텍셀에 해당하므로 레벨 2가 적절하다.
+여기서 $\rho$는 *한 화면 픽셀에 대응하는 텍셀 수의 최대값* 이다. $\rho = 1$이면 한 화면 픽셀 = 한 텍셀이라 밉맵 레벨 0이 적절하다. $\rho = 4$면 가장 긴 화면축 미분이 4텍셀 길이다. 등방적인 경우 한 픽셀의 footprint가 대략 4×4 텍셀이므로 레벨 2가 적절하다. 비스듬한 표면에서는 두 방향의 길이가 달라질 수 있다.
 
 샘플러의 LOD 파라미터가 이 $\lambda$를 한 번 더 가공한다. 최종 사용 레벨은 다음 순서로 결정된다.
 
@@ -437,8 +437,7 @@ mag filter에 `GL_LINEAR_MIPMAP_LINEAR` 같은 밉맵 모드를 넣으면 `GL_IN
 | Nearest | 1 |
 | Bilinear | 4 |
 | Trilinear | 8 |
-| Anisotropic 4× | 최대 16 (2 × 8) |
-| Anisotropic 16× | 최대 64 |
+| Anisotropic | footprint와 구현에 따라 달라짐 (설정값은 탭 수 상한이 아님) |
 
 위 수치는 알고리즘상 탭 수를 단순화한 *개념적 비용 모형* 이며, 실제 TMU 처리량·fetch 횟수·wall time은 GPU·드라이버·포맷·캐시 상태에 따라 다르다. 8비트 포맷의 bilinear를 한 클럭에 처리한다는 식의 고정 배율은 특정 하드웨어에 한정된 설명이므로, 실제 비용은 대상 GPU에서 sampler 관련 성능 카운터로 측정한다. 특히 `GL_RGBA16F`/`GL_RGBA32F` 같은 *부동소수점 포맷의 bilinear* 는 일부 GPU에서 절반 속도이고, `GL_RGBA32F`의 하드웨어 선형 필터링은 아예 지원되지 않는 구현도 있다. HDR 텍스처를 부드럽게 읽으려면 포맷별 필터 지원을 확인한다.
 
@@ -469,7 +468,7 @@ glSamplerParameteri(sampler, GL_TEXTURE_WRAP_T, GL_REPEAT);
 
 bilinear/trilinear 필터는 *경계 텍셀에서 인접 4 텍셀* 을 읽는다. 그래서 wrap 모드는 단순히 범위 밖 UV뿐 아니라 *경계 안쪽 픽셀의 보간* 에도 끼어든다.
 
-`GL_REPEAT` 텍스처는 u=0 근처 픽셀이 u=1 쪽 텍셀과 평균되어, *반대편 끝 색이 새어 든다*. 타일링 패턴이면 이어지므로 문제없지만, 한 장짜리 스프라이트라면 위 가장자리에 아래쪽 색이 비친다. 스프라이트·UI 아틀라스는 `GL_CLAMP_TO_EDGE`가 안전하다.
+`GL_REPEAT` 텍스처는 u=0 근처 픽셀이 u=1 쪽 텍셀과 평균되어, *반대편 끝 색이 새어 든다*. 타일링 패턴이면 이어지므로 문제없지만, 한 장짜리 스프라이트라면 위 가장자리에 아래쪽 색이 비친다. 독립된 스프라이트·UI 텍스처는 `GL_CLAMP_TO_EDGE`로 이 문제를 피할 수 있다. 아틀라스 내부 타일 경계에는 이 설정만으로 충분하지 않다.
 
 반대로 `GL_CLAMP_TO_EDGE`로 둔 아틀라스에서 여러 작은 이미지를 한 텍스처에 모으면, 인접 이미지의 텍셀이 밉맵 하위 레벨에서 서로 평균되며 *bleeding* 이 생긴다. 아틀라스는 각 타일 주위에 몇 텍셀의 *거터(gutter, padding)* 를 두거나, 밉맵을 제한해 이 누수를 막는다.
 
@@ -498,7 +497,7 @@ GLfloat border[] = { 1.0f, 1.0f, 1.0f, 1.0f };
 glSamplerParameterfv(sampler, GL_TEXTURE_BORDER_COLOR, border);
 ```
 
-비교 샘플링(compare mode)과 함께 쓰면 경계 밖 비교는 항상 "가려지지 않음"으로 평가되어, 라이트 범위 밖이 어두워지는 결함을 막는다.
+일반적인 깊이 방향과 `GL_LEQUAL` 비교에서 참조 깊이가 [0,1] 안이면 이 보더는 "가려지지 않음"을 반환한다. S/T wrap은 깊이 좌표까지 처리하지 않으므로, 라이트 절두체의 near/far 밖은 셰이더에서 따로 판정한다. Reverse-Z·반대 비교 함수라면 보더 값도 그 규약에 맞춰야 한다.
 
 ## 7. 이방성 필터링
 
@@ -512,11 +511,11 @@ $$
 r = \frac{\rho_{\max}}{\rho_{\min}}
 $$
 
-여기서 $\rho_{\max}, \rho_{\min}$은 화면 픽셀에 대응하는 텍셀 수의 최대/최소 방향이다. 비등방률이 크면 길쭉하다. 이방성 필터링은 긴 축을 따라 $r$개의 샘플(또는 한도 내)을 잡아 평균한다.
+여기서 $\rho_{\max}, \rho_{\min}$은 화면 픽셀에 대응하는 텍셀 수의 최대/최소 방향이다. 비등방률이 크면 길쭉하다. 이방성 필터링은 긴 축을 따라 여러 표본을 사용한다. $r$은 필요한 방향별 해상도의 비율이지 명세가 고정한 표본 수는 아니다.
 
 ### 활성화 (4.6 코어 또는 EXT_texture_filter_anisotropic)
 
-이방성 필터링은 OpenGL 4.6에서 코어로 들어왔고, 그 이전에는 `GL_EXT_texture_filter_anisotropic` 확장으로 같은 기능이 제공됐다. 이 확장은 매우 오래되고 광범위하게 지원되어 사실상 3.3 환경 어디서나 쓸 수 있다. enum 이름이 코어/확장에서 다르므로 컨텍스트 버전이나 확장 지원 여부를 확인한 뒤 분기한다.
+이방성 필터링은 OpenGL 4.6에서 코어로 들어왔고, 그 이전에는 `GL_EXT_texture_filter_anisotropic` 확장으로 같은 기능이 제공됐다. 이 확장은 광범위하게 지원되지만 OpenGL 3.3 코어가 보장하지는 않는다. enum 이름이 코어/확장에서 다르므로 컨텍스트 버전이나 확장 지원 여부를 확인한 뒤 분기한다.
 
 ```cpp
 GLint major = 0, minor = 0;
@@ -603,7 +602,7 @@ glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, w, h, 0,
 | 디퓨즈/알베도 (눈에 보이는 색) | `GL_SRGB8_ALPHA8` |
 | 노멀 맵 (법선 벡터) | `GL_RGB8` (Linear) |
 | 메탈릭/러프니스 (선형 값) | `GL_R8`/`GL_RG8` (Linear) |
-| 깊이 맵 | `GL_DEPTH_COMPONENT24` (Linear) |
+| 깊이 맵 | `GL_DEPTH_COMPONENT24` (sRGB 변환 없음, 원근 깊이 자체는 비선형) |
 | 라이트맵 | 데이터 따라 (HDR이면 `GL_R11F_G11F_B10F`) |
 
 노멀 맵을 절대 sRGB로 적재하지 않는다. 법선의 XYZ는 색이 아니라 *방향 벡터의 성분* 이라 감마 곡선을 먹이면 방향이 왜곡된다. 이것이 알베도와 노멀이 다른 내부 포맷을 쓰는 이유다.
@@ -625,7 +624,7 @@ glEnable(GL_FRAMEBUFFER_SRGB);  // sRGB 변환 활성화
 ```cpp
 GLint encoding = 0;
 glGetFramebufferAttachmentParameteriv(
-    GL_FRAMEBUFFER, GL_FRONT_LEFT,            // 기본 FB의 색 첨부
+    GL_FRAMEBUFFER, GL_BACK_LEFT,             // 기본 FB가 바인딩된 더블버퍼 창의 출력 첨부
     GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING, &encoding);
 if (encoding != GL_SRGB) {
     std::fprintf(stderr, "기본 프레임버퍼가 sRGB가 아니다\n");
@@ -681,7 +680,7 @@ D3D 명명으로 BC1 ~ BC7. OpenGL에서는 `GL_COMPRESSED_*_S3TC_DXT*_EXT` 또�
 |---|---|---:|---:|---|
 | BC1 (DXT1) | RGB(+1bit A) | 4 | 8:1 | 디퓨즈 (단순) |
 | BC2 (DXT3) | RGBA, 4bit A | 8 | 4:1 | 거의 안 씀 |
-| BC3 (DXT5) | RGBA, 8bit A | 8 | 4:1 | 디퓨즈 + 알파 |
+| BC3 (DXT5) | RGBA, 알파 끝점 8bit + 보간 인덱스 | 8 | 4:1 | 디퓨즈 + 알파 |
 | BC4 | R | 4 | 8:1 | 그레이스케일, 러프니스 |
 | BC5 | RG | 8 | 4:1 | 노멀 맵 (XY만, Z 재구성) |
 | BC6H | RGB float | 8 | 4:1 | HDR 환경맵 |
@@ -694,7 +693,7 @@ BC5 노멀 맵은 *XY 두 채널만 저장* 하고 셰이더에서 $Z = \sqrt{1 
 ```glsl
 vec2 xy = texture(uNormal, vUV).rg * 2.0 - 1.0;
 float z = sqrt(max(0.0, 1.0 - dot(xy, xy)));
-vec3 N = vec3(xy, z);
+vec3 N = normalize(vec3(xy, z));  // 압축 오차로 dot(xy, xy)가 1을 넘을 수도 있다
 ```
 
 sRGB와 결합할 때는 `GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM`(sRGB BC7) 같은 sRGB 변종을 쓴다. 압축 + sRGB 자동 디코드가 함께 동작한다.
@@ -728,7 +727,7 @@ glCompressedTexImage2D(GL_TEXTURE_2D, 0,
 
 ### 품질 손실
 
-블록 압축은 *손실 압축* 이다. 4×4 블록 안의 16 텍셀이 *몇 개의 대표 색* 으로 양자화된다. 부드러운 그라디언트나 노멀 맵의 미세한 변화는 BC5/ASTC 같은 적합한 포맷을 골라야 품질이 유지된다. 디퓨즈에 BC1을 쓰면 알파가 1비트만 표현되어 알파 마스크가 깨지므로 BC3/BC7로 가야 한다. 블록 경계를 가로지르는 급격한 색 변화(텍스트, 날카로운 로고)는 *block artifact* 가 두드러지므로, 이런 자산은 비압축이나 고품질 BC7을 쓴다.
+블록 압축은 *손실 압축* 이다. 4×4 블록 안의 16 텍셀이 *몇 개의 대표 색* 으로 양자화된다. 부드러운 그라디언트나 노멀 맵의 미세한 변화는 BC5/ASTC 같은 적합한 포맷을 골라야 품질이 유지된다. BC1의 알파는 투명/불투명 두 값만 표현하므로 이진 마스크에는 쓸 수 있지만, 부드러운 투명도에는 BC3/BC7 같은 포맷이 필요하다. 블록 경계를 가로지르는 급격한 색 변화(텍스트, 날카로운 로고)는 *block artifact* 가 두드러지므로, 이런 자산은 비압축이나 고품질 BC7을 쓴다.
 
 ### CPU에서 압축
 
@@ -742,7 +741,7 @@ glCompressedTexImage2D(GL_TEXTURE_2D, 0,
 | ARM ASTC Encoder | ASTC |
 | Microsoft DirectXTex | BC1-7 |
 
-빌드 시 한 번 압축한 결과(KTX/DDS)를 게임 자원으로 둔다. 런타임은 디코딩 비용 없이 GPU에 직접 적재된다. 다만 고품질 BC7/ASTC 인코딩은 *블록당 수많은 모드 조합을 탐색* 하느라 느려서, 대규모 자산은 빌드 시간이 분 단위로 늘 수 있다. 반복 빌드에서는 캐시된 압축 결과를 재사용한다.
+빌드 시 한 번 압축한 결과(KTX/DDS)를 게임 자원으로 둔다. 런타임은 CPU에서 전체 이미지를 비압축으로 디코딩하지 않고 지원되는 압축 데이터를 GPU에 직접 적재한다. 샘플링할 때의 블록 디코딩은 GPU가 수행한다. 다만 고품질 BC7/ASTC 인코딩은 *블록당 수많은 모드 조합을 탐색* 하느라 느려서, 대규모 자산은 빌드 시간이 분 단위로 늘 수 있다. 반복 빌드에서는 캐시된 압축 결과를 재사용한다.
 
 ## 10. 통합 예제: PNG 로드부터 셰이더 페치까지
 

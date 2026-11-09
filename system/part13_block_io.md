@@ -29,7 +29,7 @@
 
 ### 블록과 문자 디바이스
 
-리눅스에서 모든 디바이스는 파일로 표현된다. 블록 디바이스는 고정된 크기의 블록 단위로 데이터를 읽고 쓰며 랜덤 액세스가 가능하다. 하드 디스크, SSD, USB 드라이브가 예시다. 디바이스 파일 타입은 `b`다. 문자 디바이스는 바이트 스트림으로 데이터를 읽고 쓰며 순차 액세스만 가능하다. 터미널, 시리얼 포트, `/dev/null` 등이 예시이며 디바이스 파일 타입은 `c`다.
+블록 디바이스는 블록 단위로 데이터를 다루며 랜덤 액세스가 가능하다. 하드 디스크, SSD, USB 드라이브가 예시다. 디바이스 파일 타입은 `b`다. 문자 디바이스의 연산은 드라이버가 정의한다. 터미널이나 시리얼 포트는 스트림에 가깝지만 모든 문자 디바이스가 순차 접근만 지원하는 것은 아니다. 디바이스 파일 타입은 `c`다.
 
 ```bash
 $ ls -l /dev/sda /dev/tty
@@ -45,9 +45,11 @@ crw-rw-rw- 1 root tty  5, 0 Dec 23 10:00 /dev/tty
 
 리눅스 블록 레이어는 논리 블록 개념을 사용한다.
 
-- 논리 블록: 파일시스템이 다루는 기본 단위(보통 4KB)
-- 물리 블록: 디바이스의 실제 블록 크기
-- 섹터: 디스크 하드웨어의 최소 단위(512B 또는 4KB)
+- 디바이스 논리 블록: 장치가 주소 지정과 I/O에 노출하는 단위(예: 512B 또는 4KiB)
+- 디바이스 물리 블록: 장치가 보고하는 물리적 처리 단위. 512B 논리 블록과 4KiB 물리 블록을 함께 보고할 수도 있다.
+- 파일시스템 블록: 파일시스템의 할당·관리 단위로, 디바이스 논리 블록과 구분한다.
+
+Linux block layer의 sector 주소는 장치 논리 블록 크기와 무관하게 512바이트 단위로 표현된다.
 
 ```c
 /* include/linux/blkdev.h */
@@ -566,53 +568,13 @@ posix_memalign(&buf, 4096, 4096);
 ssize_t n = read(fd, buf, 4096);
 ```
 
-Direct I/O 요구사항은 다음과 같다.
+Direct I/O의 정렬 요구사항은 파일시스템과 커널에 따라 달라진다. 아래는 흔한 제약이며, 지원되는 Linux에서는 statx의 STATX_DIOALIGN으로 확인할 수 있다.
 
-- 버퍼 주소는 블록 크기로 정렬되어야 한다.
-- 읽기/쓰기 크기는 블록 크기의 배수여야 한다.
-- 파일 오프셋은 블록 크기로 정렬되어야 한다.
+- 버퍼 주소는 요구되는 메모리 정렬을 따라야 한다.
+- 읽기/쓰기 크기는 요구되는 I/O 정렬의 배수여야 한다.
+- 파일 오프셋은 요구되는 I/O 정렬을 따라야 한다.
 
-```c
-/* fs/direct-io.c */
-ssize_t __blockdev_direct_IO(struct kiocb *iocb, struct inode *inode,
-                             struct block_device *bdev, struct iov_iter *iter,
-                             get_block_t get_block, dio_iodone_t end_io,
-                             dio_submit_t submit_io, int flags)
-{
-    struct bio *bio;
-    sector_t blocknr;
-    unsigned blocksize = i_blocksize(inode);
-
-    /* 정렬 검증 */
-    if ((unsigned long)iter->iov_base & (blocksize - 1))
-        return -EINVAL;
-    if (iocb->ki_pos & (blocksize - 1))
-        return -EINVAL;
-
-    /* bio 생성 및 제출: 실제 소비·제출된 byte만큼만 전진 */
-    while (iov_iter_count(iter)) {
-        bytes = min_t(size_t, iov_iter_count(iter), nr_pages * PAGE_SIZE);
-
-        bio = bio_alloc(bdev, nr_pages, iocb->ki_flags & IOCB_WRITE ?
-                        REQ_OP_WRITE : REQ_OP_READ, GFP_KERNEL);
-
-        /* iov_iter_get_pages는 pin한 byte만큼 iter를 소비한다 */
-        bytes = iov_iter_get_pages(iter, pages, bytes, &start);
-        for (i = 0; i < nr_pages; i++)
-            bio_add_page(bio, pages[i], PAGE_SIZE, 0);
-
-        submit_bio(bio);
-
-        /* iterator 소비와 완료 byte에 대응해 file position을 한 번만 전진 */
-        iocb->ki_pos += bytes;
-        transferred += bytes;
-    }
-
-    blk_finish_plug(&plug);
-
-    return transferred;
-}
-```
+실제 direct I/O 경로는 파일시스템과 커널 버전에 따라 다르다. 커널은 사용자 버퍼와 파일 범위를 검증한 뒤 필요한 페이지를 확보하고 블록 I/O를 제출하며, 완료된 바이트 수와 오류를 호출자에게 돌려준다. 부분 완료와 비동기 완료도 가능하므로 단순히 제출한 바이트를 모두 완료된 것으로 계산해서는 안 된다.
 
 Direct I/O 사용 사례는 다음과 같다.
 
@@ -632,7 +594,7 @@ for (int i = 0; i < 1000; i++) {
 }
 ```
 
-Readahead 없이는 매번 페이지 폴트가 발생하고, 블록 레이어를 거치고, 디스크를 읽는다. Readahead가 있으면 커널은 패턴을 감지하고 미리 여러 페이지를 읽어둔다.
+Readahead가 없다면 캐시에 없는 각 범위에서 읽기 I/O를 기다려야 한다. read 시스템 콜의 캐시 미스 자체를 mmap 접근의 페이지 폴트와 혼동해서는 안 된다. Readahead가 있으면 커널은 패턴을 감지하고 미리 여러 페이지를 읽어둔다.
 
 ### Readahead 알고리즘
 
@@ -927,7 +889,7 @@ flowchart TB
     CQ2 --> C2
 ```
 
-각 CPU 코어는 독립적인 큐를 가지므로 락 경합이 없다.
+CPU와 하드웨어 큐의 매핑은 장치와 커널 구성에 따라 달라진다. 여러 CPU가 큐를 공유할 수 있으므로 멀티큐가 모든 락 경합을 없애는 것은 아니다.
 
 ### NVMe 드라이버
 

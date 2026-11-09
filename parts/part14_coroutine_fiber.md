@@ -61,7 +61,7 @@ if (player.health > 0) {  // 불완전한 상태 읽음
 }
 ```
 
-스레드 전환 자체가 데이터 레이스를 만드는 것은 아니다. 둘 이상의 스레드가 같은 메모리에 동기화 없이 접근하고 그중 하나 이상이 쓰기를 수행할 때 데이터 레이스가 발생한다. 프레임 작업을 여러 worker에 병렬 배치한다면 mutex, atomic, 소유권 분할, barrier 같은 동기화가 여전히 필요하다.
+스레드 전환 자체가 데이터 레이스를 만드는 것은 아니다. 서로 다른 스레드의 충돌하는 접근 중 하나 이상이 비원자적이고 두 접근 사이에 happens-before가 없을 때 데이터 레이스가 발생한다. 프레임 작업을 여러 worker에 병렬 배치한다면 mutex, atomic, 소유권 분할, barrier 같은 동기화가 여전히 필요하다.
 
 협력적의 장점은 다음과 같다.
 
@@ -564,6 +564,7 @@ struct fibonacci_state {
         switch (suspend_point) {
         case 0: goto LABEL_0;
         case 1: goto LABEL_1;
+        case 2: return;  // 완료 상태 (개념적 co_return)
         }
 
     LABEL_0:
@@ -575,6 +576,10 @@ struct fibonacci_state {
             return;  // 호출자에게 돌아감
 
     LABEL_1:
+            if (a > INT_MAX - b) {
+                suspend_point = 2;
+                return;
+            }
             next = a + b;
             a = b;
             b = next;
@@ -753,9 +758,9 @@ struct JobSystem {
 };
 ```
 
-마지막 job의 release 감소와 완료를 관측한 acquire load 사이의 동기화로 job 결과가 대기자에게 보인다. 단순화한 코드에는 fiber 수명, cancellation, queue shutdown과 counter 주소의 수명 보장이 추가로 필요하다. `park_current_fiber_on`은 대기 등록과 counter 재검사를 `wake_fibers_waiting_on`과 같은 프로토콜로 묶어야 한다. 그렇지 않으면 check와 park 사이에 마지막 감소와 wake가 끝나 fiber가 영원히 대기하는 lost wakeup이 생긴다. 또한 마지막 감소가 완료를 게시한 뒤에도 wake가 counter 주소를 사용하므로, 대기자가 접근을 마치기 전에 counter를 파괴해서는 안 된다.
+마지막 job의 release 감소와 완료를 관측한 acquire load 사이의 동기화로 job 결과가 대기자에게 보인다. 단순화한 코드에는 fiber 수명, cancellation, queue shutdown과 counter 주소의 수명 보장이 추가로 필요하다. `park_current_fiber_on`은 대기 등록과 counter 재검사를 `wake_fibers_waiting_on`과 같은 프로토콜로 묶어야 한다. 그렇지 않으면 check와 park 사이에 마지막 감소와 wake가 끝나 fiber가 영원히 대기하는 lost wakeup이 생긴다. 또한 마지막 감소가 완료를 게시한 뒤에도 wake가 counter 주소를 사용하므로, wake 호출까지 counter 주소 사용을 마쳤음이 보장되기 전에 counter를 파괴해서는 안 된다.
 
-fiber는 서로 다른 worker 스레드에서 재개될 수 있으므로 `thread_local` 값은 fiber를 따라가지 않고 현재 OS 스레드의 값을 본다. 락을 보유한 채 yield하거나 스레드 귀속 API(예: FLS, 그래픽스·COM)에 의존하는 fiber는 고정 worker에서만 재개되도록 하거나 yield 전에 락을 놓는 규약을 지켜야 한다.
+fiber는 서로 다른 worker 스레드에서 재개될 수 있으므로 `thread_local` 값은 fiber를 따라가지 않고 현재 OS 스레드의 값을 본다. Windows FLS는 이와 달리 fiber 전환을 따라간다. 스레드 소유 락을 보유하거나 스레드 귀속 그래픽스 컨텍스트·COM apartment에 의존하는 fiber는 해당 worker에서만 재개되도록 해야 한다. 이동 가능한 fiber는 yield 전에 그런 락을 놓고, 재개 후에도 스레드 귀속 상태를 그대로 사용할 수 있다고 가정하지 않는다.
 
 사용 예시는 다음과 같다.
 
@@ -1024,7 +1029,7 @@ void update_game_object_async(GameObject* obj) {
 }
 ```
 
-`done` 플래그의 store는 release, load는 acquire여야 한다. 텍스처 포인터의 쓰기가 done 가시화 이전에 다른 스레드에서 관찰되어야 한다. 이 예제는 `GameObject`와 `ctx`가 로드가 끝날 때까지 살아 있어야 하며, 로드 실패나 예외에도 `done`을 게시해 fiber가 영원히 대기하지 않도록 해야 한다. 완료 후 `needs_new_texture`를 해제하는 것도 이 경로의 책임이다.
+`done` 플래그에는 release store와 그 값을 읽는 acquire load가 필요하다. 위 기본 seq_cst 연산도 그 조건을 만족한다. 완료를 확인한 fiber의 후속 읽기보다 텍스처 포인터 쓰기가 happens-before가 된다. 이 예제는 `GameObject`와 `ctx`가 로드가 끝날 때까지 살아 있어야 하며, 로드 실패나 예외에도 `done`을 게시해 fiber가 영원히 대기하지 않도록 해야 한다. 완료 후 `needs_new_texture`를 해제하는 것도 이 경로의 책임이다.
 
 타임라인은 다음과 같다.
 

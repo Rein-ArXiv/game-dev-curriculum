@@ -95,7 +95,7 @@ $$\theta^* = \arg\min_\theta \; \mathbb{E}_{s \sim d_{\pi^*}}\big[\, \ell(\pi_\t
 // Behavioral Cloning: 전문가 데이터로 지도학습
 void TrainBC(Policy& policy, std::vector<Demo> demos) {
     for (int epoch = 0; epoch < kNumEpochs; ++epoch) {
-        Shuffle(demos);                          // i.i.d. 가정 — 순서 무작위화
+        Shuffle(demos);                          // 순서 무작위화 (표본 독립을 보장하지 않음)
         for (const MiniBatch& mb : Batches(demos, kBatch)) {
             // 이산: cross-entropy, 연속: MSE 또는 -log N(a|mu,sigma)
             float loss = 0.f;
@@ -340,7 +340,7 @@ $$P_\psi(\tau) = \frac{1}{Z_\psi}\,\rho_0(s_0)\!\prod_t P(s_{t+1}\mid s_t,a_t)\,
 
 ### 특징 기대값 일치와 그래디언트
 
-학습 목표는 시연의 로그우도 $\sum_{\tau \in \mathcal{D}} \log P(\tau)$를 $\psi$에 대해 최대화하는 것이다. 선형 보상에서 이 로그우도 그래디언트는 놀랍도록 깔끔한 형태가 된다.
+학습 목표는 시연의 평균 로그우도 $|\mathcal{D}|^{-1}\sum_{\tau \in \mathcal{D}} \log P(\tau)$를 $\psi$에 대해 최대화하는 것이다. 선형 보상에서 이 로그우도 그래디언트는 놀랍도록 깔끔한 형태가 된다.
 
 $$\nabla_\psi \mathcal{L} \;=\; \underbrace{\frac{1}{|\mathcal{D}|}\sum_{\tau\in\mathcal{D}} f(\tau)}_{\text{전문가 특징 기대값}} \;-\; \underbrace{\mathbb{E}_{\tau \sim P_\psi}[\,f(\tau)\,]}_{\text{현재 모델 특징 기대값}}$$
 

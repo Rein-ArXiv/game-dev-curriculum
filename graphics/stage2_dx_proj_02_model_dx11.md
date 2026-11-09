@@ -114,7 +114,7 @@ if (!scene || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !scene->mRootNode) 
 | `aiProcess_JoinIdenticalVertices` | 중복 정점 병합, 인덱스 버퍼 생성 | 정점 수 폭증 |
 | `aiProcess_ImproveCacheLocality` | 정점 캐시(ACMR) 최적화 순서로 재배열 | 정점 셰이더 재실행 증가 |
 
-`aiProcess_ConvertToLeftHanded`는 한 플래그처럼 보이지만 실제로는 세 가지를 한꺼번에 처리한다. Z축을 뒤집어 왼손 좌표계로 만들고(`MakeLeftHanded`), 면의 정점 감김 순서를 시계방향으로 바꾸며(`FlipWindingOrder`), UV의 V축을 뒤집는다(`FlipUVs`). DX는 화면 안쪽이 +Z인 왼손 좌표계를 쓰고, 텍스처 좌표의 원점이 좌상단이다. OpenGL은 화면 바깥쪽이 +Z인 오른손 좌표계에 텍스처 원점이 좌하단이다. 이 세 가지가 어긋나면 모델이 거울상으로 뒤집히거나, 컬링이 반대로 동작해 앞면이 사라지거나, 텍스처가 위아래로 뒤집힌다. 셋을 따로 디버깅하다 시간을 버리는 대신 이 플래그 하나로 일괄 처리한다.
+`aiProcess_ConvertToLeftHanded`는 한 플래그처럼 보이지만 실제로는 세 가지를 한꺼번에 처리한다. Z축을 뒤집어 왼손 좌표계로 만들고(`MakeLeftHanded`), 면의 정점 감김 순서를 시계방향으로 바꾸며(`FlipWindingOrder`), UV의 V축을 뒤집는다(`FlipUVs`). 이 예제는 왼손 좌표계·시계방향 전면과 위쪽 첫 행의 이미지/UV 규약을 선택한다. Direct3D가 월드 좌표의 손잡이를 강제하는 것은 아니므로, 오른손 좌표계의 카메라·행렬을 쓰는 파이프라인에서는 같은 변환을 무조건 켜지 않는다. 이 세 가지가 어긋나면 모델이 거울상으로 뒤집히거나, 컬링이 반대로 동작해 앞면이 사라지거나, 텍스처가 위아래로 뒤집힌다. 셋을 따로 디버깅하다 시간을 버리는 대신 이 플래그 하나로 일괄 처리한다.
 
 `aiProcess_JoinIdenticalVertices`는 인덱스 버퍼의 존재 이유다. 큐브 한 면은 정점 네 개로 충분하지만, 면마다 법선이 다르면 정점이 분리되어 24개가 된다. 위치·법선·UV가 모두 같은 정점만 병합되므로, 이 플래그를 켜면 면 경계에서 법선이 꺾이는 정점은 그대로 두고 평평한 면 안쪽의 공유 정점만 합친다.
 
@@ -179,7 +179,7 @@ void ExtractMesh(const aiMesh* m,
 }
 ```
 
-UV를 읽을 때 `m->mTextureCoords[0]`가 null인지 먼저 검사한다. Assimp는 메시당 최대 8세트의 UV를 지원하고, UV가 없는 메시는 0번 포인터가 null이다. 검사 없이 역참조하면 크래시한다. UV가 없으면 0으로 채워 두고, 텍스처 슬롯에는 뒤에서 다룰 기본 텍스처를 묶어 흰색으로 처리한다.
+UV를 읽을 때 `m->mTextureCoords[0]`가 null인지 먼저 검사한다. Assimp는 메시당 최대 8세트의 UV를 지원하고, UV가 없는 메시는 0번 포인터가 null이다. 검사 없이 역참조하면 크래시한다. 유효한 tangent 공간이 없는 메시는 노멀 매핑을 끄거나 법선에 수직인 기저를 별도로 만든다. 위 고정 T/B 대체값이 모든 법선에 유효한 기저인 것은 아니다. UV가 없으면 0으로 채워 두고, 텍스처 슬롯에는 뒤에서 다룰 기본 텍스처를 묶어 흰색으로 처리한다.
 
 `aiProcess_Triangulate`는 삼각형으로 만들 수 있는 면만 삼각분할하며, 점·선 프리미티브는 그대로 남긴다. 따라서 모든 `aiFace`가 3개의 인덱스를 가진다는 보장은 없고, 점·선 전용 메시에는 법선이 없을 수도 있다. 위 코드처럼 `mNumIndices != 3`인 면을 건너뛰고(`continue`) 인덱스 범위를 검증하는 것을 선택이 아닌 필수 계약으로 둔다. `HasNormals()`가 거짓인 메시는 정책에 따라 제외하거나 법선을 생성한 뒤 재시도한다. `aiProcess_SortByPType`로 프리미티브 종류를 분리해 점·선을 제거하는 방법도 있으나, 그 옵션을 실제로 설정한 경우에만 해당한다.
 
@@ -248,7 +248,7 @@ struct Model {
 };
 ```
 
-`Material`을 `Mesh`에서 분리한 이유는 공유다. 캐릭터의 몸 부위 메시 다섯 개가 같은 피부 재질을 쓰는 경우, 재질을 메시마다 복제하면 같은 텍스처 SRV가 다섯 벌 생기고 VRAM과 바인딩이 낭비된다. 대신 `Model::materials`에 재질을 한 벌만 두고 각 메시가 `materialIndex`로 가리킨다. 이는 Assimp가 `aiScene::mMaterials`를 배열로 두고 `aiMesh::mMaterialIndex`로 참조하는 구조를 그대로 옮긴 것이다.
+`Material`을 `Mesh`에서 분리한 이유는 공유다. 캐릭터의 몸 부위 메시 다섯 개가 같은 피부 재질을 쓰는 경우, 재질마다 텍스처를 새로 로드하면 GPU 이미지가 중복될 수 있다. 단순히 같은 SRV의 ComPtr만 복사하면 참조만 늘어 이미지 바이트까지 복제되는 것은 아니다. 대신 `Model::materials`에 재질을 한 벌만 두고 각 메시가 `materialIndex`로 가리킨다. 이는 Assimp가 `aiScene::mMaterials`를 배열로 두고 `aiMesh::mMaterialIndex`로 참조하는 구조를 그대로 옮긴 것이다.
 
 `ComPtr`는 `Microsoft::WRL::ComPtr`로, COM 객체의 참조 카운트를 자동 관리하는 스마트 포인터다. `Mesh`나 `Material`이 소멸하면 들고 있던 SRV·버퍼의 `Release`가 자동으로 호출된다. 여러 `Material`이 같은 SRV를 공유하면 참조 카운트가 그만큼 올라가고, 마지막 소유자가 사라질 때 실제로 해제된다. 수작업으로 `Release`를 부르다 누락하거나 이중 해제하는 실수를 막는다.
 
@@ -285,7 +285,7 @@ void ProcessNode(const aiNode* node,
 }
 ```
 
-여기서 가장 흔한 함정이 행렬 순서다. Assimp의 `aiMatrix4x4`는 행 우선(row-major) 저장이다. DirectXMath의 `XMMATRIX`도 메모리상으로는 행 우선이지만, HLSL 셰이더는 기본적으로 열 우선(column-major)으로 행렬을 해석한다. 또 Assimp는 변환을 `M * v`(열 벡터) 규약으로 정의하는 반면 DirectXMath의 곱셈 헬퍼는 `v * M`(행 벡터) 규약을 전제한다. 이 규약 차이를 맞추려면 Assimp 행렬을 전치해 곱한 뒤, 최종적으로 상수 버퍼에 넣을 때 한 번 더 전치해 HLSL에 보낸다. 이 두 번의 전치 중 하나를 빠뜨리면 모델이 엉뚱하게 회전하거나 찌그러진다. `aiProcess_PreTransformVertices` 플래그로 Assimp가 노드 변환을 정점에 미리 적용하게 만들면 이 행렬 처리를 통째로 생략할 수 있지만, 그러면 모든 메시가 하나로 병합되어 메시별 변환을 잃는다. 애니메이션이나 부분 토글이 필요하면 노드 트리를 유지한 채 평탄화하는 위 방식을 쓴다.
+여기서 가장 흔한 함정이 행렬 순서다. Assimp의 `aiMatrix4x4`는 행 우선(row-major) 저장이다. DirectXMath의 `XMMATRIX`도 메모리상으로는 행 우선이지만, HLSL 셰이더는 기본적으로 열 우선(column-major)으로 행렬을 해석한다. 또 Assimp는 변환을 `M * v`(열 벡터) 규약으로 정의하는 반면 DirectXMath의 곱셈 헬퍼는 `v * M`(행 벡터) 규약을 전제한다. 이 규약 차이를 맞추려면 Assimp 행렬을 전치해 곱한 뒤, 이 글처럼 HLSL이 기본 column-major인 경우에는 최종적으로 상수 버퍼에 넣을 때 한 번 더 전치해 보낸다. 앞 큐브의 `row_major` 선언을 유지한다면 이 두 번째 전치는 생략한다. 이 두 번의 전치 중 하나를 빠뜨리면 모델이 엉뚱하게 회전하거나 찌그러진다. `aiProcess_PreTransformVertices` 플래그로 Assimp가 노드 변환을 정점에 미리 적용하게 만들면 이 행렬 처리를 통째로 생략할 수 있지만, 그러면 노드 변환이 정점에 구워지고 계층·애니메이션 정보가 사라진다. 메시가 반드시 전부 하나로 합쳐지는 것은 아니며 재질·정점 형식과 설정에 따라 분리될 수 있다. 애니메이션이나 부분 토글이 필요하면 노드 트리를 유지한 채 평탄화하는 위 방식을 쓴다.
 
 `BuildMesh`는 `ExtractMesh`로 정점·인덱스를 뽑고 `CreateVB`/`CreateIB`로 버퍼를 만든 뒤 `Mesh`에 채워 넣는 래퍼다. 최대 인덱스가 `UINT16_MAX` 이하일 때만 16비트 포맷을 사용하고, 그보다 크면 32비트 포맷과 `DXGI_FORMAT_R32_UINT`를 선택한다.
 
@@ -333,13 +333,15 @@ void BindMaterial(ID3D11DeviceContext* ctx, const Material& m) {
     };
     ctx->PSSetShaderResources(0, 5, srvs);   // t0~t4 한 번에
 
-    if (m.materialCB) {
-        ctx->PSSetConstantBuffers(1, 1, m.materialCB.GetAddressOf());
-    }
+    // 없는 경우에도 이전 재질의 상수가 남지 않도록 슬롯을 갱신한다.
+    ID3D11Buffer* cb = m.materialCB.Get();
+    ctx->PSSetConstantBuffers(1, 1, &cb);
 }
 ```
 
 `PSSetShaderResources(0, 5, srvs)`는 슬롯 다섯 개를 한 호출로 묶는다. 슬롯마다 따로 호출하면 다섯 번의 API 진입이 발생하지만, 배열로 묶으면 한 번이다. DX11에서 API 호출 한 번은 드라이버 내부에서 명령 버퍼에 기록되는 작업이라, 묶을 수 있으면 묶는 것이 드로우 콜 오버헤드를 줄인다.
+
+재질 상수를 읽는 셰이더라면 각 재질에 유효한 기본 상수 버퍼를 준비한다. null 바인딩은 이전 값의 잔류를 막지만 재질의 기본값을 자동으로 만들어 주지는 않는다.
 
 `materialCB`는 텍스처로 표현되지 않는 스칼라 재질 파라미터를 담는다. 금속성·거칠기 배율, 이미시브 세기, 알파 컷오프 임계값 같은 값이다. 텍스처가 없는 재질은 이 상수만으로 단색을 표현하고, 텍스처가 있으면 텍스처 값에 이 배율을 곱한다.
 
@@ -400,7 +402,7 @@ DDS(DirectDraw Surface)는 BC1·BC3·BC5·BC7 같은 블록 압축(Block Compres
 
 압축 텍스처가 단지 디스크 용량만 줄이는 것이 아니라는 점이 핵심이다. GPU가 텍스처를 샘플링할 때 읽는 메모리 대역폭도 그대로 줄어든다. 2048×2048 디퓨즈 텍스처는 RGBA8로 16MB지만 BC7로는 4MB다. 대역폭이 4분의 1이면 텍스처 페치가 메모리 대기에 막히는 시간이 줄어, 텍스처가 많은 장면에서 실제 프레임 시간이 짧아진다.
 
-노멀 맵에 BC5를 쓰는 데도 이유가 있다. 접선 공간 노멀을 +z 반구로 한정하면 Z를 `z = sqrt(max(0, 1 - x² - y²))`로 복원한 뒤 다시 정규화할 수 있다. `max(0, ...)`가 필요한 이유는 BC5의 양자화 오차와 필터링으로 `x² + y²`가 1을 살짝 넘을 수 있기 때문이다. 또한 XY만으로는 Z의 부호를 복원할 수 없으므로, 노멀이 +z 반구에 있다는 계약이 전제된다. 그래서 XY 두 채널만 저장하면 되고, BC5는 두 채널을 각각 8비트 정밀도로 압축한다. RGB 세 채널을 통째로 압축하는 BC1을 노멀에 쓰면 색 좌표를 함께 양자화해 법선이 거칠어진다. 채널을 분리해 압축하는 BC5가 노멀에 적합하다.
+노멀 맵에 BC5를 쓰는 데도 이유가 있다. 접선 공간 노멀을 +z 반구로 한정하면 Z를 `z = sqrt(max(0, 1 - x² - y²))`로 복원한 뒤 다시 정규화할 수 있다. `max(0, ...)`가 필요한 이유는 BC5의 양자화 오차와 필터링으로 `x² + y²`가 1을 살짝 넘을 수 있기 때문이다. 또한 XY만으로는 Z의 부호를 복원할 수 없으므로, 노멀이 +z 반구에 있다는 계약이 전제된다. 그래서 XY 두 채널만 저장하면 되고, BC5는 채널별 8비트 끝점과 3비트 보간 인덱스로 값을 표현한다. 채널마다 모든 텍셀에 독립된 8비트 값을 보존하는 것은 아니다. RGB 세 채널을 통째로 압축하는 BC1을 노멀에 쓰면 색 좌표를 함께 양자화해 법선이 거칠어진다. 채널을 분리해 압축하는 BC5가 노멀에 적합하다.
 
 ### DirectXTK의 DDS 로더
 
@@ -415,7 +417,7 @@ HRESULT hr = DirectX::CreateDDSTextureFromFile(
     srv.GetAddressOf());
 ```
 
-DDS 파일 헤더의 포맷 플래그가 `_SRGB`로 끝나면 로더가 자동으로 sRGB SRV를 만든다. 따라서 콘텐츠 파이프라인에서 텍스처를 DDS로 변환할 때 sRGB 플래그를 정확히 박는 것이 중요하다. 디퓨즈를 `BC7_UNORM`(선형)으로 변환하면 화면이 어둡고 칙칙해지고, 노멀을 `BC7_UNORM_SRGB` 같은 sRGB 포맷으로 변환하면 법선이 일그러진다. BC5에는 sRGB 변종이 없으므로 노멀 맵은 `BC5_UNORM`으로 저장한다. 변환 시점에 색 공간을 못 박아 두면 런타임에서 보정할 일이 없다.
+DDS 파일 헤더의 포맷 플래그가 `_SRGB`로 끝나면 로더가 자동으로 sRGB SRV를 만든다. 따라서 콘텐츠 파이프라인에서 텍스처를 DDS로 변환할 때 sRGB 플래그를 정확히 박는 것이 중요하다. sRGB 코드값을 그대로 저장한 디퓨즈를 `BC7_UNORM` SRV로 읽으면 디코딩이 빠져 조명 계산이 잘못되며, 출력 변환까지의 조합에 따라 밝기와 대비가 달라진다. 노멀을 `BC7_UNORM_SRGB` 같은 sRGB 포맷으로 변환하면 법선이 일그러진다. BC5에는 sRGB 변종이 없으므로 노멀 맵은 `BC5_UNORM`으로 저장한다. 변환 시점에 색 공간을 못 박아 두면 런타임에서 보정할 일이 없다.
 
 ### WIC는 디코딩이 필요한 일반 이미지 포맷
 
@@ -426,7 +428,7 @@ WIC(Windows Imaging Component)는 PNG·JPG·TIFF·BMP 같은 일반 이미지 �
 
 HRESULT hr = DirectX::CreateWICTextureFromFileEx(
     device, context, L"asset.png",
-    0,                                          // maxSize (0 = 제한 없음)
+    0,                                          // maxSize (0 = feature level에 맞는 기본 상한)
     D3D11_USAGE_DEFAULT,
     D3D11_BIND_SHADER_RESOURCE,
     0, 0,
@@ -449,13 +451,13 @@ DirectXTex가 제공하는 `texconv.exe`는 PNG/TGA를 DDS로 변환하면서 BC
 
 ```bash
 texconv.exe -m 0 -f BC7_UNORM_SRGB -srgb brick_diffuse.png
-texconv.exe -m 0 -f BC5_UNORM            brick_normal.png
-texconv.exe -m 0 -f BC4_UNORM            brick_ao.png
+texconv.exe -m 0 -f BC5_UNORM --ignore-srgb brick_normal.png
+texconv.exe -m 0 -f BC4_UNORM --ignore-srgb brick_ao.png
 ```
 
-`-m 0`은 전체 밉 체인을 생성한다(0은 최대 단계까지). `-f`는 출력 압축 포맷, `-srgb`는 sRGB 플래그다. 노멀과 AO 명령에 `-srgb`가 없는 것이 핵심이다. 노멀에 sRGB를 박으면 법선이 비선형으로 일그러져 라이팅이 틀어진다.
+`-m 0`은 전체 밉 체인을 생성한다(0은 최대 단계까지). `-f`는 출력 압축 포맷이다. `-srgb`는 입력과 출력이 모두 sRGB라는 뜻으로 필터링 시 변환을 지정하며, 단순한 파일 태그만이 아니다. 노멀과 AO에는 `--ignore-srgb`로 입력 파일의 색공간 메타데이터도 무시해 데이터 채널로 처리한다. 노멀에 sRGB를 박으면 법선이 비선형으로 일그러져 라이팅이 틀어진다.
 
-BC7 압축은 품질이 BC3 대비 눈에 띄게 좋고 크기는 같지만, 인코딩 시간이 BC3 대비 대략 10배다. 한 텍스처를 압축하는 데 수 초가 걸릴 수 있어, 빌드 시점에 한 번 변환해 DDS를 저장소에 두거나 캐시한다. 매 실행마다 변환하는 것은 비현실적이다. 이것이 DDS를 "콘텐츠 파이프라인의 산출물"로 두는 이유다. 압축은 빌드 때 한 번, 로딩은 런타임에 빠르게.
+BC7은 BC3와 같은 8bpp에서 더 다양한 인코딩 모드를 제공해 품질을 높일 수 있지만, 인코딩 비용은 도구·품질 설정·CPU/GPU 경로에 따라 크게 달라진다. 한 텍스처를 압축하는 데 수 초가 걸릴 수 있어, 빌드 시점에 한 번 변환해 DDS를 저장소에 두거나 캐시한다. 매 실행마다 변환하는 것은 비현실적이다. 이것이 DDS를 "콘텐츠 파이프라인의 산출물"로 두는 이유다. 압축은 빌드 때 한 번, 로딩은 런타임에 빠르게.
 
 ## 5. 메시별 드로우 콜
 
@@ -606,7 +608,7 @@ auto sphere   = DirectX::GeometricPrimitive::CreateSphere  (context, 1.0f, 32, f
 auto cylinder = DirectX::GeometricPrimitive::CreateCylinder(context, 2.0f, 0.5f, 32, false);
 
 box->Draw(world, view, proj, Colors::CornflowerBlue);
-sphere->Draw(world2, view, proj, Colors::Red, texture.Get(), false);
+sphere->Draw(world2, view, proj, Colors::Red, diffuseSRV.Get(), false);
 ```
 
 `Draw`는 `Initialize`에서 만들어 둔 정점·인덱스 버퍼를 묶어 BasicEffect로 그린다. 버퍼 생성은 객체 생성 시점에 한 번 일어나며 `Draw` 호출마다 새로 만들지 않는다. 디버그 시각화나 학습용 데모에서 외부 모델을 불러오지 않고 형태를 띄울 때 편하다. 충돌체 시각화, 광원 위치 표시, 본 디버그 그리기에 자주 쓴다. 프로덕션 메시는 이 절의 앞에서 만든 직접 정점 버퍼 관리를 쓴다. `GeometricPrimitive`는 매 `Draw`마다 상태를 다시 설정하므로 대량 렌더링에는 부적합하다. 다만 프레임마다 `GeometricPrimitive` 객체 자체를 새로 만드는 호출자라면 버퍼 생성 비용이 발생하므로, 최적화 여부는 `Draw`의 고유 동작이 아니라 실제 호출 위치를 보고 판단한다.

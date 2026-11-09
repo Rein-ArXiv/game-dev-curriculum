@@ -229,7 +229,7 @@ if (misprediction) {
 
 ```c
 // 벤치마크: 배열에서 값 찾기
-int sum = 0;
+int64_t sum = 0;  // 이 예제는 32비트 int 입력과 int 범위 안의 원소 수를 가정
 for (int i = 0; i < SIZE; i++) {
     if (data[i] >= 128) {
         sum += data[i];
@@ -383,7 +383,7 @@ gcc -fprofile-generate -O2 program.c -o program
 clang -fprofile-instr-generate -O2 program.c -o program
 
 # MSVC
-cl /GL program.c /link /LTCG:PGINSTRUMENT
+cl /O2 /GL program.c /link /LTCG /GENPROFILE
 ```
 
 계측 코드가 삽입되어 실행 정보를 수집한다.
@@ -406,6 +406,9 @@ gcc -fprofile-use -O2 program.c -o program
 # Clang
 llvm-profdata merge -output=default.profdata default.profraw
 clang -fprofile-instr-use=default.profdata -O2 program.c -o program_optimized
+
+# MSVC: 앞서 훈련한 profile을 사용
+cl /O2 /GL program.c /link /LTCG /USEPROFILE
 ```
 
 컴파일러는 프로파일 데이터를 읽고 Hot path 인라인, Cold code 멀리 배치, 분기 예측 힌트 자동 삽입, 레지스터 할당 최적화를 적용한다.
@@ -426,7 +429,7 @@ void process(int type) {
             fast_path();
             break;
         case TYPE_B:  // 실제 사용자는 주로 이걸 사용
-            // 최적화에서 제외됨!
+            // 드문 경로로 판단되어 배치·인라이닝에서 불리할 수 있음
             slow_path();
             break;
     }
@@ -477,7 +480,7 @@ max_branchless:
     ret
 ```
 
-`cmovg`는 조건부로 값을 복사하지만 분기하지 않는다. 파이프라인이 막히지 않는다.
+`cmovg`는 조건부로 값을 복사하지만 분기하지 않는다. 분기 오예측은 피하지만 조건과 입력값에 대한 데이터 의존성은 남는다.
 
 #### 언제 유리한가
 
@@ -540,7 +543,7 @@ int abs_branch(int x) {
 }
 
 // Branchless 버전
-uint32_t abs_magnitude(int x) {
+uint32_t abs_magnitude(int32_t x) {
     uint32_t ux = static_cast<uint32_t>(x);
     uint32_t mask = 0u - (ux >> 31);  // 음수면 UINT32_MAX
     return (ux ^ mask) + (mask & 1u);
@@ -600,7 +603,7 @@ SIMD Branchless:
 ```c
 // AVX2 사용
 int i = 0;
-for (; i + 8 <= n; i += 8) {
+for (; n - i >= 8; i += 8) {
     __m256i v = _mm256_loadu_si256((__m256i*)&data[i]);
     __m256i mask = _mm256_cmpgt_epi32(v, _mm256_setzero_si256());
     __m256i to_add = _mm256_and_si256(v, mask);
@@ -625,8 +628,8 @@ for (; i < n; i++) {
 테스트 코드:
 
 ```c
-int sum_if(int threshold) {
-    int sum = 0;
+int64_t sum_if(int threshold) {
+    int64_t sum = 0;
     for (int i = 0; i < SIZE; i++) {
         if (data[i] >= threshold) {
             sum += data[i];
@@ -635,8 +638,8 @@ int sum_if(int threshold) {
     return sum;
 }
 
-int sum_branchless(int threshold) {
-    int sum = 0;
+int64_t sum_branchless(int threshold) {
+    int64_t sum = 0;
     for (int i = 0; i < SIZE; i++) {
         int mask = -(data[i] >= threshold);
         sum += data[i] & mask;
@@ -645,7 +648,7 @@ int sum_branchless(int threshold) {
 }
 ```
 
-랜덤 조건은 분기 버전에 불리하고 긴 run으로 정렬된 조건은 predictor에 유리하다는 방향은 예상할 수 있다. 그러나 compiler가 두 루프를 같은 SIMD mask 코드로 바꾸면 차이가 사라진다. branchless 식도 항상 모든 대안보다 빠른 것이 아니며 추가 산술, dependency와 vectorization 가능성을 함께 본다.
+위 두 함수는 32비트 `int`와 `0 <= SIZE <= INT_MAX`를 가정하고, 합은 signed overflow가 없도록 `int64_t`에 누적한다. 랜덤 조건은 분기 버전에 불리하고 긴 run으로 정렬된 조건은 predictor에 유리하다는 방향은 예상할 수 있다. 그러나 compiler가 두 루프를 같은 SIMD mask 코드로 바꾸면 차이가 사라진다. branchless 식도 항상 모든 대안보다 빠른 것이 아니며 추가 산술, dependency와 vectorization 가능성을 함께 본다.
 
 ### Binary Search: 분기의 함정
 
@@ -797,9 +800,7 @@ unsigned divide_by_2(unsigned x) {
 
 ### 머신러닝 기반 예측기
 
-최신 연구는 LSTM 기반 예측기를 탐구한다. 더 긴 히스토리(수백 개 분기), 복잡한 패턴 인식이 가능하지만, 하드웨어 복잡도와 전력 소비가 문제다.
-
-학계 연구들은 신경망 기반 예측기가 기존 TAGE 계열보다 높은 정확도를 달성할 수 있음을 보고하지만, 실리콘 면적과 전력, 예측 지연이 수 배로 늘어난다는 비용도 함께 보고한다. 상용화는 아직 멀었다.
+신경망 계열의 예측기는 더 긴 히스토리와 복잡한 상관관계를 학습하는 방향을 탐구한다. 다만 예측 정확도만으로 실용성을 판단할 수는 없다. 같은 분기 trace에서 기준 예측기와 비교하고, 저장 용량·학습 회로·전력·예측 지연까지 포함해야 한다. 연구 모델의 이득을 특정 상용 CPU의 구현이나 상용화 시점으로 곧바로 해석하지 않는다.
 
 ### Software-Guided Prediction
 
@@ -817,7 +818,7 @@ for (int i = 0; i < n; i++) {
 
 패턴을 명시적으로 알려주면 예측기가 학습한다.
 
-### 분기 없는 아키텍처
+### SIMT의 분기 처리
 
 NVIDIA GPU와 같은 SIMT(Single Instruction Multiple Threads) 아키텍처는 분기를 다르게 처리한다.
 

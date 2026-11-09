@@ -182,7 +182,7 @@ const view = new Float32Array(wasm.memory.buffer, ptr, count * 4);
 wasm.updateAll(ptr, count);        // 호출 1회로 전체 처리
 ```
 
-view 수명 계약이 빠지면 위 코드는 깨진다. `WebAssembly.Memory.grow()`나 allocator 재배치는 기존 `memory.buffer`를 분리(detach)하므로 이미 만든 view는 length 0·원소 undefined가 된다(공유 버퍼라도 기존 view 길이가 늘지는 않는다). 따라서 grow·재배치 이후에는 `memory.buffer`와 `ptr`를 다시 조회해 view를 재생성해야 하며, 재생성 위치와 스레드 동기화는 helper 계약으로 둔다. 여기서 말하는 공유는 JS와 WASM이 같은 `ArrayBuffer`를 본다는 뜻이고, 반드시 `SharedArrayBuffer`/멀티스레드를 뜻하지는 않는다.
+view 수명 계약이 빠지면 위 코드는 깨진다. 비공유 `WebAssembly.Memory.grow()`는 기존 버퍼를 분리(detach)하므로 기존 view가 무효가 된다. 공유 메모리는 기존 view가 분리되지 않지만 길이가 자동으로 늘지 않는다. allocator가 객체를 다른 주소로 옮길 때는 버퍼 분리와 별개로 기존 `ptr`가 그 객체를 가리키지 않는다. 따라서 grow·재배치 이후에는 `memory.buffer`와 `ptr`를 다시 조회해 view를 재생성해야 하며, 재생성 위치와 스레드 동기화는 helper 계약으로 둔다. 여기서 말하는 공유는 JS와 WASM이 같은 `ArrayBuffer`를 본다는 뜻이고, 반드시 `SharedArrayBuffer`/멀티스레드를 뜻하지는 않는다.
 
 원칙은 *경계는 굵고 드물게* 다. 데이터를 WASM 선형 메모리에 *공유 뷰(typed array view)* 로 펼쳐 두고, JS와 WASM이 *같은 메모리* 를 읽고 쓰게 하면 복사가 사라진다. 호출 횟수를 줄이고 한 번에 큰 작업을 넘긴다.
 

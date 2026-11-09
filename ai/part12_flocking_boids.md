@@ -62,6 +62,7 @@ $$
 
 ```cpp
 struct Boid {
+    uint64_t id;             // 개체별 고유 ID
     Vec2 position, velocity;
     float maxSpeed;
     float maxAccel;
@@ -74,7 +75,9 @@ Vec2 TrackVelocity(const Boid& b, Vec2 desiredVelocity) {
 }
 
 Vec2 Seek(const Boid& b, Vec2 target) {
-    Vec2 desired = Normalize(target - b.position) * b.maxSpeed;
+    Vec2 delta = target - b.position;
+    if (LengthSq(delta) < 1e-12f) return Vec2{0, 0}; // 방향 없음: 응집 명령 없음
+    Vec2 desired = Normalize(delta) * b.maxSpeed;
     return TrackVelocity(b, desired);
 }
 ```
@@ -163,8 +166,11 @@ Vec2 Separation(const Boid& b, const std::vector<const Boid*>& neighbors) {
     for (const Boid* n : neighbors) {
         Vec2  diff = b.position - n->position;
         float distSq = LengthSq(diff);
-        if (distSq > kMinDistSq &&
-            distSq < kSeparationRadius * kSeparationRadius) {
+        if (distSq <= kMinDistSq) {
+            // 같은 ID 쌍 양쪽에서 반대인 단위 방향을 주는 결정적 함수.
+            away += PairSeparationDirection(b.id, n->id) / std::sqrt(kMinDistSq);
+            ++count;
+        } else if (distSq < kSeparationRadius * kSeparationRadius) {
             away += diff / distSq;               // 크기는 1/dist
             ++count;
         }
@@ -254,7 +260,7 @@ $$
 0<\alpha<\frac{2}{\lambda_{\max}}.
 $$
 
-$0<\alpha<1$은 모든 이런 그래프에 대한 간단한 충분조건이다. 이 범위에서는 자기 상태를 남기는 양의 self-weight가 생겨 이분 그래프의 부호 교대도 피한다. 이산 갱신에서 수렴 *속도*는 가장 작은 비영 고유값 $\lambda_2$가 아니라 모든 비합의 모드의 최대 감쇠율, 곧 SLEM $\max_{k\ge2}|1-\alpha\lambda_k|$로 정해진다. $0<\alpha<1$처럼 모든 모드가 양수로 남아 $|1-\alpha\lambda_k|=1-\alpha\lambda_2$가 되는 조건에서만 $\lambda_2$가 속도를 지배한다. $\alpha$가 커져 큰 $\lambda_k$에서 $1-\alpha\lambda_k$가 음수가 되면(예: 3정점 star, $\alpha=0.99$에서 모드 $1,.01,-.98$) 고주파 모드가 더 느리게 줄어들어 $\lambda_2$만으로는 속도를 설명할 수 없다. 수렴 *여부*의 조건 $0<\alpha<2/\lambda_{\max}$와 수렴 *속도*의 지배 모드를 구분해야 한다. 비정규 그래프에서 최종값은 단순 산술평균이 아니라 차수에 비례한 가중평균이다. 정규 그래프에서만 둘이 같다.
+$0<\alpha<1$은 모든 이런 그래프에 대한 간단한 충분조건이다. 이 범위에서는 양의 self-weight 덕분에 이분 그래프의 감쇠하지 않는 부호 교대를 피하지만, 감쇠하는 교대 모드는 남을 수 있다. 이산 갱신에서 수렴 *속도*는 가장 작은 비영 고유값 $\lambda_2$가 아니라 모든 비합의 모드의 최대 감쇠율, 곧 SLEM $\max_{k\ge2}|1-\alpha\lambda_k|$로 정해진다. $0<\alpha\le1/\lambda_{\max}$처럼 모든 모드가 음수가 아니어서 $\max_{k\ge2}|1-\alpha\lambda_k|=1-\alpha\lambda_2$가 되는 조건에서는 $\lambda_2$가 속도를 지배한다. $\alpha$가 커져 큰 $\lambda_k$에서 $1-\alpha\lambda_k$가 음수가 되면(예: 3정점 star, $\alpha=0.99$에서 모드 $1,.01,-.98$) 고주파 모드가 더 느리게 줄어들어 $\lambda_2$만으로는 속도를 설명할 수 없다. 수렴 *여부*의 조건 $0<\alpha<2/\lambda_{\max}$와 수렴 *속도*의 지배 모드를 구분해야 한다. 비정규 그래프에서 최종값은 단순 산술평균이 아니라 차수에 비례한 가중평균이다. 정규 그래프에서만 둘이 같다.
 
 전파에는 두 시간척도가 있다. 한 스텝은 그래프 한 홉 밖의 정보에 의존할 수 없으므로, 한쪽 끝의 변화가 반대쪽에 *처음 영향을 주는* 데에는 적어도 그래프 지름만큼의 스텝이 필요하다. 반면 오차가 충분히 작아지는 혼합 시간은 spectral gap에 의존한다. 길이 $n$인 사슬 계열에서는 $\lambda_2=\Theta(n^{-2})$이므로 고정 $\alpha$에서 완화 시간은 대략 $\Theta(n^2\log(1/\varepsilon))$로 증가한다. 최초 도달이 $O(n)$인 것과 전체 정렬이 $O(n^2)$인 것은 다른 주장이다.
 
@@ -327,14 +333,16 @@ flowchart LR
 ```cpp
 // fovCos = cos(반각). 예: 전방 270도 → 반각 135도 → cos(135°) ≈ -0.707
 bool IsNeighbor(const Boid& b, const Boid& other, float radiusSq, float fovCos) {
+    if (b.id == other.id) return false;
     Vec2  toOther = other.position - b.position;
     float distSq  = LengthSq(toOther);
-    if (distSq > radiusSq || distSq < 1e-6f) return false;   // 반경 밖 / 자기 자신
+    if (distSq > radiusSq) return false;
+    if (distSq < 1e-6f) return true; // 다른 개체와 겹침: 분리 정책에 넘긴다
     float speedSq = LengthSq(b.velocity);
     if (speedSq < 1e-6f) return true;                         // 정지 시 방향 제한 없음
     Vec2  forward = b.velocity / std::sqrt(speedSq);
     float cosAngle = Dot(forward, toOther) / std::sqrt(distSq);
-    return cosAngle > fovCos;                                // 시야각 안
+    return cosAngle >= fovCos;                               // 경계 포함
 }
 ```
 

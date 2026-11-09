@@ -317,7 +317,9 @@ public:
 };
 ```
 
-### UHT가 생성하는 코드
+### UHT의 생성 구조를 단순화한 코드
+
+아래는 등록·접근 thunk의 역할을 보여 주는 의사코드이며, 특정 UE 버전이 실제로 출력하는 `.generated.h`나 `.gen.cpp`의 사본이 아니다. 실제 등록 함수·descriptor·매크로 형태는 엔진 버전에 따라 달라진다. `ClampMin` 같은 `meta` 정보는 에디터용이며, 게임 실행 로직이 이 문자열 메타데이터의 존재에 의존해서는 안 된다.
 
 ```cpp
 // Character.generated.h
@@ -403,7 +405,7 @@ void ParseHeader(const string& content) {
 - 조건부 컴파일을 완전히 이해하지 못한다.
 - 때로 주석 안의 매크로도 파싱한다.
 
-그러나 실용적이다. 99%의 경우에 작동하며, 개발자가 명시적으로 매크로를 작성하므로 의도가 명확하다.
+지원하는 선언 형태 안에서는 실용적이다. 개발자가 명시적으로 매크로를 작성하므로 노출 의도가 명확하지만, 지원하지 않는 C++ 구문과 매크로 조합은 UHT의 제약을 확인해야 한다.
 
 ### 장점과 단점
 
@@ -411,7 +413,7 @@ void ParseHeader(const string& content) {
 - 등록 코드를 자동 생성한다.
 - 메타데이터가 풍부하다(EditAnywhere, BlueprintCallable 등).
 - 헤더만 보면 전체 정보를 알 수 있다.
-- 타이핑 실수가 불가능하다(컴파일러가 검증).
+- 등록 코드의 반복 작성에서 생기는 실수를 줄인다(UHT와 C++ 컴파일러가 지원 구문을 검증).
 
 단점:
 - 빌드 프로세스가 복잡해진다.
@@ -642,6 +644,7 @@ void PropertyEditor::Show(Object* obj) {
     Class* type = obj->GetClass();
 
     ImGui::PushID(obj);
+    const char* currentCategory = nullptr;
     for (Property* prop : type->GetProperties()) {
         ImGui::PushID(prop);  // 객체 수명 동안 안정된 식별자라는 계약
         const char* category = prop->GetMetadata("Category");
@@ -753,12 +756,14 @@ void ScriptEngine::RegisterClass(Class* type) {
     lua_pushstring(L, "__newindex");
     lua_pushcfunction(L, &PropertySetter);
     lua_settable(L, -3);
+    lua_pop(L, 1); // 등록 중 쌓은 metatable을 제거해 진입 시 스택 높이 복원
 }
 
 // Lua -> C++ 브리지
 int ScriptEngine::MethodThunk(lua_State* L) {
     Method* method = (Method*)lua_touserdata(L, lua_upvalueindex(1));
-    Object* obj = (Object*)lua_touserdata(L, 1);
+    Object* obj = ResolveCheckedObject(L, 1, method->GetDeclaringType());
+    ValidateSupportedArguments(L, method, 2); // Float/Int 인자 수·타입·범위 검증, 실패 시 Lua 오류
 
     std::vector<Variant> args;
     for (int i = 0; i < method->GetParamCount(); i++) {
@@ -796,6 +801,8 @@ character:TakeDamage(25) -- MethodThunk 호출
 ```
 
 리플렉션이 없다면 모든 클래스에 대해 수동으로 바인딩 코드를 작성해야 한다. 리플렉션이 있으면 한 번의 RegisterClass 호출로 끝난다.
+
+이 축약 예의 `ResolveCheckedObject`는 등록된 userdata의 타입과 핸들 생존을 확인한 뒤 호출이 끝날 때까지 유효한 객체를 돌려주는 보조 함수다. `lua_touserdata`는 userdata 저장 공간의 주소를 반환할 뿐, 그 안에 저장한 `Object*`를 자동으로 꺼내거나 검증하지 않는다. `ValidateSupportedArguments`는 이 예가 지원하는 Float/Int 변환을 벡터 생성 전에 검사한다. C로 빌드된 Lua의 오류 전파가 `longjmp`라면 C++ 소멸자가 필요한 지역 객체를 건너뛰어서는 안 된다. 생략한 `PropertyGetter`도 프로퍼티가 없을 때 metatable의 메서드를 찾아야 `character:TakeDamage(25)`가 동작한다. 반환 변환은 위 코드에서 Float만 예시로 들었다.
 
 ### 3) 직렬화: 객체 저장과 로딩
 

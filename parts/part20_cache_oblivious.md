@@ -49,6 +49,8 @@ void matmul_naive(double* C, double* A, double* B, int n) {
 
 이 코드의 문제는 `B`의 접근 패턴이다. `B[k*n + j]`는 열 단위로 접근하는데, C의 행 우선(row-major) 레이아웃에서는 캐시 라인을 낭비한다.
 
+아래 행렬 예제는 유효한 배열과 음수가 아닌 크기를 전제로 하며, 간결하게 쓴 `int` 인덱스의 곱·덧셈이 표현 범위를 넘지 않는 크기만 다룬다. 더 큰 행렬은 `size_t` 등으로 인덱스를 계산하되 할당 크기의 곱도 별도로 검사해야 한다. 전치의 입력·출력은 서로 겹치지 않는 out-of-place 방식이다.
+
 **Cache-Aware 최적화: 타일링**
 
 ```c
@@ -179,7 +181,7 @@ flowchart TD
 
 Ideal cache 모델 (캐시 크기 M, 라인 크기 B)에서:
 
-행 우선 A를 읽고 열 방향 B에 쓰는 naive 루프에서 행 길이가 cache보다 크면 B의 각 원소가 별도 line miss를 유발할 수 있어 I/O는 $\Theta(n^2)$까지 간다. 재귀 전치는 두 부분 블록이 cache에 들어가는 깊이에서 line을 끝까지 재사용하므로, tall-cache 가정 아래 입력·출력을 한 번씩 훑는 하한과 같은 $\Theta(n^2/B)$ block transfer를 달성한다.
+행 우선 A를 읽고 열 방향 B에 쓰는 naive 루프에서 행 길이가 cache보다 크면 B의 각 원소가 별도 line miss를 유발할 수 있어 I/O는 $\Theta(n^2)$까지 간다. 재귀 전치는 두 부분 블록이 cache에 들어가는 깊이에서 line을 끝까지 재사용하므로, tall-cache 가정 아래 입력·출력을 한 번씩 훑는 하한과 같은 $\Theta(1+n^2/B)$ block transfer를 달성한다. 상수 1은 한 line보다 작은 입력도 읽어야 한다는 뜻이다.
 
 실측 비교에는 naive, 명시적 blocked, 재귀 버전을 같은 행렬·alignment로 실행하고 wall time과 cache miss, writeback을 기록한다. 재귀 버전이 tuned block보다 항상 빠르다는 보장은 없다. 함수 호출, cutoff, 컴파일러 최적화와 행렬 크기에 따라 상수 비용이 달라진다.
 
@@ -260,6 +262,8 @@ void matmul_oblivious(double* C, double* A, double* B, int n) {
 ```
 
 ### 캐시 효율 분석
+
+위 홀수 크기 fallback은 누락 없이 계산하기 위한 선택이다. 큰 홀수 입력에서는 재귀 분할을 하지 않으므로 아래의 점근 I/O bound를 이 축약 코드의 모든 입력에 그대로 적용할 수는 없다. 일반 크기에도 bound를 유지하려면 홀수 차원까지 균형 있게 나누는 직사각형 분할을 구현해야 한다.
 
 **작업 세트 계산:**
 
@@ -463,7 +467,7 @@ void merge_sort(int* arr, int n) {
 각 merge 자체는 두 입력과 출력을 순차 스캔하므로 line을 잘 사용한다. 차이는 cache보다 큰 재귀 레벨마다 전체 데이터를 다시 스캔한다는 데 있다. 2-way merge sort의 block transfer는 모델과 cutoff에 따라 대략 $(N/B)$에 cache 밖의 병합 레벨 수를 곱한 형태가 되고, comparison sorting의 I/O 하한은
 
 $$
-\Theta\left(\frac{N}{B}\log_{M/B}\frac{N}{B}\right)
+\Theta\left(1+\frac{N}{B}\max\left\{1,\log_{M/B}\frac{N}{B}\right\}\right)
 $$
 
 이다. 다중 병합은 한 번의 pass에서 더 많은 run을 합쳐 pass 수를 줄인다.
@@ -517,7 +521,7 @@ void funnel_sort(int* arr, int n) {
 Ideal-cache와 tall-cache 가정에서 완전한 funnel sort는
 
 $$
-O\left(\frac{N}{B}\log_{M/B}\frac{N}{B}\right)
+O\left(1+\frac{N}{B}\max\left\{1,\log_{M/B}\frac{N}{B}\right\}\right)
 $$
 
 block transfer로 comparison sorting의 점근적 I/O 하한을 달성한다. 위 코드는 분할 구조만 보이는 의사 코드이며 `funnel_merge`의 재귀 버퍼 불변식, 나머지 블록과 작은 입력 처리가 빠져 있으므로 그 자체로 이 bound를 달성하는 구현은 아니다.
@@ -729,7 +733,7 @@ void matmul_parallel(double* C, double* A, double* B, int n) {
 
 임시 block은 추가 메모리와 대역폭을 소비한다. 대안은 각 `Cij`의 두 누적 곱을 같은 task가 순차 실행하고 서로 다른 `Cij` 네 개만 병렬화하는 것이다. 어느 분해가 나은지는 산술 강도, task grain, NUMA 배치와 메모리 예산에 달려 있다.
 
-각 스레드가 독립적인 블록을 처리하므로 false sharing이 적다.
+서로 다른 C block을 맡으면 논리적인 쓰기 충돌은 피한다. 다만 블록 경계가 같은 cache line에 걸리면 false sharing은 남을 수 있으므로 시작 정렬과 row stride도 살펴야 한다.
 
 ### GPU에서의 Cache-Oblivious
 

@@ -202,7 +202,7 @@ v_{rel,n}^{\text{after}} = -e \cdot v_{rel,n}^{\text{before}}
 $$
 
 $e = 0$: 완전 비탄성 (충돌 후 상대 속도 0).
-$e = 1$: 완전 탄성 (반사).
+$e = 1$: 법선 방향 완전 탄성 (마찰 없는 단일 접촉에서는 탄성 충돌).
 $0 < e < 1$: 일부 에너지 손실.
 
 ### 3.4 normal impulse 의 식
@@ -303,7 +303,7 @@ $$
 
 ### 4.2 물리적 의미
 
-- $e = 1$: 충돌 후 *법선 속도 정확히 반사*. 에너지 손실 0. 이상적 탄성.
+- $e = 1$: 충돌 후 *법선 속도 정확히 반사*. 마찰·감쇠·안정화가 없는 이상적 단일 접촉에서 운동 에너지 손실 0.
 - $e = 0$: 충돌 후 *법선 속도 0*. 두 물체가 *그 방향으로 같이* 움직임. 완전 비탄성 (점토 흙 흡수).
 - $0 < e < 1$: 일반적. *일부 에너지 손실*.
 
@@ -363,7 +363,7 @@ normal impulse 가 *후속 속도* 를 분리시킴 — 다음 step 부터는 �
 flowchart LR
     Step1[Step n: 침투 d 검출] --> Imp[normal impulse 적용]
     Imp --> Vel[속도 분리 후속]
-    Vel --> Step2[Step n+1: 여전히 침투 (d 변함 없음)]
+    Vel --> Step2[현재 위치의 침투는 즉시 해소되지 않음]
     Step2 --> Loop[같은 응답 반복 — 진동]
 ```
 
@@ -381,7 +381,7 @@ void PositionCorrection(Body& a, Body& b, vec3 n, float depth) {
 }
 ```
 
-침투 깊이만큼 *두 강체를 질량 비율로* 분리. 정적 객체 ($\text{invMass} = 0$) 는 안 움직임.
+침투 깊이만큼 *두 강체를 역질량 비율로* 분리. 정적 객체 ($\text{invMass} = 0$) 는 안 움직임.
 
 ### 5.3 Slop (허용 침투)
 
@@ -419,7 +419,7 @@ void PositionCorrection(Body& a, Body& b, vec3 n, float depth) {
 }
 ```
 
-Box2D 의 *NGS (Non-linear Gauss-Seidel) split position solver* 의 단순화 버전. 산업 코드는 *반복 (iter) + 안정성* 추가.
+Box2D v2.4 의 *NGS (Non-linear Gauss-Seidel) position solver* 를 병진만 남겨 단순화한 예다. 산업 코드는 *반복 (iter) + 안정성* 추가.
 
 ### 5.6 위치 보정과 운동량
 
@@ -493,7 +493,7 @@ float bias = std::min((kBaumgarte * std::max(depth - kSlop, 0.0f)) / dt,
 | Baumgarte bias | 속도 제약의 bias | 별도 위치 pass 없음, 속도에 인공 에너지를 주입할 수 있음 |
 | Pseudo-velocity (Bullet) | 별도 위치 채널 | 시뮬 속도와 분리, 역시 자동 보존은 아님 |
 
-Box2D 는 *NGS + Baumgarte* 혼합. PhysX 는 *bias 기반 PGS + substep 기반 TGS*. 엔진별 다른 선택.
+Box2D v2.4 는 *위치 NGS와 별도 TOI 경로의 보정*을 사용한다. 최신 버전의 솔버 구성은 다를 수 있다. PhysX 는 *bias 기반 PGS + substep 기반 TGS*. 엔진별 다른 선택.
 
 ### 6.6 산업 채택
 

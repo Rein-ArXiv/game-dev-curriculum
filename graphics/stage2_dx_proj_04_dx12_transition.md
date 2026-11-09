@@ -95,7 +95,7 @@ D3D12CreateDevice(adapter.Get(),
 
 ### Command Queue × 3
 
-DX11의 즉시 컨텍스트는 GPU에 명령을 보내는 유일한 통로였다. DX12는 명령을 큐(Command Queue)에 제출하고, GPU가 그 큐를 비동기로 소비한다. 큐는 GPU의 물리적 엔진에 대응하며, 세 종류가 있다.
+DX11의 즉시 컨텍스트는 GPU에 명령을 보내는 유일한 통로였다. DX12는 명령을 큐(Command Queue)에 제출하고, GPU가 그 큐를 비동기로 소비한다. 큐는 지원 명령에 따라 세 종류가 있는 논리적 제출 경로다. 실제 물리 엔진과의 대응은 구현에 달려 있다.
 
 ```cpp
 auto MakeQueue = [&](D3D12_COMMAND_LIST_TYPE type) {
@@ -112,7 +112,7 @@ auto computeQueue = MakeQueue(D3D12_COMMAND_LIST_TYPE_COMPUTE);
 auto copyQueue    = MakeQueue(D3D12_COMMAND_LIST_TYPE_COPY);
 ```
 
-Direct 큐는 그래픽스·컴퓨트·복사를 모두 처리하는 만능 엔진이다. Compute 큐는 그래픽스 파이프라인 없이 컴퓨트 디스패치만, Copy 큐는 자원 전송만 담당한다. 세 엔진은 물리적으로 분리되어 있어 병렬로 실행된다. 예를 들어 Copy 큐가 다음 프레임의 텍스처를 비디오 메모리로 업로드하는 동안 Direct 큐는 현재 프레임을 그릴 수 있다.
+Direct 큐는 그래픽스·컴퓨트·복사를 모두 처리하는 만능 엔진이다. Compute 큐는 컴퓨트·복사 명령을, Copy 큐는 복사 명령을 지원한다. 여러 큐가 실제로 병렬 실행되는지는 하드웨어 스케줄러와 실행 자원 여유에 달려 있다. 예를 들어 Copy 큐가 다음 프레임의 텍스처를 비디오 메모리로 업로드하는 동안 Direct 큐는 현재 프레임을 그릴 수 있다.
 
 학습 단계에서는 Direct 큐 하나면 충분하다. 비동기 컴퓨트나 비동기 자원 업로드를 도입하는 시점에 Compute·Copy 큐를 활용한다. 다만 여러 큐를 동시에 쓰면 큐 사이의 동기화를 펜스(Fence)로 직접 다뤄야 하므로 복잡도가 한 단계 더 오른다.
 
@@ -128,7 +128,10 @@ scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
 scd.BufferCount = FRAMES_IN_FLIGHT;          // 보통 2 또는 3
 scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 scd.SampleDesc.Count = 1;                    // 스왑 체인은 MSAA 불가
-scd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+BOOL allowTearing = FALSE;
+factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                             &allowTearing, sizeof(allowTearing));
+scd.Flags = allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
 
 ComPtr<IDXGISwapChain1> swap1;
 factory->CreateSwapChainForHwnd(
@@ -140,7 +143,7 @@ ComPtr<IDXGISwapChain4> swap;
 swap1.As(&swap);
 ```
 
-`DXGI_SWAP_EFFECT_FLIP_DISCARD`는 현대 Windows에서 필수에 가까운 선택이다. 예전의 `DISCARD` 방식은 데스크톱 윈도우 매니저(DWM)가 백 버퍼 내용을 한 번 복사했지만, FLIP 모델은 백 버퍼 포인터를 그대로 화면 컨트롤러에 넘겨 복사를 없앤다. 이를 플립 모델 프레젠테이션이라 하며, 낮은 지연과 화면 모드에서의 page flip을 가능케 한다.
+`DXGI_SWAP_EFFECT_FLIP_DISCARD`는 현대 Windows에서 필수에 가까운 선택이다. 예전의 `DISCARD` 방식은 데스크톱 윈도우 매니저(DWM)가 백 버퍼 내용을 한 번 복사했지만, FLIP 모델은 백 버퍼를 DWM과 공유해 BLT 경로의 추가 복사를 줄인다. 합성 우회나 직접 scanout은 표시 환경의 추가 조건에 달려 있다. 이를 플립 모델 프레젠테이션이라 하며, 낮은 지연과 화면 모드에서의 page flip을 가능케 한다.
 
 `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING`은 가변 리프레시 레이트(VRR) 모니터에서 티어링을 허용하는 옵션이다. 이 플래그가 있어야 `Present(0, DXGI_PRESENT_ALLOW_TEARING)`로 V-Sync를 끄고 모니터 갱신 주기와 무관하게 즉시 표시할 수 있다. 이 플래그를 켜려면 시스템이 테어링을 지원하는지 `CheckFeatureSupport`로 먼저 확인해야 한다.
 
@@ -178,6 +181,10 @@ DX12는 이 모든 상태를 파이프라인 상태 객체(PSO) 하나로 통합
 
 ```cpp
 D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc{};
+// d3dx12.h: 0이 유효한 enum 기본값이 아닌 필드도 초기화한다.
+psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
 
 // Root Signature
 psoDesc.pRootSignature = rootSig.Get();
@@ -202,7 +209,7 @@ psoDesc.InputLayout = { il, _countof(il) };
 // Rasterizer — DX11의 RSSetState
 psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
 psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
-psoDesc.RasterizerState.FrontCounterClockwise = TRUE;
+psoDesc.RasterizerState.FrontCounterClockwise = FALSE; // 앞 모델 원고의 LH·시계방향 전면 규약
 psoDesc.RasterizerState.DepthClipEnable = TRUE;
 
 // Blend — DX11의 OMSetBlendState
@@ -229,7 +236,7 @@ device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pso));
 
 출력 포맷이 PSO에 박힌다는 점이 DX11과 결정적으로 다르다. 렌더 타깃의 포맷(`RTVFormats`)과 깊이 버퍼의 포맷(`DSVFormat`)이 PSO 생성 시점에 고정된다. 드로우 시점에 바인딩하는 실제 RTV·DSV의 포맷이 PSO에 박힌 포맷과 다르면 디버그 레이어가 즉시 오류를 낸다. 여기서 백 버퍼는 `R8G8B8A8_UNORM`이지만 RTV 포맷은 `_SRGB`로 지정했다. 이는 sRGB 캐스트 트릭으로, 셰이더가 출력한 선형 색상을 출력 단계에서 자동으로 sRGB 공간으로 인코딩한다.
 
-`FrontCounterClockwise = TRUE`는 반시계 방향 정점 순서를 앞면으로 본다는 뜻이다. 모델 데이터의 와인딩 순서와 이 설정이 어긋나면 정상 면이 컬링되어 사라진다.
+여기서는 앞 모델 로더의 왼손·시계방향 전면 규약에 맞춰 `FrontCounterClockwise = FALSE`로 두었다. 반시계 방향 전면 메시를 그대로 유지한다면 TRUE를 사용한다. 모델 데이터의 와인딩 순서와 이 설정이 어긋나면 정상 면이 컬링되어 사라진다.
 
 ### Primitive Topology의 분리
 
@@ -333,7 +340,7 @@ params[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 // 총 4 + 2 + 2 + 1 + 1 = 10 DWORD (64 예산 안)
 ```
 
-머티리얼 텍스처 다섯 장(알베도·노멀·메탈릭·러프니스·AO)을 `t0`부터 `t4`에 묶어 슬롯 3의 디스크립터 테이블에 둔다. IBL 텍스처 세 장(조도 큐브맵·프리필터 큐브맵·BRDF LUT)을 `t10`부터 `t12`에 묶어 슬롯 4에 둔다. 텍스처 여덟 장을 디스크립터 테이블 두 개, 즉 2 DWORD로 노출한 셈이다. 루트 SRV는 버퍼 자원만 가리킬 수 있으므로 텍스처는 애초에 디스크립터 테이블을 거쳐야 하며, 설령 버퍼 여덟 개를 루트 SRV로 노출했다면 16 DWORD를 소비했을 것이다.
+머티리얼 텍스처 다섯 장(알베도·노멀·metallic-roughness 패킹·이미시브·AO)을 `t0`부터 `t4`에 묶어 슬롯 3의 디스크립터 테이블에 둔다. IBL 텍스처 세 장(조도 큐브맵·프리필터 큐브맵·BRDF LUT)을 `t10`부터 `t12`에 묶어 슬롯 4에 둔다. 텍스처 여덟 장을 디스크립터 테이블 두 개, 즉 2 DWORD로 노출한 셈이다. 루트 SRV는 버퍼 자원만 가리킬 수 있으므로 텍스처는 애초에 디스크립터 테이블을 거쳐야 하며, 설령 버퍼 여덟 개를 루트 SRV로 노출했다면 16 DWORD를 소비했을 것이다.
 
 전체 합은 10 DWORD다. 64 예산의 6분의 1만 사용했으므로 여유가 충분하다. 예산이 빠듯해지면 변경이 가장 잦은 슬롯을 우선 유지하고, 정적인 것을 디스크립터 테이블로 합친다.
 
@@ -346,16 +353,24 @@ D3D12_STATIC_SAMPLER_DESC sampler{};
 sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
 sampler.AddressU = sampler.AddressV = sampler.AddressW =
     D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+sampler.MaxAnisotropy = 1;
+sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
 sampler.MaxLOD = D3D12_FLOAT32_MAX;
 sampler.ShaderRegister = 0;                    // s0
 sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+// 재질 텍스처는 s0 wrap, IBL 큐브맵·BRDF LUT는 s1 clamp로 읽는다.
+D3D12_STATIC_SAMPLER_DESC samplers[2] = { sampler, sampler };
+samplers[1].ShaderRegister = 1;
+samplers[1].AddressU = samplers[1].AddressV = samplers[1].AddressW =
+    D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
 
 D3D12_VERSIONED_ROOT_SIGNATURE_DESC rsDesc{};
 rsDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
 rsDesc.Desc_1_1.NumParameters = _countof(params);
 rsDesc.Desc_1_1.pParameters = params;
-rsDesc.Desc_1_1.NumStaticSamplers = 1;
-rsDesc.Desc_1_1.pStaticSamplers = &sampler;
+rsDesc.Desc_1_1.NumStaticSamplers = _countof(samplers);
+rsDesc.Desc_1_1.pStaticSamplers = samplers;
 rsDesc.Desc_1_1.Flags =
     D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
@@ -403,11 +418,11 @@ if (FAILED(hr)) return false;
 여기에 DX12 초보가 자주 걸리는 함정이 있다. 한 명령 리스트(Command List)에 동시에 활성화할 수 있는 Shader Visible 힙은 CBV/SRV/UAV 힙 하나와 샘플러 힙 하나뿐이다. 즉 셰이더가 읽는 모든 텍스처와 상수 버퍼의 디스크립터가 단 하나의 힙 안에 모여 있어야 한다.
 
 ```cpp
-ID3D12DescriptorHeap* heaps[] = { cbvSrvHeap.Get(), samplerHeap.Get() };
+ID3D12DescriptorHeap* heaps[] = { cbvSrvHeap.Get() }; // 이 예제는 static sampler이므로 sampler heap 불필요
 cmdList->SetDescriptorHeaps(_countof(heaps), heaps);   // 종류당 하나씩만
 ```
 
-프레임 도중 다른 힙으로 전환하는 것은 가능하지만 비용이 크다. GPU가 캐시를 플러시하고 새 힙 베이스를 다시 잡아야 하기 때문이다. 표준 패턴은 충분히 큰 힙 하나를 만들어 모든 디스크립터를 그 안에 집중시키는 것이다. 리소스 바인딩 Tier 1·2 하드웨어도 CBV/SRV/UAV 힙에 최대 1,000,000개의 디스크립터를 둘 수 있고 Tier 3는 그 이상도 허용하므로, 십만 개 규모의 힙은 부담이 아니다.
+프레임 도중 다른 힙으로 전환하는 것은 가능하지만 비용이 크다. GPU가 캐시를 플러시하고 새 힙 베이스를 다시 잡아야 하기 때문이다. 표준 패턴은 충분히 큰 힙 하나를 만들어 모든 디스크립터를 그 안에 집중시키는 것이다. 리소스 바인딩 Tier 1·2 하드웨어도 CBV/SRV/UAV 힙에 최대 1,000,000개의 디스크립터를 둘 수 있고 Tier 3는 그 이상도 허용하므로, 큰 힙도 디스크립터 크기와 shader-visible 메모리 예산을 소비하므로, 필요한 용량과 실제 할당 성공을 확인한다.
 
 ### Heap 생성
 
@@ -452,7 +467,7 @@ CPU Only 힙은 GPU 핸들을 발급하지 않는다. `GetGPUDescriptorHandleFor
 루트 시그니처에 설계한 슬롯과 디스크립터 힙의 핸들을 명령 리스트에서 연결한다.
 
 ```cpp
-ID3D12DescriptorHeap* heaps[] = { cbvSrvHeap.Get(), samplerHeap.Get() };
+ID3D12DescriptorHeap* heaps[] = { cbvSrvHeap.Get() }; // 이 예제는 static sampler이므로 sampler heap 불필요
 cmdList->SetDescriptorHeaps(_countof(heaps), heaps);
 
 cmdList->SetGraphicsRootSignature(rootSig.Get());
@@ -587,7 +602,7 @@ struct FrameResources {
     UINT64 fenceValue;
 };
 
-FrameResources frames[FRAMES_IN_FLIGHT];
+FrameResources frames[FRAMES_IN_FLIGHT]{};
 UINT frameIdx = 0;
 
 ComPtr<ID3D12GraphicsCommandList> cmdList;   // 리스트는 하나로 충분
@@ -596,13 +611,13 @@ HANDLE fenceEvent;
 UINT64 currentFence = 0;
 ```
 
-명령 할당자는 프레임 수만큼 둔다. 할당자는 명령 리스트가 기록한 명령의 실제 메모리 백킹이며, GPU가 그 명령을 다 실행하기 전에는 `Reset`할 수 없다. 반면 명령 리스트 자체는 `Reset` 시점에 어느 할당자에 묶을지 지정하므로 하나만 있으면 된다. 상수 버퍼도 프레임마다 갱신되므로 N벌을 둔다.
+명령 할당자는 프레임 수만큼 둔다. 할당자는 명령 리스트가 기록한 명령의 실제 메모리 백킹이며, GPU가 그 명령을 다 실행하기 전에는 `Reset`할 수 없다. 반면 명령 리스트 자체는 `Reset` 시점에 어느 할당자에 묶을지 지정하므로 하나만 있으면 된다. 상수 버퍼도 프레임마다 갱신되므로 N벌을 둔다. FrameResources는 사용 전에 영 초기화하고 모든 alloc·frameCB·매핑 포인터를 만든다. 프레임 자원 슬롯 번호와 표시할 백 버퍼 번호는 별개이며, 실제 RTV/백 버퍼는 `swap->GetCurrentBackBufferIndex()`로 선택한다.
 
 세 벌(triple buffering)이 흔한 선택이다. 두 벌이면 CPU가 한 프레임 앞서 있을 때 곧바로 GPU를 기다리지만, 세 벌이면 CPU가 잠시 빨라지거나 느려지는 변동을 흡수할 여유가 생긴다. 대신 입력 지연이 한 프레임 늘고 메모리 사용이 늘어난다.
 
 ### 펜스를 통한 동기화
 
-CPU와 GPU의 진행 상황을 맞추는 도구가 펜스(Fence)다. 펜스는 단조 증가하는 64비트 정수 값을 갖는다. GPU가 큐에 제출된 작업을 끝낼 때마다 `Signal`로 이 값을 올리고, CPU는 `GetCompletedValue`로 어디까지 끝났는지 읽는다.
+CPU와 GPU의 진행 상황을 맞추는 도구가 펜스(Fence)다. 펜스는 64비트 값을 가지며 이 예제는 매 제출의 signal 값을 증가시켜 단조 증가 타임라인으로 사용한다. API가 여러 signal의 역행을 자동으로 막는 것은 아니다. GPU가 큐에 제출된 작업을 끝낼 때마다 `Signal`로 이 값을 올리고, CPU는 `GetCompletedValue`로 어디까지 끝났는지 읽는다.
 
 ### 한 프레임의 흐름
 
@@ -675,7 +690,7 @@ f.frameCB->Map(0, nullptr, &f.frameCBMapped);    // 영구 Map
 
 DX11에서는 `Map(D3D11_MAP_WRITE_DISCARD)`로 매 프레임 버퍼를 새로 잡고 `Unmap`으로 닫는 페어를 반복했다. 드라이버는 이 DISCARD 힌트를 받아 내부적으로 버퍼를 여러 벌 돌려쓰는 버퍼 리네이밍(buffer renaming) 최적화를 했다. DX12에서는 이 일을 프로그래머가 직접 한다. 업로드 힙 버퍼를 한 번 영구 Map해 두고, 매 프레임 그 포인터에 `memcpy`만 한다. frame in flight 슬롯마다 별개의 버퍼를 두는 것이 곧 DX11이 자동으로 하던 버전 관리를 명시화한 것이다.
 
-업로드 힙은 PCIe를 통해 CPU에서 GPU로 읽히는 메모리라 대역폭이 제한적이다. 매 프레임 바뀌는 작은 상수 버퍼에는 적합하지만, 정적인 큰 정점·텍스처 데이터는 업로드 힙에 임시로 올린 뒤 `CopyBufferRegion`(버퍼)이나 `CopyTextureRegion`(텍스처)으로 기본 힙(Default Heap, GPU 전용 비디오 메모리)에 복사하는 것이 정석이다.
+전형적인 discrete GPU의 Upload 경로는 PCIe 접근 대역폭에 제약을 받는다. UMA나 GPU_UPLOAD 등 다른 지원 경로에서는 물리 배치와 비용이 달라진다. 매 프레임 바뀌는 작은 상수 버퍼에는 적합하지만, 정적인 큰 정점·텍스처 데이터는 업로드 힙에 임시로 올린 뒤 `CopyBufferRegion`(버퍼)이나 `CopyTextureRegion`(텍스처)으로 기본 힙(Default Heap, GPU 전용 비디오 메모리)에 복사하는 것이 정석이다.
 
 ## 7. DX11과의 1:1 매핑 표
 

@@ -65,8 +65,6 @@ flowchart LR
 작은 상태가 중요한 이유는 *스트림을 흩뿌리기* 때문이다. 청크마다, 객체마다, 기능마다 독립 RNG를 두려면 상태가 작아야 한다. 아래는 64비트 상태의 단순 PRNG 예시다.
 
 ```cpp
-std::uint64_t UniformBelow(std::uint64_t n);   // [0, n), n > 0
-
 struct Rng {
     uint64_t state;
     explicit Rng(uint64_t seed) : state(seed ? seed : 0x9E3779B97F4A7C15ull) {}
@@ -80,6 +78,7 @@ struct Rng {
     float NextFloat() {                      // [0,1)
         return (Next() >> 40) * (1.0f / 16777216.0f);   // 상위 24비트만 사용
     }
+    uint64_t UniformBelow(uint64_t n);        // 이 RNG 상태에서 [0,n) 추출
     int Range(int lo, int hi) {              // [lo, hi), lo < hi 필요
         if (lo >= hi) throw std::invalid_argument("Range requires lo < hi");
         const std::int64_t low = lo;
@@ -96,16 +95,17 @@ struct Rng {
 
 ```cpp
 // 요구 계약: n > 0일 때 [0, n) 값을 반환한다.
-uint64_t UniformBelow(uint64_t n) {
+uint64_t Rng::UniformBelow(uint64_t n) {
     if (n == 0) throw std::invalid_argument("UniformBelow requires n > 0");
+    // 비영 출력이 한 주기에서 균등하다는 전제: 0..UINT64_MAX-1로 이동한다.
     uint64_t limit = UINT64_MAX - (UINT64_MAX % n);
     uint64_t x;
-    do { x = Next(); } while (x >= limit);   // 꼬리 영역 거부
+    do { x = Next() - 1; } while (x >= limit); // 꼬리 영역 거부
     return x % n;
 }
 ```
 
-`Next()`를 *full uint64 균등 원천* 이라 정의하면 이 limit 식은 정상이다. 그러나 제공된 xorshift64* 변종은 비영 상태와 홀수 곱 때문에 0을 출력하지 않아 그 전제가 그대로 맞지 않는다 — 이 원천을 쓸 때는 *실제 min/max와 분포* 에 맞는 acceptance 범위를 따로 계산한다(예: 비영 출력이 균등하다는 전제라면 `Next()-1`을 0..UINT64_MAX-1로 옮겨 그 결과 수에 맞춰 계산). 근거 없이 limit 식을 off-by-one으로 바꾸지는 않는다(T21).
+이 xorshift64* 변종은 0을 출력하지 않는다. 비영 상태가 한 주기에서 균등하게 나온다는 전제에서 `Next()-1`은 `UINT64_MAX`개의 값을 갖고, 그 개수의 $n$ 배수만 받아 편향을 제거한다. 다른 RNG에는 그 원천의 범위와 분포에 맞는 매핑을 사용한다.
 
 ### 시드 분기 — 계층적 결정론
 
@@ -460,15 +460,15 @@ WFC는 *전파 중 어떤 셀의 가능 타일이 0이 되는* 모순에 종종 
 
 ```cpp
 // 사전 제약: 디자이너가 일부 셀을 미리 확정 → WFC가 나머지를 일관되게 채움
-Grid initial = grid;                              // 초기 도메인+고정 제약을 재시작 기준으로 보관
 grid.At(cx, cy).possible = MaskOf(TileRiver);     // 강 고정
 grid.At(0, 0).possible   = MaskOf(TileEntrance);  // 입구 고정
+Grid initial = grid;                              // 고정 제약 적용 후 재시작 기준 보관
 if (!Propagate(grid, rules, &grid.At(cx, cy)) ||  // 고정한 셀마다 영향을 먼저 전파
     !Propagate(grid, rules, &grid.At(0, 0)))
     return;                                       // 사전 제약 자체가 모순 → 실패 처리
 if (!WFC(grid, rules, rng)) {                     // 남은 셀 채움(실패 반환을 사용)
     grid = initial;                               // 변형된 실패 grid 재사용 금지
-    // 초기 도메인+고정 제약에서 다른 진행으로 재시도
+    // initial에서 두 고정 셀의 전파를 다시 실행한 뒤 다른 RNG 진행으로 재시도
 }
 ```
 

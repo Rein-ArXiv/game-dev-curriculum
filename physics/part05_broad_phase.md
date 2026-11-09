@@ -2,7 +2,7 @@
 
 한 강체의 *6 자유도 동역학* 은 갖춰졌다. 입자에서 강체로, 병진에서 회전까지. 이제 *여러 강체가 한 월드에 함께 있을 때* 의 토픽으로 옮겨간다. *충돌 (collision)*.
 
-N 개 강체의 *모든 쌍* 을 검사하면 *naive $O(N^2)$*. 100 개 강체 = 5000 쌍, 1000 개 = 50만 쌍, 1만 개 = 5천만 쌍. 한 프레임 16.6ms 안에 *수천만 충돌 검사 + 응답* 은 불가능. *대부분의 쌍이 멀리 떨어져* 있어 사실상 검사 자체가 *낭비*.
+N 개 강체의 *모든 쌍* 을 검사하면 *naive $O(N^2)$*. 100 개 강체 = 4,950 쌍, 1000 개 = 50만 쌍, 1만 개 = 5천만 쌍. 한 프레임 16.6ms 안에 *수천만 충돌 검사 + 응답* 은 불가능. *대부분의 쌍이 멀리 떨어져* 있어 사실상 검사 자체가 *낭비*.
 
 해결: *두 단계 충돌 검사*.
 
@@ -137,7 +137,7 @@ std::vector<std::pair<int, int>> BruteForcePairs(
 
 복잡도는 $O(N^2)$ 이고 N=100이면 4,950쌍이다. 이 정도가 충분히 빠른지는 AABB 배치, 실제 overlap 비율, 후보 vector 할당과 이후 narrow phase 비용에 달려 있으므로 장면 trace로 측정한다.
 
-### 2.2 작은 N 에서 가장 빠른 이유
+### 2.2 작은 N에서 유리할 수 있는 이유
 
 큰 N 알고리즘들이 *자료구조 유지·갱신 오버헤드* 를 가진다. 작은 N 에서 그 오버헤드가 *실제 비교 비용보다 큼*.
 
@@ -278,7 +278,7 @@ for (auto& ep : endpointsX) {
 
 ### 3.5 한계
 
-- *큰 점프 (텔레포트)*: insertion sort 가 *최악 $O(N)$* swap. 한 프레임에 큰 비용.
+- *큰 점프 (텔레포트)*: endpoint 하나는 최악 O(N) swap, 많은 객체가 함께 크게 움직이면 전체 갱신은 O(N²)까지 커진다. 한 프레임에 큰 비용.
 - *축 정렬 분포 의존*: x 분산이 좋아야 효율적. *모든 객체가 한 줄에 모이면* x 후보가 폭발.
 - *3D 추가 비용*: 축 한 개 더 — 동일 알고리즘 한 번 더.
 
@@ -297,11 +297,11 @@ Bullet 의 *btAxisSweep3* — 이 알고리즘의 산업 reference 구현. Box2D
 ```cpp
 struct SpatialHash {
     float cellSize;
-    std::unordered_map<int64_t, std::vector<int>> cells;
+    std::unordered_map<uint64_t, std::vector<int>> cells;
 };
 
-int64_t HashCell(int cx, int cy) {
-    return ((int64_t)(uint32_t)cx << 32) | (uint32_t)cy;
+uint64_t HashCell(int32_t cx, int32_t cy) {
+    return (uint64_t(uint32_t(cx)) << 32) | uint32_t(cy);
 }
 
 void Insert(SpatialHash& h, int bodyId, AABB2D aabb) {
@@ -316,6 +316,8 @@ void Insert(SpatialHash& h, int bodyId, AABB2D aabb) {
     }
 }
 ```
+
+이 Insert 예제는 비운 map에 각 body를 한 번 등록하는 재구축 경로다. 증분 갱신이면 이전 셀 목록에서 body를 제거한 뒤 다시 넣어야 stale·중복 등록과 자기 pair를 피한다. HashCell은 두 int32 좌표를 uint64 키에 겹치지 않게 포장한 함수다.
 
 AABB 가 *걸치는 모든 셀* 에 등록. 객체가 셀보다 크면 *여러 셀에 중복*.
 
@@ -400,7 +402,7 @@ private:
 
 ### 5.2 삽입과 SAH
 
-새 leaf 삽입 시 *어느 위치에 끼울지* 결정. *Surface Area Heuristic (SAH)* — 트리의 *총 표면적 합* 이 최소가 되도록.
+새 leaf 삽입 시 *어느 위치에 끼울지* 결정. *Surface Area Heuristic (SAH)* — 합쳐질 bounds의 비용 증가 등을 추정해 좋은 형제 노드를 고른다. 전역적으로 최소인 트리를 보장하지는 않는다. 2D에서는 표면적 대신 둘레를 비용으로 쓰는 구현이 흔하다.
 
 ```mermaid
 flowchart LR
@@ -522,7 +524,7 @@ DBVT 가 *이론 복잡도는 좋지만* 캐시 미스 빈도가 *상대적* 으
 
 - *대부분 정적*: brute force / spatial hash / DBVT 모두 비용 작음.
 - *대부분 동적 (작은 이동)*: SAP 의 insertion sort 가 빠름. DBVT 의 fat AABB 도 효과적.
-- *빈번한 큰 이동 (텔레포트)*: DBVT 의 재삽입이 *예측 가능한 $O(\log N)$*. SAP 는 최악 $O(N)$.
+- *빈번한 큰 이동 (텔레포트)*: DBVT 재삽입은 잘 관리된 트리에서 평균 O(log N) 수준이지만 트리 높이·탐색 정책에 따라 더 커질 수 있다. SAP는 endpoint 하나당 최악 O(N), 전체 갱신은 O(N²)까지 가능하다.
 
 ### 6.4 전환점 측정
 
@@ -607,9 +609,12 @@ broadPhase->ComputePairs(pairs);
 
 // 페어들을 narrow phase 로 전달
 for (auto& [a, b] : pairs) {
+    if (!CanCollide(world.bodies[a], world.bodies[b])) continue;
     NarrowPhaseCheck(world.bodies[a], world.bodies[b]);
 }
 ```
+
+CanCollide는 양쪽 category/mask와 joint의 충돌 비활성화·같은 body·motion type 정책을 적용한다. 단순 bit-mask 정책은 `(A.category & B.mask)!=0 && (B.category & A.mask)!=0`처럼 양방향 조건을 확인한다. broad phase 내부에서 일찍 거를 수도 있지만, 필터 변경 시 pair cache를 다시 평가해야 한다. 위 예제의 body ID는 vector index라고 가정하며 안정 handle을 쓰는 엔진에서는 조회 단계를 거친다.
 
 ### 8.3 알고리즘 비교의 검증 신호
 
@@ -621,7 +626,7 @@ for (auto& [a, b] : pairs) {
 | ComputePairs 시간 | 알고리즘별 비용 차이 |
 | 갱신 시간 (per frame) | 동적 객체 비용 |
 | 메모리 | 자료구조 크기 |
-| 페어 false positive 비율 | 후보 / 실제 충돌 비율 |
+| 페어 false positive 비율 | (후보 수−실제 충돌 수) / 후보 수; 후보0이면0으로 정의 |
 
 `ComputePairs`의 결과를 exact overlap set 또는 conservative superset 중 하나로 선언한다. exact라면 정규화한 unordered body pair 집합을 brute force와 비교하고, conservative라면 reference set $\subseteq$ candidate set을 검증한다. 정책을 맞춘 뒤에는 페어 수를 보조 지표로만 쓴다. 같은 크기의 서로 다른 집합은 누락을 숨기므로 개수 일치만으로 정확성을 판정하지 않는다.
 

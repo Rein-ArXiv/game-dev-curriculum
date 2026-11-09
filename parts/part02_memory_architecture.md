@@ -154,7 +154,7 @@ $$\text{sets} = \frac{32{,}768}{64 \times 8} = 64$$
 
 ### 주소 분해
 
-캐시 접근에 쓰이는 주소는 세 부분으로 나뉜다. x86-64의 L1 데이터 캐시는 변환이 필요 없는 페이지 오프셋 비트에서 index와 offset을 뽑고 tag는 물리 주소로 비교하며(VIPT), L2 이후는 전 구간이 물리 주소다.
+캐시 접근에 쓰이는 주소는 세 부분으로 나뉜다. 위의 32KB·8-way 예에서는 index와 offset이 4KB 페이지 오프셋 안에 들어가므로, 그 비트로 set을 찾는 동안 tag를 물리 주소로 비교하는 VIPT 구조를 설명할 수 있다. 실제 index·tag 구성과 해싱은 대상 CPU의 캐시 구현을 확인해야 한다.
 
 ```mermaid
 flowchart LR
@@ -198,7 +198,7 @@ for (int i = 0; i < N; i++) {
 |------|------|
 | Modified (M) | 이 캐시에서 수정됨, 다른 캐시는 가지지 않음, 메모리와 다름 |
 | Exclusive (E) | 이 캐시만 가짐, 메모리와 같음 |
-| Shared (S) | 여러 캐시가 같은 값을 가짐, 메모리와 같음 |
+| Shared (S) | 다른 캐시에도 사본이 있을 수 있음, 메모리와 같음 |
 | Invalid (I) | 무효 (사용 불가) |
 
 ```mermaid
@@ -253,7 +253,7 @@ sequenceDiagram
     L0-->>L1: invalidate (count1과 count2가 같은 라인)
     T1->>L1: count2 += 1 (라인 적재 필요)
     L1-->>L0: 데이터 요청 (cache-to-cache transfer)
-    L0-->>L1: 라인 전송 (S 또는 M→S)
+    L0-->>L1: 라인과 쓰기 권한 전달 (L0은 I, L1은 M)
     Note over T0,T1: 같은 라인의 소유권이 반복해서 이동
 ```
 
@@ -457,7 +457,7 @@ Thread 2: malloc → lock → [대기] → 작업
 
 jemalloc이 다음으로 대응했다.
 
-- Arena per CPU/노드: NUMA 노드별 메모리 관리
+- 선택적 per-CPU arena: arena 경합을 분산 (NUMA 물리 배치는 별도 정책 필요)
 - Extent 기반 관리: 대용량 메모리 효율적 처리
 - Decay 기반 반환: 해제된 dirty/muzzy 페이지의 보유량과 OS 반환 지연을 조절
 
@@ -506,7 +506,7 @@ tcmalloc은 Per-CPU Cache로 전환했고, HugePageAwareAllocator로 TLB 효율�
 | 용어 | 의미 | 위치 |
 |------|------|------|
 | CPU 캐시 | L1/L2/L3 SRAM | CPU 칩 내부 (하드웨어) |
-| TLS | Thread Local Storage | 각 스레드의 스택 근처 (OS 관리) |
+| TLS | Thread Local Storage | 플랫폼별 스레드 저장 영역 (OS/런타임 관리) |
 | Thread Cache | 할당자의 스레드별 객체 풀 | TLS에 저장된 소프트웨어 구조 |
 | Arena | 할당자의 메모리 풀 | 힙 (여러 스레드 공유 가능) |
 | Extent/Span | OS에서 받은 페이지 묶음 | 힙 (크기·정렬은 할당자와 페이지 크기에 따라 다름) |

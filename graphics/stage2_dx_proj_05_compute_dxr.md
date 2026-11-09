@@ -121,7 +121,7 @@ void Blur(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID) {
 
 `GroupMemoryBarrierWithGroupSync`는 두 가지를 동시에 보장한다. `groupshared` 쓰기가 모든 스레드에 보이게 만드는 *메모리 배리어* 와, 그룹 내 모든 스레드가 이 지점에 도달할 때까지 멈추는 *실행 배리어* 다. 이 동기화 없이 2단계로 넘어가면 아직 1단계 로드를 끝내지 못한 이웃 스레드의 타일 칸을 읽어 가비지가 섞인다.
 
-정량적으로, 공유 메모리 없이 짠 3×3 블러는 한 픽셀마다 9회씩 외부 텍스처를 읽어 8×8 타일에서 $9 \times 64 = 576$회의 VRAM 접근이 난다. 타일 패턴은 중앙과 halo를 합친 100회를 읽고 나머지를 온칩에서 처리한다. 인접 그룹의 halo 중복은 남지만 외부 접근은 크게 줄어든다.
+정량적으로, 공유 메모리 없이 짠 3×3 블러는 한 픽셀마다 9회씩 외부 텍스처를 읽어 8×8 타일에서 $9 \times 64 = 576$번의 텍스처 읽기 요청이 발생한다. 캐시 적중이 있으므로 이 횟수가 곧 VRAM 트랜잭션 수는 아니다. 타일 패턴은 중앙과 halo를 합친 100회를 읽고 나머지를 온칩에서 처리한다. 인접 그룹의 halo 중복은 남지만 외부 접근은 크게 줄어든다.
 
 ### Wave 단위 연산(Shader Model 6.0+)
 
@@ -137,8 +137,7 @@ void Reduce(uint tid : SV_DispatchThreadID) {
 
     // 표준 SM 6.0에는 float 전역 atomic add가 없으므로 대표 레인이
     // 자신의 슬롯에 부분합을 쓰고 다음 dispatch가 이를 다시 줄인다.
-    if (WaveIsFirstLane())
-        wavePartials[tid] = waveSum;
+    wavePartials[tid] = WaveIsFirstLane() ? waveSum : 0.0;
 }
 ```
 
@@ -261,7 +260,7 @@ void CompactParticles(uint id : SV_DispatchThreadID) {
 }
 ```
 
-`InterlockedAdd`는 더하기 전의 값을 `outIdx`로 돌려준다. 그 값이 곧 이 입자가 압축 버퍼에서 차지할 고유 슬롯이 되므로, 수만 스레드가 동시에 append해도 충돌 없이 빈틈없는 배열이 만들어진다. `drawArgs`의 오프셋 4(InstanceCount)에 누적하는 것은 매 프레임 디스패치 전에 0으로 초기화해 둔다.
+`InterlockedAdd`는 더하기 전의 값을 `outIdx`로 돌려준다. 그 값이 곧 이 입자가 압축 버퍼에서 차지할 고유 슬롯이 되므로, 수만 스레드가 동시에 append해도 충돌 없이 빈틈없는 배열이 만들어진다. `drawArgs`의 오프셋 4(InstanceCount)에 누적하는 것은 매 프레임 디스패치 전에 0으로 초기화해 둔다. 나머지 필드도 VertexCountPerInstance=4, StartVertex=0, StartInstance=0으로 준비하고 초기화 쓰기→compact의 GPU 의존성을 맞춘다.
 
 ```cpp
 cmdList->ExecuteIndirect(
@@ -272,7 +271,7 @@ cmdList->ExecuteIndirect(
     nullptr, 0);            // 카운트 버퍼 없음
 ```
 
-`ExecuteIndirect`의 커맨드 시그니처는 인자 버퍼의 바이트 레이아웃이 `D3D12_DRAW_ARGUMENTS` 구조와 일치한다고 GPU에 알린다. 인스턴스 수가 GPU 측에서 결정되므로 CPU는 고정된 한 번의 호출만 발급하고, 결과적으로 100만 파티클이 0에 가까운 CPU 드로우 콜 비용으로 그려진다. 이것이 DX11에서는 자연스럽지 않던, GPU에서 자체 완결되는 워크로드의 대표 예다.
+`ExecuteIndirect`의 커맨드 시그니처는 인자 버퍼의 바이트 레이아웃이 `D3D12_DRAW_ARGUMENTS` 구조와 일치한다고 GPU에 알린다. 인스턴스 수가 GPU 측에서 결정되므로 CPU는 고정된 한 번의 호출만 발급하고, 결과적으로 입자 수를 CPU로 읽어 오지 않고 한 번의 간접 드로우 제출로 그릴 수 있다. CPU 제출 비용과 GPU의 입자 처리는 여전히 남으며, DX11도 `DrawInstancedIndirect` 같은 GPU 인자 경로를 제공한다.
 
 이 호출이 안전하려면 컴퓨트가 쓴 인자와 데이터를 소비하기 전에 자원 상태와 가시성이 맞춰져 있어야 한다. `drawArgs`는 컴퓨트의 UAV 쓰기(`D3D12_RESOURCE_STATE_UNORDERED_ACCESS`)에서 `D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT`로, 압축된 `alive` 버퍼는 UAV 쓰기에서 정점 셰이더가 읽는 `D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE`로 전환해야 한다. 위에서 생략한 제출 헬퍼가 이 배리어와 가시성 전환을 수행한다는 계약을 전제로 하며, 같은 큐에서 디스패치와 드로우를 이어 붙이는 경로와 컴퓨트 큐에서 그래픽스 큐로 넘기는 경로를 구분해야 한다(다중 큐 경로는 큐 간 fence 핸드오프가 추가로 필요하다). helper가 이 전환을 하지 않으면 UAV 쓰기를 다 읽기 전에 소비해 잘못된 인자로 드로우하거나 데이터 경합이 난다.
 
@@ -296,7 +295,7 @@ VSOutput VSMain(uint vid : SV_VertexID, uint iid : SV_InstanceID) {
 }
 ```
 
-정점 버퍼 없이 `SV_VertexID`만으로 네 모서리를 생성하는 패턴이다. 한 입자가 한 인스턴스이고, `DrawInstanced(4, instanceCount, 0, 0)` 형태의 인자가 앞 절의 `drawArgs`에 들어 있다. 알파 블렌딩이 필요한 입자는 거리순 정렬이 이상적이지만, 비용이 크면 가산 블렌딩(additive)으로 정렬을 회피하는 절충이 흔하다.
+정점 버퍼 없이 `SV_VertexID`만으로 네 모서리를 생성하는 패턴이다. 한 입자가 한 인스턴스이고, `DrawInstanced(4, instanceCount, 0, 0)` 형태의 인자가 앞 절의 `drawArgs`에 들어 있다. 네 모서리를 두 삼각형으로 잇도록 PSO는 TRIANGLE 타입, 실제 IA 토폴로지는 `D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP`으로 설정한다. 알파 블렌딩이 필요한 입자는 거리순 정렬이 이상적이지만, 비용이 크면 가산 블렌딩(additive)으로 정렬을 회피하는 절충이 흔하다.
 
 ## 3. Compute Queue와 비동기
 
@@ -343,20 +342,13 @@ directQueue->Wait(particleFence.Get(), particleFenceValue);
 directQueue->ExecuteCommandLists(1, graphicsLists);
 ```
 
-`ID3D12CommandQueue::Wait`는 GPU 측 대기다. CPU 스레드는 여기서 멈추지 않고 다음 프레임 준비를 계속한다. 두 큐가 각자 일을 진행하다 펜스 값에서만 만나므로, CPU가 중간에 끼어 GPU를 굶기는 일이 없다. 단, 비동기로 공유하는 리소스는 컴퓨트 큐에서 쓴 직후 그래픽스 큐가 읽으므로, 둘 다 접근 가능한 상태(`COMMON` 또는 동시 접근 가능 상태)에 두고 큐 사이 상태 전환 규칙을 지켜야 한다.
+`ID3D12CommandQueue::Wait`는 GPU 측 대기다. CPU 스레드는 여기서 멈추지 않고 다음 프레임 준비를 계속한다. 두 큐가 각자 일을 진행하다 펜스 값에서만 만나므로, CPU가 중간에 끼어 GPU를 굶기는 일이 없다. 단, Fence는 실행 순서를 연결할 뿐 소비자에게 맞는 자원 상태를 대신 설정하지 않는다. 위 파티클 버퍼는 UAV 쓰기 뒤 정점 SRV 읽기에 맞는 `NON_PIXEL_SHADER_RESOURCE`로 전환한다. Direct↔Compute 사이에 무조건 COMMON으로 바꿔야 하는 것은 아니며, Copy 큐와의 handoff에는 별도의 COMMON 규칙이 있다.
 
 ### 비동기 컴퓨트가 실제로 빨라지는가
 
 작성했다고 자동으로 빨라지지는 않는다. 효과는 벤더와 세대에 크게 의존한다.
 
-| 아키텍처 | 동시 실행 특성 | 비동기 컴퓨트 이득 |
-|---|---|---|
-| NVIDIA Pascal | 그래픽스/컴퓨트 컨텍스트 스위칭, 직렬에 가까움 | 미미 |
-| NVIDIA Turing 이후 | 진정한 동시 실행 지원 | 큼 |
-| AMD GCN/RDNA | ACE가 다중 컴퓨트 큐를 동시 스케줄 | 가장 큼 |
-| Intel Arc | 멀티 엔진 지원, 워크로드 의존 | 가변 |
-
-AMD의 ACE(Async Compute Engine)는 여러 컴퓨트 큐를 동시에 받아 그래픽스 엔진의 빈 ALU를 적극적으로 채운다. 콘솔 타이틀이 비동기 컴퓨트로 큰 이득을 본 배경이다. 반면 NVIDIA Pascal에서는 그래픽스와 컴퓨트가 시분할에 가까워 오히려 동기화 오버헤드만 늘 수 있다.
+벤더·세대 이름만으로 이득의 순위를 정할 수는 없다. 논리적 큐와 물리 엔진은 1:1 대응을 보장하지 않으며, 셰이더 실행 자원·레지스터·LDS·메모리 대역폭의 여유와 스케줄링이 실제 중첩을 결정한다.
 
 따라서 비동기 컴퓨트는 반드시 측정으로 검증한다. PIX(Windows), AMD의 RGP, NVIDIA Nsight의 GPU 타임라인에서 두 큐의 바가 실제로 겹쳐 그려지는지 확인한다. 겹치지 않는다면 펜스 의존이 너무 빡빡하거나 하드웨어가 직렬화하고 있는 것이다.
 
@@ -370,7 +362,7 @@ AMD의 ACE(Async Compute Engine)는 여러 컴퓨트 큐를 동시에 받아 그
 | AMD | Ray Accelerator | 삼각형/박스 교차 (순회는 셰이더가 주도) |
 | Intel | RTU(Ray Tracing Unit) | BVH 순회 + 삼각형 교차 |
 
-RT 유닛은 BVH 순회와 삼각형-광선 교차라는, 셰이더 ALU로는 분기가 많고 느린 연산을 전용 회로로 처리한다. 이 가속이 있고 없고가 실시간 광선 추적의 실현 가능성을 가른다. DXR API 자체는 가속 유닛이 없는 GPU에서도 컴퓨트 폴백으로 동작할 수 있지만, 실시간 프레임 예산 안에서는 RT 유닛이 사실상 전제다.
+RT 유닛은 BVH 순회와 삼각형-광선 교차라는, 셰이더 ALU로는 분기가 많고 느린 연산을 전용 회로로 처리한다. 이 가속이 있고 없고가 실시간 광선 추적의 실현 가능성을 가른다. DXR API 자체는 가속 유닛이 없는 GPU에서도 별도 소프트웨어/컴퓨트 폴백 라이브러리로 구현할 여지는 있지만, 네이티브 DXR 지원이 자동으로 생기는 것은 아니다. 이 원고의 네이티브 경로는 티어 질의를 통과해야 하며, 실시간 프레임 예산 안에서는 RT 유닛이 사실상 전제다.
 
 ### BVH 빌드 비용
 
@@ -449,12 +441,17 @@ cmdList->ResourceBarrier(1, &uavB);
 TLAS는 여러 BLAS 인스턴스를 3×4 변환 행렬, 인스턴스 ID, 마스크로 묶는다. 같은 BLAS를 여러 위치·회전으로 인스턴스화하면 삼각형 트리는 공유하면서 장면을 구성한다.
 
 ```cpp
-D3D12_RAYTRACING_INSTANCE_DESC instances[N];
+D3D12_RAYTRACING_INSTANCE_DESC instances[N]{};
 for (UINT i = 0; i < N; ++i) {
-    memcpy(instances[i].Transform, &transforms[i], sizeof(float) * 12);  // 3×4
+    // transforms[i]: DirectXMath의 행벡터 규약 XMFLOAT4X4
+    // DXR은 열벡터 affine 행렬의 앞 3행을 row-major 3×4로 받는다.
+    DirectX::XMFLOAT3X4 affine;
+    DirectX::XMStoreFloat3x4(&affine, DirectX::XMMatrixTranspose(
+        DirectX::XMLoadFloat4x4(&transforms[i])));
+    memcpy(instances[i].Transform, &affine, sizeof(affine));
     instances[i].InstanceID                          = i;        // 셰이더에서 InstanceID()
     instances[i].InstanceMask                        = 0xFF;     // 광선 마스크와 AND
-    instances[i].InstanceContributionToHitGroupIndex = 0;        // SBT 인덱싱 기여
+    instances[i].InstanceContributionToHitGroupIndex = i;        // SBT 인덱싱 기여
     instances[i].Flags                               = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
     instances[i].AccelerationStructure               = blas->GetGPUVirtualAddress();
 }
@@ -471,7 +468,10 @@ for (UINT i = 0; i < N; ++i) {
 ```cpp
 // 갱신 가능하게 하려면 최초 빌드부터 ALLOW_UPDATE 플래그가 필요하다
 blasInputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
+// 최초 prebuild 질의·빌드 전에 위 값을 설정하고 buildDesc.Inputs에도 복사한다.
+// scratch는 최초 ScratchDataSizeInBytes와 UpdateScratchDataSizeInBytes 중 큰 크기로 잡는다.
 // ... 최초 빌드 후, refit 시점에:
+buildDesc.Inputs = blasInputs;
 buildDesc.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
 buildDesc.SourceAccelerationStructureData = blas->GetGPUVirtualAddress();   // 이전 트리
 buildDesc.DestAccelerationStructureData   = blas->GetGPUVirtualAddress();   // 같은 위치 갱신
@@ -506,7 +506,7 @@ void RayGen() {
 
     RayDesc ray;
     ray.Origin = origin; ray.Direction = dir;
-    ray.TMin   = 0.001;  ray.TMax      = 10000;   // 자기 교차 방지용 epsilon
+    ray.TMin   = 0.0;    ray.TMax      = 10000;   // primary ray: near plane에서 시작
 
     Payload p = (Payload)0;
     TraceRay(sceneTLAS, RAY_FLAG_NONE,
@@ -529,7 +529,7 @@ dispatch.Width  = 1920; dispatch.Height = 1080; dispatch.Depth = 1;
 cmdList->DispatchRays(&dispatch);
 ```
 
-`TMin`을 0.001로 두는 것은 광선이 출발한 표면 자신과 즉시 교차하는 *self-intersection* 을 막기 위한 것이다. 이 epsilon이 너무 작으면 표면에 점박이 잡음(acne)이, 너무 크면 접촉 그림자가 떠 보이는(peter-panning) 인공물이 생긴다. `DispatchRays`에 넘기는 세 테이블의 주소는 7절에서 만드는 SBT의 영역을 가리킨다.
+위 primary ray는 near plane에서 출발한다. near=0/far=1인 standard-Z·유한 far 투영을 전제로 하며, reverse-Z나 무한 far 행렬에서는 끝점 깊이와 w=0 방향 처리를 맞춰야 한다. 반사·그림자처럼 표면에서 시작하는 secondary ray의 `TMin` 또는 origin offset은 *self-intersection* 을 줄이기 위한 것이다. 이 epsilon이 너무 작으면 표면에 점박이 잡음(acne)이, 너무 크면 접촉 그림자가 떠 보이는(peter-panning) 인공물이 생긴다. `DispatchRays`에 넘기는 세 테이블의 주소는 7절에서 만드는 SBT의 영역을 가리킨다.
 
 ### Payload와 재귀 광선
 
@@ -550,7 +550,7 @@ void ClosestHit(inout Payload p, BuiltInTriangleIntersectionAttributes attr) {
 }
 ```
 
-Hit 셰이더 안에서 `TraceRay`를 다시 부르면 반사·굴절이 재귀로 자연스럽게 표현된다. 다만 재귀 깊이는 PSO의 `MaxTraceRecursionDepth`로 상한이 정해지고, 깊이가 늘수록 스택 메모리와 비용이 커진다. 실시간에서는 보통 1~2바운스로 제한하고 나머지는 환경 맵으로 근사한다.
+Hit 셰이더 안에서 `TraceRay`를 다시 부르면 반사·굴절이 재귀로 자연스럽게 표현된다. 위 예제는 호출 흐름을 보이는 단순 누적이며 물리적 반사 모델이 되려면 반사율·경로 가중치도 곱해야 한다. primary TraceRay에 반사 4번이 중첩되므로 위 그대로라면 최소 5의 `MaxTraceRecursionDepth`가 필요하다. 재귀 깊이는 RT State Object의 `MaxTraceRecursionDepth`로 상한이 정해지고, 깊이가 늘수록 스택 메모리와 비용이 커진다. 실시간에서는 보통 1~2바운스로 제한하고 나머지는 환경 맵으로 근사한다.
 
 ## 7. Hit Group과 Shader Binding Table
 
@@ -631,7 +631,9 @@ void ComputeShadowsCS(uint3 dtid : SV_DispatchThreadID) {
     // 광원 뒤의 블로커를 그림자로 잘못 판정하지 않게 한다.
     shadowRay.TMax = max(lightDist - 0.001, 0.0);
 
-    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;
+    // 이 최소 예제는 불투명 삼각형만 그림자 caster로 취급한다.
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+             RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
     q.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, shadowRay);
     q.Proceed();                                            // 순회 진행
 
@@ -640,7 +642,9 @@ void ComputeShadowsCS(uint3 dtid : SV_DispatchThreadID) {
 }
 ```
 
-그림자 광선은 가장 가까운 교차점이 아니라 *교차가 있는가* 만 알면 되므로, `ACCEPT_FIRST_HIT_AND_END_SEARCH` 플래그로 첫 교차에서 순회를 끝내 비용을 줄인다. SBT도 별도 셰이더 진입점도 없이 한 커널 안에서 광선을 쏘고 결과를 즉시 쓰므로, 그림자·AO·단순 반사 같은 워크로드에서는 코드가 짧고 캐시 효율도 좋다. 일반적인 게임에서 DXR 1.1 인라인 RT가 1.0의 SBT 기반보다 다루기 쉬운 이유다.
+그림자 광선은 가장 가까운 교차점이 아니라 *교차가 있는가* 만 알면 되므로, 위 `FORCE_OPAQUE | SKIP_PROCEDURAL_PRIMITIVES` 계약에서는 알파 테스트·절차적 후보를 처리하지 않으므로 한 번의 `Proceed`로 끝낼 수 있다. 알파 마스크나 절차적 기하를 지원하려면 `while(q.Proceed())`에서 후보별 판정과 commit을 구현해야 한다.
+
+`ACCEPT_FIRST_HIT_AND_END_SEARCH` 플래그로 첫 교차에서 순회를 끝내 비용을 줄인다. SBT도 별도 셰이더 진입점도 없이 한 커널 안에서 광선을 쏘고 결과를 즉시 쓰므로, 그림자·AO·단순 반사 같은 워크로드에서는 코드가 짧고 캐시 효율도 좋다. 일반적인 게임에서 DXR 1.1 인라인 RT가 1.0의 SBT 기반보다 다루기 쉬운 이유다.
 
 ### 첫 RT 결과 — 광선 추적 그림자
 

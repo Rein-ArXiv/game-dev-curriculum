@@ -135,12 +135,16 @@ steering에는 두 추상화 층이 있다. *kinematic* 은 속도를 직접 다
 
 ```cpp
 Vec2 Seek(const Agent& a, Vec2 target) {
-    Vec2 desired = Normalize(target - a.position) * a.maxSpeed;  // 목표로 최대 속도
+    Vec2 delta = target - a.position;
+    if (LengthSq(delta) < 1e-12f) return -a.velocity / a.responseTime; // 목표점: 제동
+    Vec2 desired = Normalize(delta) * a.maxSpeed;  // 목표로 최대 속도
     return (desired - a.velocity) / a.responseTime;               // 가속도 명령
 }
 
 Vec2 Flee(const Agent& a, Vec2 target) {
-    Vec2 desired = Normalize(a.position - target) * a.maxSpeed;  // 반대 방향
+    Vec2 delta = a.position - target;
+    if (LengthSq(delta) < 1e-12f) return Vec2{0, 0}; // 방향 미정: 별도 겹침 해소 정책
+    Vec2 desired = Normalize(delta) * a.maxSpeed;  // 반대 방향
     return (desired - a.velocity) / a.responseTime;
 }
 ```
@@ -339,7 +343,7 @@ Vec2 Evade(const Agent& a, const Agent& threat) {
 }
 ```
 
-예측 시간(predictTime)이 핵심이다. 목표가 멀수록(따라잡는 데 오래 걸림) 더 먼 미래를 예측하고, 가까우면 거의 현재 위치를 향한다. 분모의 `a.maxSpeed + Length(target.velocity)`는 *접근 상대 속도의 상한* 에 대한 근사다 — 둘이 마주 오면 빠르게 좁혀지므로 예측을 짧게, 같은 방향이면 천천히 좁혀지므로 길게 잡는 효과를 단순화한 것이다.
+예측 시간(predictTime)이 핵심이다. 목표가 멀수록 더 먼 미래를 예측하고, 가까우면 거의 현재 위치를 향한다. 분모는 두 속력의 합으로 상대 속력의 상한을 근사한다. 방향을 입력으로 쓰지 않으므로 같은 속력이라면 마주 오든 같은 방향이든 같은 예측 시간을 준다. 정확한 차이는 아래 intercept 방정식에서 다룬다.
 
 ### intercept의 기하
 
@@ -349,13 +353,13 @@ Vec2 Evade(const Agent& a, const Agent& threat) {
 
 ### 정면 충돌 보정
 
-순수 Pursue에는 결함이 있다. 목표가 *정면으로 다가올* 때다. 이때 목표의 미래 위치 예측은 거의 현재 위치와 같아져, Pursue가 현재 위치 Seek으로 퇴화한다(꼬리 추격이 아니라 정면 추돌). Reynolds의 보정은 "목표가 나를 향해 오고 있고 내가 목표의 전방에 있으면, 예측하지 말고 현재 위치를 곧장 Seek"하는 것이다.
+순수 Pursue에는 결함이 있다. 목표가 *정면으로 다가올* 때다. 정확히 정면에서 서로 접근하는 경우에는 예측 위치가 현재 위치와 다르더라도 두 위치를 향하는 방향은 같을 수 있다. Reynolds의 단축은 이 조건에서 현재 위치를 Seek하는 것이며, 이것만으로 충돌 회피가 되지는 않는다.
 
 ```cpp
 Vec2 PursueCorrected(const Agent& a, const Agent& target) {
     Vec2  toTarget = target.position - a.position;
-    Vec2  myForward = Normalize(a.velocity);
-    Vec2  tgtForward = Normalize(target.velocity);
+    Vec2  myForward = LengthSq(a.velocity) > 1e-12f ? Normalize(a.velocity) : a.facing;
+    Vec2  tgtForward = LengthSq(target.velocity) > 1e-12f ? Normalize(target.velocity) : target.facing;
     float facing = Dot(myForward, tgtForward);     // 같은 방향이면 +1, 마주보면 -1
 
     // 목표가 내 앞에 있고(toTarget·myForward>0) 거의 정면으로 마주 옴(facing<-0.95)
@@ -394,7 +398,7 @@ const Obstacle* MostThreatening(const Agent& a, Vec2 ahead,
                 : 0.0f;
         Vec2 closest = a.position + seg * u;
         if (DistanceSq(o.center, closest) > expanded * expanded) continue;
-        // 충돌 진입 거리 근사 — 가장 먼저 닿는 장애물을 고른다
+        // 중심을 선분에 투영한 위치가 가까운 후보를 고르는 휴리스틱
         float entry = DistanceSq(a.position, closest);
         if (entry < worstDist) { worstDist = entry; worst = &o; }
     }
@@ -402,7 +406,7 @@ const Obstacle* MostThreatening(const Agent& a, Vec2 ahead,
 }
 ```
 
-위 코드는 `ahead` 한 점이 아니라 *에이전트 위치에서 `ahead`까지의 선분 전체* 와 원의 최근접점을 검사하고, 원 반경에 `a.radius`를 더한다. 따라서 느린 접근의 코앞 장애물과 작은 장애물을 점 하나로 놓치지 않는다. 선분이 퇴화하는(`ahead == position`) 경우와 수치 오차도 `segLen2` 하한과 제곱거리 비교로 처리한다.
+위 코드는 `ahead` 한 점이 아니라 *에이전트 위치에서 `ahead`까지의 선분 전체* 와 원의 최근접점을 검사하고, 원 반경에 `a.radius`를 더한다. 따라서 선분을 가로지르는 장애물을 끝점 하나만 보는 방식보다 잘 찾는다. 중심 투영 거리 순서는 반지름이 다른 원의 실제 첫 접촉 순서와 다를 수 있으므로 정확한 우선순위가 필요하면 선분-원 진입 시각을 계산한다. 선분이 퇴화하는(`ahead == position`) 경우와 수치 오차도 `segLen2` 하한과 제곱거리 비교로 처리한다.
 
 ### 횡방향 회피력
 
@@ -468,7 +472,9 @@ Vec2 FollowPath(Agent& a, const Path& path) {
     Vec2 forward = (LengthSq(a.velocity) > 1e-6f) ? Normalize(a.velocity) : a.facing;  // 정지 시 방향 보호
     Vec2 future = a.position + forward * a.lookAhead;
     // 2) 경로상 가장 가까운 점과 그 점이 속한 구간의 진행 방향 찾기
-    auto [closest, segDir, segIdx] = path.ClosestPoint(future);
+    auto result = path.ClosestPoint(future);
+    if (!result) return Vec2{0, 0}; // 유효한 선분이 없는 경로
+    auto [closest, segDir, segIdx] = *result;
     // 3) 미래 위치가 경로 관을 허용 폭 이상 벗어났으면 경로로 복귀
     if (DistanceSq(future, closest) > path.radius * path.radius) {
         Vec2 target = closest + segDir * a.lookAhead;   // 경로 따라 약간 앞
@@ -487,17 +493,20 @@ Vec2 FollowPath(Agent& a, const Path& path) {
 ```cpp
 struct ClosestResult { Vec2 point; Vec2 dir; int seg; };
 
-ClosestResult Path::ClosestPoint(Vec2 p) const {
+std::optional<ClosestResult> Path::ClosestPoint(Vec2 p) const {
     ClosestResult best{}; float bestD2 = FLT_MAX;
     for (int i = 0; i + 1 < (int)pts.size(); ++i) {
         Vec2 A = pts[i], B = pts[i+1];
         Vec2 ab = B - A;
-        float t = Dot(p - A, ab) / (Dot(ab, ab) + 1e-9f);
+        float len2 = Dot(ab, ab);
+        if (len2 < 1e-12f) continue;  // 중복 waypoint는 방향을 정의하지 못한다
+        float t = Dot(p - A, ab) / len2;
         t = std::clamp(t, 0.0f, 1.0f);          // 선분 양 끝으로 제한
         Vec2 proj = A + ab * t;
         float d2 = DistanceSq(p, proj);
         if (d2 < bestD2) { bestD2 = d2; best = { proj, Normalize(ab), i }; }
     }
+    if (bestD2 == FLT_MAX) return std::nullopt;
     return best;
 }
 ```
@@ -506,7 +515,7 @@ ClosestResult Path::ClosestPoint(Vec2 p) const {
 
 ### 진행 방향 보장과 코너 컷
 
-`closest + segDir * lookAhead`에서 `segDir`를 *경로의 진행 방향* 으로 두는 것이 미묘하지만 중요하다. 단순히 closest 점만 Seek하면 에이전트가 경로에 *수직으로* 붙고 진행하지 않는다(경로에 달라붙어 멈춤). segDir만큼 앞을 보게 해야 경로를 *따라* 흐른다. 또한 closest를 살짝 앞쪽 구간 방향으로 밀어 두면 경로의 끝(마지막 웨이포인트)에서 진행이 멈추므로, 마지막 구간에서는 Arrive로 전환해 목적지에 부드럽게 정지시킨다.
+`closest + segDir * lookAhead`에서 `segDir`를 *경로의 진행 방향* 으로 두는 것이 미묘하지만 중요하다. 단순히 closest 점만 Seek하면 에이전트가 경로에 *수직으로* 붙고 진행하지 않는다(경로에 달라붙어 멈춤). segDir만큼 앞을 보게 해야 경로를 *따라* 흐른다. 다만 `closest + segDir * lookAhead`는 마지막 웨이포인트를 지나칠 수 있으므로 경로 끝으로 clamp하고, 마지막 구간에서는 Arrive로 전환해 목적지에 부드럽게 정지시키는 정책이 필요하다.
 
 lookAhead(미래 예측 거리)와 path radius(허용 폭)가 추종의 엄밀함을 정한다. lookAhead가 크면 코너를 더 일찍 보고 미리 꺾어 *안쪽으로 크게 깎고*, 작으면 경로에 바짝 붙는다. 좁은 통로는 작은 radius와 작은 lookAhead로 정확히, 넓은 평지는 큰 radius로 느슨하게 따르게 한다. 전역 경로는 길찾기가 정하고, 국소 추종은 steering이 맡는다는 분업의 구체적 구현이다.
 

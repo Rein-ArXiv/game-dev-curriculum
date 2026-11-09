@@ -58,7 +58,9 @@ struct FlowField {
 };
 ```
 
-이 한 줄짜리 구조체에 길찾기의 모든 결과가 담긴다. 유닛은 자기 위치를 셀 좌표로 바꿔 `At(x, y)`를 한 번 읽으면 "지금 어느 쪽으로 가야 목표에 가까워지는가"를 즉시 안다. 출발점이 어디였는지, 경로의 몇 번째 칸인지 같은 *유닛별 상태가 필요 없다*. 벡터장은 모든 출발점을 동시에 처리하는 *전역 해(global solution)* 이기 때문이다.
+이후 격자 예제는 양의 크기·셀 간격과 크기에 맞는 저장소, `int` 범위 안의 인덱스 산술, 유효한 통행 가능 목표를 전제로 한다. `Neighbors4/8`은 범위 안의 이웃만 반환한다.
+
+이 구조체에 길찾기의 방향 결과가 담긴다. 유닛은 자기 위치를 셀 좌표로 바꿔 `At(x, y)`를 한 번 읽으면 "지금 어느 쪽으로 가야 목표에 가까워지는가"를 즉시 안다. 출발점이 어디였는지, 경로의 몇 번째 칸인지 같은 *유닛별 상태가 필요 없다*. 벡터장은 모든 출발점을 동시에 처리하는 *전역 해(global solution)* 이기 때문이다.
 
 ### 비용 구조의 역전
 
@@ -71,11 +73,11 @@ struct FlowField {
 
 여기서 $V$는 격자 셀 수, $E$는 간선 수(8방향 격자면 $E \approx 8V$)다. 표의 A* 항은 탐색이 그래프 대부분을 확장하는 상한에 가까운 표현이며, 실제 비용은 휴리스틱과 장애물 배치에 따라 확장한 노드 수로 정해진다. Flow Field도 유닛당 벡터 샘플링과 이동 갱신 때문에 총비용에 $O(N)$ 항이 남는다. 다음 계산은 특정 작업량을 가정한 손익분기 예시다.
 
-- 격자 $128 \times 128 = 16,384$ 셀, Dijkstra 1회 약 $V \log V \approx 16{,}384 \times 14 \approx 230,000$ 연산.
-- 유닛별 A*가 평균 200셀을 펼친다면, 유닛 1마리당 약 $200 \times 8 \approx 1,600$ 연산.
+- 격자 $128 \times 128 = 16,384$ 셀, Dijkstra 생성 비용을 이 예에서는 약 230,000 작업 단위로 가정한다.
+- 유닛별 A*가 평균 200셀을 펼친다면, 유닛 1마리당 이웃 검사 약 $200 \times 8 \approx 1,600$회에 해당하는 총비용을 1,600 작업 단위로 가정한다.
 - 손익분기 $N \approx 230{,}000 / 1{,}600 \approx 144$ 마리.
 
-이 가정에서는 약 144마리에서 거리장 생성 비용을 상쇄한다. 그러나 보편적인 "100마리 기준"은 없다. A*의 평균 확장 수, 격자 크기, 목표 변경 빈도, flow 갱신 주기, 유닛별 회피 비용을 같은 플랫폼에서 측정해 손익분기를 구해야 한다. 유닛 수가 늘어도 격자 생성 비용은 그대로지만 $O(N)$인 샘플링과 steering 비용은 계속 증가한다.
+230,000과 1,600은 같은 비용 단위로 환산됐다는 가정이다. $V\log V$와 이웃 검사 횟수를 그대로 나누면 힙 연산·간선 완화 비용이 서로 달라 손익분기가 되지 않는다. 이 예의 비용 가정에서는 약 144마리에서 거리장 생성 비용을 상쇄한다. 그러나 보편적인 "100마리 기준"은 없다. A*의 평균 확장 수, 격자 크기, 목표 변경 빈도, flow 갱신 주기, 유닛별 회피 비용을 같은 플랫폼에서 측정해 손익분기를 구해야 한다. 유닛 수가 늘어도 격자 생성 비용은 그대로지만 $O(N)$인 샘플링과 steering 비용은 계속 증가한다.
 
 ### 특화된 도구라는 점
 
@@ -123,11 +125,12 @@ cost field는 두 가지 정보를 합친다. *정적 지형* (맵 디자인)과
 void RebuildCost(CostField& cf, const StaticTerrain& terrain,
                  const DynamicLayer& dyn) {
     for (int i = 0; i < cf.width * cf.height; ++i) {
-        uint16_t base = terrain.baseCost[i];          // 정적 지형 비용
-        uint16_t add  = dyn.hazard[i] + dyn.crowd[i]; // 위험 + 혼잡 가산
-        uint16_t sum  = base + add;
+        // 입력 세 층은 각각 0..65535 범위, 통행 가능한 baseCost는 1 이상이다.
+        uint32_t base = terrain.baseCost[i];
+        uint32_t add  = uint32_t(dyn.hazard[i]) + uint32_t(dyn.crowd[i]);
+        uint32_t sum  = base + add; // 좁은 합이 wrap한 뒤 clamp하는 실수를 피함
         cf.cost[i] = (terrain.wall[i]) ? kImpassable
-                                       : (uint8_t)std::min<uint16_t>(sum, 254);
+                                       : (uint8_t)std::min<uint32_t>(sum, 254);
         // 254 로 클램프해 동적 가산이 벽(255)을 침범하지 않게 한다
     }
 }
@@ -151,7 +154,7 @@ $256 \times 256$ 격자를 uint8로 두면 cost field는 64KB이고, 같은 격�
 
 ### 목표에서 바깥으로
 
-두 번째 격자는 *integration field* — *목표 셀에서 각 셀까지의 누적 최소 비용* 이다. 이것이 Flow Field의 심장이다.
+두 번째 격자는 *integration field* — *각 셀에서 목표까지의 누적 최소 비용* 이다. 이 예는 간선 `u→v`의 비용을 `cost[u] × StepLen(u,v)`로 정한다. 목표에서 역방향으로 전파할 때는 원래 간선 `n→c`의 비용을 더하므로 아래의 `cost[n]`이 된다. 진입 셀 비용 규약을 택한다면 integration과 flow 양쪽 식을 함께 바꿔야 한다. 이것이 Flow Field의 심장이다.
 
 목표 셀에서 시작해 *바깥으로 거리를 전파* 하는 Dijkstra(또는 균일 비용이면 BFS)를 돌린다. 목표는 0, 거기서 멀어질수록 누적 cost가 커진다.
 
@@ -175,7 +178,7 @@ void BuildIntegration(const CostField& cf, IntegrationField& f, Cell goal) {
         auto [d, c] = open.top(); open.pop();
         if (d > f.value[Idx(c)]) continue;          // 낡은 항목 폐기 (lazy delete)
         for (Cell n : Neighbors8(c)) {
-            if (cf.At(n.x, n.y) == kImpassable) continue;      // 벽
+            if (!CanTraverse(cf, n, c)) continue; // 원래 그래프의 n→c 합법 간선만 역전파
             float step = cf.At(n.x, n.y) * StepLen(c, n);      // 대각은 ×√2
             float nd = d + step;
             if (nd < f.value[Idx(n)]) {
@@ -187,7 +190,7 @@ void BuildIntegration(const CostField& cf, IntegrationField& f, Cell goal) {
 }
 ```
 
-`StepLen`은 직교 이웃에 1, 대각 이웃에 $\sqrt 2 \approx 1.414$를 돌려준다. 대각 보정을 빼면 대각 이동이 직교 이동과 같은 비용으로 평가되어, 흐름이 대각 방향으로 부당하게 쏠린다. 또 한 가지 함정: 대각으로 갈 때 *양옆 두 직교 셀이 모두 벽이면* 모서리를 뚫고 지나가는 셈이므로, 엄밀히는 그 대각 이동을 막아야 한다(corner-cutting 방지). RTS에서는 흔히 무시하지만 좁은 통로가 많은 맵에서는 검사한다.
+`CanTraverse`는 범위·벽·대각 모서리 규칙을 검사하는 보조 함수다. 이 예는 양옆 직교 셀 중 하나라도 막히면 대각 이동을 금지한다. `StepLen`은 셀 단위 거리로 직교 이웃에 1, 대각 이웃에 $\sqrt 2 \approx 1.414$를 돌려준다. 대각 보정을 빼면 대각 이동이 직교 이동과 같은 비용으로 평가되어, 흐름이 대각 방향으로 부당하게 쏠린다. 대각 통행 정책은 에이전트의 크기와 장애물 표현에 맞춰 정하고 integration과 flow 추출에서 같게 적용한다.
 
 ### 왜 A*가 아니라 Dijkstra인가
 
@@ -224,7 +227,7 @@ A*에 휴리스틱 $h=0$을 주면 Dijkstra가 된다. Flow Field의 거리 전�
 
 ### 균일 비용일 때의 단순화
 
-cost가 전부 1(벽/평지만 있는 맵)이면 우선순위 큐 없이 BFS로 충분하다. 거리가 단조 증가하는 정수이므로, 단순 큐(FIFO)로 파면을 한 겹씩 넓혀도 최적이 보장된다.
+통행 가능한 모든 *간선* 비용이 같으면 우선순위 큐 없이 BFS로 충분하다. 아래는 4방향·단위 비용이다. 셀 cost가 모두 1이어도 대각 비용이 $\sqrt2$인 8방향 그래프에는 이 FIFO BFS를 그대로 적용하지 않는다. 거리가 단조 증가하는 정수이므로, 단순 큐(FIFO)로 파면을 한 겹씩 넓혀도 최적이 보장된다.
 
 ```cpp
 void BuildIntegrationBFS(const CostField& cf, IntegrationField& f, Cell goal) {
@@ -269,8 +272,8 @@ void BuildFlowMinNeighbor(const CostField& cf, const IntegrationField& f, FlowFi
     for (int y = 0; y < flow.height; ++y)
     for (int x = 0; x < flow.width; ++x) {
         float here = f.value[Idx(x,y)];
-        if (here == INF) { flow.dir[Idx(x,y)] = {0,0}; continue; } // 도달 불가
-        float best = here;
+        if (here == INF || here == 0.f) { flow.dir[Idx(x,y)] = {0,0}; continue; } // 불가/목표
+        float best = INF;
         Vec2 bestDir{0,0};
         for (auto [dx,dy] : kNeighbors8) {
             int nx=x+dx, ny=y+dy;
@@ -279,7 +282,8 @@ void BuildFlowMinNeighbor(const CostField& cf, const IntegrationField& f, FlowFi
             // corner-cutting 금지 등 이동 규칙이 integration과 어긋난다.
             if (!CanTraverse(cf, Cell{x,y}, Cell{nx,ny})) continue;
             // 이웃 값만 비교하면 안 된다 — 이 셀을 떠나는 간선 비용(대각 ×√2)을 더해야
-            // 최단경로 선행 셀이 뽑힌다. BuildIntegration과 같은 식이라 선행 셀은 v == here.
+            // 최단경로 선행 셀이 뽑힌다. here와 재계산한 합의 반올림 차이에 의존하지 않는다.
+            if (!(f.value[Idx(nx,ny)] < here)) continue; // 엄격히 감소하는 이웃만
             float step = cf.At(x,y) * StepLen(Cell{x,y}, Cell{nx,ny});
             float v = f.value[Idx(nx,ny)] + step;
             if (v <= best) { best = v; bestDir = Normalize(Vec2{(float)dx,(float)dy}); }
@@ -289,7 +293,7 @@ void BuildFlowMinNeighbor(const CostField& cf, const IntegrationField& f, FlowFi
 }
 ```
 
-이 방식은 셀당 8회 비교로 $O(V)$다. 빠르고 견고하다 — integration이 INF인 셀(도달 불가)을 자연스럽게 정지(`{0,0}`)로 두고, 목표 셀(자기보다 작은 이웃 없음)도 정지로 둔다. integration이 대각 이동을 막는 corner-cutting 규칙을 쓴다면 flow 추출도 같은 `CanTraverse(from,to)`를 통과한 간선만 봐야 한다 — 최단 우회로 도달 가능하다는 전역 사실과 현재 셀에서 그 방향으로 바로 이동 가능하다는 것은 다르다. 단점은 방향이 8방향으로 *양자화* 된다는 것이다. 유닛이 8개 방향으로만 움직여 흐름이 각져 보이고, 넓은 평지에서 사선으로 가야 할 곳을 계단처럼 꺾어 간다.
+이 방식은 셀당 8회 비교로 $O(V)$다. 양의 간선 비용이 float 해상도보다 작아 누적값에 반영되지 않는 큰 거리에서는 plateau가 생길 수 있으므로, 그 범위는 double·정수 비용 또는 저장한 선행 포인터로 다뤄야 한다. 빠르고 견고하다 — integration이 INF인 셀(도달 불가)을 자연스럽게 정지(`{0,0}`)로 두고, 목표 셀(자기보다 작은 이웃 없음)도 정지로 둔다. integration이 대각 이동을 막는 corner-cutting 규칙을 쓴다면 flow 추출도 같은 `CanTraverse(from,to)`를 통과한 간선만 봐야 한다 — 최단 우회로 도달 가능하다는 전역 사실과 현재 셀에서 그 방향으로 바로 이동 가능하다는 것은 다르다. 단점은 방향이 8방향으로 *양자화* 된다는 것이다. 유닛이 8개 방향으로만 움직여 흐름이 각져 보이고, 넓은 평지에서 사선으로 가야 할 곳을 계단처럼 꺾어 간다.
 
 ### 중심 차분 방식
 
@@ -411,7 +415,7 @@ $$
 | (10,3) | 10.4403 | 11.2426 (+7.68%) | 10.8401 (+3.83%) |
 | (20,8) | 21.5407 | 23.3137 (+8.23%) | 22.1717 (+2.93%) |
 
-핵심은 *대각이 FMM의 최악이자 Dijkstra의 최선* 으로 정반대라는 점이다. Dijkstra는 격자 대각을 $\sqrt2$로 정확히 밟지만(오차 0), 1차 FMM은 같은 대각을 평면 파면으로 근사해 $1+\tfrac1{\sqrt2}\approx1.707$로 20% 부풀린다. 따라서 "(2,1) 셀에서 FMM이 약 $2.236$으로 거의 일치한다(오차 8%→1% 미만)"는 1차 FMM에는 성립하지 않는다 — 그 수준의 정밀도는 2차 차분 FMM이나 고차 스킴이라야 한다. 1차 FMM의 진짜 이득은 *축에 고정된 체계적 편향이 사라져* 중·원거리 경사가 등방적이 되는 것이고, 흐름이 읽는 것은 바로 그 경사 방향이다.
+핵심은 *대각이 FMM의 최악이자 Dijkstra의 최선* 으로 정반대라는 점이다. Dijkstra는 격자 대각을 $\sqrt2$로 정확히 밟지만(오차 0), 1차 FMM은 같은 대각을 평면 파면으로 근사해 $1+\tfrac1{\sqrt2}\approx1.707$로 20% 부풀린다. 따라서 "(2,1) 셀에서 FMM이 약 $2.236$으로 거의 일치한다(오차 8%→1% 미만)"는 1차 FMM에는 성립하지 않는다 — 그 수준의 정밀도는 2차 차분 FMM이나 고차 스킴이라야 한다. 1차 FMM은 유한 격자에서 방향 의존 오차가 남지만, 격자를 세분하면 등방 Eikonal 해로 수렴한다. 이 점이 옥타일 척도의 고정 비율 편향과 다르며, 흐름이 읽는 것은 바로 그 경사 방향이다.
 
 ### 전체 행진 루프
 
@@ -431,8 +435,8 @@ void BuildIntegrationFMM(const CostField& cf, IntegrationField& f, Cell goal) {
         frozen[Idx(c)] = 1;                                  // 최소값으로 확정
         for (Cell n : Neighbors4(c)) {                       // FMM 은 4방향 갱신
             if (cf.At(n.x,n.y) == kImpassable || frozen[Idx(n)]) continue;
-            float a = AxisMin(f, n.x, n.y, /*horizontal*/true);   // 좌우 이웃 최소
-            float b = AxisMin(f, n.x, n.y, /*horizontal*/false);  // 상하 이웃 최소
+            float a = AxisMin(f, frozen, n.x, n.y, /*horizontal*/true);   // 좌우 이웃 최소
+            float b = AxisMin(f, frozen, n.x, n.y, /*horizontal*/false);  // 상하 이웃 최소
             float t = SolveEikonal(a, b, (float)cf.At(n.x,n.y));
             if (t < f.value[Idx(n)]) { f.value[Idx(n)] = t; open.push({t, n}); }
         }
@@ -440,11 +444,11 @@ void BuildIntegrationFMM(const CostField& cf, IntegrationField& f, Cell goal) {
 }
 ```
 
-`AxisMin`은 한 축의 두 이웃 중 더 작은 값을 돌려준다(둘 다 없으면 INF). FMM은 4방향 이웃만으로 갱신하면서도 2차 풀이 덕분에 *임의 방향의 거리* 를 등방적으로 근사한다.
+`AxisMin`은 한 축의 두 이웃 중 `frozen`인 통행 가능 이웃의 최솟값만 돌려주고, 없으면 INF를 준다. 이 FMM 식은 격자 간격 1을 전제로 하며 간격이 $h$라면 `SolveEikonal`의 마지막 인자에 $h/F$를 전달한다. FMM은 4방향 이웃만으로 갱신하면서도 2차 풀이 덕분에 *임의 방향의 거리* 를 등방적으로 근사한다.
 
 ### 비용과 선택 기준
 
-FMM의 결과는 *격자 축에 고정된 체계적 편향이 없는 거리장* 이고, 그 경사에서 추출한 flow는 임의 각도의 자연스러운 흐름이 된다. 다만 위에서 유도했듯 1차 FMM의 이점은 "모든 셀에서 거리가 더 정확해진다"가 아니라 "Dijkstra의 거리 무관 8% 축편향이 사라진다"이다 — 1차 FMM은 소스 근방과 대각에서 오히려 오차가 크고 멀어질수록 줄어든다. 흐름이 읽는 중·원거리 경사가 등방적이 되는 것이 핵심 이득이다.
+FMM은 등방 Eikonal 해를 근사하며 그 경사에서 임의 각도 방향을 추출할 수 있다. 유한 격자의 오차와 장애물 경계는 남는다. 위에서 유도했듯 1차 FMM의 이점은 "모든 셀에서 거리가 더 정확해진다"가 아니라 "Dijkstra의 거리 무관 8% 축편향이 사라진다"이다 — 1차 FMM은 소스 근방과 대각에서 오히려 오차가 크고 멀어질수록 줄어든다. 흐름이 읽는 중·원거리 경사가 등방적이 되는 것이 핵심 이득이다.
 
 | 방법 | 셀당 비용 | 거리 정확도 | 흐름 매끄러움 |
 |---|---|---|---|
@@ -512,13 +516,14 @@ Vec2 Separation(const Unit& u, const SpatialHash& hash, float radius) {
             ++count;
         }
     }
-    return count ? Normalize(push) : Vec2{0, 0};
+    return LengthSq(push) > 1e-12f ? Normalize(push) : Vec2{0, 0}; // 대칭 반발은 상쇄될 수 있음
 }
 
-Vec2 desired = Normalize(flowDir * wFlow + Separation(u, hash, sepR) * wSep) * u.maxSpeed;
+Vec2 combined = flowDir * wFlow + Separation(u, hash, sepR) * wSep;
+Vec2 desired = LengthSq(combined) > 1e-12f ? Normalize(combined) * u.maxSpeed : Vec2{0,0};
 ```
 
-flow field(전역 방향) + separation(국소 회피)의 결합이 대량 유닛 이동의 표준 조합이다. 가중치 $w_\text{flow}$, $w_\text{sep}$로 "목표 추종 대 충돌 회피"의 균형을 맞춘다. separation의 이웃 질의는 *공간 해시(spatial hash)* 로 $O(1)$ 근처에서 처리해야 한다 — 전수 비교는 $O(N^2)$로 무리 규모에서 폭발한다.
+flow field(전역 방향) + separation(국소 회피)의 결합이 대량 유닛 이동의 표준 조합이다. 가중치 $w_\text{flow}$, $w_\text{sep}$로 "목표 추종 대 충돌 회피"의 균형을 맞춘다. separation에는 *공간 해시(spatial hash)* 등으로 가까운 이웃만 찾는다. 유계 밀도·고정 반경에서 평균 후보 수가 제한되면 유닛당 비용을 상수에 가깝게 줄일 수 있지만, 밀집한 한 셀의 이웃을 모두 반환하면 여전히 선형 후보 수가 든다. 전수 비교는 전체 $O(N^2)$다.
 
 ```mermaid
 flowchart LR
@@ -556,11 +561,13 @@ flowchart TB
 
 ```cpp
 void SplatDensity(const std::vector<Unit>& units, DensityField& rho, VelField& vbar) {
-    rho.Clear(); vbar.Clear();
+    rho.Clear(); vbar.Clear(); // 양의 유한 cellSize. Add는 격자 밖 좌표를 무시한다.
     for (const Unit& u : units) {
         if (!std::isfinite(u.position.x) || !std::isfinite(u.position.y)) continue;
         // SampleBilinear와 같은 cell-centered 변환(셀 중심이 정수 격자점)
-        float fx = u.position.x / cellSize - 0.5f, fy = u.position.y / cellSize - 0.5f;
+        double fx = double(u.position.x) / cellSize - 0.5, fy = double(u.position.y) / cellSize - 0.5;
+        // rho.width/height는 격자 크기. int 변환 전에 겹치는 splat 영역인지 확인한다.
+        if (!(fx >= -1 && fx < rho.width && fy >= -1 && fy < rho.height)) continue;
         int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
         float tx = fx - x0, ty = fy - y0;
         float w00=(1-tx)*(1-ty), w10=tx*(1-ty), w01=(1-tx)*ty, w11=tx*ty;
@@ -610,9 +617,9 @@ Continuum Crowds는 개별 충돌 회피로는 얻기 어려운 *대규모 군�
 
 ## 8. 사례와 동적 갱신
 
-### Supreme Commander와 RTS
+### Supreme Commander 2와 RTS
 
-Supreme Commander는 수천 유닛의 동시 이동을 flow field 계열로 처리한 초기 대표 사례다. 선택한 유닛 무리의 목표 지점에 대해 거리장을 만들고, 모든 유닛이 그 장을 따라 이동하며 separation으로 겹침을 푼다. 유닛 수가 수천이어도 길찾기 비용이 목표 수에 비례하므로 확장된다. 이후 다수 RTS가 "그룹 이동 명령 = flow field 한 장"이라는 패턴을 채택했다. Game AI Pro에 실린 flow field tile 기법은 이를 *타일 단위로 쪼개* 변경 지역만 다시 푸는 형태로 산업화했다.
+Elijah Emerson의 [Game AI Pro 원문](https://www.gameaipro.com/GameAIPro/GameAIPro_Chapter23_Crowd_Pathfinding_and_Steering_Using_Flow_Field_Tiles.pdf)은 Supreme Commander 2의 이동·길찾기 개선을 배경으로 flow field tile을 설명한다. 목표까지 필요한 타일의 장을 공유하고 steering·물리와 결합하는 사례다. 이 출처를 원작 Supreme Commander나 이후 모든 RTS의 내부 구현으로 확대하지 않는다. 목표·이동 유형·타일별 공유로 반복 탐색을 줄이되, 유닛별 조향 비용은 남는다.
 
 ### Plants vs Zombies와 타워 디펜스
 
@@ -640,7 +647,7 @@ flowchart TB
 
 ### 메모리 레이아웃과 캐시
 
-세 격자(cost/integration/flow)는 모두 같은 인덱싱 `y * width + x`를 공유하므로, 같은 셀의 세 값이 서로 다른 배열의 같은 인덱스에 있다. 한 셀을 처리할 때 세 배열을 모두 건드리면 캐시 라인이 흩어진다. 핫 패스(BuildFlow)가 한 배열(integration)만 순회하므로 SoA(배열별 분리)가 자연스럽고, 행 우선(row-major)으로 두면 BFS/Dijkstra의 이웃 접근이 같은 행에서 인접한다.
+세 격자(cost/integration/flow)는 모두 같은 인덱싱 `y * width + x`를 공유하므로, 같은 셀의 세 값이 서로 다른 배열의 같은 인덱스에 있다. 한 셀을 처리할 때 세 배열을 모두 건드리면 캐시 라인이 흩어진다. BuildFlow는 integration·cost를 읽고 flow를 쓰지만 각 배열을 조밀하게 유지할 수 있어 SoA(배열별 분리)가 자연스럽고, 행 우선(row-major)으로 두면 BFS/Dijkstra의 이웃 접근이 같은 행에서 인접한다.
 
 ```cpp
 // 캐시 친화 인덱싱: 행 우선, 셀 좌표 → 선형 인덱스
@@ -698,7 +705,7 @@ Flow Field는 길찾기 결과를 유닛이 아니라 *공간* 에 저장한다.
 
 생성은 세 격자의 파이프라인이다. cost field가 정적 지형과 동적 요소를 합쳐 통행 비용을 인코딩하고, integration field가 목표에서 Dijkstra(또는 균일 비용이면 BFS)로 최소 비용을 전파하며, flow field가 값이 감소하는 방향을 추출한다. 양수 간선과 엄격히 감소하는 이웃 선택 아래에서는 이산 포인터가 가짜 국소 최소 없이 목표에 도달한다. 그러나 보간과 steering을 합친 연속 궤적은 별도 검증이 필요하다. 8방향 격자의 방향 의존 오차가 문제면 Eikonal 방정식의 Fast Marching으로 격자 세분 시 유클리드 해에 수렴하는 거리장을 만들 수 있다. Continuum Crowds는 밀도를 cost에 되먹여 혼잡을 분산하지만, 그 결과 역시 이산화·갱신 주기·국소 회피와 함께 측정해야 한다.
 
-Supreme Commander의 수천 유닛, 타워 디펜스의 끝없는 적 물결이 이 모델의 산물이다. 약점인 동적 갱신은 tile 분할·캐싱·배치 갱신으로 국소화하고, 캐시 친화적 메모리 레이아웃과 세 격자 디버그 뷰가 규모를 떠받친다. flow field는 "다수가 소수의 공통 목표로"라는 패턴에 특화된 도구이며, 그 바깥(개별 목표, 잦은 변경)에서는 유닛별 길찾기와 혼합해 쓴다. 길찾기를 공간의 문제로 재구성한 이 관점이, 대량 유닛 시대의 핵심 기법이 됐다.
+Supreme Commander 2의 공유 타일 기법, 타워 디펜스의 끝없는 적 물결이 이 모델의 산물이다. 약점인 동적 갱신은 tile 분할·캐싱·배치 갱신으로 국소화하고, 캐시 친화적 메모리 레이아웃과 세 격자 디버그 뷰가 규모를 떠받친다. flow field는 "다수가 소수의 공통 목표로"라는 패턴에 특화된 도구이며, 그 바깥(개별 목표, 잦은 변경)에서는 유닛별 길찾기와 혼합해 쓴다. 길찾기를 공간의 문제로 재구성한 이 관점이, 대량 유닛 시대의 핵심 기법이 됐다.
 
 ## 더 읽을거리
 

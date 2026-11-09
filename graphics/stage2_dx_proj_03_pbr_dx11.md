@@ -54,6 +54,7 @@ float3 F_Schlick(float VoH, float3 F0) {
 
 ```hlsl
 float3 CookTorranceSpec(float3 N, float3 V, float3 L, float roughness, float3 F0) {
+    // N/V/L은 단위 벡터, 양의 반구, roughness는 0보다 큰 유효 범위를 전제로 한다.
     float3 H  = normalize(V + L);
     float NoV = saturate(dot(N, V));
     float NoL = saturate(dot(N, L));
@@ -79,7 +80,7 @@ float3 PBR(float3 N, float3 V, float3 L, float3 lightColor,
            float3 albedo, float metallic, float roughness)
 {
     float NoL = saturate(dot(N, L));
-    if (NoL <= 0.0) return float3(0, 0, 0);     // 표면 뒤 광원은 기여 없음
+    if (NoL <= 0.0 || dot(N, V) <= 0.0) return float3(0, 0, 0);     // 표면 뒤 광원은 기여 없음
 
     float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
 
@@ -124,7 +125,9 @@ SamplerState linearWrap    : register(s0);
 
 float4 PSMain(PSInput input) : SV_Target {
     float3 baseColor = baseColorMap.Sample(linearWrap, input.uv).rgb;
-    float3 normalT   = normalMap.Sample(linearWrap, input.uv).xyz * 2.0 - 1.0;
+    // 앞 모델 원고의 BC5(+Z 반구) 규약: 저장된 XY로 Z를 재구성한다.
+    float2 normalXY = normalMap.Sample(linearWrap, input.uv).rg * 2.0 - 1.0;
+    float3 normalT = normalize(float3(normalXY, sqrt(max(0.0, 1.0 - dot(normalXY, normalXY)))));
     float2 mr        = metalRoughMap.Sample(linearWrap, input.uv).gb;
     float  roughness = max(mr.x, 0.04);
     float  metallic  = mr.y;
@@ -141,12 +144,14 @@ float4 PSMain(PSInput input) : SV_Target {
 }
 ```
 
-DX11 고유의 함정은 *텍스처 포맷의 색 공간* 이다. base color는 sRGB 포맷(`DXGI_FORMAT_R8G8B8A8_UNORM_SRGB`)으로 만들어 샘플 시 자동 선형화되게 하고, normal·metalRough는 데이터값이므로 반드시 선형 포맷(`_UNORM`)으로 둔다. 이 둘을 바꾸면 법선이 휘거나 거칠기가 어긋나며, metalRough에 밉맵을 생성할 때 색 공간 변환이 끼면 안 되므로 선형 포맷이 맞다. 법선 텍셀의 `* 2.0 - 1.0`은 $[0,1]$ 텍셀을 $[-1,1]$ 벡터로 펴는 표준 디코딩이다.
+DX11 고유의 함정은 *텍스처 포맷의 색 공간* 이다. base color는 sRGB 포맷(`DXGI_FORMAT_R8G8B8A8_UNORM_SRGB`)으로 만들어 샘플 시 자동 선형화되게 하고, normal·metalRough는 데이터값이므로 반드시 선형 포맷(`_UNORM`)으로 둔다. 이 둘을 바꾸면 법선이 휘거나 거칠기가 어긋나며, metalRough에 밉맵을 생성할 때 색 공간 변환이 끼면 안 되므로 선형 포맷이 맞다. 이 셰이더의 `mul(normalT, input.TBN)`은 T·B·N을 **행**으로 쌓은 월드 공간 기저를 받는 규약이다. 정점 셰이더와 이를 일치시킨다. 예제의 lightColor는 표면에 도달한 광량 계수로 취급하며, 실제 점광은 거리 감쇠·광도와 필요한 가시성 항도 계산해 넘긴다.
+
+법선 텍셀의 `* 2.0 - 1.0`은 $[0,1]$ 텍셀을 $[-1,1]$ 벡터로 펴는 표준 디코딩이다.
 
 
 ## 4. IBL 전처리: Compute Shader
 
-IBL의 세 전처리(조도 맵·프리필터 맵·BRDF LUT)를 DX11 Compute Shader로 굽는다. 큐브맵 6면은 `RWTexture2DArray`의 배열 인덱스(0~5)로 동시에 채운다. Compute Shader에는 픽셀 미분이 없어 `SampleLevel`로 밉을 명시해야 한다.
+IBL의 세 전처리(조도 맵·프리필터 맵·BRDF LUT)를 DX11 Compute Shader로 굽는다. 큐브맵 6면은 `RWTexture2DArray`의 배열 인덱스(0~5)로 동시에 채운다. DX11 Compute Shader에는 픽셀의 암시적 화면 미분이 없으므로, 이 예제는 `SampleLevel`로 밉을 명시한다. 명시적 gradient를 가진 `SampleGrad` 같은 경로도 있다.
 
 조도 맵(확산): 법선 방향 반구를 구좌표로 적분한다.
 
@@ -173,7 +178,7 @@ void IrradianceCS(uint3 tid : SV_DispatchThreadID) {
 }
 ```
 
-적분의 $\cos\theta$는 램버트 코사인, $\sin\theta$는 구좌표 야코비안이다 — $\sin\theta$를 빠뜨리면 천정이 과하게 밝아진다. 디퓨즈는 본래 흐릿해 32×32 큐브맵이면 충분하고, 정적 환경이면 로딩 시 한 번만 굽는다.
+적분의 $\cos\theta$는 램버트 코사인, $\sin\theta$는 구좌표 야코비안이다 — $\sin\theta$를 빠뜨리면 천정이 과하게 밝아진다. 위 `π * 합 / samples`가 저장하는 값은 조도 $E$ 자체가 아니라 $E/π$의 수치 근사다. 그래서 5절 런타임 디퓨즈에는 다시 `/π`를 하지 않는다. 일정 radiance가 1인 흰 환경이면 이 맵도 약 1이 되어야 한다. 이름은 irradianceMap이지만 이 정규화 계약을 혼동하면 π배 밝기 오류가 생긴다. 확산 환경은 저주파여서 작은 큐브맵을 사용할 수 있고, 정적 환경이면 로딩 시 한 번만 굽는다.
 
 프리필터 맵(정반사): roughness별로 밉 체인에 GGX 중요도 표집 결과를 담는다.
 
@@ -184,7 +189,7 @@ cbuffer PrefilterCB : register(b0) { uint mip; uint maxMipLevels; }  // 밉마�
 void SpecularCS(uint3 tid : SV_DispatchThreadID) {
     float  roughness = mip / float(maxMipLevels - 1);
     float3 R = GetCubeDirection(tid.z, /* uv */);
-    float3 N = R, V = R;                  // N=V=R 가정으로 적분 1차원 축소
+    float3 N = R, V = R;                  // N=V=R 가정으로 프리필터에서 독립 시선 방향 의존 제거
 
     float3 prefiltered = 0; float totalWeight = 0;
     for (uint i = 0; i < 1024; ++i) {
@@ -222,7 +227,7 @@ float3 ImportanceSampleGGX(float2 xi, float3 N, float roughness) {
 
 `up`을 법선과 거의 평행할 때 갈아 끼우는 것은 외적이 0 벡터가 되어 접선 기저가 무너지는 것을 막는 방어다.
 
-BRDF LUT: 환경과 무관한 split-sum의 둘째 인수를 $(NoV, roughness)$ 2D 텍스처로 굽는다. 여기서는 IBL용 $k=\text{roughness}^2/2$를 써야 한다.
+BRDF LUT: 환경과 무관한 split-sum의 둘째 인수를 $(NoV, roughness)$ 2D 텍스처로 굽는다. 여기서는 IBL용 Schlick-GGX 근사의 $k=\text{roughness}^2/2$를 쓴다. 이것이 모든 Smith 구현의 필수식은 아니며, 다른 가시성 모델을 택하면 LUT도 그 모델에 맞춰 다시 굽는다.
 
 ```hlsl
 [numthreads(8, 8, 1)]
@@ -266,7 +271,7 @@ float3 IBL(float3 N, float3 V, float3 albedo, float metallic, float roughness, f
     float  NoV = saturate(dot(N, V));
     float3 R   = reflect(-V, N);
 
-    // 거칠기 반영 Fresnel (Lagarde 변형) — 직접광과 같은 kD 규약을 쓴다
+    // 환경광 kD용 거칠기 반영 Fresnel 근사 (직접광의 VoH Fresnel과 동일한 식은 아님)
     float3 F  = F0 + (max(1.0 - roughness, F0) - F0) * pow(1.0 - NoV, 5.0);
     float3 kD = (1.0 - F) * (1.0 - metallic);
 
@@ -282,7 +287,7 @@ float3 IBL(float3 N, float3 V, float3 albedo, float metallic, float roughness, f
 }
 ```
 
-`prefilter * (F0 * envBRDF.x + envBRDF.y)`가 split-sum의 두 조각(환경맵 적분 × BRDF LUT)을 곱하는 부분이다. roughness에 `(maxMip - 1)`을 곱해 밉을 고르면 하드웨어 삼선형 필터가 인접 밉을 보간해 거칠기가 연속적으로 변해도 끊김이 없다. 디퓨즈에 $k_D=(1-F)(1-\text{metallic})$을 곱하는 것은 직접광과 동일하다. (거친 금속의 어두워짐을 막는 Kulla-Conty 보정은 BRDF LUT에 보정 채널을 함께 굽는 방식으로 더할 수 있다.)
+`prefilter * (F0 * envBRDF.x + envBRDF.y)`가 split-sum의 두 조각(환경맵 적분 × BRDF LUT)을 곱하는 부분이다. roughness에 `(maxMip - 1)`을 곱해 밉을 고르면 하드웨어 삼선형 필터가 인접 밉을 보간해 거칠기가 연속적으로 변해도 끊김이 없다. 디퓨즈에 $k_D=(1-F)(1-\text{metallic})$ 형태의 가중치를 곱하지만, 위 환경광의 F는 직접광의 VoH 기반 Fresnel과 다른 근사다. (거친 금속의 어두워짐을 막는 Kulla-Conty 보정은 BRDF LUT에 보정 채널을 함께 굽는 방식으로 더할 수 있다.)
 
 
 ---
@@ -297,5 +302,5 @@ DX11에서 PBR은 두 갈래로 나뉜다 — 직접광은 픽셀 셰이더가 �
 
 - Brian Karis, ["Real Shading in Unreal Engine 4"](https://cdn2.unrealengine.com/Resources/files/2013SiggraphPresentationsNotes-26915738.pdf) (SIGGRAPH 2013) — split-sum·prefilter·BRDF LUT의 원전.
 - Microsoft, [Direct3D 11 Compute Shader 개요](https://learn.microsoft.com/en-us/windows/win32/direct3d11/direct3d-11-advanced-stages-compute-shader) — `RWTexture2DArray`·디스패치 모델.
-- Romain Guy, Mathias Agopian, [Google Filament 문서](https://google.github.io/filament/Filament.html) — 실시간 PBR 구현의 수식·코드 종합.
+- Romain Guy, Mathias Agopian, [Google Filament 문서](https://google.github.io/filament/main/filament.html) — 실시간 PBR 구현의 수식·코드 종합.
 - [LearnOpenGL: PBR](https://learnopengl.com/PBR/Theory) — 같은 수식의 GLSL 구현(API만 다름).

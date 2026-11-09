@@ -236,23 +236,30 @@ Ordered channel은 빠진 메시지가 있으면 뒤 메시지를 대기시킨�
 void Connection::SendPacket(double now) {
     PacketWriter w(buffer_, kMaxPayload);                // 예: 1200 바이트
     PacketHeader header = MakeHeader();                  // sequence/ack/ackBits
+    std::vector<ReliableKey> included;                    // (channel, id)
     w.WriteHeader(header);
 
     // 1) 재전송 기한이 지난 reliable 부터 — 가장 오래 기다린 것 우선
     for (auto& m : resendQueue_) {
         if (now - m.lastSentTime < ResendDelay(rtt_.Smoothed(), rtt_.Variance())) continue;
         if (!w.TryWriteMessage(m)) break;                // MTU 여유 없으면 다음 패킷으로
-        m.lastSentTime = now; ++m.sendCount;
-        sentRecord_[header.sequence].push_back(m.id);    // 패킷→메시지 매핑(5절)
+        included.push_back({m.channel, m.id});
     }
     // 2) 새 reliable 메시지
     // 3) 남은 공간에 unreliable 상태 (스냅샷 — 우선순위 누적기가 고른 엔티티들)
     FillSnapshot(w);
 
-    socket_.Send(remote_, w.Data(), w.Size());
-    bytesSentWindow_ += w.Size();                        // 대역폭 계측
+    if (socket_.Send(remote_, w.Data(), w.Size()) == SendResult::Accepted) {
+        sentRecord_[header.sequence] = included;         // 패킷→(channel, id)
+        for (auto key : included) MarkSent(key, now);    // 송신 시각·횟수 갱신
+        bytesSentWindow_ += w.Size();
+    } else {
+        HandleSendFailure();  // 실패한 패킷의 메시지는 재전송 대상으로 남긴다
+    }
 }
 ```
+
+`MarkSent`는 큐에 여전히 남은 해당 메시지의 송신 시각과 횟수를 갱신하는 개념 함수다. 위 골격은 단일 실행 흐름에서 즉시 수락 여부를 확인한다고 가정한다. 비동기 backend에서는 수락·완료 및 ACK가 경쟁할 수 있으므로 기록과 메시지의 수명·롤백 순서를 별도로 동기화해야 한다.
 
 순서의 논리: 재전송분은 이미 한 번 늦은 데이터라 가장 먼저, 새 reliable이 다음, 그리고 *남는 공간을 스냅샷이 채운다*. 스냅샷은 "가능한 한 많이"가 아니라 "남은 예산만큼"이다 — 어차피 다음 틱에 더 새 것이 온다. 이 구조 덕에 reliable 트래픽이 일시적으로 몰려도(예: 매치 시작 시 초기화 이벤트들) 스냅샷이 자연스럽게 양보하고, 평시에는 스냅샷이 패킷을 채운다.
 

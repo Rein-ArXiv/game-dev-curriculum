@@ -192,7 +192,7 @@ void LoadWithDependencies(ResourceHandle h) {
     }
     // Acquire 반환은 의존성 ready를 보장하지 않는다: 강한 의존성의 완료를 기다린다.
     for (ResourceHandle dep : Resolve(h)->heldDeps) {
-        if (!WaitReadyOrFail(dep)) {           // 실패·취소는 부모로 전파
+        if (!AwaitReadyOrFail(dep)) { // 개념적 await: 워커를 점유하지 않고 continuation으로 재개           // 실패·취소는 부모로 전파
             UnloadDependencies(h);             // 취득 도중 실패 — 이미 잡은 pin을 되돌린다
             MarkFailed(h);
             return;
@@ -209,6 +209,8 @@ void UnloadDependencies(ResourceHandle h) {
 ```
 
 참조 카운팅은 공유 에셋의 소유자 수를 표현한다. 동일 ID의 동시 요청을 한 물리 로드로 합치는 일은 `Unloaded→Loading` 전이를 원자적으로 소유하고 나머지 요청을 같은 future에 결합하는 별도 deduplication 규칙이 담당한다. 의존성 `Acquire`의 반환도 그 의존성이 `Loaded`임을 보장하지 않으므로, 재귀 로드가 비동기라면 모든 강한 의존성의 완료(또는 실패)를 기다린 뒤에만 부모를 `Loaded`로 게시하고, 취득 도중 실패하면 이미 잡은 의존성 참조를 되돌린다. 모델 A와 B가 같은 텍스처 T를 쓰면 T의 강한 참조 수는 2이며, 둘이 모두 놓은 뒤에야 캐시·언로드 후보가 된다.
+
+부모 로드가 자식 완료를 기다리는 동안 동일 worker pool의 스레드를 모두 블로킹하면 자식 작업이 실행되지 못해 교착된다. 위 AwaitReadyOrFail은 작업을 중단·재개하는 개념적 await이며, 실제 C++ 구현은 coroutine·future continuation·의존 카운터로 연결한다.
 
 순환 의존성(A→B→A)은 참조 카운팅의 약점이다 — 서로를 잡고 있어 외부 참조가 사라져도 둘 다 0이 안 된다. 에셋 의존성은 보통 *DAG(방향 비순환 그래프)* 로 설계해 순환을 빌드 시점에 금지하는 것이 정석이다. 쿠킹 단계에서 의존성을 위상 정렬해 순환을 *빌드 에러* 로 잡는다.
 
@@ -280,7 +282,7 @@ void WorkerLoop(LoadScheduler& sched) {
     while (true) {
         LoadJob* j = sched.NextOrWait();                     // empty 확인과 대기가 같은 동기화 경계
         if (!j) break;                                       // Stop() 이후
-        if (j->cancelled.load()) { Recycle(j); continue; }   // 단계 진입 전 검사
+        if (j->cancelled.load()) { CompleteCancelledAndRecycle(j); continue; }   // 단계 진입 전 검사
 
         switch (j->stage) {
             case LoadStage::ReadDisk: j->rawBytes = ReadFromPak(j->handle); break;
@@ -288,7 +290,7 @@ void WorkerLoop(LoadScheduler& sched) {
             // UploadGPU는 렌더 스레드 큐로 넘긴다
             default: break;
         }
-        if (j->cancelled.load()) { Recycle(j); continue; }   // 단계 완료 후 재검사
+        if (j->cancelled.load()) { CompleteCancelledAndRecycle(j); continue; }   // 단계 완료 후 재검사
         AdvanceStage(j);
     }
 }
@@ -325,13 +327,13 @@ void UpdateStreaming(Vec3 playerPos) {
 
 이것이 메모리 절약의 핵심이다. 4096² BC7 텍스처는 베이스 레벨이 16MiB이고 전체 밉 사슬은 약 21.33MiB다. 화면에서 256픽셀 정도로 보일 때 256² 레벨 한 장은 64KiB이고, 그보다 작은 밉 꼬리까지 합치면 약 85KiB다. 실제 필요 집합은 트라이리니어·이방성 필터, 스트리밍 여유분과 API의 메모리 배치 단위를 포함해 더 커진다.
 
-가상 텍스처(virtual texturing)는 이를 극단까지 민다 — 거대한 텍스처를 *고정 크기 타일* 로 쪼개고, 셰이딩에 *실제로 샘플링되는 타일만* 온디맨드로 로드한다. 화면에 보이는 타일을 GPU 피드백으로 수집해 그 타일만 스트리밍하므로, 텍스처 총량과 무관하게 *메모리는 화면 해상도에 비례* 한다.
+가상 텍스처(virtual texturing)는 이를 극단까지 민다 — 거대한 텍스처를 *고정 크기 타일* 로 쪼개고, 셰이딩에 *실제로 샘플링되는 타일만* 온디맨드로 로드한다. 화면에 보이는 타일을 GPU 피드백으로 수집해 그 타일만 스트리밍하므로, 전체 원본 텍스처와 현재 상주 작업 집합을 분리할 수 있다. 화면 footprint는 중요한 요인이지만 최소 상주 밉·페이지 테이블·여러 뷰와 프리페치도 메모리를 쓴다.
 
 ### 밉 스트리밍의 메모리 산술 — 기하급수 사슬과 화면 footprint
 
-위에서 "필요 밉만 들고 있으면 텍스처 메모리가 수 분의 일로 준다"·"메모리는 화면 해상도에 비례"라고 결과만 진술했는데, 이 절감은 정확히 계산되는 양이다. 픽셀당 바이트(블록 압축 단가 $b$)는 색·감마 소유 개념으로 전제하고, 여기서는 밉 사슬의 합과 화면에서 필요한 밉 레벨만 유도한다.
+필요한 밉만 상주시킬 때의 저장량은 밉 사슬의 합으로 계산할 수 있다. 가상 텍스처 전체의 메모리 예산과는 구분해 보자. 픽셀당 바이트(블록 압축 단가 $b$)는 선택한 텍스처 포맷의 저장 단가로 전제하고, 여기서는 밉 사슬의 합과 화면에서 필요한 밉 레벨만 유도한다.
 
-전제로 한 변 $T$ 텍스처에서 밉 레벨 $k$는 한 변 $T/2^k$, 텍셀 수 $T^2/4^k$다. 전체 사슬의 바이트는 공비 $1/4$ 기하급수다.
+전제로 한 변 $T$가 2의 거듭제곱인 정사각 텍스처에서 밉 레벨 $k$는 한 변 $T/2^k$, 텍셀 수 $T^2/4^k$다. 전체 사슬의 바이트는 공비 $1/4$ 기하급수다.
 
 $$M_\text{full}=b\,T^2\sum_{k=0}^{\log_2 T}\frac1{4^k}=b\,T^2\cdot\frac{1-4^{-(\log_2 T+1)}}{1-\tfrac14}\xrightarrow{T\gg1}\frac43\,b\,T^2.$$
 
@@ -370,14 +372,21 @@ void UpdateResidentMip(TextureStream& t, float lambda) {
     // residentMip이 작을수록 고해상. lambda가 경계를 벗어날 때만 wantedMip을 갱신.
     int m = std::clamp((int)std::floor(lambda), 0, kMaxMip);
     if (lambda < t.residentMip - kMipHysteresis) t.wantedMip = m;       // 승급
-    else if (lambda > t.residentMip + kMipHysteresis) t.wantedMip = m;  // 강등
+    else if (lambda > t.residentMip + 1.0f + kMipHysteresis) t.wantedMip = m;  // 강등
     // 경계 내면 wanted 유지 — 한 단계 요청도 장기 유지되면 반영된다
-    if (t.wantedMip != t.requestedMip) { t.requestedMip = t.wantedMip; RequestMipLoad(t); }
+    if (t.wantedMip != t.requestedMip) {
+        t.requestedMip = t.wantedMip;
+        RequestMipLoad(t, t.requestedMip, ++t.requestRevision); // 목표와 revision을 job에 고정
+    }
 }
-void OnMipLoadComplete(TextureStream& t) {   // 로드·fence 완료 후에만 호출
-    t.residentMip = t.requestedMip;          // 완료 전에는 resident를 올리지 않는다
+void OnMipLoadComplete(TextureStream& t, int jobMip, uint64_t jobRevision) {
+    // 로드·GPU fence 완료 뒤 자원 소유 스레드에서 게시한다.
+    if (jobRevision != t.requestRevision) { RetireStaleMipJob(jobRevision); return; }
+    t.residentMip = jobMip; // 완료한 job의 목표를 게시; 현재 requested를 읽어 추정하지 않는다
 }
 ```
+
+승급 경계는 현재 밉 m에서 m−1로 가는 λ=m 부근이고, 강등 경계는 m+1로 가는 λ=m+1 부근이다. 둘 다 m 주변으로 비교하면 λ가 정수 경계에서 조금 흔들릴 때 곧바로 반대 전환이 일어나 히스테리시스가 무너진다. wanted/requested/resident와 revision은 자원 소유 스레드에서 관리하며, 완료 콜백은 발행 당시 목표·revision을 가져와 오래된 완료를 걸러낸다.
 
 ## 4. 메모리 예산과 단편화
 
@@ -599,7 +608,7 @@ void OnFileChanged(std::string_view path) {
 
 교체는 해당 버전을 읽는 CPU 잡과 GPU 명령의 수명을 추적하는 안전 지점에서 수행한다. "프레임 끝"이라고 해서 모든 비동기 잡과 GPU 사용이 끝났다고 보장되지는 않는다. CPU는 epoch/read guard, GPU는 fence 또는 timeline 값으로 옛 버전의 마지막 사용 완료를 확인한 뒤 해제한다. 고정된 한두 프레임 지연은 GPU가 그보다 더 늦을 수 있어 안전성 증명이 아니다.
 
-핫 리로드는 *개발 빌드 전용* 이다. 출시 빌드는 패키지에서만 읽고 파일 감시를 끈다 — 감시 스레드와 느슨한 파일 검사 오버헤드를 제거한다.
+이 예제의 파일 감시형 핫 리로드는 *개발 빌드 전용* 으로 둔다. 출시 빌드는 패키지에서 읽고 파일 감시를 끈다 — 감시 스레드와 느슨한 파일 검사 오버헤드를 제거한다.
 
 ### DLC와 패치
 
@@ -701,7 +710,7 @@ void DumpLeaks() {
 
 ### 디스크 I/O 병목
 
-로딩이 느린데 CPU·메모리가 한가하면 *디스크가 병목* 이다. 진단은 *실제 읽기 대역폭과 이론치 비교* 다. NVMe가 수 GB/s인데 실측이 수십 MB/s면 *작은 무작위 읽기로 시간을 낭비* 하는 것이다 — 패키지 레이아웃(1절)이 흩어졌거나, 읽기를 *너무 잘게* 쪼갰거나, 시스템 콜 오버헤드에 묶인 것이다.
+로딩이 느린데 CPU가 한가하면 I/O 대기뿐 아니라 작업 의존·우선순위·락 대기를 구분해야 한다. 진단은 *실제 읽기 대역폭과 이론치 비교* 다. NVMe의 대용량 순차 성능이 수 GB/s인데 실측이 수십 MB/s면 요청 크기·분포와 큐 깊이를 확인한다. 다른 작업의 대기 때문에 I/O를 충분히 발행하지 못하는 경우도 있다 — 패키지 레이아웃(1절)이 흩어졌거나, 읽기를 *너무 잘게* 쪼갰거나, 시스템 콜 오버헤드에 묶인 것이다.
 
 해법은 작은 읽기를 적절한 청크로 합치고 접근 순서와 패키지 배치를 맞추는 것이다. 너무 큰 요청 하나는 긴급한 작은 요청의 우선순위를 막을 수 있으므로 큐 깊이와 취소 입도도 함께 설계한다. `io_uring`이나 플랫폼 스트리밍 API는 비동기 요청과 배치를 돕는다. DirectStorage류 경로도 하드웨어·드라이버·압축 형식에 따라 GPU 또는 최적화된 CPU 압축 해제와 직접 GPU 대상 I/O를 사용할 수 있는 것이지, 모든 요청이 자동으로 CPU와 중간 사본을 완전히 우회하는 것은 아니다.
 

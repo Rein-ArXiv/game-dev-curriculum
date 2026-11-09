@@ -327,7 +327,7 @@ int AlphaBetaNega(const State& s, int depth, int alpha, int beta) {
 }
 ```
 
-창을 뒤집어 넘기는 `(-beta, -alpha)`가 핵심이다. 자식 관점에서는 부모의 상한이 자식의 하한이 되고, 부모의 하한이 자식의 상한이 된다 — 제로섬의 부호 반전이 경계에도 그대로 적용된다. 이 코드는 명시적 버전과 완전히 같은 결과를 내면서 분기가 없어, killer/history/TT를 얹기에도 더 깔끔하다.
+창을 뒤집어 넘기는 `(-beta, -alpha)`가 핵심이다. 자식 관점에서는 부모의 상한이 자식의 하한이 되고, 부모의 하한이 자식의 상한이 된다 — 제로섬의 부호 반전이 경계에도 그대로 적용된다. 이 코드는 전체 창으로 호출할 때 명시적 버전과 같은 minimax 값을 내며, 좁은 창의 fail-hard 반환은 경계값일 수 있다. MAX/MIN 분기가 없어, killer/history/TT를 얹기에도 더 깔끔하다.
 
 ## 4. 평가 함수
 
@@ -378,12 +378,16 @@ horizon effect의 표준 해법은 *quiescence search(정적 탐색)* 다. 깊�
 
 ```cpp
 int Quiescence(const State& s, int alpha, int beta) {
-    int standPat = ScoreForSideToMove(s); // 아무것도 안 두는 평가 (하한 후보)
-    if (standPat >= beta) return beta;   // 이미 충분히 좋음
-    if (standPat > alpha) alpha = standPat;
+    if (s.IsTerminal()) return ScoreForSideToMove(s);
+    if (!s.InCheck()) {
+        int standPat = ScoreForSideToMove(s); // 정적 평가 (하한 후보)
+        if (standPat >= beta) return beta;
+        if (standPat > alpha) alpha = standPat;
+    }
 
     std::vector<Move> captures;
-    s.NoisyMoves(captures);              // 캡처/체크/승급만
+    if (s.InCheck()) s.LegalMoves(captures); // 모든 합법 회피
+    else s.NoisyMoves(captures);              // 캡처/체크/승급만
     for (Move m : captures) {
         int score = -Quiescence(s.Apply(m), -beta, -alpha);
         if (score >= beta) return beta;
@@ -393,7 +397,7 @@ int Quiescence(const State& s, int alpha, int beta) {
 }
 ```
 
-negamax 형태인 `AlphaBetaNega`의 `depth == 0` 분기에서 `ScoreForSideToMove(s)` 대신 `Quiescence(s, alpha, beta)`를 호출하면 캡처·체크처럼 크게 흔들리는 전술 수를 더 따라간 뒤 평가한다. `Quiescence`는 현재 차례(side-to-move) 관점의 점수와 부호 반전 창 `(-beta, -alpha)`를 쓰므로, MAX 관점 값과 그대로의 `[alpha, beta]`를 쓰는 명시적 `AlphaBeta`의 `Evaluate(s)` 자리에 직접 끼워 넣으면 값과 창의 관점이 뒤집힌다(quiet MIN 상태가 MAX 관점 +100이면 `Quiescence`는 -100을 반환한다). 명시적 MAX/MIN 버전에 붙이려면 값과 창을 차례에 따라 함께 변환하는 adapter를 두거나 MAX용·MIN용 quiescence를 따로 작성해야 한다. `standPat`은 실제로 패스할 수 있다는 뜻이 아니다. 체크가 아닌 국면에서 정적 평가를 현재 하한 후보로 두고, 유리한 전술 수가 있을 때만 올리는 null-move 관찰이다. 체크 중에는 가만히 있을 수 없으므로 stand-pat을 허용하지 않고 모든 합법 회피를 생성해야 한다. quiescence search는 포함한 전술 종류 밖의 horizon effect를 남기며, 조용한 국면의 정의와 delta pruning이 정확성과 비용을 결정한다.
+negamax 형태인 `AlphaBetaNega`의 `depth == 0` 분기에서 `ScoreForSideToMove(s)` 대신 `Quiescence(s, alpha, beta)`를 호출하면 캡처·체크처럼 크게 흔들리는 전술 수를 더 따라간 뒤 평가한다. `Quiescence`는 현재 차례(side-to-move) 관점의 점수와 부호 반전 창 `(-beta, -alpha)`를 쓰므로, MAX 관점 값과 그대로의 `[alpha, beta]`를 쓰는 명시적 `AlphaBeta`의 `Evaluate(s)` 자리에 직접 끼워 넣으면 값과 창의 관점이 뒤집힌다(quiet MIN 상태가 MAX 관점 +100이면 `Quiescence`는 -100을 반환한다). 명시적 MAX/MIN 버전에 붙이려면 값과 창을 차례에 따라 함께 변환하는 adapter를 두거나 MAX용·MIN용 quiescence를 따로 작성해야 한다. `standPat`은 실제로 패스할 수 있다는 뜻이 아니다. 체크가 아닌 국면에서 정적 평가를 현재 하한 후보로 두고, 유리한 전술 수가 있을 때만 올리는 null-move 관찰이다. 체크 중에는 가만히 있을 수 없으므로 stand-pat을 허용하지 않고 모든 합법 회피를 생성해야 한다. 체크를 포함하는 탐색은 반복 수순으로 끝나지 않을 수 있으므로 실제 구현은 반복 판정과 탐색 예산을 적용해야 한다. quiescence search는 포함한 전술 종류 밖의 horizon effect를 남기며, 조용한 국면의 정의와 delta pruning이 정확성과 비용을 결정한다.
 
 ## 5. Iterative Deepening
 

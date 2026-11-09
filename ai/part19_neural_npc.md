@@ -246,7 +246,7 @@ QuantTensor QuantizeSymmetric(const std::vector<float>& w) {
 
 본문은 "오차가 스케일 $s$에 비례한다"고만 적었다. 그 비례 상수가 얼마이고, 비트 수를 한 칸 낮출 때 정확도가 정확히 얼마나 깎이며, 왜 범위 $A$를 분포에 맞추는 것이 "잘 맞으면 좋다" 수준이 아니라 *최소화 문제* 인지를 한 번 유도한다.
 
-가장 가까운 정수로 반올림하는 양자화의 복원 오차는 $e=\hat r-r\in[-s/2,\,s/2]$ 안에 갇힌다. 신호가 격자 간격보다 충분히 넓게 퍼져 있고 격자와 병적으로 상관되지 않으면(고해상도 가정), $e$는 그 구간 위 *균등 분포* 로 근사되고 신호와 독립이다. 그러면 평균은 0, 분산은
+클리핑되지 않은 값을 가장 가까운 정수로 반올림하는 양자화의 복원 오차는 $e=\hat r-r\in[-s/2,\,s/2]$ 안에 갇힌다. 신호가 격자 간격보다 충분히 넓게 퍼져 있고 격자와 병적으로 상관되지 않으면(고해상도 가정), $e$는 그 구간 위 *균등 분포* 로 근사되고 신호와 독립이다. 그러면 평균은 0, 분산은
 
 $$
 \sigma_e^2=\frac1s\int_{-s/2}^{s/2}e^2\,de=\frac1s\cdot\frac23\Big(\frac s2\Big)^3=\frac{s^2}{12}
@@ -522,7 +522,7 @@ hybrid의 핵심 안전장치는 신경망 출력을 *룰로 감싸는* 가드�
 
 ```cpp
 // 신경망 잎: 조준 미세 보정을 NN이 내고, 룰 가드가 범위를 강제
-float ComputeAimAngle(const NPC& npc, const Target& tgt) {
+std::optional<float> ComputeAimAngle(const NPC& npc, const Target& tgt) {
     float baseAngle = AngleTo(npc.pos, tgt.pos);        // 룰: 기본 조준
     auto  in        = BuildAimInput(npc, tgt);
     float nnDelta   = AllFinite(in) ? npc.aimNet.Infer(in) : 0.0f;  // 입력 finite 검사
@@ -533,12 +533,12 @@ float ComputeAimAngle(const NPC& npc, const Target& tgt) {
 
     float angle = baseAngle + nnDelta;
     // 추가 가드: 금지 방향(아군 사선)이면 룰 폴백
-    if (WouldHitAlly(npc, angle)) angle = baseAngle;
+    if (WouldHitAlly(npc, angle)) return std::nullopt; // 발사 보류
     return angle;
 }
 ```
 
-이 패턴에서 신경망은 *제안* 하고 룰은 검증 가능한 제약을 강제한다. 다만 가드가 검사하지 않는 위험까지 자동으로 안전해지는 것은 아니다. OOD 점수, 입력 유효성, 출력 범위와 도메인 불변식을 검사하고 실패 시 룰 기반 폴백으로 전환한다.
+호출자는 결과가 없으면 발사를 보류한다. 기본 조준각도 아군을 향할 수 있으므로 검증 없이 폴백으로 사용하지 않는다. 이 패턴에서 신경망은 *제안* 하고 룰은 검증 가능한 제약을 강제한다. 다만 가드가 검사하지 않는 위험까지 자동으로 안전해지는 것은 아니다. OOD 점수, 입력 유효성, 출력 범위와 도메인 불변식을 검사하고 실패 시 룰 기반 폴백으로 전환한다.
 
 ### 검증 부담의 국소화
 
@@ -673,7 +673,7 @@ Action ConditionedInfer(Policy& pi, const State& s, const StyleParams& style) {
 
 ### 재현 가능성이라는 전제
 
-게임 QA는 *재현 가능한 버그* 를 전제로 한다. "이 입력 순서로 이 버그가 난다"를 재현해 고치고, 고쳤음을 검증한다. 멀티플레이어 게임은 한 걸음 더 나아가, 모든 클라이언트가 *비트 단위로 같은 시뮬레이션* 을 돌려야 한다(lockstep 동기화). 신경망 추론은 이 결정성을 정면으로 위협한다.
+게임 QA는 *재현 가능한 버그* 를 전제로 한다. "이 입력 순서로 이 버그가 난다"를 재현해 고치고, 고쳤음을 검증한다. 결정적 lockstep을 사용하는 멀티플레이어 게임은 참여자가 *비트 단위로 같은 시뮬레이션* 을 돌려야 한다. 신경망 추론은 이 결정성을 정면으로 위협한다.
 
 ```mermaid
 flowchart TB

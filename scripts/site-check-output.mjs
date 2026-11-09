@@ -17,8 +17,25 @@ async function htmlFiles(dir) {
 const unescape = text => text.replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
   .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n))).replace(/&#x([\da-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)));
 const pages = new Map();
+const mathErrors = [];
+let renderedMath = 0;
 for (const filename of await htmlFiles(dist)) {
   const html = await readFile(filename, 'utf8');
+  // Inspect rendered math only: prose/code examples can legitimately name error attributes.
+  for (const match of html.matchAll(/<mjx-container\b[^>]*>[\s\S]*?<\/mjx-container>/g)) {
+    renderedMath++;
+    const math = match[0];
+    const explicit = [...math.matchAll(/\bdata-mjx-error="([^"]*)"/g)].map(m => unescape(m[1]));
+    const undefinedCommands = [...math.matchAll(/<mtext\b[^>]*\bmathcolor="red"[^>]*>([\s\S]*?)<\/mtext>/g)]
+      .map(m => unescape(m[1].replace(/<[^>]*>/g, ''))).filter(text => /^\\[A-Za-z]+/.test(text));
+    if (explicit.length || /data-mml-node="merror"|<merror\b/.test(math) || undefinedCommands.length) {
+      mathErrors.push({
+        page: path.relative(dist, filename).replace(/\\/g, '/'),
+        offset: match.index,
+        diagnostics: [...new Set([...explicit, ...undefinedCommands.map(command => `Undefined TeX command: ${command}`)])],
+      });
+    }
+  }
   pages.set(filename, {
     ids: new Set([...html.matchAll(/\bid="([^"]*)"/g)].map(m => unescape(m[1]).normalize('NFC'))),
     links: [...html.matchAll(/<a\b[^>]*\bhref="([^"]*)"/g)].map(m => unescape(m[1])),
@@ -49,6 +66,11 @@ for (const [filename, page] of pages) {
 const cache = path.join(root, 'site/.vitepress/cache');
 await mkdir(cache, { recursive: true });
 await writeFile(path.join(cache, 'anchor-report.json'), JSON.stringify({ checked, errors }, null, 2));
+await writeFile(path.join(cache, 'math-report.json'), JSON.stringify({ renderedMath, errors: mathErrors }, null, 2));
+if (mathErrors.length) {
+  console.error('MathJax rendered errors:', mathErrors.slice(0, 40));
+  process.exitCode = 1;
+} else console.log(`Verified MathJax error markers across ${renderedMath} rendered expressions.`);
 if (errors.length) {
   console.error(`Broken rendered fragment links: ${errors.length}/${checked}`);
   console.error(errors.slice(0, 40));

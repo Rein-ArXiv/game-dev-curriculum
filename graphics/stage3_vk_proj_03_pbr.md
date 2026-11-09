@@ -29,7 +29,7 @@ OpenGL과 달리 Vulkan은 셰이더가 읽는 모든 자원을 디스크립터 
 | 0 | global | irradianceMap, prefilterMap, brdfLUT (cubemap×2 + 2D) |
 | 1 | per-frame | viewProj, cameraPos, light data |
 | 2 | per-material | albedo, normal, metallic-roughness, AO, emissive (5종) |
-| 3 | per-object | model matrix (push constant 권장) |
+| 세트 없음 | per-object | model matrix (push constant 사용) |
 
 IBL 세 텍스처는 환경이 바뀌지 않는 한 불변이라 가장 낮은 번호인 global 세트(0)가 적합하다. per-material 세트는 fragment 단계에 텍스처 5종을 노출한다.
 
@@ -43,7 +43,7 @@ VkDescriptorSetLayoutBinding set2Bindings[] = {
 };
 ```
 
-매 드로우마다 바뀌는 작은 데이터(64바이트 모델 행렬)는 디스크립터 세트보다 push constant가 빠르다 — 디스크립터를 거치지 않고 명령 버퍼에 값이 직접 기록된다.
+매 드로우마다 바뀌는 작은 데이터(64바이트 모델 행렬)는 push constant로 전달하면 디스크립터를 거치지 않고 명령 버퍼에 값이 직접 기록된다. 성능 우위는 디바이스와 갱신 방식에 따라 달라진다. push constant에는 set 번호가 없다.
 
 ```cpp
 VkPushConstantRange pcRange{};
@@ -61,7 +61,7 @@ layout(push_constant) uniform Push { mat4 model; } pc;   // 정점 셰이더
 
 ## 2. BRDF의 GLSL 구현
 
-PBR 수식을 GLSL로 옮긴다. Disney 관례로 `roughness*roughness`를 $\alpha$로 쓰고, 직접광 $k=(\text{rough}+1)^2/8$ / IBL $k=\alpha/2\;(=\text{roughness}^2/2)$로 나눈다.
+PBR 수식을 GLSL로 옮긴다. 아래 직접광 BRDF는 정규화한 방향, NoV·NoL>0, roughness>0을 전제한다. 거울에 해당하는 roughness=0은 별도 경로로 처리한다. Disney 관례로 `roughness*roughness`를 $\alpha$로 쓰고, 직접광 $k=(\text{rough}+1)^2/8$ / IBL $k=\alpha/2\;(=\text{roughness}^2/2)$로 나눈다.
 
 ```glsl
 float DistributionGGX(vec3 N, vec3 H, float roughness) {
@@ -82,17 +82,23 @@ vec3 FresnelSchlick(float VoH, vec3 F0) { return F0 + (1.0-F0)*pow(1.0-VoH, 5.0)
 $F_0$는 `mix(vec3(0.04), albedo, metallic)`로 합성한다. 거친 금속이 단일 산란에서 어두워지는 손실은, 이미 굽는 BRDF LUT를 재활용하는 Fdez-Agüera 보정으로 추가 텍스처 없이 되돌린다.
 
 ```glsl
-vec3 MultiscatterBRDF(vec3 F0, float roughness, float NoV) {
+vec3 MultiscatterIBL(vec3 F0, float roughness, float NoV,
+                     vec3 radiance, vec3 irradianceOverPi,
+                     vec3 albedo, float metallic) {
     vec2 brdf = texture(brdfLUT, vec2(NoV, roughness)).rg;
     vec3 Favg = F0 + (1.0 - F0) / 21.0;     // 평균 Fresnel 근사
     vec3 FssEss = F0 * brdf.x + brdf.y;     // 단일 산란 기여
     float Ess = brdf.x + brdf.y;            // 단일 산란이 보존한 에너지
     float Ems = 1.0 - Ess;                  // 손실분
     vec3 Fms = FssEss * Favg / (1.0 - Favg * Ems);
-    return FssEss + Fms * Ems;
+    vec3 multiple = Fms * Ems;
+    vec3 kD = max(vec3(0.0), 1.0 - FssEss - multiple) * (1.0 - metallic);
+    return FssEss * radiance + (multiple + kD * albedo) * irradianceOverPi;
 }
 ```
 
+
+이 함수는 단일 산란에 정반사 프리필터를, 넓게 퍼지는 다중 산란에는 조도 맵의 E/π를 사용한다. 두 기여를 같은 프리필터에 곱하는 것은 비균일 환경에서 다른 근사다. 확산 기여도 두 정반사 기여를 뺀 나머지로 제한한다. 아래는 논문의 식 (17)·(18)의 F0 분해를 쓰며, listing의 거칠기 의존 Fresnel 치환은 추가하지 않는다.
 
 ## 3. HDR 환경맵 로딩
 
@@ -110,6 +116,7 @@ VkDeviceSize size = (VkDeviceSize)w * h * 4 * sizeof(float);  // RGBA32F
 
 ```cpp
 VkImageCreateInfo info{};
+info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 info.imageType = VK_IMAGE_TYPE_2D;
 info.format = VK_FORMAT_R32G32B32A32_SFLOAT;
 info.extent = { (uint32_t)w, (uint32_t)h, 1 };
@@ -121,7 +128,7 @@ info.samples = VK_SAMPLE_COUNT_1_BIT;
 // host-visible staging → vkCmdCopyBufferToImage → 레이아웃 전이
 ```
 
-복사 전후로 `UNDEFINED → TRANSFER_DST_OPTIMAL → SHADER_READ_ONLY_OPTIMAL` 배리어가 필요하다. 4K 환경맵(4096×2048 RGBA32F)은 128MB이므로, 로딩 단계만 32비트를 쓰고 큐브맵부터는 16비트로 내리는 편이 낫다. 등직사각형은 샘플마다 `atan`/`asin`이 들고 극점이 늘어나므로, 런타임 IBL은 큐브맵으로 변환해 둔다.
+복사 전후로 `UNDEFINED → TRANSFER_DST_OPTIMAL → SHADER_READ_ONLY_OPTIMAL` 배리어가 필요하다. 4K 환경맵(4096×2048 RGBA32F)은 128MiB이므로, 로딩 단계만 32비트를 쓰고 큐브맵부터는 16비트로 내리는 편이 낫다. 등직사각형은 샘플마다 `atan`/`asin`이 들고 극점이 늘어나므로, 런타임 IBL은 큐브맵으로 변환해 둔다.
 
 
 ## 4. Equirectangular에서 Cubemap으로
@@ -130,6 +137,10 @@ info.samples = VK_SAMPLE_COUNT_1_BIT;
 
 ```cpp
 VkImageCreateInfo cubeInfo{};
+cubeInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+cubeInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+cubeInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+cubeInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 cubeInfo.imageType = VK_IMAGE_TYPE_2D;
 cubeInfo.format = VK_FORMAT_R16G16B16A16_SFLOAT;    // half float — 메모리 절반
 cubeInfo.extent = { 512, 512, 1 };
@@ -139,7 +150,7 @@ cubeInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BI
                | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 ```
 
-16비트 half float로 낮추면 512×512×6이 24MB→12MB로 절반이고(밉 체인까지 포함하면 약 16MB), HDR 휘도에 정밀도가 충분하다. 변환은 *화면이 아닌 큐브맵 면에 직접 렌더링* 한다 — 원점에 단위 큐브를 두고 카메라를 6방향으로 돌리며 90도 화각으로 각 면을 그린다. 면을 다 그린 뒤에는 `vkCmdBlitImage`로 단계별 축소해 밉 체인을 채운다 — 5절의 Filtered Importance Sampling이 `textureLod`로 상위 밉을 고르려면 이 밉 체인이 반드시 있어야 한다.
+16비트 half float로 낮추면 512×512×6이 24MiB→12MiB로 절반이고(밉 체인까지 포함하면 약 16MiB), 많은 환경맵에 충분한 정밀도를 제공한다. 65504를 넘는 고휘도 입력은 half로 보존할 수 없으므로 노출 스케일이나 포맷을 함께 정한다. 변환은 *화면이 아닌 큐브맵 면에 직접 렌더링* 한다 — 원점에 단위 큐브를 두고 카메라를 6방향으로 돌리며 90도 화각으로 각 면을 그린다. 면을 다 그린 뒤에는 `vkCmdBlitImage`로 단계별 축소해 밉 체인을 채운다 — 5절의 Filtered Importance Sampling이 `textureLod`로 상위 밉을 고르려면 이 밉 체인이 반드시 있어야 한다.
 
 ```cpp
 glm::mat4 captureProj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
@@ -153,7 +164,7 @@ glm::mat4 captureViews[6] = {
 };
 ```
 
-up 벡터가 $(0,1,0)$이 아니라 $(0,-1,0)$ 등인 점에 주의 — 큐브맵 면 좌표계가 위→아래로 증가하는 관례라, 부호를 틀리면 환경이 반전된다. 각 면을 single-layer image view로 framebuffer를 구성해 6회 그리거나, `VK_KHR_multiview`로 한 드로우에 6 layer를 채운다. fragment 셰이더는 큐브 정점 방향을 등직사각형 UV로 변환해 원본을 페치한다.
+이 capture projection에는 앞 장의 y-flip을 추가하지 않는다. 아래 면 방향·up 벡터와 양수 viewport height가 cubemap 좌표 계약을 함께 이룬다. up 벡터가 $(0,1,0)$이 아니라 $(0,-1,0)$ 등인 점에 주의 — 큐브맵 면 좌표계가 위→아래로 증가하는 관례라, 부호를 틀리면 환경이 반전된다. 각 면을 single-layer image view로 framebuffer를 구성해 6회 그리거나, `VK_KHR_multiview`로 한 드로우에 6 layer를 채운다. fragment 셰이더는 큐브 정점 방향을 등직사각형 UV로 변환해 원본을 페치한다.
 
 ```glsl
 layout(set = 0, binding = 0) uniform sampler2D equirect;
@@ -191,7 +202,7 @@ void main() {
 }
 ```
 
-`cos(theta)`는 램버트 가중, `sin(theta)`는 구좌표 야코비안 — 빠뜨리면 천정이 과하게 밝아진다. `ref`는 N과 평행하지 않은 축을 고르는 안정화다. `abs(N.y)`가 1에 가까우면 `cross(vec3(0,1,0), N)`의 길이가 0이 되어 정규화가 정의되지 않으므로 다른 축을 쓴다. orthonormal basis helper를 따로 두더라도 평행 입력에서 정의되도록 이 처리를 계약으로 명시한다.
+이 루프의 π×각도 격자 평균은 E가 아니라 E/π를 저장한다. 따라서 런타임 diffuse에 다시 1/π를 곱하지 않는다. `cos(theta)`는 램버트 가중, `sin(theta)`는 구좌표 야코비안 — 빠뜨리면 천정이 과하게 밝아진다. `ref`는 N과 평행하지 않은 축을 고르는 안정화다. `abs(N.y)`가 1에 가까우면 `cross(vec3(0,1,0), N)`의 길이가 0이 되어 정규화가 정의되지 않으므로 다른 축을 쓴다. orthonormal basis helper를 따로 두더라도 평행 입력에서 정의되도록 이 처리를 계약으로 명시한다.
 
 프리필터 맵(정반사): 거칠기별 결과를 mip 체인에 담는다. Vulkan 구현의 요점은 *Filtered Importance Sampling* — 샘플 입체각과 텍셀 입체각을 비교해 mip을 골라 거친 표면의 반딧불이 노이즈를 억제한다(`textureLod`).
 
@@ -199,6 +210,10 @@ void main() {
 layout(push_constant) uniform Push { float roughness; } pc;
 void main() {
     vec3 N = normalize(vWorldPos), R = N, V = R;   // N=V=R 가정 (split-sum 근사)
+    if (pc.roughness == 0.0) { // GGX의 delta 극한을 유한 분포 식에 넣지 않는다
+        fragColor = vec4(textureLod(envMap, R, 0.0).rgb, 1.0);
+        return;
+    }
     vec3 prefiltered = vec3(0.0); float totalWeight = 0.0;
     for (uint i = 0u; i < 1024u; ++i) {
         vec2 Xi = Hammersley(i, 1024u);
@@ -219,7 +234,7 @@ void main() {
 }
 ```
 
-BRDF LUT: 환경과 무관한 split-sum의 둘째 인수를 storage image(`rg16f`)에 컴퓨트로 굽는다. IBL용 $k=\alpha/2=\text{roughness}^2/2$를 써야 한다.
+BRDF LUT: 환경과 무관한 split-sum의 둘째 인수를 storage image(`rg16f`)에 컴퓨트로 굽는다. 여기서는 Schlick-Smith의 IBL 근사 $k=\alpha/2=\text{roughness}^2/2$를 사용한다. LUT를 다른 Smith 모델로 굽는 것도 가능하지만 런타임과 같은 정의를 써야 한다. `rg16f` storage image의 포맷 지원과 `shaderStorageImageExtendedFormats` 지원·활성화를 확인한다. 굽기는 512×512 이미지에 정확히 32×32 workgroup을 dispatch하며, 완료 후 compute shader write→fragment shader read 의존성과 GENERAL→SHADER_READ_ONLY_OPTIMAL 전이를 연결한다.
 
 ```glsl
 layout(local_size_x = 16, local_size_y = 16) in;
@@ -265,21 +280,15 @@ float roughness = max(texture(metallicRoughnessMap, vUv).g, 0.04);  // G=roughne
 float ao        = texture(aoMap, vUv).r;
 vec3  F0 = mix(vec3(0.04), albedo, metallic);
 
-// 거칠기 반영 Fresnel (Lagarde 변형)
-vec3 F  = F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(1.0 - NoV, 5.0);
-vec3 kD = (1.0 - F) * (1.0 - metallic);
-
-vec3 irradiance = texture(irradianceMap, N).rgb;
-vec3 diffuse    = irradiance * albedo;
-
+vec3 irradianceOverPi = texture(irradianceMap, N).rgb;
+// 이 예제는 prefilter를 5개 mip에 굽는 경우. 실제 생성한 mip 수-1과 맞춘다.
 const float MAX_MIP = 4.0;
 vec3 prefiltered = textureLod(prefilterMap, R, roughness * MAX_MIP).rgb;
-vec3 specular = prefiltered * MultiscatterBRDF(F0, roughness, NoV);  // split-sum BRDF 항 + 다중 산란 보정
-
-vec3 ambient = (kD * diffuse + specular) * ao;
+vec3 ambient = MultiscatterIBL(F0, roughness, NoV, prefiltered,
+                             irradianceOverPi, albedo, metallic) * ao;
 ```
 
-`F0 * brdf.x + brdf.y`가 split-sum의 BRDF 항이다. LUT가 $F=F_0 A+B$로 분해해 구운 것이므로 여기에 다시 각도 의존 $F$를 곱하면 프레넬이 이중 적용된다. 위의 거칠기 반영 프레넬 $F$는 $k_D$ 계산에만 쓴다. glTF 2.0은 metallic/roughness를 한 텍스처의 B/G에 패킹하므로 페치 한 번에 둘을 읽고, R에 AO까지 묶으면 occlusion-metallic-roughness를 한 텍스처로 처리한다. 직접광은 split-sum 없이 Cook-Torrance를 그대로 합산해 ambient에 더한다.
+`F0 * brdf.x + brdf.y`가 split-sum의 BRDF 항이다. LUT가 $F=F_0 A+B$로 분해해 구운 것이므로 여기에 다시 각도 의존 $F$를 곱하면 프레넬이 이중 적용된다. 위 함수는 단일·다중 정반사 에너지를 뺀 나머지로 $k_D$를 정한다. glTF 2.0은 metallic/roughness를 한 텍스처의 B/G에 패킹하므로 페치 한 번에 둘을 읽고, R에 AO까지 묶으면 occlusion-metallic-roughness를 한 텍스처로 처리한다. 직접광은 split-sum 없이 Cook-Torrance를 그대로 합산해 ambient에 더한다.
 
 마지막은 톤 매핑과 감마다. 여기서 *Vulkan 고유의 함정* 이 있다.
 
@@ -291,7 +300,7 @@ color = color / (color + vec3(1.0));        // Reinhard (또는 ACES filmic)
 outColor = vec4(color, 1.0);
 ```
 
-스왑체인 포맷이 `*_SRGB`면 하드웨어가 자동으로 sRGB 인코딩을 하므로 셰이더의 `pow(1/2.2)`를 *생략* 해야 한다 — 둘 다 적용하면 감마 인코딩이 두 번 걸려 색이 씻긴 듯 밝아진다. DX·GL과 결과는 같되, "어디서 sRGB 인코딩이 일어나는가"를 스왑체인 포맷으로 명시 제어하는 것이 Vulkan 방식이다.
+스왑체인 포맷이 `*_SRGB`면 하드웨어가 자동으로 sRGB 인코딩을 하므로 셰이더의 `pow(1/2.2)`를 *생략* 해야 한다 — 둘 다 적용하면 감마 인코딩이 두 번 걸려 색이 씻긴 듯 밝아진다. 이 동작은 실제 attachment image view의 포맷이 결정한다. UNORM 포맷에 SRGB_NONLINEAR color space만 지정한다고 셰이더 출력이 자동 인코딩되지는 않는다. `pow(1/2.2)`는 정확한 sRGB 전달함수의 근사다.
 
 
 ---
@@ -300,7 +309,7 @@ outColor = vec4(color, 1.0);
 
 Vulkan에서 PBR/IBL의 본체는 수식 자체보다 *명시적 자원 관리* 다. 변경 빈도별 디스크립터 세트와 push constant, HDR의 RGBA 패딩과 staging·레이아웃 전이, `CUBE_COMPATIBLE` 6-layer 이미지와 off-screen 렌더 패스(up=−y 주의), 프리필터의 Filtered Importance Sampling과 `textureLod`, storage image로 굽는 BRDF LUT, 그리고 스왑체인 sRGB 포맷에 따른 감마 처리 분기가 핵심이다. 셰이더가 계산하는 PBR 수식은 API와 무관하고, Vulkan에서 어려운 부분은 이 바인딩·전처리 파이프라인에 있다.
 
-무거운 환경맵 적분은 전처리로 옮겨져 런타임은 텍스처 페치 세 번으로 압축된다. 이 문서의 범위는 PBR/IBL 전처리와 런타임 바인딩까지이며, 그림자처럼 별도 깊이 패스를 요구하는 효과는 같은 렌더 패스·프레임버퍼 의존성 원리 위에 추가된다.
+무거운 환경맵 적분은 전처리로 옮겨져 런타임은 조도·정반사 프리필터·BRDF LUT를 조회한다. 재질 텍스처 조회는 이와 별도로 필요하다. 이 문서의 범위는 PBR/IBL 전처리와 런타임 바인딩까지이며, 그림자처럼 별도 깊이 패스를 요구하는 효과는 같은 렌더 패스·프레임버퍼 의존성 원리 위에 추가된다.
 
 ## 더 읽을거리
 

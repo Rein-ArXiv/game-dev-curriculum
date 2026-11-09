@@ -41,7 +41,7 @@
 
 CPU 제출 비용은 Bindless와 GPU 주도 지오메트리의 중요한 동기다. 그러나 명령 하나의 비용을 고정된 나노초·마이크로초로 둘 수는 없다. 드라이버, 검증 레이어, 명령 버퍼 재사용, 상태 정렬, 스레드 수에 따라 달라진다. CPU 프로파일에서 명령 기록·정렬·culling·descriptor 갱신을 분리하고, 드로우 수를 늘린 확장성 곡선으로 병목을 확인해야 한다. Ray Tracing의 채택 여부는 이 CPU 곡선보다 BVH 빌드, 광선 발산, 메모리 대역폭, 화질 목표로 판단한다.
 
-전통적 접근은 인스턴싱과 배칭으로 드로우 콜 수를 줄였다. 그러나 머티리얼이 다르면 배칭할 수 없고, 메시가 동적으로 생성되면 인스턴싱이 어렵다. Bindless는 머티리얼 차이로 인한 재바인딩을, Mesh Shader는 정점 처리 단계의 고정 기능 오버헤드를, Ray Tracing은 다중 패스 누적 비용을 각각 줄인다.
+전통적 접근은 인스턴싱과 배칭으로 드로우 콜 수를 줄였다. 그러나 머티리얼별 자원 바인딩을 그대로 유지하면 배칭이 제한되고, 메시가 동적으로 생성되면 인스턴싱이 어렵다. Bindless는 머티리얼 차이로 인한 재바인딩을, Mesh Shader는 정점 처리 단계의 고정 기능 오버헤드를, Ray Tracing은 다중 패스 누적 비용을 각각 줄인다.
 
 ### 가시성 문제의 이전
 
@@ -84,7 +84,7 @@ for (auto& mesh : model.meshes) {
 }
 ```
 
-디스크립터 바인딩은 프레임당 한 번이고, 드로우마다 드는 비용은 push constant 4바이트 기록뿐이다. push constant는 명령 버퍼 안에 인라인으로 들어가 별도 메모리 동기화가 필요 없으므로 가장 싼 데이터 전달 경로다. CPU 측 비용이 줄고, 드로우 순서를 머티리얼로 정렬할 필요도 사라진다.
+디스크립터 바인딩은 프레임당 한 번이고, 머티리얼 선택을 위한 드로우별 갱신은 push constant 4바이트가 된다. draw 기록과 다른 상태·자원 갱신 비용은 남는다. push constant는 명령 버퍼 안에 인라인으로 들어가 별도 메모리 동기화가 필요 없으므로 작은 데이터를 전달하기에 좋은 후보다. 실제 성능은 장치에서 비교한다. CPU 측 비용이 줄고, 재바인딩을 위한 정렬 부담을 줄인다. 실행 지역성과 투명 블렌딩 순서를 위한 정렬은 여전히 유용하거나 필요하다.
 
 ### Indirect Draw와의 결합
 
@@ -97,7 +97,7 @@ vkCmdDrawIndexedIndirect(cmd, drawCommandBuffer, 0,
                          sizeof(VkDrawIndexedIndirectCommand));
 ```
 
-`VkDrawIndexedIndirectCommand`의 `firstInstance` 필드를 머티리얼 인덱스 전달 통로로 활용하는 기법이 널리 쓰인다. 셰이더에서 `gl_InstanceIndex`로 그 값을 읽어 Bindless 배열을 인덱싱하면, push constant 없이도 메시별 머티리얼을 고를 수 있다. CPU가 드로우 콜을 발급하는 횟수는 1회로 고정되고, 실제 N개의 메시를 그리는 일은 GPU가 스스로 한다. GPU-Driven Rendering의 토대가 이 결합이다.
+`VkDrawIndexedIndirectCommand`의 `firstInstance` 필드를 머티리얼 인덱스 전달 통로로 활용하는 기법이 널리 쓰인다. 셰이더에서 `gl_InstanceIndex`로 그 값을 읽어 Bindless 배열을 인덱싱하면, push constant 없이도 메시별 머티리얼을 고를 수 있다. CPU가 드로우 콜을 발급하는 횟수는 1회로 고정되고, 실제 N개의 메시를 그리는 일은 GPU가 스스로 한다. GPU-Driven Rendering의 토대가 이 결합이다. 이 예제는 instanceCount=1을 전제한다. 여러 인스턴스이면 gl_InstanceIndex가 증가하므로 인스턴스 자료에서 재질을 조회하거나 gl_DrawID 등의 별도 draw 인덱스를 쓴다. numMeshes>1은 multiDrawIndirect, 0이 아닌 firstInstance는 drawIndirectFirstInstance 기능이 필요하며 장치 한계도 확인한다.
 
 drawCommandBuffer 자체를 컴퓨트 셰이더가 채우게 하면 컬링과 LOD 결정까지 GPU로 옮길 수 있다. 절두체에 들어오는 메시만 골라 명령 버퍼에 기록하고, 그 개수를 `vkCmdDrawIndexedIndirectCount`로 넘기면 CPU는 씬 전체에 대해 단 한 번의 명령만 발급한다.
 
@@ -122,7 +122,7 @@ features.pNext = &di;
 // vkCreateDevice 시 pCreateInfo.pNext 에 features 를 연결한다
 ```
 
-각 플래그의 의미가 다르다. `runtimeDescriptorArray`는 셰이더에서 크기가 명시되지 않은 배열(`textures[]`)을 선언하도록 허용한다. `descriptorBindingPartiallyBound`는 배열의 일부 슬롯만 유효한 디스크립터를 가져도 되도록 한다. 슬롯 10만 개를 선언해도 실제로 1,000개만 채우고 나머지는 비워 둘 수 있다는 뜻이다. `descriptorBindingVariableDescriptorCount`는 셋 할당 시점에 배열 크기를 동적으로 정하게 한다. `shaderSampledImageArrayNonUniformIndexing`은 워프 안에서 스레드마다 다른 인덱스로 배열에 접근하는 비균일 인덱싱을 허용한다.
+각 플래그의 의미가 다르다. `runtimeDescriptorArray`는 셰이더에서 크기가 명시되지 않은 배열(`textures[]`)을 선언하도록 허용한다. `descriptorBindingPartiallyBound`는 배열의 일부 슬롯만 유효한 디스크립터를 가져도 되도록 한다. 슬롯 10만 개를 선언해도 실제로 1,000개만 채우고 나머지는 비워 둘 수 있다는 뜻이다. 실제 shader가 접근하는 슬롯은 유효해야 하며 빈 슬롯 읽기를 허용하는 기능은 아니다. `descriptorBindingVariableDescriptorCount`는 셋 할당 시점에 배열 크기를 동적으로 정하게 한다. `shaderSampledImageArrayNonUniformIndexing`은 워프 안에서 스레드마다 다른 인덱스로 배열에 접근하는 비균일 인덱싱을 허용한다.
 
 이 묶음은 Vulkan 1.2부터 코어 기능으로 승격되어 별도 확장 활성화 없이 `VkPhysicalDeviceVulkan12Features`로 켤 수 있다. Vulkan 1.0/1.1만 지원하는 일부 모바일 GPU에서는 `VK_EXT_descriptor_indexing` 확장을 명시적으로 활성화해야 한다. 활성화 전에 `vkGetPhysicalDeviceFeatures2`로 각 플래그가 지원되는지 조회하지 않으면, 미지원 GPU에서 디바이스 생성이 실패한다.
 
@@ -145,7 +145,7 @@ pi.pPoolSizes = &poolSize;
 vkCreateDescriptorPool(device, &pi, nullptr, &bindlessPool);
 ```
 
-상한 100,000은 임의의 큰 값이다. 실제 상한은 `VkPhysicalDeviceDescriptorIndexingProperties::maxDescriptorSetUpdateAfterBindSampledImages`로 조회해야 하며, 데스크톱 GPU에서는 보통 백만 단위, 일부 구형이나 모바일에서는 수십만 수준으로 제한된다. 조회 없이 하드코딩하면 특정 하드웨어에서 풀 생성이 실패할 수 있다.
+상한 100,000은 임의의 큰 값이다. 실제 상한은 `VkPhysicalDeviceDescriptorIndexingProperties::maxDescriptorSetUpdateAfterBindSampledImages`로 조회해야 하며, combined sampler에 적용되는 sampler·per-stage·pool 전체 update-after-bind 한계도 함께 만족해야 한다. 조회 없이 하드코딩하면 특정 하드웨어에서 풀 생성이 실패할 수 있다.
 
 ### 무한 배열 디스크립터 레이아웃
 
@@ -176,7 +176,24 @@ li.pNext = &bfi;
 vkCreateDescriptorSetLayout(device, &li, nullptr, &bindlessLayout);
 ```
 
-`pBindingFlags` 배열은 `pBindings`와 길이가 같아야 하고, 인덱스로 1:1 대응한다. 가변 카운트 플래그를 가진 바인딩은 레이아웃 안에서 마지막 바인딩이어야 한다는 제약이 있다. 이 규칙을 어기면 검증 레이어가 `VUID-VkDescriptorSetLayoutBindingFlagsCreateInfo` 계열 오류를 보고한다.
+`pBindingFlags` 배열은 `pBindings`와 길이가 같아야 하고, 인덱스로 1:1 대응한다. 가변 카운트 플래그를 가진 바인딩은 레이아웃 안에서 binding 번호가 가장 높아야 한다는 제약이 있다. 이 규칙을 어기면 검증 레이어가 `VUID-VkDescriptorSetLayoutBindingFlagsCreateInfo` 계열 오류를 보고한다.
+
+가변 길이 binding은 할당 시에도 실제 개수를 넘긴다. 이 구조를 생략하면 가변 길이가 0으로 간주된다.
+
+```cpp
+uint32_t allocatedCount = 1000; // layout 상한과 pool 용량 이하
+VkDescriptorSetVariableDescriptorCountAllocateInfo vc{};
+vc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO;
+vc.descriptorSetCount = 1;
+vc.pDescriptorCounts = &allocatedCount;
+VkDescriptorSetAllocateInfo ai{};
+ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+ai.pNext = &vc;
+ai.descriptorPool = bindlessPool;
+ai.descriptorSetCount = 1;
+ai.pSetLayouts = &bindlessLayout;
+vkAllocateDescriptorSets(device, &ai, &bindlessSet);
+```
 
 ### 셰이더 측의 nonuniformEXT
 
@@ -222,7 +239,7 @@ write.pImageInfo = &imageInfo;
 vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 ```
 
-다만 갱신하려는 슬롯이 현재 GPU가 실행 중인 명령에서 읽히고 있지 않아야 한다. 스트리밍 슬롯과 사용 중 슬롯을 분리하거나, 프레임 펜스로 이전 프레임의 완료를 보장한 뒤 갱신하는 식의 동기화가 필요하다. 이 동기화를 빼면 GPU가 읽는 중인 디스크립터를 덮어써 표면이 깜빡이거나 잘못된 텍스처가 한 프레임 노출되는 결함이 생긴다.
+UPDATE_AFTER_BIND는 바인딩 이후부터 제출 전까지 갱신을 허용하지, pending 명령이 접근하는 슬롯과의 경합을 허용하지는 않는다. pending 중 미사용 슬롯을 갱신하려면 별도 UPDATE_UNUSED_WHILE_PENDING 기능·binding flag와 동적 미사용 조건이 필요하다. 가장 단순한 방법은 그 set을 사용하는 제출의 완료 뒤에 갱신하는 것이다. 스트리밍 슬롯과 사용 중 슬롯을 분리하거나, 프레임 펜스로 이전 프레임의 완료를 보장한 뒤 갱신하는 식의 동기화가 필요하다. 이 동기화를 빼면 GPU가 읽는 중인 디스크립터를 덮어써 표면이 깜빡이거나 잘못된 텍스처가 한 프레임 노출되는 결함이 생긴다.
 
 ## 4. Mesh Shader의 새 두 단계
 
@@ -274,14 +291,14 @@ layout(location = 1) out vec2 outUv[];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
-    uint meshletIdx = gl_WorkGroupID.x;
+    uint meshletIdx = gl_WorkGroupID.x; // Task 없는 직접 dispatch 경로
     Meshlet m = meshlets[meshletIdx];
 
     SetMeshOutputsEXT(m.vertexCount, m.primitiveCount);
 
     // 32 스레드가 최대 64 정점을 처리하므로 한 스레드가 2개를 담당
     for (uint i = tid; i < m.vertexCount; i += 32) {
-        Vertex v = vertices[m.vertexOffset + i];
+        Vertex v = vertices[meshletVertices[m.vertexOffset + i]];
         gl_MeshVerticesEXT[i].gl_Position = viewProj * vec4(v.pos, 1.0);
         outNormal[i] = v.normal;
         outUv[i]     = v.uv;
@@ -345,7 +362,9 @@ void main() {
 
 흐름은 다음과 같다. 이 예제의 local size가 32이므로 CPU는 `ceil(meshletCount / 32)`개의 Task Shader 워크그룹을 dispatch한다. 마지막 워크그룹의 남는 invocation은 `id < meshletCount` 검사로 거른다. Task Shader가 메시릿 단위로 절두체 컬링과 백페이스 콘 컬링을 수행하고, 살아남은 메시릿 인덱스를 페이로드에 모은다. `EmitMeshTasksEXT`가 살아남은 개수만큼 Mesh Shader 워크그룹을 발급하고, 페이로드를 통해 어떤 메시릿을 그릴지 전달한다.
 
-이 구조의 효과는 크지만, 컬링이 처리량을 자동으로 화면 픽셀 수에 비례하도록 제한한다고 단정할 수는 없다. 화면 안에 아주 작은 정면 메시릿을 많이 놓으면 절두체·백페이스 컬링을 모두 통과하므로, 해상도가 고정돼도 살아남는 메시릿 수는 늘어난다. 이 코드가 하는 일은 컬링 단계의 visibility rejection이고, 픽셀 수에 가까운 기하 예산은 LOD·오클루전 컬링·screen-space error·별도 geometry budget 정책으로 제한해야 한다. 다만 절두체 밖이나 뒷면 메시릿을 GPU에서 일찍 버리는 것만으로도 정점 변환·래스터화 낭비가 크게 줄고, CPU는 dispatch 한 번으로 드로우 콜 비용을 없앨 수 있다.
+이 구조의 효과는 크지만, 컬링이 처리량을 자동으로 화면 픽셀 수에 비례하도록 제한한다고 단정할 수는 없다. 화면 안에 아주 작은 정면 메시릿을 많이 놓으면 절두체·백페이스 컬링을 모두 통과하므로, 해상도가 고정돼도 살아남는 메시릿 수는 늘어난다. 이 코드가 하는 일은 컬링 단계의 visibility rejection이고, 픽셀 수에 가까운 기하 예산은 LOD·오클루전 컬링·screen-space error·별도 geometry budget 정책으로 제한해야 한다. 다만 절두체 밖이나 뒷면 메시릿을 GPU에서 일찍 버리는 것만으로도 정점 변환·래스터화 낭비가 크게 줄고, CPU는 mesh-task dispatch 한 번으로 객체별 draw 제출을 줄일 수 있다.
+
+Task를 붙인 Mesh Shader는 같은 taskPayloadSharedEXT 선언을 두고 `payload.meshletIndices[gl_WorkGroupID.x]`로 원래 meshletIdx를 복원해야 한다. 직접 dispatch용 gl_WorkGroupID.x만 쓰면 압축된 순번을 원본 메시릿 번호로 오인한다.
 
 `EmitMeshTasksEXT`는 워크그룹의 *모든 invocation* 이 uniform control flow에서 정확히 한 번 호출해야 한다. 인자는 첫 invocation의 값이 사용되고 호출 자체가 `barrier()`를 암시한다. 대표 스레드만 조건부로 호출하면 미정의 동작이다. 위 코드의 앞선 배리어는 `visibleCount`와 페이로드 집계가 끝난 뒤 모든 invocation이 같은 호출 지점으로 오게 한다.
 
@@ -357,7 +376,7 @@ void main() {
 
 ```cpp
 struct Meshlet {
-    uint32_t vertexOffset;     // 전역 정점 배열에서의 시작 위치
+    uint32_t vertexOffset;     // meshletVertices 리맵 배열에서의 시작 위치
     uint32_t vertexCount;      // 0~64
     uint32_t indexOffset;      // 로컬 인덱스 배열에서의 시작 위치
     uint32_t primitiveCount;   // 0~124
@@ -408,12 +427,13 @@ meshopt_Bounds bounds = meshopt_computeMeshletBounds(
     &vertices[0].pos.x, vertexCount, sizeof(Vertex));
 
 // bounds.center, bounds.radius        -> 절두체 컬링
-// bounds.cone_axis[3], bounds.cone_cutoff -> 백페이스 콘 컬링
+// bounds.cone_axis[3], bounds.cone_cutoff -> float 경로
+// int8 저장에는 bounds.cone_axis_s8[], bounds.cone_cutoff_s8 사용
 ```
 
 경계 구는 절두체 컬링에 쓴다. 구의 중심과 반지름을 절두체 여섯 평면과 비교해 완전히 바깥이면 버린다. 백페이스 콘은 메시릿 전체가 카메라를 등지고 있는지 판정하는 도구다. 메시릿 안 삼각형들의 법선이 좁은 원뿔 안에 모여 있을 때, 그 원뿔이 시선 방향과 같은 쪽을 향하면 메시릿 전체가 뒷면이므로 통째로 버린다. 콘 축과 컷오프를 8비트로 양자화해 저장하는 이유는 메시릿당 메모리를 최소화하기 위해서다. 콘 컬링은 보수적이라 일부 뒷면을 놓칠 수 있지만, 메시릿 단위로 빠르게 거르는 게 목적이므로 정확도보다 속도를 택한다.
 
-GPU는 프레임마다 수만에서 수십만 개의 메시릿을 검사하고, 통과한 것만 그린다. 이 검사 자체가 Task Shader에서 병렬로 일어나므로 CPU 부담이 없다.
+GPU는 프레임마다 수만에서 수십만 개의 메시릿을 검사하고, 통과한 것만 그린다. 이 검사 자체가 Task Shader에서 병렬로 일어나므로 CPU의 메시릿별 검사를 줄인다. 자료 업로드와 dispatch 제출 비용은 남는다.
 
 ## 6. Vulkan Ray Tracing 개요
 
@@ -443,10 +463,15 @@ rtpFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_
 rtpFeat.rayTracingPipeline = VK_TRUE;
 rtpFeat.pNext = &asFeat;
 
+VkPhysicalDeviceRayQueryFeaturesKHR rqFeat{};
+rqFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+rqFeat.rayQuery = VK_TRUE;
+rqFeat.pNext = &rtpFeat;
+
 VkPhysicalDeviceBufferDeviceAddressFeatures bdaFeat{};
 bdaFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
 bdaFeat.bufferDeviceAddress = VK_TRUE;
-bdaFeat.pNext = &rtpFeat;
+bdaFeat.pNext = &rqFeat;
 
 VkPhysicalDeviceFeatures2 features{};
 features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -454,7 +479,7 @@ features.pNext = &bdaFeat;
 // vkCreateDevice 시 pCreateInfo.pNext = &features
 ```
 
-세 feature 구조체를 pNext 체인으로 엮고, 그 체인의 머리를 `VkPhysicalDeviceFeatures2`에 건다. 체인 순서 자체는 무관하지만, 각 구조체의 `sType`을 정확히 채워야 드라이버가 어떤 구조체인지 식별한다. 이 채우기를 빠뜨리면 디바이스 생성이 조용히 기능을 무시하거나 실패한다.
+필요한 feature 구조체를 pNext 체인으로 엮고, 그 체인의 머리를 `VkPhysicalDeviceFeatures2`에 건다. 체인 순서 자체는 무관하지만, 각 구조체의 `sType`을 정확히 채워야 드라이버가 어떤 구조체인지 식별한다. 이 채우기를 빠뜨리면 디바이스 생성이 조용히 기능을 무시하거나 실패한다.
 
 ### 셰이더 단계
 
@@ -469,7 +494,7 @@ flowchart TB
     AS --> MS[Miss<br/>어디에도 안 맞음]
 ```
 
-Ray Generation 셰이더가 진입점이다. 픽셀마다 한 번씩 호출되어 카메라에서 광선을 만들어 `traceRayEXT`로 발사한다. 발사된 광선은 Acceleration Structure를 순회하며 교차를 찾는다. 가장 가까운 교차가 확정되면 Closest Hit 셰이더가 그 표면의 셰이딩을 계산한다. Any Hit는 광선이 허용된 *후보 교차*를 지날 때 호출되어 그 교차를 계속 처리할지 결정한다. 모든 기하 교차마다 반드시 호출되는 것은 아니다. opaque 플래그가 설정된 교차, 이미 확정된 hit보다 먼 교차, ray/instance 컬링으로 제거된 교차는 건너뛸 수 있고 API·플래그에 따라 중복 호출 보장도 다르다. opaque는 종료(terminate)나 무시(ignore) 계약으로 처리한다. Intersection은 삼각형이 아닌 사용자 정의 프리미티브(구, 복셀 등)의 교차 판정을 직접 구현할 때만 쓴다. 광선이 어떤 표면에도 닿지 않으면 Miss 셰이더가 호출되어 배경색이나 환경 맵을 반환한다.
+Ray Generation 셰이더가 진입점이다. 픽셀마다 한 번씩 호출되어 카메라에서 광선을 만들어 `traceRayEXT`로 발사한다. 발사된 광선은 Acceleration Structure를 순회하며 교차를 찾는다. 가장 가까운 교차가 확정되면 Closest Hit 셰이더가 그 표면의 셰이딩을 계산한다. Any Hit는 광선이 허용된 *후보 교차*를 지날 때 호출되어 그 교차를 계속 처리할지 결정한다. 모든 기하 교차마다 반드시 호출되는 것은 아니다. opaque 플래그가 설정된 교차, 이미 확정된 hit보다 먼 교차, ray/instance 컬링으로 제거된 교차는 건너뛸 수 있고 API·플래그에 따라 중복 호출 보장도 다르다. Any Hit에서는 후보를 받아들이거나 ignore·terminate 명령으로 처리한다. opaque 플래그는 이 셰이더 호출을 건너뛰게 하는 별도 계약이다. Intersection은 삼각형이 아닌 사용자 정의 프리미티브(구, 복셀 등)의 교차 판정을 직접 구현할 때만 쓴다. 광선이 어떤 표면에도 닿지 않으면 Miss 셰이더가 호출되어 배경색이나 환경 맵을 반환한다.
 
 ## 7. Acceleration Structure 빌드
 
@@ -504,7 +529,9 @@ buildInfo.geometryCount = 1;
 buildInfo.pGeometries = &geom;
 ```
 
-`VK_GEOMETRY_OPAQUE_BIT_KHR`은 이 지오메트리가 불투명이라 Any Hit 셰이더를 건너뛰어도 된다는 힌트다. 불투명 표면에 이 플래그를 주면 순회 비용이 줄어든다. 빌드 플래그 `PREFER_FAST_TRACE`는 순회 성능을 빌드 시간보다 우선하라는 뜻으로, 정적 지오메트리에 적합하다. 매 프레임 갱신되는 지오메트리에는 `PREFER_FAST_BUILD`나 `ALLOW_UPDATE`를 쓴다.
+`VK_GEOMETRY_OPAQUE_BIT_KHR`은 이 지오메트리가 불투명이라 Any Hit 셰이더를 건너뛰는 불투명 처리 계약이다. ray/instance의 opacity override도 함께 고려한다. 불투명 표면에 이 플래그를 주면 순회 비용이 줄어든다. 빌드 플래그 `PREFER_FAST_TRACE`는 순회 성능을 빌드 시간보다 우선하라는 뜻으로, 정적 지오메트리에 적합하다. 매 프레임 갱신되는 지오메트리에는 `PREFER_FAST_BUILD`나 `ALLOW_UPDATE`를 쓴다.
+
+정점·인덱스·인스턴스 입력 버퍼에는 ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR와 SHADER_DEVICE_ADDRESS_BIT usage가 필요하고, 업로드 쓰기→AS build read 의존도 연결한다. BLAS/TLAS의 shader 조회에는 AS build write→해당 ray-tracing/fragment/compute consumer read 의존이 필요하다.
 
 ### Scratch Buffer
 
@@ -575,7 +602,7 @@ struct VkAccelerationStructureInstanceKHR {
 ```cpp
 std::vector<VkAccelerationStructureInstanceKHR> instances(N);
 for (uint32_t i = 0; i < N; ++i) {
-    instances[i].transform = ToTransformKHR(modelMatrices[i]);
+    instances[i].transform = ToTransformKHR(modelMatrices[i]); // row-major 3×4: GLM M[col][row]를 matrix[row][col]에 기록
     instances[i].instanceCustomIndex = i;
     instances[i].mask = 0xFF;   // mask & rayMask != 0 이어야 교차로 인정
     instances[i].instanceShaderBindingTableRecordOffset = 0;
@@ -707,7 +734,9 @@ bool TraceShadow(vec3 origin, vec3 direction, float tMax) {
     rayQueryInitializeEXT(q, scene,
         gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
         0xFF, origin, 0.001, direction, tMax);
-    rayQueryProceedEXT(q);
+    while (rayQueryProceedEXT(q)) {
+        // 불투명 삼각형만 가림체로 인정하며 procedural 후보는 무시한다.
+    }
     return rayQueryGetIntersectionTypeEXT(q, true)
            != gl_RayQueryCommittedIntersectionNoneEXT;
 }
@@ -725,7 +754,7 @@ void main() {
 }
 ```
 
-Ray Query는 기존 래스터 파이프라인에 광선 기반 효과를 점진적으로 얹기 좋다. 이미 동작하는 PBR 프래그먼트 셰이더에 그림자 광선 한 줄을 추가하면 화면 공간 그림자의 한계를 넘는 정확한 그림자를 얻는다. `gl_RayFlagsTerminateOnFirstHitEXT`는 첫 교차에서 순회를 멈추라는 플래그로, 그림자는 가림 여부만 알면 되므로 가장 가까운 교차를 끝까지 찾을 필요가 없다. 이 플래그가 그림자 광선의 비용을 크게 줄인다.
+Ray Query는 기존 래스터 파이프라인에 광선 기반 효과를 점진적으로 얹기 좋다. 이미 동작하는 PBR 프래그먼트 셰이더에 그림자 광선 한 줄을 추가하면 화면 밖 가림체까지 질의할 수 있다. 이 코드는 alpha mask와 procedural 교차를 처리하지 않고, 수치 오프셋·광원 모델도 근사이므로 모든 재질의 정확한 그림자는 아니다. `gl_RayFlagsTerminateOnFirstHitEXT`는 첫 교차에서 순회를 멈추라는 플래그로, 그림자는 가림 여부만 알면 되므로 가장 가까운 교차를 끝까지 찾을 필요가 없다. 이 플래그가 그림자 광선의 비용을 크게 줄인다.
 
 광선 시작점에 `L * 0.001`을 더하는 것은 자기 그림자(self-shadowing) 아티팩트, 즉 표면이 자신을 그림자로 가리는 문제를 막기 위한 오프셋이다. 부동소수점 정밀도 때문에 광선 시작점이 표면 바로 위에 있으면 자기 자신과 교차할 수 있다. 이 오프셋이 작으면 여전히 줄무늬가 남고, 크면 그림자가 표면에서 떠 보인다. 장면 스케일에 맞춰 조정하는 값이다. 오프셋으로 origin을 옮긴 뒤에는 광원까지의 거리도 그 origin에서 다시 계산해 TMax로 써야 한다. 옮기기 전 거리를 그대로 유지하면 광선 끝이 광원 뒤로 넘어가, 광원 뒤쪽의 가림체를 그림자로 잘못 판정할 수 있다.
 
@@ -756,7 +785,7 @@ CPU는 프레임 시작에 씬 데이터를 한 번 올리고 dispatch 몇 번�
 
 Unreal Engine 5의 Nanite는 메시를 클러스터(메시릿)로 분할하고 거리별 LOD를 자동 선택한다. 작은 클러스터의 래스터화에는 전통적 래스터 하드웨어 대신 컴퓨트 기반 소프트웨어 래스터라이저를 쓰는데, 픽셀 하나 크기의 삼각형이 많을 때 컴퓨트 쪽이 더 효율적이기 때문이다. 그 결과 수천만에서 수억 폴리곤 씬을 실시간으로 그린다.
 
-Unreal Engine 5의 Lumen은 동적 전역 조명과 반사를 다룬다. 표면별 라이팅 정보를 담는 Surface Cache와 복셀 기반 표현을 결합하고, 하드웨어 레이 트레이싱이 가능한 환경에서는 더 정확한 결과를 위해 선택적으로 활용한다. 하드웨어 RT가 없으면 소프트웨어 추적으로 폴백한다.
+Unreal Engine 5의 Lumen은 동적 전역 조명과 반사를 다룬다. 표면별 라이팅 정보를 담는 Surface Cache와 화면 공간 추적·Signed Distance Field 기반 소프트웨어 추적을 결합하고, 하드웨어 레이 트레이싱이 가능한 환경에서는 더 정확한 결과를 위해 선택적으로 활용한다. 추적 경로는 플랫폼 지원과 프로젝트 설정에 따라 선택한다.
 
 EA의 Frostbite와 id Software의 id Tech 계열은 Bindless 디스크립터와 컴퓨트 기반 렌더링 그래프를 중심에 둔다. 드로우 콜을 데이터로 다루고, 머티리얼 바인딩을 인덱스로 환원해 CPU 비용을 최소화하는 방향이다.
 

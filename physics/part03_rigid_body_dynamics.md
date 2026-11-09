@@ -134,7 +134,7 @@ $$
 C_y = \frac{1}{6 A} \sum_{i=0}^{n-1} (y_i + y_{i+1})(x_i y_{i+1} - x_{i+1} y_i)
 $$
 
-여기서 $A$ 는 signed area (shoelace 합 / 2).
+여기서 $A$ 는 signed area (shoelace 합 / 2)이고 마지막 정점 뒤에는 첫 정점이 온다. 식은 자기교차가 없는 균일 밀도 면적 다각형과 A≠0을 전제한다.
 
 ### 2.3 비균일 밀도
 
@@ -174,9 +174,9 @@ $$
 \vec{p} = M \vec{v}_{cm}
 $$
 
-강체의 *총 운동량* 은 *모든 입자의 운동량 합* 이지만, 거리 불변 가정 + 질량중심 정의로 *질량 × 질량중심 속도* 로 단순화.
+강체의 *총 운동량* 은 *모든 입자의 운동량 합* 이지만, 질량이 일정한 계의 질량중심 정의로 *질량 × 질량중심 속도* 로 단순화.
 
-증명. $\vec{r}_i(t) = \vec{r}_{cm}(t) + \vec{s}_i(t)$ (질량중심 + body 좌표).
+증명. $\vec{r}_i(t) = \vec{r}_{cm}(t) + \vec{s}_i(t)$ (질량중심 + world 축으로 표시한 COM 상대 위치).
 
 $$
 \sum_i m_i \vec{v}_i = M \vec{v}_{cm} + \sum_i m_i \dot{\vec{s}}_i = M \vec{v}_{cm}
@@ -498,18 +498,18 @@ void ApplyForceAtPoint(RigidBody2D& body, vec2 force, vec2 point) {
 body.linearVelocity *= std::exp(-damping * dt);
 ```
 
-지수 감쇠. dt 와 무관하게 *프레임률 독립적* — 같은 시간 흐름에 같은 감쇠량. 단순 곱셈 (`v *= 0.99`) 은 dt 의존이라 *프레임률 따라 다른 결과*.
+지수 감쇠. 감쇠계수 일정·다른 힘 없음이면 같은 총 시간에 같은 감쇠량이다. 다른 힘·접촉과 교대로 적용한 전체 적분 결과까지 dt와 무관한 것은 아니다. 단순 곱셈 (`v *= 0.99`) 은 dt 의존이라 *프레임률 따라 다른 결과*.
 
 ### 6.5 적분기 선택
 
-결론대로 *semi-implicit Euler*. 진동 시스템 (스프링·충돌 응답 후) 에서 *bounded*.
+결론대로 *semi-implicit Euler*. 위치 의존 보존력의 조화진동자에서는 hω<2의 안정 영역 안에서 에너지 오차가 bounded다. 충돌·제약을 포함한 전체 solver는 별도로 검증한다.
 
 ```cpp
-// 잘못된 (explicit) 순서:
+// explicit 순서 (이번 예제에서 선택하지 않은 방법):
 body.position += body.linearVelocity * dt;
 body.linearVelocity += acc * dt;
 
-// 올바른 (semi-implicit) 순서:
+// 이번 예제의 semi-implicit 순서:
 body.linearVelocity += acc * dt;
 body.position += body.linearVelocity * dt;
 ```
@@ -535,6 +535,7 @@ struct RigidBody2D {
 };
 
 void MakeStatic(RigidBody2D& body) {
+    body.type = BodyType::Static; // §7.2의 motion type도 함께 변경
     body.invMass    = 0.0f;
     body.invInertia = 0.0f;
     body.linearVelocity = {0, 0};
@@ -552,7 +553,7 @@ void MakeStatic(RigidBody2D& body) {
 | Kinematic | 0 + 타입 플래그 | 무시 | 위치 직접 설정 가능 |
 | Dynamic | > 0 | 적용됨 | force / impulse 로 |
 
-둘 다 *invMass = 0* 이지만 *kinematic 은 사용자 코드가 position 을 직접 갱신*. Static 은 *영구히 같은 위치*.
+둘 다 *invMass = 0* 이지만 *kinematic 은 사용자 코드가 position 을 직접 갱신*. Static은 통상 적분하지 않는 고정 형상으로 취급한다. API가 정적 transform 변경을 지원하더라도 broad-phase 갱신·접촉 무효화 등 비용과 규칙을 따라야 한다.
 
 엔진에 따라 *별도 플래그* 로 구분 (`isStatic`, `isKinematic`) 또는 *type enum* 으로.
 

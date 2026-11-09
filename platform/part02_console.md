@@ -403,8 +403,7 @@ bool SaveGame(const SaveData& data) {
 // 플랫폼에서만 앱의 pending 저장소가 책임진다(둘을 중복 구현하지 않는다).
 void UnlockAchievement(AchievementId id) {
     if (localState_.IsUnlocked(id)) return;     // 멱등: 이미 달성
-    localState_.MarkUnlocked(id);               // IsUnlocked=true (로컬 먼저)
-    localState_.MarkPending(id);                // 서버 완료 전까지 durable dirty/pending
+    localState_.MarkUnlockedAndPending(id);     // 두 상태를 하나의 durable 원자적 기록으로 저장
     TryUpload(id);
 }
 
@@ -414,6 +413,8 @@ void TryUpload(AchievementId id) {
     localState_.MarkUploaded(id);               // IsUploaded/Confirmed=true, pending 해제
 }
 ```
+
+달성 표시와 pending 기록을 따로 확정하면 그 사이 장애로 업로드가 영구 누락될 수 있다. 둘을 한 번에 저장하거나 재시작 시 로컬 달성 중 미확정 항목을 다시 찾아 pending으로 복구한다.
 
 크로스 플레이 게임에서는 *플랫폼별 실적이 서로 다른 정책* 을 가져, 같은 게임이라도 플랫폼마다 실적 구성을 따로 관리해야 한다.
 

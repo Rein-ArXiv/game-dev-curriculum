@@ -318,7 +318,7 @@ MT의 큰 상태를 작은 seed 공간에서 초기화하면 도달 가능한 �
 
 ```cpp
 // 작은 application seed: 재현 가능한 초기화. 상태 공간이 seed 수만큼인 것은 의도된 계약이다.
-std::seed_seq seq{seed, seed >> 32};
+std::seed_seq seq{uint32_t(seed), uint32_t(seed >> 32)};
 std::mt19937 rng(seq);
 
 // 표준에는 배열을 직접 받는 생성자가 없으므로, seed_seq 나 엔진의 seed 함수를 거친다.
@@ -621,7 +621,7 @@ int PoissonSample(float lambda, float (*uniform)()) {
 }
 ```
 
-*Knuth의 알고리즘*. $\lambda$ 가 작으면 빠르고, 크면 느리다 ($\lambda$ 에 비례). 그런데 더 심각한 것은 *underflow* 다. `float` 에서 $\lambda$ 가 대략 $88$ 을 넘으면 `std::exp(-lambda)` 가 $0$ 이 되어, `p` 도 underflow 할 때까지 곱한 뒤 $\lambda$ 와 무관한 값에 갇힌다. 예를 들어 $\lambda = 1000, u = 0.5$ 에서 $149$ 부근을 돌려주는데 이는 $\lambda$ 의 함수가 아니다. 따라서 이 코드는 *작은 $\lambda$ (대략 $\lambda \lesssim 10$, 늦어도 $\exp(-\lambda)$ 가 정규 `float` 로 표현되는 범위)* 전용으로 명시하고, 큰 $\lambda$ 에는 검증된 rejection 알고리즘 (예: PTRS/PTRD)이나 로그 영역의 별도 처리를 쓴다. Normal 근사 ($\mu = \sigma^2 = \lambda$) 는 음이 아닌 정수 support 와 근사 오차를 함께 명시할 때만 대안이 된다.
+*Knuth의 알고리즘*. $\lambda$ 가 작으면 빠르고, 크면 느리다 ($\lambda$ 에 비례). 그런데 더 심각한 것은 *underflow* 다. binary32에서 $\lambda$ 가 약 87을 넘으면 $e^{-\lambda}$ 는 정규수 범위를 벗어나며, 서브노멀을 보존하고 반올림하는 환경이라면 약 104 부근에서 0이 된다. 서브노멀을 0으로 처리하는 환경은 더 일찍 0이 될 수 있다. 이때 `p` 도 underflow 할 때까지 곱한 뒤 $\lambda$ 와 무관한 값에 갇힌다. 따라서 이 코드는 *작은 $\lambda$ (대략 $\lambda \lesssim 10$)* 전용으로 쓰고, 큰 $\lambda$ 에는 검증된 rejection 알고리즘 (예: PTRS/PTRD)이나 로그 영역의 별도 처리를 쓴다. Normal 근사 ($\mu = \sigma^2 = \lambda$) 는 음이 아닌 정수 support 와 근사 오차를 함께 명시할 때만 대안이 된다.
 
 게임 응용:
 
@@ -746,7 +746,7 @@ uint64_t DeriveSeed(uint64_t parentSeed, uint32_t domainTag, uint64_t childId) {
 }
 ```
 
-`splitmix64` 가 가벼운 hash. 시드 비트의 *작은 차이* 가 *출력에 잘 퍼진다*. 같은 `(parentSeed, childId)` 라도 *시스템 tag* 가 다르면 다른 seed 가 나와야 한다. tag/좌표 packing/버전을 고정하지 않으면 AI·drop·chunk 가 같은 seed 를 공유할 수 있다. `DeriveSeed(0, 0, 0)` 처럼 0이 나오지 않도록 domain tag 를 비영으로 섞고, 생성기별 seed 정책 (예: xorshift 계열은 0 state 금지) 을 연결한다.
+`splitmix64` 가 가벼운 hash. 시드 비트의 *작은 차이* 가 *출력에 잘 퍼진다*. 같은 `(parentSeed, childId)` 에 서로 다른 *시스템 tag* 를 사용해 도메인을 구분한다. 입력 조합이 출력 64비트보다 크므로 서로 다른 입력의 충돌은 피할 수 없으며, 이 산술 결합도 모든 조합의 유일성을 보장하지 않는다. tag/좌표 표현/버전을 고정해 재현성을 유지한다. `DeriveSeed(0, 0, 0)` 의 결과는 0이 아니지만 다른 입력에서 0이 나올 수 있으므로 생성기별 seed 정책 (예: xorshift 계열은 0 state 금지) 을 별도로 연결한다.
 
 ```cpp
 // 사용 예

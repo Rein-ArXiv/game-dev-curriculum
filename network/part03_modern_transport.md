@@ -151,6 +151,8 @@ $$
 +\operatorname{maxAckDelay}
 $$
 
+이 식의 `maxAckDelay`는 Application Data 공간에서 확인된 handshake 이후 적용하는 항이다. Initial·Handshake 공간에서는 더하지 않는다. 실제 timer는 packet number space, handshake 상태와 outstanding ack-eliciting packet을 함께 고려한다.
+
 연속 PTO에서 timer를 지수적으로 늘려 네트워크를 더 압박하지 않는다. PTO가 만료되어 ack-eliciting probe를 보내는 것과 outstanding packet을 lost로 선언하는 것은 다르다 — probe는 새 번호로 보내고, probe나 뒤 packet에 대한 ACK가 돌아온 뒤에야 packet threshold·time threshold로 손실을 판정한다. PTO 하나로 모든 outstanding packet을 즉시 손실 처리하지 않는다.
 
 ### 응용 RTT와 transport RTT
@@ -336,8 +338,10 @@ QUIC도 공유 네트워크에서 혼잡을 유발할 책임이 있다. UDP 위�
 
 $$
 B_{\text{congestion}}\le
-\operatorname{cwnd}-\operatorname{bytesInFlight}
+\max(0,\operatorname{cwnd}-\operatorname{bytesInFlight})
 $$
+
+이는 일반 송신의 근사 예산이다. PTO probe처럼 명세가 congestion window를 일시적으로 초과해 보낼 수 있게 하는 예외는 따로 처리한다.
 
 STREAM frame은 여기에 stream·connection flow-control credit까지 추가로 지켜야 한다.
 

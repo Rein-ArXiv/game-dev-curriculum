@@ -257,7 +257,7 @@ void ValueIteration(const MDP& mdp, std::vector<float>& V, float gamma) {
 
 $$k \ge \frac{\ln\!\big(\lVert V_0-V^* \rVert_\infty / \epsilon\big)}{\ln(1/\gamma)}$$
 
-보상이 $[0, R_{\max}]$면 가치는 $[0, R_{\max}/(1-\gamma)]$에 들어 $\lVert V_0-V^* \rVert_\infty \le R_{\max}/(1-\gamma)$다. 분모 $\ln(1/\gamma) = -\ln\gamma$는 $\gamma$가 1에 가까울 때 $-\ln\!\big(1-(1-\gamma)\big) \approx (1-\gamma)$이므로 $k \approx \frac{1}{1-\gamma}\ln\frac{\lVert V_0-V^* \rVert_\infty}{\epsilon}$다. sweep 수를 지배하는 인자가 $1/(1-\gamma)$ — 이것이 1절에서 말한 *유효 지평* $1/(1-\gamma)$의 출처다(할인 가중 $\gamma^k(1-\gamma)$의 평균 깊이 $\gamma/(1-\gamma)$, 반감기 $\ln 2/(1-\gamma)$도 같은 척도다). 문제는 이 한계가 $V^*$를 알아야 계산된다는 점이다. 실행 중에는 $V^*$를 모른다.
+보상이 $[0, R_{\max}]$이고 초기 가치 $V_0$도 $[0, R_{\max}/(1-\gamma)]$ 범위에 있으면 $\lVert V_0-V^* \rVert_\infty \le R_{\max}/(1-\gamma)$다. 분모 $\ln(1/\gamma) = -\ln\gamma$는 $\gamma$가 1에 가까울 때 $-\ln\!\big(1-(1-\gamma)\big) \approx (1-\gamma)$이므로 $k \approx \frac{1}{1-\gamma}\ln\frac{\lVert V_0-V^* \rVert_\infty}{\epsilon}$다. sweep 수를 지배하는 인자가 $1/(1-\gamma)$ — 이것이 1절에서 말한 *유효 지평* $1/(1-\gamma)$의 출처다(할인 가중 $\gamma^k(1-\gamma)$의 평균 깊이 $\gamma/(1-\gamma)$, 반감기 $\ln 2/(1-\gamma)$도 같은 척도다). 문제는 이 한계가 $V^*$를 알아야 계산된다는 점이다. 실행 중에는 $V^*$를 모른다.
 
 **(2) 계산 가능한 정지 한계 — `delta`의 진짜 의미.** Value Iteration 코드는 sweep당 최대 변화 `delta` $= \lVert V_{k+1}-V_k \rVert_\infty$가 `kEpsilon` 아래면 멈춘다. 이 *Bellman 잔차* 는 계산 가능하고, 축약성만으로 실제 거리를 묶는다. $V^* = \mathcal{T}V^*$와 $V_{k+1}=\mathcal{T}V_k$에서
 
@@ -371,7 +371,7 @@ TD 오차 = 목표 − Q(s,a)       = 0.72 − 0.5     = 0.22
 새 Q(s,a) = 0.5 + 0.1 · 0.22  = 0.522
 ```
 
-한 번의 경험으로 $Q(s, a)$가 0.5에서 0.522로 *목표 쪽으로 22%의 10%만큼* 움직였다. 같은 전이를 여러 번 겪으며 Q가 점점 진짜 목표로 다가간다. max 연산이 "다음 상태에서 최선을 다한다고 가정"하므로, 실제로 그 best 행동을 하지 않았더라도 그 가치가 현재 추정에 반영된다 — 이것이 off-policy의 작동 방식이다.
+한 번의 경험으로 $Q(s, a)$가 0.5에서 0.522로 *목표까지의 차이 0.22의 10%만큼* 움직였다. 같은 전이를 여러 번 겪으며 Q가 점점 진짜 목표로 다가간다. max 연산이 "다음 상태에서 최선을 다한다고 가정"하므로, 실제로 그 best 행동을 하지 않았더라도 그 가치가 현재 추정에 반영된다 — 이것이 off-policy의 작동 방식이다.
 
 ### 두 가지 중요한 성질
 
@@ -494,7 +494,7 @@ DQN은 Q를 학습해 *간접적으로* 정책을 얻는다(argmax). Policy Grad
 
 $$\nabla_\theta J(\theta) = \mathbb{E}_\pi\!\left[\, \sum_t \gamma^t\, \nabla_\theta \log \pi(a_t \mid s_t; \theta)\; A(s_t, a_t) \,\right]$$
 
-여기서 $\mathbb{E}_\pi$는 궤적과 정책이 만든 (정규화하지 않은) 할인 방문 측도에 대한 기대다. 상태·행동 방문을 확률분포로 정규화해 쓰면 $1/(1-\gamma)$ 정규화 계수가 함께 붙으며, 무할인 방문 평균으로 바꾸면 상태별 가중이 달라진다.
+여기서 $\mathbb{E}_\pi$는 정책이 생성한 궤적에 대한 기댓값이며, 합 안의 $\gamma^t$가 각 방문에 할인 가중치를 준다. 상태·행동 방문을 확률분포로 정규화해 쓰면 $1/(1-\gamma)$ 정규화 계수가 함께 붙으며, 무할인 방문 평균으로 바꾸면 상태별 가중이 달라진다.
 
 직관은 단순하다. 우위 $A(s, a)$(그 행동이 평균보다 얼마나 나았는가)가 양수면 그 행동의 로그 확률을 *올리고*, 음수면 *내린다*. 좋았던 행동은 더 자주, 나빴던 행동은 덜 하게 정책 분포를 민다. 이산·연속 행동 모두 자연스럽고(연속이면 가우시안 정책의 평균·분산을 출력), 확률적 정책을 직접 표현한다.
 

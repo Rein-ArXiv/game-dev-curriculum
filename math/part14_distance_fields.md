@@ -282,10 +282,10 @@ $$
 두 형상의 합:
 
 $$
-f_{A \cup B}(\vec{p}) = \min(f_A(\vec{p}), f_B(\vec{p}))
+g_{A \cup B}(\vec{p}) = \min(f_A(\vec{p}), f_B(\vec{p}))
 $$
 
-*가장 가까운 형상의 거리* — 둘 중 더 가까운 표면.
+합집합의 안팎을 나타내는 필드. 두 형상의 바깥에서는 가까운 형상까지의 거리지만, 겹친 내부에서는 합집합 경계까지의 정확한 거리가 아닐 수 있다 (3.7절).
 
 ```cpp
 float opUnion(float a, float b) { return min(a, b); }
@@ -294,7 +294,7 @@ float opUnion(float a, float b) { return min(a, b); }
 ### 3.5 교집합 (intersection)
 
 $$
-f_{A \cap B}(\vec{p}) = \max(f_A(\vec{p}), f_B(\vec{p}))
+g_{A \cap B}(\vec{p}) = \max(f_A(\vec{p}), f_B(\vec{p}))
 $$
 
 *두 형상 모두에 속해야 내부*. 두 SDF 의 *큰 값*.
@@ -306,7 +306,7 @@ float opIntersect(float a, float b) { return max(a, b); }
 ### 3.6 차집합 (subtraction)
 
 $$
-f_{A - B}(\vec{p}) = \max(f_A(\vec{p}), -f_B(\vec{p}))
+g_{A - B}(\vec{p}) = \max(f_A(\vec{p}), -f_B(\vec{p}))
 $$
 
 *A 의 내부에서 B 를 뺀다*. B의 SDF 부호를 뒤집어 *교집합* 처럼.
@@ -317,7 +317,7 @@ float opSubtract(float a, float b) { return max(a, -b); }
 
 ### 3.7 합성의 한계
 
-*min/max 합성* 의 결과는 *진짜 SDF 가 아님*. *합성 이음매에서 떨어진 곳의 거리는 정확*, 하지만 *두 형상이 만나는 오목 이음매 근처* 에서는 경계 바로 옆에서도 실제 거리보다 작게 나온다 (예: 두 반평면의 교집합 밖 모서리 근처에서 max 는 참거리의 약 0.71 배). 단순 합성은 *근사 SDF (거리의 하한, bound on distance)*.
+*min/max 합성* 은 안팎을 표현하지만 일반적으로 *진짜 SDF 가 아니다*. 두 형상이 만나는 이음매 근처뿐 아니라 겹친 내부에서도 실제 경계 거리와 다를 수 있다 (예: 두 반평면의 교집합 밖 모서리 근처에서 max 는 참거리의 약 0.71 배). 위 $g$ 는 부호와 영집합을 다루는 합성 필드이며, 적절한 조건에서 안전한 거리 하한으로 사용할 수 있다.
 
 게임 응용에서 대부분 *경계 근처만 중요* (레이 마칭이 표면을 향해 진행) → 실용적으로 OK.
 
@@ -477,7 +477,7 @@ RayResult RayMarch(vec3 ro, vec3 rd, auto sdfFunc, float maxDistance) {
 }
 ```
 
-매 반복: *현재 위치의 SDF 평가 + 그 만큼 전진*. epsilon 보다 작아지면 *표면에 도달*. 위 코드는 *외부 시작* (`sdfFunc(ro) > 0`) 전제. 내부 시작이나 내부 통과를 다루려면 *판정과 step 을 함께* 바꿔야 한다. `abs(d) < EPSILON` 만으로 hit 을 판정하고 `t += d` 를 그대로 두면, 내부의 음수 d 에서 광선이 *뒤로* 진행한다. 내부 확장 예시는 *step = abs(d)* 로 전진하고, 목표를 *입구/출구 경계 교차* 로 명시하며, 시작점이 이미 표면 띠 안이면 그 자체를 hit 로 처리하는 계약을 둔다.
+매 반복: *현재 위치의 SDF 평가 + 그 만큼 전진*. 정확한 거리 필드에서 epsilon보다 작아지면 *표면 근처에 도달* 한 것으로 처리한다. 거리 하한만 제공하는 근사 필드는 작은 값만으로 실제 표면이 가까움을 보장하지 않으므로 별도 hit 검증이 필요하다. 위 코드는 *외부 시작* (`sdfFunc(ro) > 0`) 전제. 내부 시작이나 내부 통과를 다루려면 *판정과 step 을 함께* 바꿔야 한다. `abs(d) < EPSILON` 만으로 hit 을 판정하고 `t += d` 를 그대로 두면, 내부의 음수 d 에서 광선이 *뒤로* 진행한다. 내부 확장 예시는 *step = abs(d)* 로 전진하고, 목표를 *입구/출구 경계 교차* 로 명시하며, 시작점이 이미 표면 띠 안이면 그 자체를 hit 로 처리하는 계약을 둔다.
 
 ### 5.3 Sphere Tracing 이라는 이름
 

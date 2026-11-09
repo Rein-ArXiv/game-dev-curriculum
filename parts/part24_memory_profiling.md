@@ -219,8 +219,8 @@ shadow_addr = (addr >> 3) + kShadowOffset;
 
 // 일부 x86-64 Linux ASan 매핑의 예시. 실제 offset은 runtime/PIE/플랫폼에 따라 다름:
 // kShadowOffset = 0x00007fff8000
-// Main:   0x0000000000000000 - 0x00007fffffffffff (128TB)
-// Shadow: 0x00007fff8000      - 0x000010007fff7fff (16TB)
+// 실제 application 영역은 LowMem/HighMem 등으로 나뉘며,
+// shadow와 shadow gap을 일반 application 주소 범위에 포함하지 않는다.
 ```
 
 우측 시프트 3비트(`>> 3`)는 8로 나누는 것과 같다. 즉, 8바이트마다 1바이트로 압축한다.
@@ -318,7 +318,7 @@ ASan의 또 다른 핵심은 **redzone**이다. 모든 할당 전후에 접근 �
 ```c
 void func() {
     char buf[10];
-    // ASan이 생성하는 실제 레이아웃:
+    // ASan의 redzone 배치를 보이는 개념도 (정확한 크기는 구현별로 다름):
     // [Left RZ: 32B][buf: 10B][Padding: 6B][Right RZ: 32B]
 }
 ```
@@ -329,7 +329,7 @@ void func() {
 Before ASan:          After ASan:
 +------------+        +------------------+
 | buf[10]    |        | Left RZ (32B)    |  shadow: 0xF1
-| other vars |        | buf[10]          |  shadow: 2 (10 mod 8)
+| other vars |        | buf[10]          |  shadow: 첫 8바이트는 0, 나머지 granule은 2
 | ret addr   |        | Padding (6B)     |  shadow: 2 (buf의 마지막 granule 공유)
 +------------+        | Right RZ (32B)   |  shadow: 0xF3
                       | other vars       |
@@ -388,7 +388,7 @@ MSan의 한계는 원칙적으로 **전체 프로그램 재컴파일**이 필요
 
 ### ThreadSanitizer (TSan): 데이터 레이스 탐지
 
-TSan은 **멀티스레드 프로그램의 데이터 레이스**를 찾는다. 동기화 없이 같은 메모리에 접근하는 경우를 탐지한다.
+TSan은 **멀티스레드 프로그램의 데이터 레이스**를 찾는다. 서로 다른 스레드의 충돌하는 접근 중 하나 이상이 비원자적이고 happens-before로 순서가 정해지지 않은 경우가 대상이다.
 
 ```c
 int global = 0;
@@ -404,17 +404,18 @@ Shadow memory는 더 복잡하다:
 
 ```text
 Main Memory: [8 bytes]
-Shadow:      [32 bytes]  (8바이트 셀 4개, 4:1 확장)
+Shadow:      [16 bytes]  (아래에서 참조한 LLVM 구현: 4바이트 기록 4개)
 ```
 
-각 8바이트당 4개의 접근 기록(shadow cell)을 저장한다:
+LLVM의 `tsan_defs.h`에서는 `kShadowCell=8`, `kShadowCnt=4`, `RawShadow=u32`이므로 이 shadow 영역은 2:1이다. 전체 메모리 오버헤드에는 별도 metadata와 실행 history도 포함되며 버전별 배치는 달라질 수 있다. 접근 기록이 담는 의미를 풀어 쓰면 다음과 같다(실제 bit layout은 아님):
 
 ```c
 struct ShadowCell {
-    uint64_t tid:16;     // 스레드 ID
-    uint64_t epoch:42;   // 논리적 시간
-    uint64_t is_write:1;
-    uint64_t size:3;
+    ThreadSlot thread;   // 스레드 식별 정보
+    Epoch epoch;         // 논리적 시간
+    AccessMask bytes;    // granule 안의 접근 바이트
+    bool is_write;
+    bool is_atomic;
 };
 ```
 
@@ -567,7 +568,7 @@ jemalloc은 `malloc_stats_print`로 더 상세한 정보를 제공한다.
 
 포인터를 역참조할 때 하드웨어가 상위 8비트를 무시하므로, 여기에 메타데이터를 저장할 수 있다. 메모리 접근 시 태그를 shadow memory와 비교한다.
 
-Google은 Android 11부터 일부 시스템 컴포넌트에 HWASan을 적용하고 있다.
+Android 공식 문서는 Android 10 이상 AArch64 환경의 HWASan 지원을 설명한다. 실제 시스템 이미지·앱에서 쓸 수 있는 범위와 설정은 Android·NDK 버전에 맞춰 확인한다.
 
 **GWP-ASan (샘플링 기반)**: 모든 할당을 검증하지 않고 일부 할당을 확률적으로 guarded slot에 배치한다. 샘플링률과 reserved slot 수를 낮추면 전체 ASan보다 훨씬 작은 비용으로 운영 빌드에 적용할 수 있지만, 비용이 0은 아니며 비표본 할당의 오류는 검출하지 못한다. 제품 적용 여부와 설정은 플랫폼·프로세스별 정책이다.
 
@@ -700,7 +701,7 @@ Valgrind Massif로 프로파일링한 결과:
 void listPushCopy(robj *subject, robj *value, int where) {
     if (subject->encoding == OBJ_ENCODING_QUICKLIST) {
         robj *stored = dup_robj(value);   // 내부 보관용 사본 생성
-        quicklistPush(subject->ptr, stored, where);
+        appendSerializedCopy(subject, stored, where);  // 값을 복사하며 robj*를 보관하지 않는 가상 helper
         // stored를 참조하는 곳이 없어지면 decrRefCount(stored) 해야 한다
     }
 }
@@ -712,13 +713,13 @@ void listPushCopy(robj *subject, robj *value, int where) {
 void listPushCopy(robj *subject, robj *value, int where) {
     if (subject->encoding == OBJ_ENCODING_QUICKLIST) {
         robj *stored = dup_robj(value);
-        quicklistPush(subject->ptr, stored, where);
+        appendSerializedCopy(subject, stored, where);  // 값을 복사하며 robj*를 보관하지 않는 가상 helper
         decrRefCount(stored);  // 내부에서 만든 사본의 참조 카운트만 감소
     }
 }
 ```
 
-이 버그는 특정 명령어 조합(`LPUSH` + `LTRIM`)에서만 발생했기 때문에 일반 테스트로는 찾기 어려웠다.
+이 모형의 `appendSerializedCopy`는 payload를 복사하며 `robj*`를 보관하지 않는다는 계약이다. 포인터를 그대로 보관하는 함수라면 위의 즉시 감소는 use-after-free를 만든다. 실제 Redis `quicklistPush`는 객체 포인터가 아니라 값의 바이트와 길이를 받는다. 이런 차이는 명령어 조합과 객체 수명까지 재현해야 구분할 수 있다.
 
 ### 사례 3: PDF 렌더러의 out-of-bounds write
 
@@ -774,8 +775,12 @@ ObjectPool<PlayerState, 100000> player_pool;
 
 // 큰 버퍼용 별도 할당자
 class ReplayBuffer {
+public:
     static void* operator new(size_t size) {
-        return mmap(nullptr, size, ...);  // OS에서 직접 할당
+        void* p = mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) throw std::bad_alloc();
+        return p;  // OS에서 직접 할당
     }
     static void operator delete(void* p, size_t size) {
         munmap(p, size);
@@ -796,7 +801,7 @@ LLVM/Clang과 GCC가 제공하는 sanitizer 군은 모두 컴파일러 계측에
 | Sanitizer | 검출 대상 | 대표 검출 사례 | 런타임 오버헤드 | 메모리 오버헤드 |
 |---|---|---|---|---|
 | AddressSanitizer (ASan) | 공간/시간 안전성 | use-after-free, heap/stack/global buffer overflow, double free | 약 2배 | 약 2~3배 |
-| LeakSanitizer (LSan) | 메모리 누수 | reachability 기반 누수 | 종료 시 한 번 | 거의 없음 |
+| LeakSanitizer (LSan) | 메모리 누수 | reachability 기반 누수 | 주로 검사 시 비용, 평소 할당 추적 | 추적 metadata에 의존 |
 | UndefinedBehaviorSanitizer (UBSan) | 미정의 동작 | signed integer overflow, null deref, 잘못된 시프트, 잘못된 정렬, 잘못된 enum 값 | 검사 집합·복구 정책 의존 | 검사 집합 의존 |
 | ThreadSanitizer (TSan) | 데이터 레이스 | 동기화 없이 같은 메모리에 접근 | 약 5~15배 | 약 5~10배 |
 | MemorySanitizer (MSan) | 초기화되지 않은 읽기 | uninitialized read, 오염 전파 | 약 3배 | 약 2~3배 |
@@ -867,7 +872,7 @@ void worker() {
 std::thread t1(worker), t2(worker);
 ```
 
-이 코드는 잠금이나 atomic 없이 두 스레드가 동시에 `counter`를 수정하므로 데이터 레이스다. TSan은 첫 번째 충돌하는 접근 쌍을 스택 트레이스와 함께 보고한다. 검출은 실행된 경로에 한정되므로, 같은 코드라도 충돌 경로를 한 번도 밟지 않으면 TSan 역시 잡지 못한다. 이 한계는 정적 분석과 결합해야 메우기 쉽다.
+이 코드는 잠금이나 atomic 없이 두 스레드가 동시에 `counter`를 수정하므로 데이터 레이스다. TSan은 충돌하는 접근 쌍을 스택 트레이스와 함께 보고한다. 검출은 실행된 경로에 한정되므로, 같은 코드라도 충돌 경로를 한 번도 밟지 않으면 TSan 역시 잡지 못한다. 이 한계는 정적 분석과 결합해야 메우기 쉽다.
 
 ### MemorySanitizer가 잡는 것들
 
@@ -968,7 +973,7 @@ OSS-Fuzz는 이 조합을 대규모로 운영하는 사례다. 수백 개 오픈
 지금까지 다룬 도구들은 대부분 Linux 또는 Clang/GCC 기반이다. Windows에서는 약간 다른 도구 셋이 쓰인다.
 
 - **Application Verifier (AppVerif)**: heap, handle, lock에 대한 동적 검증 도구. `HEAP_TAIL_CHECKING_ENABLED`는 `HeapAlloc`에 넘기는 플래그가 아니라 GFlags/Application Verifier가 프로세스 heap 검증을 위해 활성화하는 모드다. `HeapValidate`와 PageHeap 같은 진단 기능과 조합한다.
-- **PageHeap**: Windows의 디버그 힙 모드. standard page heap은 할당 끝에 fill 패턴을 써 두고 해제 시점에 손상 여부를 검사하며, full page heap은 할당마다 끝에 접근 불가 페이지를 두어 overflow를 즉시 접근 위반으로 만든다. 검출 시점과 메모리 사용량이 모드에 따라 다르므로 짧은 재현용 빌드에 한정해 켠다.
+- **PageHeap**: Windows의 디버그 힙 모드. standard page heap은 할당 끝에 fill 패턴을 써 두고 해제 시점에 손상 여부를 검사하며, full page heap은 할당 뒤에 접근 불가 페이지를 두어 그 보호 페이지를 침범한 접근을 즉시 검출한다. 정렬을 위한 여유 바이트 안의 작은 overflow까지 항상 즉시 검출하는 것은 아니다. 검출 시점과 메모리 사용량이 모드에 따라 다르므로 짧은 재현용 빌드에 한정해 켠다.
 - **MSVC의 `/fsanitize=address`**: Visual Studio 2019 16.9부터 ASan을 공식 지원한다. Linux의 ASan과 같은 compiler-rt 인프라를 쓰지만 검출 범위가 같지는 않다. 누수 검출(LSan)이 없고, stack-use-after-return은 별도 컴파일러 옵션을 요구하며, initialization order fiasco·intra-object overflow 같은 검사는 포함되지 않는다. container overflow는 VS2022 17.2 이후 `std::vector`, 17.6 이후 `std::string`에 대해 STL annotation으로 검출되며, custom allocator는 8바이트 정렬 등 조건을 만족할 때만 검출 범위에 들어간다.
 - **clang-tidy on Windows**: clang-cl 툴체인 위에서 동작한다. Visual Studio가 직접 통합한다.
 

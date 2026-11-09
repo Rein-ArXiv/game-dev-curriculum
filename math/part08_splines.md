@@ -560,7 +560,7 @@ integrand 가 구간에서 충분히 매끄럽고 composite step 이 균일하�
 특정 *Gauss 점* 에서 표본해 *낮은 N으로 높은 정확도*. CAD 라이브러리의 표준.
 
 ```cpp
-// 5점 Gauss-Legendre: 매끄러운 integrand의 한 panel에서 오차 O(h^10)
+// 5점 Gauss-Legendre: 매끄러운 integrand의 한 panel에서 오차 O(h^11)
 const float kGaussX[5] = {
     -0.9061798f, -0.5384693f, 0.0f, 0.5384693f, 0.9061798f
 };
@@ -578,9 +578,10 @@ const float kGaussW[5] = {
 ```cpp
 struct ArcLengthLUT {
     std::vector<float> samples;     // 균일 t에 대응하는 호 길이
-    float totalLength;
+    float totalLength = 0.0f;
 
     void Build(const Spline& s, int sampleCount = 128) {
+        if (sampleCount < 1) { samples.clear(); totalLength = 0.0f; return; }
         samples.resize(sampleCount + 1);
         samples[0] = 0;
         vec3 prev = s.At(0);
@@ -623,7 +624,7 @@ struct ArcLengthLUT {
 ```cpp
 // 매 프레임
 character.distanceTraveled += character.speed * dt;
-if (loop) {
+if (loop && arcLut.totalLength > 0.0f) {
     character.distanceTraveled =
         std::fmod(character.distanceTraveled, arcLut.totalLength);  // 나머지 거리 보존
 } else if (character.distanceTraveled >= arcLut.totalLength) {
@@ -635,7 +636,7 @@ character.position = spline.At(t);
 character.tangent  = normalize(spline.Derivative(t));
 ```
 
-`distance` 를 *clamp 한 뒤* 마지막 위치를 적용하므로 트랙 *끝점까지 이동* 하고, 국소 `return` 으로 마지막 유효 표본에 멈추지 않는다. loop 는 나머지 거리를 보존한다. *거리 누적* + *LUT 변환* + *위치 + 접선*. 캐릭터·차량·카메라가 *균등 속도로 트랙* 을 따라간다.
+`distance` 를 *clamp 한 뒤* 마지막 위치를 적용하므로 트랙 *끝점까지 이동* 하고, 국소 `return` 으로 마지막 유효 표본에 멈추지 않는다. 위 예제는 음이 아닌 속도와 `dt`, 0이 아닌 접선을 가정한다. loop 는 양의 길이에서 나머지 거리를 보존한다. *거리 누적* + *LUT 변환* + *위치 + 접선*. 캐릭터·차량·카메라가 LUT 근사 범위 안에서 *거의 균등한 속도* 로 트랙을 따라간다.
 
 ### 6.5 적응적 표본
 

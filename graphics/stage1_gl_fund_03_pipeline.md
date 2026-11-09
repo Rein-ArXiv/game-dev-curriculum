@@ -178,7 +178,7 @@ glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
 | `GL_STATIC_READ` | GPU가 쓰고 CPU가 읽음 | Transform Feedback 결과 |
 | `GL_DYNAMIC_COPY` | GPU가 쓰고 GPU가 다시 읽음 | Compute → Vertex 파이프라인 |
 
-이 힌트는 *드라이버가 메모리를 어디(VRAM/PCIe/HOST)에 둘지* 의 결정에 영향을 주지만, 강제는 아니다. 잘못 지정해도 동작은 하지만 성능이 손해를 본다.
+이 힌트는 *드라이버가 메모리를 어디(VRAM/PCIe/HOST)에 둘지* 의 결정에 영향을 주지만, 강제는 아니다. 잘못 지정해도 동작은 하지만, 드라이버와 실제 사용 패턴에 따라 성능이 달라질 수 있다.
 
 ### glBufferSubData와 glMapBuffer
 
@@ -195,7 +195,7 @@ std::memcpy(ptr, newData, size);
 glUnmapBuffer(GL_ARRAY_BUFFER);
 ```
 
-`GL_MAP_INVALIDATE_RANGE_BIT`는 *기존 데이터를 보존할 필요 없음* 을 알려 드라이버가 동기화 비용을 건너뛰게 한다. 이 비트가 없으면 같은 영역을 GPU가 아직 읽고 있을 때 *동기화 stall* 이 발생할 수 있다.
+`GL_MAP_INVALIDATE_RANGE_BIT`는 *매핑 범위의 기존 데이터를 보존할 필요 없음* 을 알린다. 드라이버가 다른 저장 공간을 제공해 대기를 줄일 여지가 생기지만, 동기화 stall이 없어진다는 보장은 아니다. 이 비트는 동기화를 생략하도록 요청하는 `GL_MAP_UNSYNCHRONIZED_BIT`와도 다르다.
 
 ### Buffer Orphaning과 Persistent Mapping
 
@@ -208,7 +208,7 @@ glBufferData(GL_ARRAY_BUFFER, size, nullptr, GL_STREAM_DRAW);   // 기존 메모
 glBufferSubData(GL_ARRAY_BUFFER, 0, size, newData);             // 새 메모리에 기록
 ```
 
-드라이버는 새 메모리를 잡고 이전 것은 GPU가 다 쓰면 회수한다. CPU·GPU 동기화 없이 흘러간다.
+드라이버는 새 저장 공간을 제공하고 이전 것은 GPU가 다 쓰면 회수하는 방식으로 대기를 피할 수 있다. 실제 재사용·할당 전략은 구현에 달려 있으므로, 이 호출만으로 항상 동기화 비용이 사라지는 것은 아니다.
 
 **Persistent Mapped Buffer**: 4.4+ `GL_ARB_buffer_storage` 사용.
 
@@ -220,7 +220,7 @@ void* ptr = glMapBufferRange(GL_ARRAY_BUFFER, 0, size,
 // 매 프레임 ptr에 직접 쓰기 (mapping 유지)
 ```
 
-매 프레임 매핑/언매핑을 하지 않고 *영구 매핑* 된 포인터에 직접 쓴다. 동기화는 *GPU fence* 로 직접 관리한다. 가장 빠른 동적 버퍼 패턴이지만 동기화 책임이 사용자에게 넘어온다.
+매 프레임 매핑/언매핑을 하지 않고 *영구 매핑* 된 포인터에 직접 쓴다. 동기화는 *GPU fence* 로 직접 관리한다. 반복 매핑 비용을 줄이는 동적 버퍼 패턴이지만, 실제 성능은 갱신 패턴에 달려 있고 동기화 책임이 사용자에게 넘어온다.
 
 ### Interleaved vs Separate
 
@@ -359,7 +359,7 @@ void main() {
 }
 ```
 
-`layout(location = 0) out vec4 FragColor`는 0번 컬러 첨부에 출력된다. location 한정자를 명시해 두면 MRT를 도입하거나 셰이더 리플렉션이 들어올 때 동작이 명확해진다.
+`layout(location = 0) out vec4 FragColor`는 0번 프래그먼트 출력이다. 실제 컬러 첨부는 `glDrawBuffers`의 0번 항목이 지정한다(기본 프레임버퍼에서는 보통 후면 버퍼). location 한정자를 명시해 두면 MRT를 도입하거나 셰이더 리플렉션이 들어올 때 동작이 명확해진다.
 
 ### 컴파일과 링크
 
@@ -424,7 +424,7 @@ GLuint LinkProgram(GLuint vs, GLuint fs) {
 
 ### `#version`과 호환성
 
-`#version 330 core`는 *GLSL 3.30 문법으로 컴파일하겠다* 는 선언이다. OpenGL 3.3 이상의 컨텍스트라면 어디서든 컴파일·실행되고, 4.x 컨텍스트라도 GLSL 330 코드는 그대로 받아들인다. 다만 셰이더가 4.x 이후의 기능(예: `binding` 한정자, compute, SSBO)을 쓰려면 그 기능을 지원하는 GLSL 버전(`#version 420 core` 이상)이나 해당 확장(`GL_ARB_shading_language_420pack` 등)을 명시해야 한다.
+`#version 330 core`는 *GLSL 3.30 문법으로 컴파일하겠다* 는 선언이다. OpenGL 3.3 이상의 컨텍스트라면 어디서든 컴파일·실행되고, 4.x 컨텍스트라도 GLSL 330 코드는 그대로 받아들인다. 다만 셰이더가 4.x 이후의 기능(예: `binding` 한정자, compute, SSBO)을 쓰려면 그 기능을 지원하는 GLSL 버전(`binding`은 4.20, compute·SSBO는 4.30 이상)이나 각 기능에 대응하는 확장을 명시해야 한다.
 
 GLSL ES(OpenGL ES, WebGL)는 별도 버전 체계다. 데스크톱 셰이더를 모바일에 그대로 쓰려면 정밀도 한정자(`highp`, `mediump`, `lowp`)와 일부 함수 차이를 처리해야 한다.
 
@@ -551,8 +551,8 @@ layout(std140) uniform Camera {
 핵심은 다음 셋이다.
 
 1. `vec3`는 *16바이트 정렬* 을 요구하지만 실제 성분 데이터는 12바이트다. 구조체 안에서 `vec3` 뒤에 `float`가 오면 그 4바이트 패딩 자리에 `float`가 들어가 공간을 절약할 수 있다.
-2. *모든 배열의 각 원소* 는 16바이트 정렬을 받는다. 즉 `float arr[10]`은 160바이트(10 × 16)를 차지한다.
-3. 구조체 전체도 16바이트 정렬이다.
+2. 스칼라·벡터 배열의 원소 정렬과 stride는 기본 정렬을 16바이트 배수로 올려 결정한다. 즉 `float arr[10]`은 160바이트(10 × 16)를 차지한다. 더 큰 기본 정렬을 요구하는 타입까지 모두 16바이트 stride인 것은 아니다.
+3. 구조체 정렬은 가장 큰 멤버 정렬을 16바이트 배수로 올린 값이다. 위 타입만 사용한 구조체라면 16바이트다.
 
 ### CPU 측 구조체 일치
 
@@ -568,7 +568,7 @@ struct CameraUBO {
 static_assert(sizeof(CameraUBO) == 144, "UBO size mismatch");
 ```
 
-`vec3 + float` 조합은 *공간을 아끼는 흔한 패턴* 이다. `vec3`는 16바이트 정렬을 받지만 성분 자체는 12바이트라, 그 뒤 4바이트 자리에 단일 `float`을 끼워 넣어 정렬을 깨지 않으면서 공간을 절약한다. 셰이더에서도 같은 순서로 선언하면 일치한다.
+`vec3 + float` 조합은 *공간을 아끼는 흔한 패턴* 이다. `vec3`는 16바이트 정렬을 받지만 성분 자체는 12바이트라, 그 뒤 4바이트 자리에 단일 `float`을 끼워 넣어 정렬을 깨지 않으면서 공간을 절약한다. 셰이더에서도 같은 순서로 선언하면 일치한다. 단, GLM의 aligned gentype 설정에서는 `glm::vec3` 자체가 16바이트를 차지할 수 있으므로, 이 예제는 12바이트 `glm::vec3`를 전제로 한다. `sizeof`뿐 아니라 `offsetof(CameraUBO, time) == 140`도 확인해야 한다.
 
 다만 *float를 vec3 앞에 두면* 패딩이 어긋난다.
 
@@ -614,7 +614,7 @@ glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(data), &data);
 
 ### UBO 크기 한계
 
-OpenGL 3.3은 UBO 크기 한도가 *최소 16,384 byte* 다(드라이버에 따라 더 클 수 있다). 큰 데이터(스켈레탈 본 행렬, 인스턴스 행렬 수천 개 등)는 SSBO로 가야 한다.
+OpenGL 3.3은 UBO 크기 한도가 *최소 16,384 byte* 다(드라이버에 따라 더 클 수 있다). 큰 데이터(스켈레탈 본 행렬, 인스턴스 행렬 수천 개 등)는 SSBO·텍스처 버퍼 같은 다른 경로나 여러 블록으로 나누는 방식을 검토한다. SSBO는 이 글의 3.3 기준보다 높은 버전이 필요하다.
 
 ```cpp
 GLint maxSize;
@@ -636,7 +636,7 @@ layout(std430, binding = 1) buffer Particles {
 };
 ```
 
-SSBO 자체가 GLSL 4.30+ 기능이라 `#version 430 core` 이상이 필요하다. `binding` 한정자도 4.20+에서 사용 가능하므로 SSBO 셰이더에서는 자연스럽게 함께 쓴다.
+이 예제는 SSBO가 코어 기능인 GLSL 4.30을 사용한다. 더 낮은 지원 버전에서는 `GL_ARB_shader_storage_buffer_object` 등 필요한 확장을 명시해야 한다. `binding` 한정자는 4.20부터 코어 기능이므로 위 4.30 셰이더에서는 함께 사용할 수 있다.
 
 UBO와 비슷하지만 다음 점이 다르다.
 
@@ -717,7 +717,7 @@ glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT |
 
 | 기준 | UBO | SSBO |
 |---|---|---|
-| 크기 | ~64KB | 수백 MB |
+| 블록 크기 한도 | 최소 보장 16KB (`GL_MAX_UNIFORM_BLOCK_SIZE` 조회) | 최소 보장 128MB (`GL_MAX_SHADER_STORAGE_BLOCK_SIZE` 조회) |
 | 접근 | 읽기 전용 | 읽기 + 쓰기 |
 | atomic | 불가 | 가능 |
 | std140 vs std430 | std140 (조밀치 못함) | std430 (조밀) |

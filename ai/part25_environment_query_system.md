@@ -76,6 +76,7 @@ struct QueryContext {
     double               queryTime;
     uint64_t             navGeneration;
     uint64_t             threatMapVersion;
+    uint64_t             worldVersion;   // hard filter가 읽는 월드 상태 세대
 };
 ```
 
@@ -98,6 +99,10 @@ struct QueryContext {
 ```cpp
 std::optional<QueryItem> RunQuery(const QueryDef& def, const QueryContext& ctx) {
     std::vector<QueryItem> items = def.generator->Generate(ctx);
+    for (auto& item : items) {
+        item.snapshotTime = ctx.queryTime;
+        item.worldVersion = ctx.worldVersion;
+    }
     ApplyFilters(def.filters, ctx, items);     // 측정한 비용·선택도에 따라 정렬
     ApplyScorers(def.scorers, ctx, items);     // 살아남은 후보만 점수화
     Normalize(def.scorers, items);             // scorer별 0~1 정규화 + 가중합
@@ -210,9 +215,9 @@ std::vector<QueryItem> GenerateDonut(Vector3 center, float innerR, float outerR,
     if (!std::isfinite(innerR) || !std::isfinite(outerR) ||
         !(innerR >= 0.0f) || outerR < innerR || rings <= 0 || pointsPerRing <= 0)
         throw std::invalid_argument("donut parameters");
-    const size_t count = size_t(rings) * size_t(pointsPerRing);   // size_t 곱
-    if (count > kMaxDonutCandidates)          // 후보 예산 초과 → 실패 상태(빈 결과)
+    if (size_t(rings) > kMaxDonutCandidates / size_t(pointsPerRing))
         return {};
+    const size_t count = size_t(rings) * size_t(pointsPerRing);   // 곱하기 전 예산 검사
     std::vector<QueryItem> out;
     out.reserve(count);
     for (int r = 0; r < rings; ++r) {
@@ -557,10 +562,15 @@ struct QueryJob {
 
 ```cpp
 void TickQuery(QueryJob& job, int budget) {
+    if (job.state == QueryState::Done || job.state == QueryState::Failed) return;
     if (job.state == QueryState::Pending) {
         // 예시는 구조를 단순화해 생성과 필터를 한 번에 실행한다.
         // 실제 시스템은 이 두 단계도 프로파일링 결과에 따라 작업으로 쪼갠다.
         job.items = job.def.generator->Generate(job.ctx);
+        for (auto& item : job.items) {
+            item.snapshotTime = job.ctx.queryTime;
+            item.worldVersion = job.ctx.worldVersion;
+        }
         ApplyFilters(job.def.filters, job.ctx, job.items);
     }
     job.state = QueryState::Running;

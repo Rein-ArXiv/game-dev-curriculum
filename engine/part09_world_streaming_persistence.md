@@ -40,6 +40,7 @@ $$
 $s$는 셀 한 변의 길이다. 음수 좌표에서는 C++ 정수 나눗셈이 0 방향으로 절단되므로 단순 cast를 쓰면 안 된다. `floor` 의미를 명시해야 원점 왼쪽과 오른쪽의 셀 경계가 대칭이다.
 
 ```cpp
+// 전제: 유한 좌표, cellSize>0, floor 결과가 int64_t 범위 안.
 CellCoord WorldToCell(Vec3 position, double cellSize) {
     return {
         (int64_t)std::floor(position.x / cellSize),
@@ -176,23 +177,25 @@ ActivationResult World::Activate(PreparedCell&& prepared) {
 
     ActivationJournal journal;
     journal.created.reserve(prepared.entities.size());             // 부작용 전에 용량 확보
+    ScopeRollback rollback;
+    rollback.Push([&] { journal.Rollback(*this); }); // 후속 Create 예외도 이전 생성분 회수
     for (const EntityRecord& record : prepared.entities) {
         EntityHandle handle = entities_.Create(record.persistentId);   // strong guarantee
         journal.created.push_back(handle);                         // 재할당 없음
         if (!AttachComponents(handle, record, journal)) {
-            journal.Rollback(*this);
-            return ActivationResult::Failed;
+            return ActivationResult::Failed; // scope guard가 rollback
         }
     }
-    RegisterCellIndexes(prepared.id, journal.created);
+    RegisterCellIndexes(prepared.id, journal.created, journal);
     PublishCell(prepared.id, std::move(prepared.pinnedAssets), std::move(journal.created));
+    rollback.Commit(); // PublishCell이 성공한 뒤에만 정리 가드 해제
     return ActivationResult::Committed;
 }
 ```
 
 `Validate()`는 live pointer가 없는지, entity record의 persistent ID와 스키마 버전이 요청과 맞는지, `CellBounds`와 `residentBytes`가 상한 안인지를 검사한다. `worldGeneration`은 월드 전환 epoch이고 `requestGeneration`은 같은 월드에서 같은 셀을 다시 요청할 때마다 증가하는 토큰이므로, 완료 callback뿐 아니라 commit 직전에도 현재 활성 요청과 다시 비교한다.
 
-중간 실패에서 일부 entity만 남지 않게 activation journal로 rollback한다. 스니펫은 부작용 전에 journal 용량을 확보하므로 `push_back`이 재할당으로 실패하지 않고, `entities_.Create`는 실패 시 아무것도 만들지 않는 strong guarantee를, `Commit`·`Destroy`는 실패하지 않는 no-fail 계약을 갖는다. 더 단순한 방법은 필요한 용량을 사전 예약하고 모든 검증을 먼저 끝내 commit 구간이 실패하지 않도록 만드는 것이다.
+중간 실패에서 일부 entity만 남지 않게 activation journal로 rollback한다. 스니펫은 부작용 전에 journal 용량을 확보하므로 `push_back`이 재할당으로 실패하지 않고, `entities_.Create`는 실패 시 아무것도 만들지 않는 strong guarantee를, `RegisterCellIndexes`는 부분 등록도 journal에 기록하고, `PublishCell`은 사전 예약된 저장소로 no-fail 게시를 수행해야 한다. rollback의 역등록·Destroy도 실패하지 않아야 한다. 각 Create의 strong guarantee만으로 앞서 만든 다른 entity까지 자동 복구되지는 않으므로 scope guard는 예외 탈출에도 journal을 되돌린다. 더 단순한 방법은 필요한 용량을 사전 예약하고 모든 검증을 먼저 끝내 commit 구간이 실패하지 않도록 만드는 것이다.
 
 `PreparedCell::pinnedAssets`는 성공 commit에서 `PublishCell`로 이동해 활성 셀이 소유한다. 실패·stale 반환 시에는 `prepared`의 소유권이 호출자에게 남아 pin을 회수하며, entity component가 pin을 따로 소유하는 경우에도 그 획득을 commit 안에서 명시한다.
 
@@ -387,7 +390,8 @@ struct SaveHeader {
 |---|---|
 | runtime handle | 한 실행·한 generation |
 | persistent entity GUID | 저장과 로드 사이 |
-| asset ID/content hash | 빌드와 패치 사이 |
+| asset ID | 논리 에셋 식별자로 빌드·패치 사이 유지 |
+| content hash | 특정 바이트 내용의 revision 식별자; 내용 변경 시 바뀜 |
 | player/account ID | 서비스 권위 저장소 |
 
 runtime handle을 그대로 저장하지 않는다. 로드 시 persistent ID에서 새 handle로 매핑한다.

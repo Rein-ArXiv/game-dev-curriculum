@@ -431,7 +431,9 @@ ServerSelection ChooseServer(const std::vector<PlayerId>& players) {
         bool acceptable = true;
         for (auto& p : players) {
             float ping = EstimatePing(p, loc);
-            if (!std::isfinite(ping)) { acceptable = false; break; } // NaN RTT 후보 제외
+            if (!std::isfinite(ping) || !policy.PlayerRttAcceptable(p, loc, ping)) {
+                acceptable = false; break;          // 유효하지 않거나 하드 상한 초과
+            }
             sum += ping;
             worst = std::max(worst, ping);          // 최악 핑 추적
         }

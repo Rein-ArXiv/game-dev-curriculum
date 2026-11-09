@@ -77,7 +77,7 @@ CLRS의 분석·증명 체계와 *The Algorithm Design Manual*의 문제 모델�
 
 검증 규모는 고정 사례 45개(520,927 CHECK) + 시드 무작위 property 11종(6,950 표본)이고, CTest는 전체 1개 + step별 8개 + property 1개 + bench smoke 1개로 11개다. 무력화 변이는 15건 주입해 14건이 검출됐고, 생존한 1건은 `step08`에 사유와 함께 기록돼 있다 — Kraft 검사가 잡지 못하는 손상을 checksum이 어차피 잡으므로, 그 변이는 "검사가 잡는 척"하지 않고 생존으로 남겼다.
 
-여기 기록한 CHECK 수·mutation score·CTest 수·benchmark는 이 ZIP에 포함되지 않은 `projects/mini/algorithms_lab` 등 별도 lab의 과거 검수 기록이며, 이 문서 묶음만으로 재실행해 검증한 결과가 아니다.
+여기 기록한 CHECK 수·mutation score·CTest 수·benchmark는 `projects/mini/algorithms_lab` 등 실습 프로젝트의 과거 검수 기록이다. 현재 구현의 결과를 확인하려면 해당 lab의 실행 조건과 명령으로 다시 검증하고, 문서에 인용된 기록과 새 실행 결과를 구분한다.
 
 **mega가 흡수한 것.** 위 알고리즘 중 게임에 실제 이유가 있는 여섯 개는 `projects/mega`의 제품 경로에 들어가 있다(`include/algo/`). 리플레이 본문의 canonical Huffman, 미로 생성의 Kruskal + DSU, 건설 가능 칸 판정의 절단점, 해금 그래프의 위상 정렬 + SCC, 입장 토큰 스캔의 Aho-Corasick, 스냅샷 관련도 상위 K의 quickselect다. 흡수의 기준은 "알고리즘이 멋있는가"가 아니라 **임시 구현을 교체하거나 없던 기능을 만드는가**이며, 그 이유를 만들지 못한 알고리즘은 lab에만 둔다.
 

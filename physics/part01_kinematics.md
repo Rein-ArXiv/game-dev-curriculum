@@ -2,7 +2,7 @@
 
 게임 물리의 출발점. 모든 동역학 (힘·충돌·관절) 이 *운동학 (Kinematics)* 위에 올라간다. 운동학은 *힘은 다루지 않고 운동만 기술* — *위치 $\vec{x}$, 속도 $\vec{v}$, 가속도 $\vec{a}$* 라는 세 양과 시간 적분의 관계.
 
-이 단계가 가볍게 보이지만, 실제 게임 엔진의 *많은 안정성 문제* 가 여기서 결정된다. *Explicit Euler* 와 *Semi-implicit Euler* 의 코드 차이는 한 줄이지만 *시뮬레이션의 발산 여부* 에 큰 영향을 준다. *가변 dt* 와 *고정 dt* 의 차이는 *프레임 드랍 시 결과와 재현성* 을 크게 바꾼다. 다만 이 선택들이 *충분조건은 아니다* — 고정 dt + semi-implicit 도 step 대비 이동량이 크면 얇은 장애물을 discrete collision 으로 놓치고 (15절 CCD), spring 고유진동수에 비해 step 이 크면 발산한다 (Part02 §6.4).
+이 단계가 가볍게 보이지만, 실제 게임 엔진의 *많은 안정성 문제* 가 여기서 결정된다. *Explicit Euler* 와 *Semi-implicit Euler* 의 코드 차이는 한 줄이지만 *시뮬레이션의 발산 여부* 에 큰 영향을 준다. *가변 dt* 와 *고정 dt* 의 차이는 *프레임 드랍 시 결과와 재현성* 을 크게 바꾼다. 다만 이 선택들이 *충분조건은 아니다* — 고정 dt + semi-implicit 도 step 대비 이동량이 크면 얇은 장애물을 discrete collision 으로 놓치고 (Part15 CCD), spring 고유진동수에 비해 step 이 크면 발산한다 (Part02 §6.4).
 
 이 글의 목표.
 
@@ -79,9 +79,7 @@ struct Particle {
 
 ### 1.3 더 높은 차수의 도함수는 게임에서 안 쓰는가
 
-이론상 *jerk (가속도의 변화율, m/s³)*, *snap (m/s⁴)* 도 있다. 우주선 궤적 분석 같은 *정밀 시뮬레이션* 엔 활용. 게임은 보통 *가속도까지*. 그 이상은 *시각적 차이 무시 가능 + 계산 비용 무가치*.
-
-예외: *카메라 motion blur* 가 *jerk 를 곱한 항* 을 활용할 수 있다. 일반적이지 않다.
+이론상 *jerk (가속도의 변화율, m/s³)*, *snap (m/s⁴)* 도 있다. 우주선 궤적 분석 같은 *정밀 시뮬레이션* 엔 활용. 이 글의 입자 모델은 가속도까지만 상태로 다룬다. 더 높은 도함수가 무가치한 것은 아니다. 카메라·이동 경로처럼 가속도 변화의 부드러움이 중요한 곳에서는 jerk 제한을 설계 목표로 둘 수 있다. 다만 모든 입자에 jerk·snap을 별도 저장해야 하는 것은 아니다.
 
 ### 1.4 좌표계와 단위
 
@@ -185,7 +183,7 @@ void StepSemiImplicitEuler(Particle& p, vec3 force, float mass, float dt) {
 }
 ```
 
-코드 차이는 *두 줄 순서 바꿈*. 하지만 *진동 시스템에서 발산 없이 평균적으로 bounded* — *symplectic integrator*. Box2D, Bullet, Unity 모두 *semi-implicit Euler* 를 기본 채택. 이유는 5절.
+코드 차이는 *두 줄 순서 바꿈*. 하지만 *무감쇠 조화진동자에서 hω<2일 때 에너지 오차가 bounded* — 위치만의 보존력과 고정 step을 전제한 *symplectic integrator*. 임의의 힘·step에서 안정성을 보장하지는 않는다. Box2D, Bullet, Unity 모두 *semi-implicit Euler* 를 기본 채택. 이유는 5절.
 
 ### 3.3 Velocity Verlet
 
@@ -217,7 +215,7 @@ void StepRK4(Particle& p, /* ... */, float dt) {
 }
 ```
 
-*정확하지만 비쌈* + *복잡*. 게임의 실시간 시뮬레이션은 거의 *RK4 안 씀*. *우주선 궤도 시뮬*, *공학 시뮬레이션* 에는 표준.
+*정확하지만 비쌈* + *복잡*. 게임의 실시간 시뮬레이션은 거의 *RK4 안 씀*. 매끄러운 ODE에서 높은 단기 정확도가 필요하면 후보가 된다. 장기 궤도에서는 symplectic 방법, 강직한 문제에서는 implicit 방법이 더 적합할 수 있다.
 
 ### 3.5 정확도 vs 안정성의 분리
 
@@ -389,7 +387,7 @@ x += v * dt;        // 새 v 로 x
 
 ### 5.3 Symplectic Integrator 의 직관
 
-Semi-implicit Euler 는 *수학적으로 symplectic* — 이산 step map 이 Hamiltonian 계의 *symplectic form* 을 보존한다. 그 결과 (exact arithmetic 에서) 위상 공간 (phase space) 의 *부피도 보존* 되고, 진동 시스템의 *에너지가 평균적으로 제한* 되는 토대가 된다. 단 *symplectic form 보존이 부피 보존을 함의* 할 뿐, 부피 보존만으로 symplectic 이라고 말할 수는 없다. 정의와 한정은 Part02 §5.3 이 소유한다.
+Semi-implicit Euler 는 *수학적으로 symplectic* — 이산 step map 이 Hamiltonian 계의 *symplectic form* 을 보존한다. 그 결과 (exact arithmetic 에서) 위상 공간 (phase space) 의 *부피도 보존* 되고, 진동 시스템의 *에너지가 평균적으로 제한* 되는 토대가 된다. 단 *symplectic form 보존이 부피 보존을 함의* 할 뿐, 부피 보존만으로 symplectic 이라고 말할 수는 없다. 정의와 한정은 Part02 §5.3에서 더 자세히 다룬다.
 
 ```mermaid
 flowchart LR
@@ -468,14 +466,14 @@ const float kMaxSpeed = 1000.0f;
 if (!std::isfinite(p.velocity.x) || !std::isfinite(p.velocity.y) || !std::isfinite(p.velocity.z)) {
     p.velocity = {0, 0, 0};               // 비유한 속도 차단 — Inf*0 NaN 회피
 } else {
-    float speed = std::hypot(p.velocity.x, p.velocity.y, p.velocity.z);  // 제곱합 overflow 없이 크기 계산
+    double speed = std::hypot(double(p.velocity.x), double(p.velocity.y), double(p.velocity.z));  // 제곱합 overflow 없이 크기 계산
     if (speed > kMaxSpeed) {
-        p.velocity *= kMaxSpeed / speed;
+        p.velocity *= static_cast<float>(kMaxSpeed / speed);
     }
 }
 ```
 
-`dot(v, v)` 로 크기를 재면 큰 유한 속도에서 제곱합이 먼저 Inf 가 되어 scale 이 0이 되고, Inf 성분이 있으면 `Inf * 0` 이 NaN 이 된다. 위처럼 유한성 검사 후 `std::hypot` 기반으로 정규화하면 overflow 없이 cap 이 적용된다. 게임 엔진의 *Rigidbody.maxLinearVelocity* 같은 설정이며, *수치 안전장치이지 tunneling (CCD) 의 대체가 아니다* — 얇은 장애물 통과는 연속 충돌 검사(CCD)로 다룬다.
+`dot(v, v)` 로 크기를 재면 큰 유한 속도에서 제곱합이 먼저 Inf 가 되어 scale 이 0이 되고, Inf 성분이 있으면 `Inf * 0` 이 NaN 이 된다. 위처럼 유한 float 성분을 double로 올려 `std::hypot`을 계산하면 최종 벡터 크기가 float 최대값보다 큰 경우에도 이 예제의 cap 비율을 구할 수 있다. float 반환형 hypot은 중간 제곱합은 피하지만 최종 크기 자체가 float 범위를 넘으면 Inf가 될 수 있다. 게임 엔진의 *Rigidbody.maxLinearVelocity* 같은 설정이며, *수치 안전장치이지 tunneling (CCD) 의 대체가 아니다* — 얇은 장애물 통과는 연속 충돌 검사(CCD)로 다룬다.
 
 ### 6.4 dt clamp (재강조)
 
@@ -542,7 +540,7 @@ $$
 운동학 변수가 NaN 이 되면 *후속 모든 적분이 NaN*. 시각적으로는 *객체 사라짐*. 디버그 신호.
 
 - $\vec{x}$ 또는 $\vec{v}$ 의 임의 성분이 `std::isfinite` 가 false.
-- *속도가 한 step 에 비현실적으로 큼* (예: $10^9$) → 위치가 한 step 만에 월드 밖으로 벗어난다. float 위치 자체가 overflow 하려면 $\Delta t = 1/60$ 에서 $v > 2 \times 10^{40}$ 이 필요하므로, NaN 보다 이 신호가 먼저 잡힌다.
+- *속도가 한 step 에 비현실적으로 큼* (예: $10^9$) → 위치가 한 step 만에 월드 밖으로 벗어난다. 위치가 0 근처인 단일 step에서 Δt=1/60의 변위만으로 float 범위를 넘으려면 v가 약 2×10^40이어야 해 유한 float 속도 범위 밖이다. 하지만 이미 큰 위치에 변위를 더하거나 가속도 계산이 먼저 overflow하면 다른 경로로 Inf가 생길 수 있다. 월드 범위 이탈과 산술 overflow는 별도로 진단한다.
 
 진입 시점에서 즉시 break 하는 assert 가 *원인 추적의 표준*. NaN 이 *전파된 후 발견* 하면 시점 추적 불가.
 

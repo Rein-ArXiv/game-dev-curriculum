@@ -122,7 +122,7 @@ LeaveCriticalSection(&cs);
 
 ## 2. Lock-free 프로그래밍 개요
 
-락을 쓰지 않는 알고리즘을 넓게 비차단(non-blocking)이라 부르고, 그중 진행 보장 수준에 따라 wait-free, lock-free, obstruction-free로 나뉜다. 여기서는 핵심 개념만 짚는다.
+비차단(non-blocking) 알고리즘은 다른 스레드의 중단에 의존하지 않는 진행 보장을 다룬다. 단순히 명시적인 락이 없다는 뜻은 아니며, 보장 수준에 따라 wait-free, lock-free, obstruction-free로 나뉜다. 여기서는 핵심 개념만 짚는다.
 
 ### 진행 보장 수준
 
@@ -446,14 +446,13 @@ int data = 0;  // 일반 변수
 void Producer() {
     data = 42;  // (1) 일반 쓰기
     ready.store(true, std::memory_order_release);  // (2) Release
-    // 보장: (1)이 (2)보다 먼저 다른 CPU에 보임
+    // 이 true를 읽는 acquire 이후에는 (1)의 결과를 사용할 수 있음
 }
 
 void Consumer() {
     while (!ready.load(std::memory_order_acquire));  // (3) Acquire
     printf("%d\n", data);  // (4) 일반 읽기
-    // 보장: (3)이 (4)보다 먼저 실행됨
-    //       (3)에서 true를 봤다면, (1)의 결과도 봄
+    // (3)에서 true를 봤다면 (1) happens-before (4)
 }
 ```
 
@@ -506,7 +505,7 @@ dmb ish                 ; Acquire barrier (Load-Load, Load-Store)
 ldr r3, [data]          ; 42가 보장됨
 ```
 
-ARM에서는 명시적 배리어가 필요하지만 Sequential Consistency보다 저렴하다.
+위 ARM 예시는 명시적 배리어를 쓰지만, ARMv8에서는 acquire/release 명령으로 구현할 수도 있다. seq_cst와의 비용 차이는 명령 매핑과 경합 상태에 따라 달라지며 항상 더 저렴하다고 단정할 수는 없다.
 
 ### Relaxed
 

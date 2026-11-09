@@ -83,7 +83,7 @@ Vec3 SpringFollow(Vec3 current, Vec3& velocity, Vec3 target,
 float armLen = Max(0.0f, idealDistance);
 if (SweepSphere(pivot, idealDir, idealDistance, cameraRadius, &hit))
     armLen = Max(0.0f, hit.distance);            // 막힌 곳까지만 줄인다 (즉시)
-float springLen = SpringFollow1D(currentLen, vel, armLen, /*halfLife=*/0.3f, dt); // 늘리기: 천천히
+float springLen = SpringFollow1D(currentLen, vel, armLen, /*smoothTime=*/0.3f, dt); // 늘리기: 천천히
 if (armLen < springLen) {                         // 막힘으로 잘리는 구간: 즉시 줄이고 속도 재설정
     currentLen = armLen;
     vel = 0;
@@ -174,7 +174,7 @@ FOV 각도를 직접 lerp하면 화면 확대율이 비선형으로 변한다. �
 
 FOV는 카메라의 마지막 표현 수단이다. 질주·부스트에서 FOV를 넓히면 속도감을 줄 수 있고, 조준에서는 좁혀 확대 효과를 만든다. 변화량은 화면 크기, 기준 FOV, 종횡비와 멀미 테스트로 정하며 장르 전체에 통하는 각도 범위는 없다. 계단형 전환이 의도된 컷이 아니라면 초점거리 또는 확대율 공간에서 연속적으로 보간한다.
 
-멀미는 카메라 시스템의 접근성 문제다. 원인의 대부분이 *시각 정보와 전정 기관의 불일치* 이고, 카메라가 만드는 불일치는 줄일 수 있다.
+멀미는 카메라 시스템의 접근성 문제다. *시각 정보와 전정 감각의 불일치* 는 대표적인 설명 중 하나다. 개인차가 크므로 한 가지 설정으로 모두 해결한다고 보장하지 않고, 사용자가 움직임·FOV·자동 보정을 조정할 수 있게 한다.
 
 | 유발 요인 | 완화 |
 |---|---|
@@ -305,7 +305,7 @@ example: clear for 0.25s    -> restore obstacle
 카메라 버그는 “기분이 나쁘다”로 보고되는 경우가 많다. 따라서 내부 상태를 화면에 보여 줄 수 있어야 한다.
 
 - 피벗, 이상적 위치, 충돌 후 위치
-- 스프링 속도와 half-life
+- 스프링 속도와 응답 시간(smoothTime 등 실제 매개변수)
 - 데드존과 safe frame
 - 활성 가상 카메라와 블렌드 가중치
 - 스프링 암 hit point와 hit normal

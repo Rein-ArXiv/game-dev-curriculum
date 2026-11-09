@@ -118,7 +118,7 @@ $$
 
 ## 4. Fractional Knapsack과 0/1 반례
 
-항목 $i$의 가치 $v_i$, 무게 $w_i$가 있고 용량 $W$가 있다.
+항목 $i$의 가치 $v_i\ge0$, 무게 $w_i>0$가 있고 용량 $W\ge0$가 있다.
 
 ### Fractional knapsack
 
@@ -181,7 +181,7 @@ Canonical coin system인지 증명되지 않은 임의 게임 화폐에 greedy�
 - 같은 지역 asset을 묶으면 I/O locality 증가
 - 한 tower upgrade가 다른 tower 효과를 증폭
 
-Marginal gain을 매번 재계산하는 greedy가 필요할 수 있다. 그러나 단조 submodular 최대화에서 greedy가 cardinality 제약 아래 보장하는 것은 정확한 최적이 아니라 $1-1/e$ 근사다. 예를 들어 coverage에서 $A=\{1,2,3,4\}$, $B=\{1,2,5\}$, $C=\{3,4,6\}$이고 두 집합을 고르면 greedy는 $A$ 다음 $B$를 골라 5를 얻지만, 최적은 $B\cup C$로 6이다. Greedy가 정확한 최적해를 주는 것은 matroid 위의 선형 가중치 같은 별도의 교환 구조가 있을 때다.
+Marginal gain을 매번 재계산하는 greedy가 필요할 수 있다. 그러나 비음수 단조 submodular 최대화에서 greedy가 cardinality 제약 아래 보장하는 것은 정확한 최적이 아니라 $1-1/e$ 근사다. 예를 들어 coverage에서 $A=\{1,2,3,4\}$, $B=\{1,2,5\}$, $C=\{3,4,6\}$이고 두 집합을 고르면 greedy는 $A$ 다음 $B$를 골라 5를 얻지만, 최적은 $B\cup C$로 6이다. Greedy가 정확한 최적해를 주는 것은 matroid 위의 선형 가중치 같은 별도의 교환 구조가 있을 때다.
 
 ### Tie-break의 영향
 

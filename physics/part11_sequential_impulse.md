@@ -45,7 +45,7 @@ $$
 K \vec{\lambda} = -J \vec{v} - \vec{b}
 $$
 
-$K = J M^{-1} J^T$ 가 m×m. *직접 풀이* (행렬 inverse) 는 $O(m^3)$ — 큰 m 에 비쌈.
+$K = J M^{-1} J^T$ 가 m×m. 일반 dense 행렬의 *직접 풀이* 는 보통 $O(m^3)$ — 큰 m 에 비쌈.
 
 ### 1.2 Gauss-Seidel 의 아이디어
 
@@ -195,7 +195,7 @@ void PreStep(float dt) {
 }
 ```
 
-`PrepareVelocityConstraint` 가 *r_A, r_B, effective mass, bias* 등 *step 내 불변량* 캐싱.
+`PrepareVelocityConstraint` 가 *r_A, r_B, effective mass, bias* 등 pose를 고정한 velocity pass 안의 불변량을 캐싱한다. sub-step에서 pose를 갱신하면 해당 값도 다시 계산한다.
 
 ### 2.5 Velocity iteration 의 수렴
 
@@ -206,6 +206,7 @@ iter 수가 늘면 일반적으로 residual이 감소하지만 수렴률은 stac
 velocity iteration *후* 적분 — 보정된 속도로 위치 갱신.
 
 ```cpp
+IntegrateExternalForcesToVelocity(world, dt); // 중력·외력을 먼저 반영
 PreStep(dt);
 for (int i = 0; i < kVelocityIters; ++i) { /* velocity iter */ }
 Integrate(world, dt);                       // x += v * dt
@@ -275,7 +276,7 @@ bool ContactConstraint::SolvePositionConstraint() {
 }
 ```
 
-`kBaumgarte`, `kLinearSlop`, `kMaxLinearCorrection` 은 단위계와 dt에 맞춘 solver 파라미터다. 특정 숫자를 복사하기보다 허용 penetration과 최대 보정 속도로 의미를 정의한다.
+위 코드는 병진만 보정한 축약 예다. 일반 강체 접촉은 회전 유효질량과 회전 위치 보정도 포함한다. `kBaumgarte`, `kLinearSlop`, `kMaxLinearCorrection` 은 단위계와 dt에 맞춘 solver 파라미터다. 특정 숫자를 복사하기보다 허용 penetration과 최대 보정 속도로 의미를 정의한다.
 
 ### 3.4 위치 보정의 운동량 모델
 
@@ -342,7 +343,7 @@ warm start 캐시는 다음 계약을 만족할 때만 유효하다.
 | 큰 시뮬 (수백 contact) | 느림 | 안정 |
 | 시각적 부드러움 | jitter 가능 | 부드러움 |
 
-iter 수 절반 — 핫 패스 비용 절감.
+위 표는 설명용 예시이며 보장된 성능 수치가 아니다. 실제 장면에서 같은 잔차 기준으로 비용 절감을 측정한다.
 
 ### 4.4 Contact persistence
 
@@ -457,7 +458,7 @@ int desiredIters = std::min(
     kMaxIters);
 ```
 
-비결정적 로컬 품질 모드에서만 *복잡도 자동 감지* — 침투가 큰 frame 에 *iter 증가* — 를 허용한다.
+접촉 수나 침투량처럼 같은 시뮬 상태에서 결정되는 값은 결정적 규칙으로 조정할 수 있다. wall-clock 비용에 따라 조정하는 정책은 비결정적 로컬 품질 모드로 제한한다.
 
 ### 6.5 Substepping 의 대안
 
@@ -472,7 +473,7 @@ for (int i = 0; i < kSubSteps; ++i) {
 }
 ```
 
-4 sub-step + iter 8 = 효과적으로 32 iter 의 dt. 더 안정적이지만 *4 배 충돌 검사 비용* 도.
+4 sub-step마다 8회를 풀면 총 32회의 constraint sweep이지만, 큰 step에서 32회 반복한 것과 동등하지 않다. pose·접촉 갱신 빈도가 다르며, broad/narrow phase를 매 sub-step 새로 실행하는지에 따라 충돌 검사 비용도 달라진다.
 
 ### 6.6 측정 기반 튜닝
 
@@ -484,7 +485,7 @@ if (lastFrameTime > kPhysicsFrameBudget) iter = std::max(iter - 1, 4);
 else if (lastFrameTime < kPhysicsFrameBudget * 0.5f) iter = std::min(iter + 1, 20);
 ```
 
-`lastFrameTime` 은 PC 부하·스케줄러에 따라 달라지므로 같은 입력에서도 solver 횟수가 바뀌고, 최소 반복으로도 frame budget을 넘으면 조정만으로 frame drop을 보장 회피하지 못한다. 측정 기반 adaptive 정책에는 *최소 정확성 하한*, *최악 작업량 한도*, *부채 처리 정책*(반복을 다음 frame으로 이월하거나 품질을 낮춤)을 함께 둔다.
+`lastFrameTime` 은 PC 부하·스케줄러에 따라 달라지므로 같은 입력에서도 solver 횟수가 바뀌고, 최소 반복으로도 frame budget을 넘으면 조정만으로 frame drop을 보장 회피하지 못한다. 측정 기반 adaptive 정책에는 *최소 정확성 하한*, *최악 작업량 한도*, *예산 초과 정책*(시뮬 시간 부채를 제한하거나 품질을 낮춤)을 함께 둔다.
 
 ## 7. Island solver
 

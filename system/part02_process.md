@@ -8,7 +8,7 @@
 
 이 글은 운영체제의 가장 핵심적인 추상화인 프로세스의 본질을 분해한다. 리눅스 커널이 프로세스를 어떻게 표현하고, 생성하고, 관리하는지를 `task_struct`, `kernel_clone`, `copy_process`, `execve`, `wait`까지 코드 레벨에서 따라간다.
 
-특히 fork-exec 모델, Copy-on-Write, 그리고 스레드와 프로세스의 통일된 추상화인 `clone`에 집중한다. 이 세 가지가 UNIX 프로세스 모델의 핵심이며, 컨테이너와 PID 네임스페이스로 이어지는 분기점이다.
+아래 커널 내부 코드 조각은 흐름을 설명하기 위해 여러 세부 사항과 오류 처리를 생략한 개념적 축약이다. 실제 함수의 순서와 시그니처는 커널 버전에 따라 확인해야 한다. 특히 fork-exec 모델, Copy-on-Write, 그리고 스레드와 프로세스의 통일된 추상화인 `clone`에 집중한다. 이 세 가지가 UNIX 프로세스 모델의 핵심이며, 컨테이너와 PID 네임스페이스로 이어지는 분기점이다.
 
 
 ---
@@ -331,7 +331,7 @@ void wake_up_process(struct task_struct *p)
 wait_event_interruptible(wq, condition);
 ```
 
-이 상태에서 `SIGINT` (Ctrl-C)와 같은 시그널을 받으면 즉시 깨어나고, 시스템 콜은 `-EINTR`을 반환한다.
+처리 가능한 시그널이 대기를 깨울 수 있다. 사용자 공간에서 시스템 콜이 `EINTR`로 실패할지 자동 재시작될지는 호출과 시그널 핸들러 설정 등에 따라 달라진다.
 
 ### TASK_UNINTERRUPTIBLE: 인터럽트 불가능한 대기
 
@@ -791,7 +791,7 @@ void wake_up_new_task(struct task_struct *p)
 
 **Copy-on-Write (COW)**는 이 문제를 해결한다. `fork` 시 실제로 메모리를 복사하지 않고, 부모와 자식이 같은 물리 페이지를 **공유**한다. 페이지 테이블 엔트리를 **읽기 전용**으로 설정한다.
 
-부모나 자식이 페이지에 쓰기를 시도하면, **페이지 폴트**가 발생한다. 커널이 이를 포착하고, 그제야 페이지를 복사한다.
+복사 대상인 private writable 매핑에서 부모나 자식이 쓰기를 시도하면 **페이지 폴트**가 발생한다. 커널은 필요하면 페이지를 복사하고, 이미 독점된 페이지라면 복사 없이 쓰기 가능하게 바꿀 수도 있다. `MAP_SHARED` 매핑은 이 private COW 계약과 다르다.
 
 ```text
 fork() 직후:
@@ -1826,16 +1826,17 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                       CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID);
 
     /*
-     * raw clone은 커널이 준비한 새 스택에서 자식을 시작한다. 자식은 이 C 함수의
-     * 프레임/반환 주소로 정상 반환하지 않으며, glibc는 새 스택에 자식 함수를
+     * raw clone은 커널이 준비한 새 스택에서 자식을 시작한다. 자식이 이 C 함수의
+     * 프레임/반환 주소로 정상 반환하도록 단순히 syscall을 호출해서는 안 되며, glibc는 새 스택에 자식 함수를
      * 호출하고 종료하는 trampoline을 둔다. libc의 clone(fn, stack, flags, arg)도
      * 이런 trampoline을 제공한다.
      * x86-64 raw clone ABI: flags, stack, parent_tid, child_tid, tls
      */
+    // 개념적 표시: 실제 glibc는 아래 직접 syscall 대신 trampoline 경로를 사용한다.
     pid_t pid = syscall(__NR_clone, clone_flags, stack,
                         &pd->tid, &pd->tid, tls);
 
-    /* 아래 return은 부모 쪽 경로에만 해당한다. 자식은 start_routine에서 시작한다. */
+    /* 실제 구현에서는 trampoline이 자식 쪽에서 start_routine을 호출한다. */
     /* ... */
     return 0;
 }
@@ -2484,7 +2485,9 @@ int main() {
         return 1;
     }
 
-    Process *procs = malloc(10000 * sizeof(Process));
+    const int capacity = 10000;
+    Process *procs = malloc(capacity * sizeof(Process));
+    if (!procs) { closedir(dir); return 1; }
     int count = 0;
 
     struct dirent *ent;
@@ -2492,6 +2495,7 @@ int main() {
         if (!isdigit(ent->d_name[0]))
             continue;
 
+        if (count == capacity) break;  /* 이 단순 예제는 초과 프로세스를 생략한다 */
         int pid = atoi(ent->d_name);
         if (read_process_info(pid, &procs[count]) == 0)
             count++;

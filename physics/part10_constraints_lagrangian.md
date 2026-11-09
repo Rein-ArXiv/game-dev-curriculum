@@ -75,7 +75,7 @@ $$
 | 종류 | 제약 식 |
 |---|---|
 | Distance joint | $|x_A - x_B| - L = 0$ |
-| Hinge (revolute) | $x_A^{world} - x_B^{world} = 0$ (점 일치) |
+| Hinge (revolute) | $x_A^{world} - x_B^{world} = 0$ (점 일치), 3D에서는 회전축 정렬 2행 추가 |
 | Slider (prismatic) | 한 축 외 운동 제거 |
 | Motor | 각속도 = 목표 |
 | Limit | 각도 / 거리 한도 $\theta_{min} \le \theta \le \theta_{max}$ |
@@ -96,7 +96,7 @@ $$
 | Slider | 5 (위치 2 + 회전 3) | 1 (한 축 이동) |
 | 자유 | 0 | 6 |
 
-각 관절을 *제약 식의 개수* 로 표현 — 독립 활성 제약이 많을수록 자유도가 적다. 위 표의 수치는 겹치지 않는 정규 직교 행을 가정한 어림이며, 일반 자유도 수와 저장 성분 수(q의 성분 개수)는 구분한다.
+각 관절을 *제약 식의 개수* 로 표현 — 독립 활성 제약이 많을수록 자유도가 적다. 위 표의 수치는 관절이 특이하지 않은 배치에서 독립 제약을 세어 얻으며, 일반 자유도 수와 저장 성분 수(q의 성분 개수)는 구분한다.
 
 ## 2. 속도 제약과 Jacobian
 
@@ -202,7 +202,7 @@ $$
 J \dot{\vec{v}} + \dot{J} \vec{v} = 0
 $$
 
-게임 솔버가 실제로 푸는 것은 *한 step 동안의 Jacobian을 고정한* 이산 속도 투영이다. 이 근사에서 $\dot{J}\vec{v}$ 항(회전·자이로스코픽 등)은 step 안에서 무시된다. 외력이 반영된 속도를 $\vec{v}^* = \vec{v} + \Delta t\, M^{-1}\vec{F}_{ext}$ 로 두고 제약력 미정승수를 $\lambda_{force}$ 라 하면:
+게임 솔버가 실제로 푸는 것은 *한 step 동안의 Jacobian을 고정한* 이산 속도 투영이다. 이 근사에서는 제약 기하의 변화인 $\dot{J}\vec{v}$를 명시적으로 풀지 않는다. 강체 자체의 자이로스코픽 항은 이 항과 다르며, 3D 자유 운동 속도를 만들 때 별도로 반영할 수 있다. 외력이 반영된 속도를 $\vec{v}^* = \vec{v} + \Delta t\, M^{-1}\vec{F}_{ext}$ 로 두고 제약력 미정승수를 $\lambda_{force}$ 라 하면:
 
 $$
 J \vec{v}^* + \Delta t\, J M^{-1} J^T \lambda_{force} = 0
@@ -230,13 +230,13 @@ $$
 
 ### 3.5 제약력과 운동량 보존
 
-$\vec{F}_c = J^T \lambda$ 의 효과:
+힘을 시간 적분한 제약 임펄스 $\vec{P}=J^T\Lambda_{impulse}$ 의 효과:
 
 $$
-M \Delta \vec{v} = J^T \lambda
+M \Delta \vec{v} = J^T \Lambda_{impulse}
 $$
 
-두 강체에 분배 — *내부 힘* (action-reaction). 운동량 보존 자연 만족.
+상대 좌표에 대한 내부 제약이면 두 강체에 action-reaction으로 분배되어 총 운동량을 보존한다. 월드에 고정한 제약이나 외부 구동 모터는 외부와 운동량을 교환하므로 모든 Jacobian 제약에 같은 결론을 적용하지 않는다.
 
 ### 3.6 미정승수의 의미
 
@@ -339,7 +339,7 @@ $$
 \vec{w} = A \vec{\lambda} + \vec{q}, \quad \vec{\lambda} \ge 0, \quad \vec{w} \ge 0, \quad \vec{\lambda}^T \vec{w} = 0
 $$
 
-$A = J M^{-1} J^T$ (inverse effective mass matrix), $\vec{q} = J \vec{v} + b$.
+$A = J M^{-1} J^T$ (inverse effective mass matrix), $\vec{q} = J \vec{v}^{*} + b$. 여기의 $\vec{v}^{*}$는 제약 임펄스 적용 전 자유 운동 속도이며, $\vec{w}$는 적용 후 잔차다.
 
 ### 5.3 MLCP (Mixed LCP)
 
@@ -602,7 +602,7 @@ void WarmStart() {
 }
 ```
 
-수렴 가속 — 평균 iter 수 *3~5* 까지 줄어듦.
+수렴 가속 — 필요한 반복 수의 감소는 장면의 시간적 연속성, 접촉 대응과 질량비에 따라 측정한다.
 
 ### 7.6 모든 제약이 같은 코드
 
@@ -621,7 +621,7 @@ void WarmStart() {
 
 ### 8.1 Box2D
 
-`b2Joint` (관절들) + `b2Contact` (충돌) 가 *모두 같은 솔버* 안에서 처리.
+Box2D v2.4의 `b2Joint` (관절들) + `b2Contact` (충돌) 가 *모두 같은 솔버* 안에서 처리.
 
 - `b2Joint::InitVelocityConstraints` ≈ `PrepareVelocityConstraint`.
 - `b2Joint::SolveVelocityConstraints` ≈ `SolveVelocityConstraint`.

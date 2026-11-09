@@ -61,7 +61,7 @@ uint32_t murmur3_finalize(uint32_t h) {
 }
 ```
 
-FNV-1a는 매우 간단하면서도 좋은 분포를 제공한다. 각 바이트를 XOR한 후 소수를 곱하는 과정을 반복하는데, 이 소수 값들은 수학적으로 좋은 분포를 만들도록 선택되었다. MurmurHash3는 더 복잡한 비트 믹싱을 통해 더 나은 균등 분포를 제공하지만, 계산 비용이 약간 더 든다.
+FNV-1a는 각 바이트를 XOR한 후 소수를 곱하는 간단한 해시다. 다만 낮은 비트의 확산은 약하다. 특히 최하위 비트는 입력 바이트들의 최하위 비트에만 영향을 받으므로, 아래처럼 2의 거듭제곱 크기 테이블에서 하위 비트만 마스킹할 때는 키 분포와 추가 믹싱을 살펴야 한다. MurmurHash3는 더 복잡한 비트 믹싱을 사용하지만 계산 비용도 든다.
 
 해시 값을 배열 인덱스로 변환할 때도 주의가 필요하다:
 
@@ -214,7 +214,7 @@ public:
 
 Open Addressing의 장점은 명확하다. **캐시 친화적**이다. 모든 데이터가 연속된 배열에 있어 공간 지역성(spatial locality)이 우수하다. **메모리 효율적**이다. 포인터 오버헤드가 없고, 단일 배열 할당만 필요하다.
 
-하지만 삭제가 복잡하다. 단순히 슬롯을 비우면 탐색 체인이 끊어진다. 따라서 "톰스톤(tombstone)" 상태가 필요하다. 그리고 로드 팩터가 높아지면 성능이 급격히 저하된다.
+하지만 삭제가 복잡하다. 단순히 슬롯을 비우면 탐색 체인이 끊어진다. 위 구현은 이를 막기 위해 "톰스톤(tombstone)" 상태를 사용한다. 뒤에서 볼 backward shift는 다른 해결책이다. 그리고 로드 팩터가 높아지면 성능이 급격히 저하된다.
 
 위 축약 코드는 `slots.size()`가 0이 아닌 2의 거듭제곱이고 `rehash()`가 더 큰 배열에 원소를 다시 삽입한다는 계약을 전제로 한다. 실제 구현은 tombstone 수도 별도로 세어, 살아 있는 원소의 load factor가 낮더라도 tombstone이 probe chain을 길게 만들면 재해시한다.
 
@@ -222,9 +222,9 @@ Open Addressing의 장점은 명확하다. **캐시 친화적**이다. 모든 �
 
 로드 팩터 $\alpha = n / m$ (n은 요소 수, m은 슬롯 수)은 해시 테이블 성능의 핵심 지표이다.
 
-Chaining에서 평균 탐색 길이는 대략 $1 + \alpha/2$ 이다. $\alpha = 1.0$ 이어도 평균 1.5번만 탐색하면 된다. 하지만 각 탐색이 캐시 미스를 동반한다면 실제 성능은 이론보다 훨씬 나쁘다.
+Chaining에서 키가 버킷에 균등하게 분포하고 저장된 키를 같은 확률로 조회한다면, 성공 탐색의 평균 비교 횟수는 대략 $1 + \alpha/2$ 이다. $\alpha = 1.0$ 이면 약 1.5번이다. 실패 탐색은 해당 체인 전체를 읽으므로 평균 약 $\alpha$번이다. 하지만 각 탐색이 캐시 미스를 동반한다면 실제 성능은 이론보다 훨씬 나쁘다.
 
-단순 균등 해싱 가정 아래 linear probing의 성공 탐색 기대 probe 수는 대략
+각 키의 시작 버킷이 독립적으로 균등하게 선택되고 삭제 표식이 없는 linear probing 모델에서, 성공 탐색 기대 probe 수는 대략
 $\frac{1}{2}(1 + \frac{1}{1-\alpha})$, 실패 탐색은
 $\frac{1}{2}(1 + \frac{1}{(1-\alpha)^2})$다. $\alpha$가 1에 가까워질수록 특히 실패 탐색과 삽입 비용이 급격히 커진다. 재해시 임계값은 구현의 probe 정책, SIMD group 크기와 삭제 방식에 따라 달라지므로 0.7이 보편 규칙은 아니다.
 
@@ -339,7 +339,9 @@ $$h(k, i) = (h(k) + i) \mod m, \quad i = 0, 1, 2, \ldots$$
 size_t find_slot_linear(const K& key) {
     size_t index = hash(key) & (slots.size() - 1);
 
-    while (slots[index].state != EMPTY) {
+    for (size_t probes = 0;
+         probes < slots.size() && slots[index].state != EMPTY;
+         ++probes) {
         if (slots[index].state == OCCUPIED &&
             slots[index].key == key) {
             return index;
@@ -402,7 +404,7 @@ Double Hashing은 두 개의 독립적인 해시 함수를 사용한다:
 
 $$h(k, i) = (h_1(k) + i \cdot h_2(k)) \mod m$$
 
-여기서 $h_2(k)$ 는 0이 아니어야 하며, 일반적으로 홀수로 만든다.
+모든 슬롯을 방문하려면 $h_2(k)$와 $m$이 서로소여야 한다. 아래처럼 $m$이 2의 거듭제곱이면 홀수 간격으로 이를 만족시킨다.
 
 ```cpp
 size_t hash1(const K& key) const {
@@ -432,7 +434,7 @@ size_t find_slot_double(const K& key) {
 
 위 helper들은 반환값의 의미가 서로 다르다. `find_slot_linear`는 못 찾으면 `NOT_FOUND`를, `find_slot_quadratic`/`find_slot_double`은 삽입 가능한 빈 인덱스를 돌려준다. 검색 결과와 삽입 위치는 별도 타입으로 구분하는 편이 안전하다. 또한 `Equal(a, b)`이면 반드시 `Hash(a) == Hash(b)`여야 하며, double hashing의 제2 해시도 패딩을 제외한 같은 정규화 값으로 계산한다.
 
-각 키가 고유한 탐색 순서를 가지므로 2차 클러스터링도 회피한다. 이론적으로 가장 좋은 분포를 제공한다.
+같은 시작 버킷에서도 제2 해시가 다르면 탐색 순서가 달라져 2차 클러스터링을 줄인다. 다만 두 해시 값이 모두 같은 키들은 여전히 같은 순서를 따르므로 키마다 고유한 순서를 보장하지는 않는다.
 
 하지만 두 해시 함수 계산 비용과 비순차적 메모리 접근으로 인해, 실전에서는 Linear Probing보다 느릴 수 있다. 현대 CPU의 프리페처가 순차 접근을 매우 효율적으로 처리하기 때문이다.
 
@@ -444,7 +446,7 @@ Robin Hood Hashing은 Pedro Celis의 1986년 박사 학위 논문(University of 
 
 Robin Hood의 핵심은 각 요소가 "이상적 위치"에서 얼마나 떨어져 있는지를 추적하는 것이다. 이를 **Probe Sequence Length (PSL)** 이라 부른다.
 
-$$\text{PSL} = \text{현재 인덱스} - \text{이상적 인덱스}$$
+$$\text{PSL} = (\text{현재 인덱스} - \text{이상적 인덱스} + m) \bmod m$$
 
 예를 들어, 키 K의 해시 값이 5인데 인덱스 8에 저장되어 있다면, PSL은 3이다.
 
@@ -467,7 +469,7 @@ class RobinHoodMap {
 };
 ```
 
-PSL을 `uint8_t`로 선택한 이유는 실전에서 PSL이 255를 초과하는 경우가 거의 없기 때문이다. 메모리 효율을 위한 선택이다.
+PSL을 `uint8_t`로 선택하면 메모리를 아낄 수 있지만, 아래 코드는 거리가 255를 넘지 않는 범위에서만 올바르다. 낮은 load factor만으로 이 조건을 보장할 수는 없다. 넘침을 처리하는 정책은 뒤의 구현 가이드에서 다시 다룬다.
 
 ### 삽입 알고리즘: "부자"를 밀어내기
 
@@ -684,7 +686,7 @@ PSL:   0   0   1
 
 Backward Shift의 장점:
 - **톰스톤 불필요**: 테이블이 깨끗하게 유지됨
-- **성능 저하 없음**: 삭제가 장기적 영향을 주지 않음
+- **톰스톤 축적 없음**: 삭제 표식이 쌓여 탐색을 길게 만드는 문제를 피함
 - **메모리 효율**: State 필드가 단순 bool로 충분
 
 ### 비교 벤치마크의 설계
@@ -1053,7 +1055,7 @@ public:
 
         // 새 문자열 저장
         auto buffer = std::make_unique<char[]>(str.size() + 1);
-        std::memcpy(buffer.get(), str.data(), str.size());
+        if (!str.empty()) std::memcpy(buffer.get(), str.data(), str.size());
         buffer[str.size()] = '\0';
 
         const char* ptr = buffer.get();
@@ -1156,7 +1158,7 @@ auto duration2 = std::chrono::high_resolution_clock::now() - start;
 
 **Unreal Engine의 FName**:
 
-Unreal은 FName이라는 인터닝 시스템을 사용한다:
+Unreal은 FName이라는 인터닝 시스템을 사용한다. 다음은 정수 비교의 원리를 보여주는 개념 코드이며 실제 클래스 정의는 아니다:
 
 ```cpp
 class FName {
@@ -1172,8 +1174,8 @@ public:
                Number == Other.Number;
     }
 
-    bool operator<(const FName& Other) const {
-        // 정렬도 O(1)
+    bool FastLess(const FName& Other) const {
+        // 인덱스 순 비교도 O(1); 문자열 사전순은 아님
         return ComparisonIndex < Other.ComparisonIndex ||
                (ComparisonIndex == Other.ComparisonIndex &&
                 Number < Other.Number);
@@ -1190,6 +1192,8 @@ if (entity.Tag == PlayerTag) {  // 두 개의 정수 비교만
 ```
 
 FName은 태그, 컴포넌트 이름, 프로퍼티 이름 등 Unreal 전체에서 사용된다. 문자열이지만 정수처럼 빠르다.
+
+실제 FName의 기본 동일성은 대소문자를 구분하지 않는다. 또한 `FastLess`의 인덱스 순서는 현재 프로세스 안에서만 안정적이다. 실행 간에 같은 문자열 사전순이 필요하면 `LexicalLess`를 사용하며, 내부 인덱스를 영속적인 문자열 ID로 저장하지 않는다.
 
 **StringID 패턴 - 컴파일 타임 해싱**:
 
@@ -1264,7 +1268,7 @@ public:
 
         // 실제 삽입
         auto buffer = std::make_unique<char[]>(str.size() + 1);
-        std::memcpy(buffer.get(), str.data(), str.size());
+        if (!str.empty()) std::memcpy(buffer.get(), str.data(), str.size());
         buffer[str.size()] = '\0';
 
         const char* ptr = buffer.get();
@@ -1326,7 +1330,7 @@ public:
 
 ## 7. 구현 가이드: 실전 Robin Hood Hash Map
 
-이론을 실천으로 옮길 시간이다. 실제 사용 가능한 Robin Hood Hash Map을 구현해보자.
+이론을 실천으로 옮길 시간이다. Robin Hood Hash Map의 삽입·탐색·삭제가 연결되는 교육용 골격을 구현해보자.
 
 ### 기본 구조
 

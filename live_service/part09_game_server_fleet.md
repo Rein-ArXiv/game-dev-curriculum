@@ -324,7 +324,7 @@ flowchart LR
 | 조인 | 강함 | 약함 (앱에서) |
 | 트랜잭션 | ACID | 제한적 |
 | 수평 확장 | 수동 샤딩 | 자동 파티셔닝 |
-| 일관성 | Strong | Eventual (대부분) |
+| 일관성 | 엔진·격리·복제 설정에 의존 | 제품·읽기 모드·복제 설정에 의존 |
 
 원칙 — *데이터 형태가 SQL/NoSQL 을 정한다*. *프로필/거래/결제* 는 *관계·트랜잭션·강한 일관성* 필요 → SQL. *매치 로그/이벤트 스트림/세션* 은 *쓰기 폭증·자동 샤딩* 필요 → NoSQL. 둘을 *혼용* 하는 것이 일반이다 — 한쪽을 억지로 모든 용도에 쓰면 어느 쪽이든 약점이 드러난다.
 
@@ -496,10 +496,11 @@ void PublishEvent(Event e) {
 ```cpp
 void HandleReward(const Event& e) {
     auto tx = db.Begin();
-    if (!tx.TryInsert(e.id)) return;             // 이미 commit된 키 — 저장된 결과로 동일 응답
-    tx.GrantReward(e.playerId, e.reward);        // 마커·효과·결과를 같은 transaction에 commit
+    // TryInsert는 UNIQUE 충돌을 트랜잭션을 중단하지 않는 방식으로 false로 반환한다.
+    if (tx.TryInsert(e.id))
+        tx.GrantReward(e.playerId, e.reward);    // 새 키에만 효과 적용
     tx.Commit();
-    queue.Ack(e);                                // ACK는 durable commit 뒤에
+    queue.Ack(e);                                // 새 처리와 중복 모두 durable 확인 뒤 ACK
     // 효과가 외부 시스템이면 outbox에 기록하고 수신자 멱등 처리로 재시도한다.
 }
 ```

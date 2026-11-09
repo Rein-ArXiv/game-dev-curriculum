@@ -173,7 +173,7 @@ struct Action {
     WorldState  precondition;  // 시작 조건(CanStart) — 시작 시 한 번 검사
     WorldState  invariant;     // 유지 불변식(MustRemainTrue) — Running 동안 계속 검사
     WorldState  effect;        // 완료 시 적용
-    float       cost = 1.0f;   // A* 간선 가중치 (선호도)
+    float       cost = 1.0f;   // 유한한 0 이상 A* 간선 가중치 (선호도)
 
     bool CanStart(const WorldState& s) const {     // 시작 가능 여부
         return s.Satisfies(precondition);
@@ -258,7 +258,7 @@ bool TryRegress(const WorldState& g, const Action& a, WorldState& out) {
 | FlankAttack | AtCover, AmmoAvailable, EnemyVisible | EnemyDead | 3 |
 | DirectAttack | AmmoAvailable, EnemyVisible | EnemyDead | 4 |
 
-비용은 행동의 *선호도* 를 인코딩한다. FlankAttack(3)이 DirectAttack(4)보다 싸므로, 둘 다 가능하면 플래너는 측면 공격을 선호한다. 효과가 같은 두 행동(둘 다 EnemyDead)이라도 전제조건과 비용이 달라, 상황과 선호에 따라 다른 경로가 선택된다. "전술적으로 더 나은" 계획을 비용으로 유도하는 것이 GOAP 튜닝의 한 축이다 — 코드를 고치지 않고 숫자만 바꿔 행동 경향을 조정한다. 표의 전제조건은 시작 시점(`CanStart`)에 확인하는 조건이다. Running 동안 매 틱 확인해야 하는 조건이 다르면 각 행동의 `invariant`에 따로 적는다.
+비용은 행동의 *선호도* 를 인코딩한다. FlankAttack(3)이 DirectAttack(4)보다 싸므로, 다른 전제 충족 비용이 같다면 측면 공격을 선호한다. 엄폐 이동 같은 준비 행동까지 포함한 *계획 전체 비용* 으로 비교해야 한다. 효과가 같은 두 행동(둘 다 EnemyDead)이라도 전제조건과 비용이 달라, 상황과 선호에 따라 다른 경로가 선택된다. "전술적으로 더 나은" 계획을 비용으로 유도하는 것이 GOAP 튜닝의 한 축이다 — 코드를 고치지 않고 숫자만 바꿔 행동 경향을 조정한다. 표의 전제조건은 시작 시점(`CanStart`)에 확인하는 조건이다. Running 동안 매 틱 확인해야 하는 조건이 다르면 각 행동의 `invariant`에 따로 적는다.
 
 ## 4. 목표와 우선순위
 
@@ -664,15 +664,17 @@ NPC마다 플래너를 하나씩 가지거나, 풀에서 빌려 쓴다. 핵심�
 // 프레임당 재계획 예산 — 스파이크 방지
 // size_t nextReplan_ = 0;   // 다음 프레임에 재계획을 시작할 순환 인덱스 (AIManager 멤버)
 void AIManager::Tick(float dt) {
-    // 1) 실행기는 매 프레임 모든 에이전트에서 진행하고 반환값을 needsReplan에 연결 (AI-003)
+    // 1) 재계획을 기다리지 않는 에이전트의 실행기를 진행한다
     for (Agent* a : agents_) {
+        if (a->needsReplan) continue;       // 실패한 행동을 대기 중 다시 실행하지 않음
         const PlanExecutor::Status result = a->executor.Tick(*a, a->worldState, dt);
         if (result == PlanExecutor::Status::NeedReplan)
             a->needsReplan = true;
         // Running/Done은 여기서 추가 동작 없이 다음 단계로
     }
-    // 2) 재계획은 순환 시작 인덱스에서 예산만큼만 (고정 순서 기아 방지, AI-006)
+    // 2) 재계획은 순환 시작 인덱스에서 예산만큼만 (고정 순서 기아 방지)
     const size_t n = agents_.size();
+    if (n > 0) nextReplan_ %= n;            // 에이전트 수가 줄어도 유효한 시작점
     int budget = kReplansPerFrame;          // 예: 8
     for (size_t scanned = 0; scanned < n && budget > 0; ++scanned) {
         Agent* a = agents_[nextReplan_];
@@ -685,6 +687,8 @@ void AIManager::Tick(float dt) {
     }
 }
 ```
+
+이 루프는 에이전트 목록이 Tick 도중 바뀌지 않는다고 가정한다. 최초 계획과 새 목표 선택은 `needsReplan`을 설정하고, `Replan`은 기존 행동의 취소·예약 정리를 담당한다. 탐색 실패 시에는 실패한 기존 계획을 다시 실행하지 않도록 안전한 대기·폴백 계획으로 교체한다. 행동 비용은 도메인 로드 시 유한한 0 이상인지 검사한다. 음수 비용 사이클을 허용하면 위 탐색과 완화 비용 반복의 종료·최적성 전제가 깨진다.
 
 ### 계획 캐싱
 

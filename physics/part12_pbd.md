@@ -74,11 +74,11 @@ cloth / soft body 의 *수많은 제약* 이 *큰 dt 에서도 안정 시뮬*. �
 - *Stiffness 가 implicit* — 매개변수 튜닝 어려움.
 - *물리 정밀 시뮬엔 부적합* (자동차, 항공).
 
-cloth 같은 *plausible 시뮬* 에는 압도적 우위. 정밀 시뮬엔 SI / TGS.
+cloth처럼 많은 기하 제약을 다루는 시뮬에서 유용하다. 정밀도는 PBD/SI/TGS라는 이름만으로 정해지지 않으며 재료 모델, 시간 이산화와 수렴 오차를 함께 비교한다.
 
 ### 1.5 PBD 와 Verlet 의 친화성
 
-PBD 는 *위치를 직접 투영* 한다는 점에서 *position Verlet 의 확장*. 다만 position Verlet 과 달리 *속도를 상태로 보관* 하며, 매 step 끝에서 `(predicted - position) / dt` 로 재구성한다.
+PBD는 Jakobsen의 Verlet 기반 위치 제약 기법과 역사적으로 연결되지만, 위치를 투영한다는 사실만으로 position Verlet 적분기와 같은 것은 아니다. 다만 position Verlet 과 달리 *속도를 상태로 보관* 하며, 매 step 끝에서 `(predicted - position) / dt` 로 재구성한다.
 
 ### 1.6 Müller 의 원전
 
@@ -161,7 +161,7 @@ p.velocity = (p.predicted - p.position) / dt;
 p.position = p.predicted;
 ```
 
-속도가 *위치 차분 / dt* — Verlet 의 속도 정의. 다음 step 의 입력.
+속도가 *위치 차분 / dt* — 이 PBD step에서 채택한 속도 재구성 규약. 다음 step 의 입력.
 
 ### 2.5 흐름의 함의
 
@@ -204,7 +204,7 @@ $$
 
 여기서 $w_i = 1 / m_i$ (inverse mass), $\hat{n} = (\vec{p}_1 - \vec{p}_2) / |\vec{p}_1 - \vec{p}_2|$.
 
-직관: *위반 양만큼* 두 입자를 *질량 비율* 로 분배한다. 단일 거리 제약이고 `stiffness = 1` 이면 한 번의 project 로 그 제약은 만족하지만, 여러 제약이 서로 얽히면 반복으로 절충한다.
+직관: *위반 양만큼* 두 입자를 *역질량 비율* 로 분배한다. 단일 거리 제약이고 `stiffness = 1` 이면 한 번의 project 로 그 제약은 만족하지만, 여러 제약이 서로 얽히면 반복으로 절충한다.
 
 ### 3.3 코드
 
@@ -255,7 +255,7 @@ cloth 의 *상단 고정 행*, 깃발의 *깃발 봉* 등. 자연 처리.
 
 ### 3.5 한 step 의 의미
 
-한 project 호출이 *완전한 거리 제약 만족*. 다른 제약 (다른 입자 페어) 의 효과로 *다시 위반* 가능 — 반복으로 점진적 수렴.
+고립된 거리 제약에 stiffness=1이면 한 project 호출이 *완전한 거리 제약 만족*. 다른 제약 (다른 입자 페어) 의 효과로 *다시 위반* 가능 — 반복으로 점진적 수렴.
 
 cloth 의 *대각선 spring* + *수평·수직 spring* 의 *서로 경쟁* — iteration 으로 절충.
 
@@ -337,6 +337,7 @@ struct ParticleCollisionConstraint {
 PBD 입자 vs 정적 환경 (바닥, 벽). 침투 깊이 보정 + 마찰.
 
 ```cpp
+// 동적 입자에만 적용하는 점-평면 접촉 예시 (반지름 0).
 void GroundCollision(Particle& p) {
     if (p.predicted.y < 0) {
         p.predicted.y = 0;
@@ -487,11 +488,11 @@ struct XpbdDistanceConstraint {
         Particle& b = particles[p2];
         vec3 d = a.predicted - b.predicted;
         float L = length(d);
-        if (L < 1e-8f) return;
+        // 겹친 입자도 양의 restLength를 해소할 수 있도록 대체축을 둔다.
+        vec3 n = (L > 1e-8f) ? d / L : vec3{1, 0, 0};
         float invSum = a.invMass + b.invMass;
         if (invSum <= 0) return;
 
-        vec3 n = d / L;
         float C = L - restLength;
         float alphaTilde = compliance / (dt * dt);
         float dLambda = (-C - alphaTilde * lambda_acc)
@@ -507,7 +508,7 @@ struct XpbdDistanceConstraint {
 };
 ```
 
-매 solve window 시작에 *lambda_acc = 0 으로 리셋* 하고, 그 window 안의 iteration 동안 누적한다. substep 을 독립 step 으로 취급하면 substep 마다 리셋하고, 한 step 내부 반복으로 취급하면 반복 동안 유지한다.
+매 solve window 시작에 *lambda_acc = 0 으로 리셋* 하고, 그 window 안의 iteration 동안 누적한다. 위처럼 예측·투영·속도 재구성을 새로 하는 substep에서는 매 substep 리셋하고, 같은 예측 위치를 푸는 iteration 동안 유지한다. 이전 시간 구간의 multiplier를 재사용하는 warm start는 시간 간격에 맞춘 별도 유도·스케일링 없이 적용하지 않는다.
 
 ### 6.5 compliance 의 직관
 

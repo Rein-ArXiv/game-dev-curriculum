@@ -298,11 +298,11 @@ $s\le\text{contactSlop}$인 점만 접촉 후보로 남기고, A/B witness를 �
 
 ```cpp
 point.positionIncident = clipped.position;
-point.positionReference = clipped.position - normal * separation;
+point.positionReference = clipped.position - reference.outwardNormal * separation;
 point.separation = separation;
 ```
 
-reference owner가 B라면 A/B 저장 순서를 뒤집되 manifold normal은 계속 A에서 B를 향하게 한다.
+여기서 separation은 reference의 외향 단위 법선 n_r로 계산한 값이다. projection에도 같은 n_r를 써야 한다. reference owner가 B이면 global manifold normal은 −n_r이므로 이를 그대로 projection에 쓰면 반대편으로 점을 옮기는 오류가 난다. A/B 저장 순서를 뒤집되 manifold normal은 계속 A에서 B를 향하게 한다.
 
 ### 점 수 줄이기
 
@@ -330,7 +330,7 @@ struct FeaturePair {
 };
 ```
 
-clip vertex는 원래 incident vertex ID와 clipping side plane ID를 전달한다. 교차로 새 점이 생기면 두 source feature를 canonical order로 조합한다. 예를 들어 `(incidentVertex, sidePlane)`을 `(작은 ID, 큰 ID)` 순서로 묶으면 A/B 입력 순서를 바꿔 같은 교차점을 만들어도 동일한 `FeaturePair`가 나온다. A/B를 교환할 때는 `featureA`와 `featureB`, `childA`와 `childB`를 함께 바꾼다. 이 규칙은 폴리헤드럴 face pair의 clipping 점을 서로 구별하기 위한 것이며, vertex ID가 없는 smooth shape에는 그대로 적용되지 않는다.
+clip vertex는 incident edge·vertex와 reference clipping plane의 출처를 전달한다. 새 교차점은 incident edge와 reference side feature처럼 두 형상의 feature 조합으로 식별하고, child ID와 feature 종류도 키에 포함한다. 서로 다른 형상의 숫자 ID를 단순히 작은 값·큰 값으로 정렬하면 소속이 사라지고 다른 점이 같은 키가 될 수 있다. body pair를 안정 ID로 canonicalize한 뒤 그 순서에 맞춰 feature를 보관한다. A/B를 교환할 때는 featureA·featureB와 childA·childB를 함께 바꾼다. reference face가 바뀌어 대응 feature를 복원할 수 없으면 새 접촉으로 처리하거나 anchor 기반 별도 매칭을 쓴다. 이 규칙은 폴리헤드럴 face pair의 clipping 점을 서로 구별하기 위한 것이며, vertex ID가 없는 smooth shape에는 그대로 적용되지 않는다.
 
 ### manifold 갱신
 
@@ -434,7 +434,7 @@ enum class ContactStatus {
 | convex-triangle | triangle feature를 보존하는 특화 경로 |
 | concave mesh-convex | BVH로 triangle 후보 후 개별 detector |
 
-dispatcher는 입력 순서를 canonicalize하되 출력 normal을 원래 A에서 B 방향으로 되돌린다.
+dispatcher는 type 순서와 같은 type 사이의 안정 body ID로 입력 순서를 canonicalize하되 출력 normal을 원래 A에서 B 방향으로 되돌린다. 중심이 같은 대칭 쌍도 같은 canonical 순서에서 tie를 풀어야 A/B 교환 시 일관되게 Flip할 수 있다.
 
 ```cpp
 ContactManifold Collide(const Collider& a, const Collider& b) {

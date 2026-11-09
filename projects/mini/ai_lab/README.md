@@ -43,7 +43,7 @@
 - **raylib 5.0** — 윈도우/2D 드로잉/입력 (FetchContent로 자동 취득, 시스템 설치 불필요).
 - **raygui 4.0** — 패널 컨트롤 (단일 헤더).
 
-> 같은 mini 시리즈의 `math_lab` / `physics_lab` 과 동일한 raylib + raygui Scene 아키텍처를 따른다. (초기 설계 메모의 ImGui/ImPlot 대신, 검증된 2D lab 패턴인 raygui를 사용한다.)
+> 같은 mini 시리즈의 `math_lab` / `physics_lab` 과 동일한 raylib + raygui Scene 아키텍처를 따른다.
 
 ## 디렉토리 구조
 
@@ -85,7 +85,7 @@ cmake --build build --config Release
 ./build/Release/ai_lab        # Windows (MSVC): build/Release/ai_lab.exe
 ```
 
-raylib·raygui는 CMake FetchContent로 자동으로 가져온다. 인터넷 연결과 C++20 컴파일러만 있으면 된다.
+raylib·raygui는 CMake FetchContent로 자동으로 가져온다. 인터넷 연결, CMake와 C++20 컴파일러가 필요하다. Linux에서는 raylib의 윈도우·그래픽 백엔드 개발 패키지도 필요할 수 있다.
 
 ## 자동 테스트
 

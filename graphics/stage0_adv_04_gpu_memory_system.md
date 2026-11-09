@@ -111,7 +111,7 @@ Coherent는 가시성 계약이고 cached는 CPU 접근 성능 속성이다. coh
 
 ```cpp
 // offset, size: allocation 안의 flush/invalidate 대상 범위(바이트).
-// allocationSize, mappedSize: 실제 할당 크기와 CPU에 매핑된 크기.
+// allocationSize, mappedSize: 실제 할당 크기와 offset 0부터 CPU에 매핑된 크기.
 std::optional<Range> AlignNonCoherentRange(
     uint64_t offset,
     uint64_t size,
@@ -244,7 +244,7 @@ F_{\text{external}} =
 1 - \frac{\text{largest free block}}{\text{total free bytes}}
 $$
 
-이 값은 외부 단편화의 한 가지 지표다. 0에 가까우면 여유 공간이 한 덩어리에 가깝고, 1에 가까우면 잘게 쪼개져 있다. 이것만으로 재배치 비용이나 메모리 타입별 분포까지 설명하지는 못하므로 크기 히스토그램과 함께 본다.
+이 값은 total free bytes가 양수일 때 정의하는 외부 단편화의 한 가지 지표다. 여유 공간이 0인 경우는 비율을 계산하지 않고 할당 고갈로 따로 기록한다. 0에 가까우면 여유 공간이 한 덩어리에 가깝고, 1에 가까우면 잘게 쪼개져 있다. 이것만으로 재배치 비용이나 메모리 타입별 분포까지 설명하지는 못하므로 크기 히스토그램과 함께 본다.
 
 ### Aliasing은 수명 분석 문제다
 
@@ -333,6 +333,9 @@ public:
         const uint64_t usedWithPadding = begin - retired;
         if (usedWithPadding > capacity_ || size > capacity_ - usedWithPadding)
             return std::nullopt;
+
+        if (begin > std::numeric_limits<uint64_t>::max() - size)
+            return std::nullopt;                // 절대 커서 end overflow도 거절
 
         // 성공 직전에만 상태를 갱신한다. 실패 경로는 head를 변경하지 않는다.
         retired_ = retired;

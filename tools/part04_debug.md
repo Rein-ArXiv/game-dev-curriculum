@@ -588,7 +588,8 @@ class TimeTravel {
 public:
     bool StepBack(int frames) {
         if (frames < 0) return false;                      // 음수를 먼저 거부
-        if (currentFrame_ < oldestRetained_ + static_cast<uint32_t>(frames))
+        if (oldestRetained_ > currentFrame_ ||
+            static_cast<uint32_t>(frames) > currentFrame_ - oldestRetained_)
             return false;                                  // 보관 범위 밖
         const uint32_t target = currentFrame_ - static_cast<uint32_t>(frames);
         if (!RestoreNearestKeyframe(target)) return false; // 가장 가까운 이전 키프레임

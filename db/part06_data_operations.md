@@ -162,7 +162,7 @@ PITR이 게임에서 특히 중요한 이유 — 복구 대상의 다수가 *하
 
 운영 문서는 사람이 읽는 글로 끝나면 사고 당일에 흔들린다. 데이터 운영의 핵심 절차는 쿼리, 스크립트, 대시보드, 경보 조건으로 내려와야 한다. "백업이 정상이다"는 말은 복구 리허설 결과와 검증 쿼리로만 증명된다.
 
-예를 들어 경제 원장의 일일 정산은 다음 질의처럼 자동화되어야 한다.
+예를 들어 경제 원장의 일일 정산은 다음 PostgreSQL 질의처럼 자동화할 수 있다.
 
 ```sql
 WITH ledger_sum AS (
@@ -170,16 +170,19 @@ WITH ledger_sum AS (
       FROM wallet_ledger
      GROUP BY player_id, currency
 )
-SELECT b.player_id, b.currency, b.amount, l.ledger_amount
+SELECT COALESCE(b.player_id, l.player_id) AS player_id,
+       COALESCE(b.currency, l.currency) AS currency,
+       b.amount, l.ledger_amount
   FROM wallet_balance b
-  JOIN ledger_sum l
+  FULL OUTER JOIN ledger_sum l
     ON l.player_id = b.player_id
    AND l.currency = b.currency
- WHERE b.amount <> l.ledger_amount
+ WHERE b.player_id IS NULL OR l.player_id IS NULL
+    OR b.amount IS DISTINCT FROM l.ledger_amount
  LIMIT 100;
 ```
 
-이 쿼리는 수동 조사 도구가 아니라 경보 조건이다. 결과가 0행이어야 하는 쿼리는 배치 잡으로 실행하고, 1행이라도 나오면 쓰기 경로 배포 중지나 지급 경로 차단 같은 runbook으로 이어져야 한다.
+원장과 잔액 양쪽에 행이 반드시 있어야 한다는 전제에서 한쪽만 있는 키도 불일치로 잡는다. 0원 계정에 원장 행이 없는 것을 허용한다면 그 정책을 조건에 반영한다. 이 쿼리는 수동 조사 도구가 아니라 경보 조건이다. 결과가 0행이어야 하는 쿼리는 배치 잡으로 실행하고, 1행이라도 나오면 쓰기 경로 배포 중지나 지급 경로 차단 같은 runbook으로 이어져야 한다.
 
 무중단 마이그레이션도 체크리스트가 아니라 상태 기계로 관리한다.
 

@@ -55,18 +55,9 @@ char str[] = "Hello";
 
 ### 역사적 맥락: 왜 C는 Null-terminated를 선택했는가
 
-이 선택을 이해하려면 1970년대 초반의 상황을 봐야 한다. Dennis Ritchie가 C를 설계할 때 그가 다룬 하드웨어는 PDP-11이었다. 이 기계는 상상하는 것보다 훨씬 제한적이었다.
+이 선택은 PDP-11의 메모리 부족만으로 설명하기보다 C의 선행 언어인 BCPL과 B에서 이어진 표현을 봐야 한다. Ritchie의 [설계 회고](https://www.nokia.com/bell-labs/about/dennis-m-ritchie/chist.pdf)에 따르면 BCPL은 첫 packed byte에 길이를 넣었고, B는 길이 대신 `*e`로 표기한 종료 문자를 사용했다. 그는 이 변화의 이유로 8·9비트 길이 필드의 문자열 길이 제한을 피하는 점과, 길이를 계속 관리하기보다 종료자를 쓰는 편이 편리했던 경험을 든다.
 
-- 16비트 주소 공간 (한 주소 공간에서 최대 64KB)
-- 매우 느린 메모리 접근
-- 복잡한 자료구조를 위한 여유가 없었음
-
-이런 환경에서 null-terminated 방식은 이상적이었다.
-
-1. **메모리 효율**: 길이 필드가 필요 없다
-2. **단순성**: `char*` 하나로 문자열 표현 가능
-3. **문자열 리터럴**: 컴파일러가 자동으로 `\0`을 추가할 수 있다
-4. **Unix 철학**: "간단하고 우아한" 설계
+C의 `\0` 종료 표현도 이 계보 안에 있다. 별도 길이 필드 없이 문자 배열과 포인터로 다루기 쉽지만, 길이를 알아내려면 종료자까지 읽어야 한다는 비용을 함께 물려받았다. 특정 하드웨어가 유일하게 강제한 선택이나 모든 조건에서 이상적인 표현은 아니었다.
 
 하지만 이 선택은 대가를 치렀다. 그리고 그 대가는 50년이 지난 지금도 지불되고 있다.
 
@@ -271,7 +262,7 @@ public:
     }
 
     size_t length() const { return length_; }
-    const char* c_str() const { return data_; }
+    const char* c_str() const { return data_ ? data_ : ""; }
 };
 ```
 
@@ -298,13 +289,15 @@ void reserve(size_t new_capacity) {
 }
 
 void append(const String& other) {
+    if (other.length_ > SIZE_MAX - length_ - 1)
+        throw std::length_error("String too long"); // <stdexcept>
     size_t new_length = length_ + other.length_;
     if (new_length >= capacity_) {
         // 재할당 필요
         reserve(new_length + 1);
     }
     // self-append(other == *this) 시 구간이 겹치므로 memmove를 쓴다.
-    std::memmove(data_ + length_, other.data_, other.length_ + 1);
+    std::memmove(data_ + length_, other.c_str(), other.length_ + 1);
     length_ = new_length;
 }
 ```
@@ -328,7 +321,7 @@ void reserve(size_t new_capacity) {
     }
 
     char* new_data = new char[new_cap];
-    std::memcpy(new_data, data_, length_ + 1);
+    std::memcpy(new_data, c_str(), length_ + 1);
     delete[] data_;
     data_ = new_data;
     capacity_ = new_cap;
@@ -381,10 +374,12 @@ public:
 
     // operator+: 새 객체 생성 (임시 객체)
     String operator+(const String& other) const {
+        if (other.length_ > SIZE_MAX - length_ - 1)
+            throw std::length_error("String too long"); // <stdexcept>
         String result;
         result.reserve(length_ + other.length_ + 1);
-        std::memcpy(result.data_, data_, length_);
-        std::memcpy(result.data_ + length_, other.data_, other.length_ + 1);
+        std::memcpy(result.data_, c_str(), length_);
+        std::memcpy(result.data_ + length_, other.c_str(), other.length_ + 1);
         result.length_ = length_ + other.length_;
         return result;  // 값 반환 (NRVO 가능, 생략되지 않으면 이동 생성자)
     }
@@ -423,7 +418,7 @@ String operator+(String&& lhs, const String& rhs) {
 }
 ```
 
-이제 컴파일러는 임시 객체를 감지해서 불필요한 복사를 제거할 수 있다.
+이제 임시 객체의 기존 버퍼를 재사용할 수 있다. 다만 매번 정확한 요구 크기로만 재할당하면 왼쪽 문자열의 반복 복사는 여전히 누적될 수 있다. 긴 append 연쇄의 상각 비용까지 줄이려면 앞에서 본 기하 성장이나 충분한 사전 reserve가 함께 필요하다.
 
 ## 4. SSO: Small String Optimization
 
@@ -462,7 +457,7 @@ private:
     };
 
     struct ShortString {
-        char buffer[SSO_SIZE + 1];  // 스택에 직접 저장
+        char buffer[SSO_SIZE + 1];  // String 객체 내부에 직접 저장
         unsigned char length;       // 1바이트 길이
     };
 
@@ -686,12 +681,12 @@ String(String&& other) noexcept {
 
 #### 이유 4: 실제 성능 저하
 
-이론적 이점과 달리, 벤치마크는 C++11 이후 COW가 실제로 느리다는 것을 보여줬다.
+COW가 항상 느리다는 결론은 아니다. 복사 후 읽기만 하는 workload에서는 이득일 수 있지만, 다음 조건은 그 이득을 줄이거나 역전시킬 수 있다.
 
-- Copy 비용 감소보다 참조 카운팅 오버헤드가 더 크다
+- 짧은 문자열에서는 복사 절약보다 참조 카운팅 비용이 커질 수 있다
 - 멀티코어 환경에서 false sharing 발생
-- SSO가 대부분의 짧은 문자열을 커버 (COW 불필요)
-- 대부분의 문자열은 실제로 복사되지 않는다 (move 사용)
+- SSO 범위의 문자열은 별도 힙 버퍼 공유 없이 복사할 수 있다
+- 이동으로 소유권을 넘기는 경로에서는 COW의 복사 절약 이점이 작아진다
 
 ### N2668 제안서: COW의 종말
 
@@ -768,7 +763,7 @@ public:
 특징:
 - 크기: 16바이트 (포인터 8 + size_t 8, 64비트 기준)
 - 복사 비용: $O(1)$ (포인터 2개만 복사)
-- 힙 할당: 없음 (스택에만 존재)
+- 자체 힙 할당: 없음 (view 자체는 지역 변수·멤버·컨테이너 원소 등으로 둘 수 있음)
 - 소유권: 없음 (원본 데이터의 생명주기에 의존)
 
 ### Zero-copy 패턴
@@ -832,8 +827,9 @@ std::cout << sv;  // 미정의 동작
 std::string s = "Hello";
 std::string_view sv = s;  // s의 버퍼 참조
 
-s += " World";  // capacity를 넘길 때만 재할당. SSO 범위면 버퍼가 그대로라 sv도 유효하다
-// 재할당이 일어나면 sv는 해제된 메모리를 가리킴
+s += " World";  // append는 기존 포인터·참조를 무효화할 수 있다
+// 재할당되면 sv는 dangling이다. 재할당이 없다는 관찰만으로 표준상 유효성을 보장하지 않는다.
+// 변경 뒤 계속 사용할 view는 s에서 다시 만든다.
 ```
 
 #### 위험 3: C 문자열 생명주기

@@ -142,7 +142,7 @@ Dedicated server는 중립적인 process가 권위를 가진다. client는 입�
 
 현실 핑은 하한보다 나쁘다 — BGP가 고르는 경로는 최단이 아니라 *사업적 경로* 이고(통신사 간 피어링), 혼잡 구간의 큐잉이 더해진다. 대형 게임사가 자체 백본·POP(접속 거점)을 까는 이유다: 플레이어를 가까운 POP에서 받아 전용 백본으로 서버까지 나르면, 공인 인터넷 구간이 "집 ↔ 근처 POP"로 줄어든다(Riot Direct, SDR이 이 모델).
 
-매치메이킹은 각 region probe endpoint에 대한 RTT·loss를 측정하고 skill·queue time·party 제약과 함께 최적화한다. client가 보고한 숫자는 조작될 수 있으므로 signed probe result나 server-observed telemetry로 검증하고, 한 번의 ping보다 최근 분포를 사용한다. server 위치는 player 분포와 peak concurrency에서 나오며, 넓은 지역을 섞을 때는 최대 RTT·party cohesion·대기 시간 사이의 목적 함수를 명시한다.
+매치메이킹은 각 region probe endpoint에 대한 RTT·loss를 측정하고 skill·queue time·party 제약과 함께 최적화한다. client가 보고한 숫자는 조작될 수 있으므로 서버가 직접 관측할 수 있는 지표와 대조하고, 한 번의 ping보다 최근 분포를 사용한다. 서명된 probe 응답은 응답의 출처를 확인할 뿐 클라이언트가 보고한 RTT 자체의 진실성을 증명하지는 않는다. server 위치는 player 분포와 peak concurrency에서 나오며, 넓은 지역을 섞을 때는 최대 RTT·party cohesion·대기 시간 사이의 목적 함수를 명시한다.
 
 ## 8. 배포 구조 선택 기준
 
@@ -292,6 +292,8 @@ EncryptAEAD(payload, len,
 ```
 
 설계 포인트는 네 가지다. 첫째, *nonce 재사용 금지*는 게임 신뢰 채널의 작은 sequence 번호와 분리된 암호 패킷 카운터로 보장한다. 재전송할 reliable 메시지도 새 패킷으로 다시 암호화한다면 새 카운터를 쓴다. 둘째, 송·수신 방향별 키를 HKDF로 분리해 양쪽 카운터가 같은 값이어도 `(key, nonce)`가 겹치지 않게 한다. 셋째, 평문 헤더는 associated data로 인증한다. 넷째, 수신 측은 인증 성공 뒤에도 패킷 카운터의 sliding replay window를 검사한다. AEAD는 위조를 막지만 이전의 유효한 암호문을 다시 보내는 행위 자체는 막지 않는다.
+
+수신자가 동일한 nonce를 복원할 수 있도록 패킷 카운터와 key epoch는 wire 형식 또는 양쪽이 합의한 복원 규칙으로 전달하고 인증해야 한다. 카운터 중복 검사와 window 갱신도 동시 수신에서 원자적으로 처리한다.
 
 nonce 재사용 금지가 중요한 이유는 숫자로 드러난다. 같은 $(\text{key},\text{nonce})$로 서로 다른 평문을 두 번 암호화하면 스트림 계열 AEAD에서는 두 암호문의 XOR로 평문 관계가 드러나고, GCM에서는 인증까지 심각하게 무너질 수 있다. 카운터 nonce는 무작위 충돌을 없애지만 재시작 후 키를 재사용한 채 카운터를 0으로 되돌리면 즉시 실패한다. 따라서 연결마다 새 키를 파생하고 key epoch를 영속적이거나 충돌 불가능한 키 수명과 묶어야 한다.
 

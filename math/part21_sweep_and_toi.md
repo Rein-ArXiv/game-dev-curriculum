@@ -165,7 +165,7 @@ $t = 0$ 에 이미 겹쳐 있으면 2.1 의 min 은 수학적으로 $t^\ast = 0$
 
 ### 2.5 스치는 접촉
 
-거리가 0에 닿았다가 다시 멀어지는 경로가 있다. 수학적으로는 $t^\ast$ 가 존재하지만, 부동소수점에서 그 접점을 안정적으로 잡을 수 없고 잡아도 법선이 퇴화한다. 실무 계약은 *양의 목표 여유* $\delta > 0$ 를 두고 "간격이 $\delta$ 이하로 줄어드는 첫 시각" 을 반환하는 것이다. 이 완화가 4절과 5절의 종료 조건을 가능하게 만드는 장치이기도 하다. 이 완화된 Hit 는 정확한 기하학적 접촉(ToI)과 다른 계약이다. 4절의 반복은 닫힌 구간 $[0,1]$ 에서 이 밴드에 처음 들어가는 시각을 찾고, $t=1$ 끝점도 평가한다.
+거리가 0에 닿았다가 다시 멀어지는 경로가 있다. 수학적으로는 $t^\ast$ 가 존재하지만, 부동소수점에서 그 접점을 안정적으로 잡을 수 없고 잡아도 법선이 퇴화한다. 실무 계약은 *양의 목표 여유* $\delta > 0$ 와 허용 밴드를 두고 그 근처에서 반환하는 것이다. 이 완화된 Hit 는 정확한 기하학적 접촉(ToI)이나 밴드에 처음 들어간 정확한 시각과 다른 계약이다. 4절의 반복은 목표 여유를 지나치지 않으면서 허용 밴드에 도달하면 종료하고, $t=1$ 끝점도 평가한다.
 
 ### 2.6 둘 다 움직이는 경우
 
@@ -300,7 +300,7 @@ $$
 \lvert d(t') - d(t) \rvert \le \lVert \vec u(t') - \vec u(t) \rVert \le \mu \lvert t' - t \rvert
 $$
 
-회전이 있으면 스텝 동안 물질 점의 변위가 $\vec\Delta + \vec\Omega \times \vec r$ 이고 $\lVert \vec r \rVert \le R$ 이므로 상한을 다음과 같이 잡는다.
+회전이 있으면 정규화 시간에 대한 순간 속도는 병진 항과 각속도 $\vec\omega(t) \times \vec r(t)$ 의 합이다. $\lVert \vec r(t) \rVert \le R$ 이고 구간 전체에서 각속도 크기를 상계하면 상한을 다음과 같이 잡는다.
 
 $$
 \mu = \lVert \vec\Delta_A - \vec\Delta_B \rVert + \Omega_A R_A + \Omega_B R_B
@@ -308,7 +308,8 @@ $$
 
 ```cpp
 // 모든 물질 점의 상대 변위 상한. t 는 [0,1] 정규화 시간이므로
-// 속도(초당)가 아니라 스텝 동안의 displacement/angularDisplacement 를 쓴다.
+// 병진은 정규화 시간에 선형, angularDisplacement는 구간 전체의
+// |d angle / dt| 상한이다. 최종 자세의 순 회전각만으로는 부족하다.
 float MotionBound(const Motion& a, const Motion& b) {
     return length(a.displacement - b.displacement)
          + a.angularDisplacement * a.boundingRadius
@@ -316,7 +317,7 @@ float MotionBound(const Motion& a, const Motion& b) {
 }
 ```
 
-분리 방향 $\hat n$ 이 이미 있으면 병진 항을 $\hat n \cdot (\vec\Delta_A - \vec\Delta_B)$ 로 투영해 더 조일 수 있다. 상한이 조일수록 반복이 줄어든다.
+순간 분리 방향에 병진을 투영한 값은 일반적으로 그 순간의 접근률이다. 방향이 변할 수 있으므로 이를 구간 전체의 Lipschitz 상한으로 그대로 대체해서는 안 된다. 지지 평면 등 별도의 보수적 논증이 있을 때 방향 정보를 이용해 더 조일 수 있다.
 
 ### 4.3 안전 전진
 
@@ -352,7 +353,7 @@ flowchart TD
 
 ### 4.4 수렴 속도
 
-수열 $t_k$ 는 증가하고 참 ToI 로 위에서 막혀 있으므로 수렴한다. 문제는 *얼마나 빨리* 다.
+목표 여유에 도달하는 시각이 존재하고 정확한 거리와 안전 상한을 쓴다면 $t_k$ 는 증가하면서 그 시각을 넘지 않으므로 수렴한다. 그 극한이 언제나 목표에 도달한다거나 모든 경로에서 고정 등비율이라는 뜻은 아니다.
 
 목표 초과분을 $e_k = d(t_k) - \delta$ 로 두고, 구간 $[t_k, t_{k+1}]$ 에서의 평균 접근 속도를 $\rho_k$ 라 하자. 정의상 $d(t_{k+1}) = d(t_k) - \rho_k (t_{k+1} - t_k)$ 이므로
 
@@ -431,9 +432,11 @@ ShapeCastHit ConservativeAdvance(const Motion& a, const Motion& b,
         if (dr.distance <= cfg.target + cfg.tolerance) {
             return {CastStatus::Hit, t, dr.pointOnB, -dr.normal, dr.distance};
         }
-        float next = t + (dr.distance - cfg.target) / mu;   // tau/mu 이상 전진한다
+        // lowerBound가 참 거리 이하임이 검증되어야 안전하다.
+        float next = t + (dr.lowerBound - cfg.target) / mu;
         if (next > 1.0f) {
-            // 끝점 t=1 을 평가한다. 정확히 여기서 밴드에 들어오면 Hit 다.
+            // 끝점을 평가한다. 건너뛴 구간에는 목표 delta 미만이 없지만,
+            // 더 넓은 delta+tolerance 밴드는 중간에 스쳤을 수 있다.
             DistanceResult d1 = Distance(a.PosedAt(1.0f), b.PosedAt(1.0f));
             return (d1.distance <= cfg.target + cfg.tolerance)
                  ? ShapeCastHit{CastStatus::Hit, 1.0f, d1.pointOnB, -d1.normal, d1.distance}
@@ -447,7 +450,7 @@ ShapeCastHit ConservativeAdvance(const Motion& a, const Motion& b,
 }
 ```
 
-네 번째는 코드로 막을 수 없다. 검증으로 잡는다 — 반환된 $t$ 직전의 여러 시각을 이산 검사로 표본 추출해 겹침이 없는지 확인하면 상한 위반이 드러난다.
+`lowerBound <= target` 인데 거리 상한은 종료 밴드 밖이면 안전하게 전진할 근거가 부족하므로 `Failed` 다. 끝점이 밴드 밖인 `Miss`는 목표 $\delta$ 미만을 지나지 않았다는 의미이며, 더 넓은 종료 밴드의 중간 스침이 없었다는 증명은 아니다. 거리 질의의 상·하한과 운동 상한이 타당해야 한다. 시간 표본 검사는 반례를 발견할 수 있지만 그 자체로 보수성을 증명하지는 못한다.
 
 ## 5. ToI의 종료 조건과 정밀도
 
@@ -477,7 +480,7 @@ $\delta$ 는 캐스트가 끝난 뒤 남길 여유(스킨)이고, $\tau$ 는 그
 |---|---|---|
 | $d(t_k) \le \delta + \tau$ | `Hit` at $t_k$ | 목표 밴드 도달. $k=0$ 이면 시작부터 밴드 안 |
 | $\mu = 0$ 이고 밴드 밖 | `Miss` | 정지 분리. 남은 구간에 접촉 없음 |
-| $t_{k+1} > 1$ | `Hit`(끝점이 밴드 안) 또는 `Miss` | 닫힌 구간. 끝점 $t=1$ 을 건너뛰지 않는다 |
+| $t_{k+1} > 1$ | `Hit`(끝점이 밴드 안) 또는 `Miss` | 목표 $\delta$ 미만을 지나치지 않음. 더 넓은 밴드의 중간 스침은 별도 |
 | $k = k_{\max}$ | `Failed` | 판정 실패. 분리도 충돌도 주장하지 않는다 |
 
 `Failed` 를 `Miss` 로 접는 것이 실무에서 가장 흔한 오류다. 반복 상한은 스치는 접근에서 정상적으로 도달하는 상태이고, 그때가 바로 터널링이 일어나는 상황이다. 상한 도달을 계측하지 않으면 어떤 프레임에서 몇 번이나 판정을 포기했는지 알 수 없다.
@@ -647,7 +650,7 @@ AABB SweptBounds(const AABB& atStart, vec3 delta, float slop) {
 }
 ```
 
-**회전이 있으면 이 합집합은 상한이 아니다.** 중간 자세의 AABB 가 양 끝 AABB 밖으로 나갈 수 있다. 안전한 대안은 중심 경로를 감싸는 것이다. 모든 물질 점이 중심에서 $R$ 이내에 있으므로, 쓸고 간 영역은 *중심 선분을 반지름 $R$ 로 부풀린 영역* 안에 있다. 이 보장은 중심이 두 끝점을 잇는 선분을 따라 *선형으로* 움직인다는 전제 위에 있다. 중심이 가속되어 곡선 궤적을 그리면 끝점 선분을 벗어나므로, 가속이 있으면 스텝 동안의 중심 위치 표본을 감싸는 보수 AABB 를 먼저 구해 같은 방식으로 $R$ 만큼 부풀린다.
+**회전이 있으면 이 합집합은 상한이 아니다.** 중간 자세의 AABB 가 양 끝 AABB 밖으로 나갈 수 있다. 안전한 대안은 중심 경로를 감싸는 것이다. 모든 물질 점이 중심에서 $R$ 이내에 있으므로, 쓸고 간 영역은 *중심 선분을 반지름 $R$ 로 부풀린 영역* 안에 있다. 이 보장은 중심이 두 끝점을 잇는 선분을 따라 *선형으로* 움직인다는 전제 위에 있다. 중심이 가속되어 곡선 궤적을 그리면 끝점 선분을 벗어나므로, 가속이 있으면 스텝 전체의 중심 궤적을 감싸는 보수 AABB 를 먼저 구해 같은 방식으로 $R$ 만큼 부풀린다. 유한 개의 위치 표본만 감싼 박스는 표본 사이의 극값을 놓칠 수 있으므로 충분하지 않다.
 
 ```cpp
 AABB SweptBoundsWithRotation(vec3 centerStart, vec3 centerEnd,
@@ -707,7 +710,7 @@ bool NeedsContinuousTest(float maxRelativeSpeed, float dt,
 
 `thinnestColliderOnPath` 가 레벨의 성질이라는 점이 중요하다. 같은 발사체가 두꺼운 벽만 있는 레벨에서는 이산으로 충분하고 삼각형 메시 난간이 있는 레벨에서는 아니다. 전역 상수 하나로 정할 수 있는 값이 아니다.
 
-`maxRelativeSpeed` 에는 표적의 속도와 회전 항까지 넣는다. 정지한 벽을 기준으로 잡으면 움직이는 플랫폼이나 회전하는 톱날에서 조건이 어긋난다. 이 판정은 1절의 1D 정면 부등식을 그대로 쓴 *보수적 휴리스틱* 이다. 일반 3D grazing 경로에서는 겹침 구간이 짧아져 같은 값이 충분조건이 되지 않으므로, 경계 볼륨·경로 전체 검사와 함께 쓰고 놓치지 않는지 검증한다.
+`maxRelativeSpeed` 에는 표적의 속도와 회전 항까지 넣는다. 정지한 벽을 기준으로 잡으면 움직이는 플랫폼이나 회전하는 톱날에서 조건이 어긋난다. 이 판정은 1절의 1D 정면 부등식을 활용한 *휴리스틱* 이다. 일반 3D grazing 경로에서는 겹침 구간이 짧아져 이 기준을 통과해도 터널링을 놓칠 수 있으므로 보수적 보장으로 취급하지 않는다. 경계 볼륨·경로 전체 검사와 함께 쓴다.
 
 ### 8.2 대안 넷
 

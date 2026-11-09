@@ -408,6 +408,8 @@ AOI는 집합의 *순간값* 이 아니라 *전이* 가 일을 만든다. 클라
 
 **이탈(앎 → 잊음)**: 두 가지 의미론이 있다. *despawn* — 클라이언트가 엔티티를 완전히 파괴(메모리 회수, 다시 만나면 full 재전송). *dormancy(휴면)* — 클라이언트가 마지막 상태를 보존한 채 갱신만 중단(다시 만나면 그 상태 기준 delta 재개). 자주 재진입하는 엔티티(경계 근처 배회)는 dormancy가 진입 비용을 없애 주고, 영영 안 볼 엔티티는 despawn이 클라이언트 메모리를 지킨다. 거리 기반 단계화 — 가까운 이탈은 dormancy, 먼 이탈은 despawn — 가 실용적이다.
 
+휴면에서 delta를 재개하려면 양쪽이 같은 확인된 baseline을 보존하고, 휴면 중 변화도 그 baseline과 비교해 포함해야 한다. baseline이 만료되었거나 세대·스키마가 바뀌었다면 full refresh가 필요하다.
+
 서버 측 자료구조도 이 수명에 묶인다 — 클라이언트별 "알고 있는 엔티티 집합 + 엔티티별 마지막 ack 상태"가 delta 복제의 전제이고, AOI 전이는 그 집합의 삽입/삭제다. 클라이언트별 메모리 예산은 active·dormant·retained baseline을 모두 포함해야 한다. 활성 AOI 상한(최대 N개)은 매 순간 활성인 엔티티 수만 제한하고, dormancy로 보존한 entry는 서로 겹치지 않는 지역 k곳을 방문하면 kN까지 쌓일 수 있다. 따라서 dormant entry의 개수·수명과 eviction/full-refresh 규칙을 별도로 정해야 메모리 상한이 된다.
 
 ## 14. Priority와 Update Rate

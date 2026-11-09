@@ -116,7 +116,7 @@ void benchmark_arena() {
 }
 ```
 
-이 코드는 측정 골격일 뿐 결과표가 아니다. `clock()`은 프로세스 CPU 시간을 측정하고 컴파일러가 사용되지 않는 결과를 제거할 수도 있으므로, 실제 비교에서는 반환 포인터를 관찰 가능한 방식으로 사용하고 warm-up·반복·분위수를 기록해야 한다. Arena의 fast path는 정렬 계산, 범위 검사와 offset 갱신으로 짧지만 arena 자체의 메타데이터와 backing storage 확보 비용은 존재한다.
+이 코드는 측정 골격일 뿐 결과표가 아니다. `clock()`은 ISO C에서는 프로세스 CPU 시간을 뜻하지만 Microsoft CRT에서는 경과 wall time을 반환하므로 구현 계약을 확인해야 한다. 컴파일러가 사용되지 않는 결과를 제거할 수도 있으므로, 실제 비교에서는 반환 포인터를 관찰 가능한 방식으로 사용하고 warm-up·반복·분위수를 기록해야 한다. Arena의 fast path는 정렬 계산, 범위 검사와 offset 갱신으로 짧지만 arena 자체의 메타데이터와 backing storage 확보 비용은 존재한다.
 
 ### 완전한 구현
 
@@ -952,11 +952,11 @@ struct page *__alloc_pages(gfp_t gfp_mask, unsigned int order,
 ```
 
 **주요 특징:**
-- Order 0~10 (4KB ~ 4MB)
+- 예: 4KiB 페이지와 최대 order 10인 구성은 4KiB~4MiB (실제 order 상한·페이지 크기는 커널 설정에 의존)
 - MIGRATE_TYPES: 단편화 방지 전략
  - UNMOVABLE: 커널 데이터
- - MOVABLE: 사용자 페이지
- - RECLAIMABLE: 페이지 캐시
+ - MOVABLE: 이동 가능한 사용자·페이지 캐시 페이지 등
+ - RECLAIMABLE: shrinker로 회수 가능한 slab 할당 등
 - Compaction: 물리 메모리 조각 모음
 
 Buddy allocator는 **외부 단편화**를 제한된 order의 병합 가능 block으로 바꾸는 대신 내부 단편화를 감수한다. 요청을 바로 위 2의 거듭제곱으로 올리는 단순 buddy에서 요청 크기가 block 경계를 조금 넘으면 내부 낭비율은 할당 block의 50%에 가까워질 수 있다. 평균 낭비율은 요청 크기 분포와 최소 order에 따라 달라지므로 Wilson 등의 allocator survey가 하나의 보편적인 25~30% 평균을 보장하는 것으로 읽으면 안 된다.
@@ -1732,6 +1732,8 @@ void GameEngine::update(float dt) {
 }   // 다음 프레임 시작 시 frame_arena 리셋
 ```
 
+이 루프는 `submit`이 반환 전에 커맨드와 참조 데이터를 소비하거나 더 오래 사는 저장소로 복사한다는 전제다. 렌더 스레드·GPU가 나중에 참조한다면 완료 신호까지 해당 arena를 유지하고, frames-in-flight별 저장소를 순환해야 한다.
+
 ### 레벨 로딩
 
 ```c
@@ -1862,6 +1864,7 @@ template <class Allocator>
 void* tracked_alloc(Allocator& allocator, size_t size,
                     const char* file, int line) {
     void* p = allocator.allocate(size);
+    if (!p) return nullptr; // 실패를 살아 있는 allocation으로 기록하지 않는다
     /* tracker의 vector/map/string도 동적 할당한다. 전역 new/malloc hook을
        같은 tracker로 계측하면 내부 할당이 재진입하거나 비재귀 mutex에서
        교착한다. 이 예제는 제한된 명시적 wrapper 전용이며, 전역 계측에는
@@ -1909,8 +1912,11 @@ public:
             size_t room = total_capacity - off;
             size_t len = b.size < room ? b.size : room;
             size_t end = off + len;
-            size_t s = (off * WIDTH) / total_capacity;
-            size_t e = (end * WIDTH) / total_capacity;
+            // 표시용 근사 비율: size_t의 off*WIDTH 곱셈 overflow를 피한다.
+            size_t s = static_cast<size_t>(
+                (long double)off / total_capacity * WIDTH);
+            size_t e = static_cast<size_t>(
+                (long double)end / total_capacity * WIDTH);
             char ch = b.is_free ? '.' : '#';
             for (size_t i = s; i < e && i < WIDTH; i++) line[i] = ch;
         }

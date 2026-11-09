@@ -21,7 +21,7 @@
 | 강체 수 | BroadPhase 10~2000 / Response 4~100 / Measure 4~64 | 스케일링 |
 | 반발 계수 | 0 / 0.5 / 1 | 에너지 보존 한계 |
 
-> Semi-implicit Euler 는 symplectic Euler 의 다른 이름. 별도 옵션으로 두지 않는다.
+> 이 lab의 위치 의존 힘·분리 가능한 Hamiltonian에서는 사용하는 semi-implicit Euler가 symplectic Euler다. 임의의 감쇠·속도 의존 힘을 넣은 semi-implicit update 전체가 symplectic이라는 뜻은 아니다.
 
 ## 출력
 
@@ -51,7 +51,7 @@
 - raygui 4.0 (단일 헤더, 라벨 / 토글 / 슬라이더).
 - 자체 구현 강체 엔진 (외부 물리 엔진 사용 안 함 — 모든 차이가 코드에 있어야 함).
 
-> Dear ImGui / ImPlot 도입은 그래프 표현이 raygui 의 라인 그래프로 부족해질 때만 검토한다. Step 8 까지 raygui 만으로 충분하다고 본다.
+> 그래프는 raygui 기반 라인 그래프로 표시한다. 에너지와 오차의 시간 추이, 토글별 차이를 함께 관찰한다.
 
 ## 디렉토리 구조 (현재 Step 진행 시점)
 

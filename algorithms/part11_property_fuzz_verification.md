@@ -163,7 +163,7 @@ $$
 =-\operatorname{sign}(\operatorname{Compare}(b,a))
 $$
 
-이 식은 3-way compare 결과가 $-1,0,1$로 정규화됐을 때만 그대로 성립한다. `strcmp`류 API는 부호만 일정하면 되므로 $a<b$에서 $-2$, $a>b$에서 $1$을 돌려주어도 올바른 comparator다. 일반 API에서는 부호의 반대만 검사하고, `INT_MIN`에 단항 부정을 적용하면 signed overflow가 날 수 있다.
+식의 $\operatorname{sign}$은 비교 결과를 $-1,0,1$로 정규화하는 연산이다. 따라서 원래 3-way compare의 반환 크기까지 같을 필요는 없다. `strcmp`류 API가 $a<b$에서 $-2$, $a>b$에서 $1$을 돌려주어도 위 *부호 관계*는 성립한다. 원래 반환값끼리 정확한 음수 관계를 요구하지 않으며, `INT_MIN`에 단항 부정을 적용하면 signed overflow가 날 수 있다.
 
 sequence number의 wrap-safe 비교처럼 domain 일부에서만 관계가 정의되면 사전조건을 property에 포함한다.
 
@@ -196,7 +196,7 @@ property $P_1$이 $P_2$를 함의한다면 $P_2$만 검사할 이유가 약하�
 
 사전조건을 만족하는 입력은 직접 구성하는 편이 효율적이다.
 
-invertible matrix를 무작위 16개 scalar로 만든 뒤 determinant가 0이 아닌 것만 남기면 많은 표본을 버리고 ill-conditioned matrix가 섞인다. translation, rotation, bounded nonzero scale을 조합하면 의미 있는 affine transform을 직접 만들 수 있다.
+무작위 16개 scalar로 만든 행렬에서 determinant가 0이 아닌 것만 남겨도 ill-conditioned matrix를 걸러 낸다는 보장은 없다. 연속 분포에서는 singular 행렬의 확률이 0일 수도 있으므로, 이 방식이 항상 많은 표본을 버린다고 볼 수도 없다. translation, rotation, bounded nonzero scale을 조합하면 의미 있는 affine transform을 직접 만들 수 있다.
 
 ```cpp
 Mat4 GenerateInvertibleTransform(Random& rng) {

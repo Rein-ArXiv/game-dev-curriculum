@@ -127,6 +127,7 @@ enum class SquadRole { None, Suppress, Flank, Assault, Reserve };
 void Squad::AssignRolesGreedy(const TacticalContext& ctx) {
     for (Member& m : members_) m.role = SquadRole::None;
     Member* closest = NearestTo(ctx.enemyPos);
+    if (!closest) return;                       // 빈 분대
     closest->role = SquadRole::Suppress;        // 가장 가까운 자가 제압
     Member* flanker = BestFlankCandidate(ctx);  // 측면 경로가 좋은 자
     if (flanker && flanker != closest)
@@ -616,7 +617,7 @@ blackboard(공유 상태)와 메시지(이벤트)는 다른 일을 한다. 둘�
 | 적합 | "적이 어디 있나" | "방금 누가 쓰러졌다" |
 | 비유 | 칠판에 적힌 현황 | 무전 한 마디 |
 
-지속 정보(적 위치, 분대 상태, 토큰 수)는 blackboard에 두고 멤버가 polling한다. 순간 이벤트(적 발견, 아군 사망, 수류탄 투척)는 메시지로 한 번 발행한다. 지연이 지나 메시지가 실제 전달된 수신자는 `HandleMessage`에서 blackboard를 갱신하거나 자기 행동을 전환한다 — 즉 메시지는 *blackboard 갱신의 트리거* 이며, 전달에 실패하면 갱신도 일어나지 않는다.
+지속 정보는 blackboard에 둔다. 다만 거리·지연으로 수신자가 다른 정보는 각 멤버의 수신 blackboard에 따로 저장해야 한다. 전원이 같은 메모리를 polling하면 한 명에게 전달되는 즉시 멀리 있는 멤버도 알아버린다. 공통 토큰처럼 분대 전체에 즉시 공유할 상태는 별도 공유 blackboard로 둔다. 순간 이벤트(적 발견, 아군 사망, 수류탄 투척)는 메시지로 한 번 발행한다. 지연이 지나 메시지가 실제 전달된 수신자는 `HandleMessage`에서 blackboard를 갱신하거나 자기 행동을 전환한다 — 즉 메시지는 *blackboard 갱신의 트리거* 이며, 전달에 실패하면 갱신도 일어나지 않는다.
 
 ### 지연과 신뢰도
 
@@ -638,9 +639,9 @@ void Squad::BroadcastMessage(const Message& msg) {
 }
 
 // 지연 큐에서 메시지가 실제 적용될 때(전달 성공 시)만
-// 수신자가 공유 blackboard 를 갱신한다. 전달되지 않으면 갱신되지 않는다.
+// 수신자가 자기 수신 blackboard를 갱신한다. 전달되지 않은 멤버는 정보를 얻지 않는다.
 void Member::HandleMessage(const Message& msg) {
-    auto& bb = squad_->blackboard_;
+    auto& bb = receivedBlackboard_;              // 이 수신자에게 전달된 정보만 기록
     switch (msg.type) {
     case MsgType::EnemySpotted:
         bb.knownEnemy      = msg.enemy;

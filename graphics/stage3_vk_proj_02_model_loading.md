@@ -1,6 +1,6 @@
 ## 들어가며
 
-큐브 한 개를 그리던 단계에서 임의의 메시를 그리는 단계로 넘어가려면 세 가지가 동시에 필요하다. 외부 모델 파일을 읽어 정점·인덱스로 변환하고, 깊이 비교로 카메라에 가려진 면을 잘라내고, 거친 가장자리를 부드럽게 만드는 멀티 샘플 안티앨리어싱(Multi-Sampled Anti-Aliasing, MSAA)을 도입하는 것이다. 이 셋은 서로 얽혀 있다. 메시를 읽으면 면이 겹치므로 깊이 버퍼가 필요해지고, 깊이 버퍼가 생기면 깊이 첨부의 샘플 수가 컬러 첨부와 일치해야 하므로 MSAA 설정이 깊이 자원까지 끌고 들어간다.
+큐브 한 개를 그리던 단계에서 임의의 메시를 그리는 단계로 넘어가려면 세 가지가 동시에 필요하다. 외부 모델 파일을 읽어 정점·인덱스로 변환하고, 깊이 비교로 카메라에 가려진 면을 잘라내고, 거친 가장자리를 부드럽게 만드는 멀티 샘플 안티앨리어싱(Multi-Sampled Anti-Aliasing, MSAA)을 도입하는 것이다. 깊이와 MSAA는 독립적으로 도입할 수 있지만, 함께 쓸 때는 첨부 구성이 맞물린다. 메시를 읽으면 면이 겹치므로 깊이 버퍼가 필요해지고, 깊이 버퍼가 생기면 깊이 첨부의 샘플 수가 컬러 첨부와 일치해야 하므로 MSAA 설정이 깊이 자원까지 끌고 들어간다.
 
 여기까지의 코드 상태는 삼각형 하나에서 회전하는 텍스처 큐브까지의 흐름이 동작하는 단계다. Vulkan 인스턴스, 논리 디바이스, 스왑체인, 렌더 패스, 그래픽스 파이프라인, 디스크립터 세트, 이미지 레이아웃 전이의 기본 패턴이 한 번 통과한 상태다. 다만 그려지는 형상은 코드에 하드코딩된 정점 배열이고, 깊이 테스트가 없어 그리는 순서대로 면이 덮어써지며, 가장자리는 계단 모양으로 거칠다.
 
@@ -86,7 +86,7 @@ glTF는 Khronos가 정의한 런타임 전송 포맷이다. 이름 그대로 "�
 
 `attributes`의 숫자는 접근자(accessor) 인덱스다. 접근자는 컴포넌트 타입(`FLOAT`, `UNSIGNED_SHORT` 등), 원소 형상(`VEC3`, `SCALAR`), 개수, 그리고 버퍼 뷰(bufferView)로의 오프셋을 담는다. 버퍼 뷰는 다시 바이너리 버퍼의 한 슬라이스를 가리키며, 바이트 오프셋·길이·간격(stride)을 명시한다. 이 간접 참조 사슬을 따라가면 정점 데이터의 정확한 바이트 위치가 나온다. 데이터는 이미 인터리브되어 있을 수 있고, 인덱스 또한 하나의 통합 인덱스로 들어 있어 재패킹이 거의 필요 없다.
 
-glTF가 OBJ와 결정적으로 다른 지점은 표준 재질 모델이다. glTF의 `pbrMetallicRoughness`는 베이스 컬러, 금속성(metallic), 거칠기(roughness)를 표준 텍스처 슬롯으로 정의한다. 스킨 애니메이션, 모르프 타깃, 노드 계층 변환까지 포맷 안에 들어 있어, 캐릭터나 복잡한 씬을 추가 변환 없이 옮길 수 있다.
+glTF가 OBJ와 결정적으로 다른 지점은 표준 재질 모델이다. glTF의 `pbrMetallicRoughness`는 베이스 컬러, 금속성(metallic), 거칠기(roughness)를 표준 텍스처 슬롯으로 정의한다. 스킨 애니메이션, 모르프 타깃, 노드 계층 변환까지 포맷 안에 들어 있어, 그 정보를 보존해 옮길 수 있다. 로더는 노드 변환·스키닝·재질과 지원 확장을 실제 렌더러 표현에 연결해야 한다.
 
 ```cpp
 #define TINYGLTF_IMPLEMENTATION
@@ -103,7 +103,7 @@ bool ok = loader.LoadASCIIFromFile(&model, &err, &warn, "model.gltf");
 // .glb 라면 loader.LoadBinaryFromFile(...)
 ```
 
-`.gltf` 확장자는 JSON 텍스트와 외부 `.bin` 파일을 따로 두는 형태이고, `.glb`는 JSON과 바이너리를 한 파일에 담은 컨테이너다. 배포 시에는 단일 파일인 `.glb`가 다루기 편하다. tinygltf는 두 경우를 별도 함수로 받는다.
+`.gltf`는 JSON 텍스트이며 바이너리·이미지를 외부 URI나 data URI로 참조할 수 있다. `.glb`는 JSON과 선택적인 BIN chunk를 담는 컨테이너로, 외부 이미지 등을 여전히 참조할 수도 있다. 모든 자원을 내장한 `.glb`를 만들면 단일 파일로 배포할 수 있다. 배포 시에는 단일 파일인 `.glb`가 다루기 편하다. tinygltf는 두 경우를 별도 함수로 받는다.
 
 ### OBJ와 glTF 비교
 
@@ -156,7 +156,7 @@ template<> struct hash<Vertex> {
 }
 ```
 
-해시 함수는 `glm::vec3`와 `glm::vec2`의 해시를 시프트해 섞는다. 충돌이 나도 `operator==`가 최종적으로 동일성을 판정하므로 정확성에는 영향이 없고, 해시 품질이 낮으면 같은 버킷에 몰려 성능만 떨어진다. 부동소수 비교를 직접 쓰는 점은 주의가 필요하다. 같은 정점이라도 파일에서 읽은 비트가 정확히 같아야 같은 키로 인식되므로, 로더가 값을 변형하지 않고 그대로 넘긴다는 전제 위에서 동작한다.
+해시 함수는 `glm::vec3`와 `glm::vec2`의 해시를 시프트해 섞는다. 충돌이 나도 `operator==`가 최종적으로 동일성을 판정하므로 정확성에는 영향이 없고, 해시 품질이 낮으면 같은 버킷에 몰려 성능만 떨어진다. 부동소수 비교를 직접 쓰는 점은 주의가 필요하다. 근삿값이 아니라 각 성분이 수치적으로 정확히 같아야 같은 키로 인식된다(+0과 -0은 같게 비교된다). 이 예제는 NaN 없는 유효한 입력을 전제하며, 근접한 정점을 오차 범위로 합치는 용접 알고리즘은 아니다.
 
 ```cpp
 std::vector<Vertex> vertices;
@@ -191,7 +191,7 @@ for (const auto& shape : shapes) {
 
 `try_emplace`는 키가 없을 때만 삽입하고, 삽입 여부를 `inserted`로 알려 준다. 처음 보는 정점이면 새 인덱스를 부여하고 `vertices`에 추가하며, 이미 있는 정점이면 기존 인덱스를 재사용한다. 어느 쪽이든 `it->second`가 그 정점의 최종 인덱스이므로 인덱스 버퍼에 그대로 밀어 넣는다.
 
-UV의 V 좌표를 `1.0f -`로 뒤집는 한 줄이 중요하다. OBJ의 텍스처 좌표는 좌하단을 원점으로 삼지만, Vulkan의 텍스처 좌표계는 좌상단을 원점으로 삼는다. V축의 방향이 반대이므로, 뒤집지 않으면 텍스처가 상하로 뒤집혀 매핑된다. glTF는 이미 좌상단 원점을 따르므로 glTF 경로에서는 이 뒤집기를 적용하지 않는다.
+UV의 V 좌표를 `1.0f -`로 뒤집는 한 줄이 중요하다. 여기서는 OBJ 자산의 V=0을 이미지의 아래쪽으로 해석하고, stb_image가 위쪽 행부터 반환한 픽셀을 그대로 업로드한다고 가정한다. Vulkan의 텍스처 v=0은 업로드한 첫 행에 대응한다. 이 자산·로더 계약에서 V축 방향을 맞추려면 한 번 뒤집어야 한다. 이미지 로더에서 이미 행을 뒤집었다면 UV를 다시 뒤집지 않는다. glTF는 이미 좌상단 원점을 따르므로 glTF 경로에서는 이 뒤집기를 적용하지 않는다.
 
 ### 효과
 
@@ -200,11 +200,8 @@ UV의 V 좌표를 `1.0f -`로 뒤집는 한 줄이 중요하다. OBJ의 텍스�
 | 모델 | 원본 정점 (face × 3) | 중복 제거 후 | 감소율 |
 |---:|---:|---:|---:|
 | 큐브 | 36 | 24 | 33% |
-| Stanford Bunny | 208,353 | 35,947 | 83% |
-| Sponza | 786,432 | 152,015 | 81% |
-| Suzanne (Blender) | 2,904 | 507 | 83% |
 
-대형 폐곡면 모델에서 정점 수가 80% 안팎까지 줄어든다. 메모리 절감도 의미 있지만, 더 큰 이득은 GPU의 변환 후 정점 캐시(post-transform vertex cache)다. 인덱스 버퍼를 통해 같은 정점을 여러 면이 참조하면, GPU가 한 번 변환한 정점 셰이더 결과를 캐시에 두고 재활용한다. 중복 정점이 펼쳐져 있으면 같은 위치를 매번 다시 변환하므로 캐시가 무력화된다. 작은 코드 한 벌로 메모리와 정점 셰이더 부하를 동시에 줄이는 셈이다.
+실제 감소율은 자산 버전과 UV seam·법선·재질 분리에 따라 달라진다. 메모리 절감도 의미 있지만, 더 큰 이득은 GPU의 변환 후 정점 캐시(post-transform vertex cache)다. 인덱스 버퍼를 통해 같은 정점을 여러 면이 참조하면, GPU가 한 번 변환한 정점 셰이더 결과를 캐시에 두고 재활용한다. 중복 정점이 펼쳐져 있으면 같은 위치를 매번 다시 변환하므로 캐시가 무력화된다. 작은 코드 한 벌로 메모리와 정점 셰이더 부하를 동시에 줄이는 셈이다.
 
 법선이 분리된 정점에서는 의도된 중복이 남는다. 큐브의 한 모서리 점은 세 면에 속하지만 면마다 법선이 다르므로, 위치는 같아도 법선이 달라 별개의 정점으로 유지된다. 큐브가 8개가 아니라 24개로 남는 이유가 이것이다. 부드러운(smooth) 법선을 쓰는 모델일수록 더 많이 합쳐진다.
 
@@ -234,13 +231,13 @@ CreateBuffer(bufferSize,
              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
              vertexBuffer, vertexMemory);
 
-CopyBuffer(stagingBuf, vertexBuffer, bufferSize);  // 전송 커맨드 버퍼
+CopyBuffer(stagingBuf, vertexBuffer, bufferSize);  // 복사+vertex-read 배리어 기록 및 완료 대기까지 수행하는 helper
 
 vkDestroyBuffer(device, stagingBuf, nullptr);
 vkFreeMemory(device, stagingMem, nullptr);
 ```
 
-`HOST_VISIBLE`은 CPU가 매핑해 쓸 수 있는 메모리이고, `HOST_COHERENT`는 `vkFlushMappedMemoryRanges` 없이도 쓰기가 GPU에 보이도록 보장한다. `DEVICE_LOCAL`은 VRAM이며 CPU가 직접 매핑하지 못하는 대신 GPU 접근 대역폭이 가장 높다. DX12의 업로드 힙에서 디폴트 힙으로 복사하는 패턴과 정확히 같은 구조다. 스테이징 버퍼는 복사가 끝나면 즉시 해제하는데, 실제로는 복사 커맨드가 완료된 뒤에 해제해야 하므로 펜스나 큐 대기로 완료를 보장한 다음 정리한다.
+`HOST_VISIBLE`은 CPU가 매핑해 쓸 수 있는 메모리이고, `HOST_COHERENT`는 `vkFlushMappedMemoryRanges` 없이도 쓰기가 GPU에 보이도록 보장한다. `DEVICE_LOCAL`은 GPU에 로컬인 메모리 속성이며, CPU 매핑 가능 여부는 별도 `HOST_VISIBLE` 속성이 정한다. 이 예제는 직접 map하지 않는 device-local 목적지를 선택한다. DX12의 업로드 힙에서 디폴트 힙으로 복사하는 패턴과 정확히 같은 구조다. 스테이징 버퍼는 복사가 끝나면 즉시 해제하는데, 실제로는 복사 커맨드가 완료된 뒤에 해제해야 하므로 펜스나 큐 대기로 완료를 보장한 다음 정리한다.
 
 작은 정점 데이터마다 별도 `vkAllocateMemory`를 호출하는 것은 학습 단계에서는 명료하지만, 드라이버가 보장하는 동시 할당 수(`maxMemoryAllocationCount`, 보통 4,096)에 묶인다. 실제 프로젝트에서는 큰 메모리 블록 하나를 할당해 서브 할당하는 할당자로 묶는다.
 
@@ -281,7 +278,7 @@ VkFormat FindDepthFormat(VkPhysicalDevice gpu) {
 }
 ```
 
-`optimalTilingFeatures`를 검사하는 이유는 깊이 첨부가 항상 최적 타일링(드라이버가 압축·재배치한 불투명 레이아웃)으로 만들어지기 때문이다. 선형 타일링은 CPU 접근용이라 깊이 첨부로는 거의 지원되지 않는다.
+`optimalTilingFeatures`를 검사하는 이유는 이 예제가 깊이 첨부를 최적 타일링(드라이버가 압축·재배치한 불투명 레이아웃)으로 만들어지기 때문이다. 선형 타일링은 CPU 접근용이라 깊이 첨부로는 거의 지원되지 않는다.
 
 ### Image, ImageView, Memory
 
@@ -327,7 +324,7 @@ void CreateDepthResources() {
 }
 ```
 
-스텐실을 동반하는 포맷이면 이미지 뷰의 aspect에 `VK_IMAGE_ASPECT_STENCIL_BIT`을 함께 켠다. 다만 한 이미지 뷰가 깊이와 스텐실을 동시에 가리키는 것은 첨부 용도에서만 허용되고, 셰이더에서 샘플링할 때는 깊이 또는 스텐실 중 하나만 가리키는 별도 뷰가 필요하다. 깊이 버퍼의 메모리 크기는 해상도와 픽셀당 바이트로 직접 계산된다. 1920×1080 해상도에서 `D32_SFLOAT`은 약 8MB, `D24_UNORM_S8_UINT`는 약 8MB다. MSAA를 4×로 켜면 이 값이 4배가 되므로 깊이 첨부만으로 32MB에 이른다.
+스텐실을 동반하는 포맷이면 이미지 뷰의 aspect에 `VK_IMAGE_ASPECT_STENCIL_BIT`을 함께 켠다. 다만 한 이미지 뷰가 깊이와 스텐실을 동시에 가리키는 것은 첨부 용도에서만 허용되고, 셰이더에서 샘플링할 때는 깊이 또는 스텐실 중 하나만 가리키는 별도 뷰가 필요하다. 해상도와 논리적 픽셀당 바이트로 원시 저장량을 추정할 수 있지만, 실제 할당량은 정렬·타일링·메타데이터에 따라 달라져 memory requirements로 조회한다. 1920×1080 해상도에서 `D32_SFLOAT`은 약 8MB, `D24_UNORM_S8_UINT`는 약 8MB다. MSAA를 4×로 켜면 이 값이 4배가 되므로 깊이 첨부만으로 32MB에 이른다.
 
 ### Layout 전이
 
@@ -404,6 +401,7 @@ dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
 dep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
                   | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                  | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
                   | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 ```
 
@@ -440,7 +438,7 @@ fbInfo.layers = 1;
 vkCreateFramebuffer(device, &fbInfo, nullptr, &framebuffer);
 ```
 
-스왑체인 이미지는 여러 장이므로 프레임버퍼도 이미지마다 하나씩 만든다. 깊이 이미지는 한 장만 두고 모든 프레임버퍼가 공유해도 무방한데, GPU가 한 프레임을 끝낸 뒤 다음 프레임이 깊이를 다시 클리어하므로 프레임 간 깊이 내용이 보존될 필요가 없기 때문이다. 다만 여러 프레임을 동시에 비행(in-flight)시키면 깊이 충돌이 생기므로, 그 경우에는 깊이도 프레임 수만큼 둔다.
+스왑체인 이미지는 여러 장이므로 프레임버퍼도 이미지마다 하나씩 만든다. 깊이 이미지는 한 장만 두고 모든 프레임버퍼가 공유해도 무방한데, GPU가 한 프레임을 끝낸 뒤 다음 프레임이 깊이를 다시 클리어하므로 프레임 간 깊이 내용이 보존될 필요가 없기 때문이다. 여러 프레임이 in-flight여도 위처럼 같은 queue에서 깊이 사용을 올바르게 직렬화하면 공유할 수 있다. 다만 해당 단계의 프레임 간 중첩이 줄어든다. 깊이 이미지를 frame 슬롯이나 swapchain image별로 분리하면 이 공유 의존을 줄일 수 있으며, framebuffer도 선택한 깊이 이미지와 맞춰야 한다.
 
 ### Clear Value
 
@@ -486,7 +484,7 @@ dss.maxDepthBounds = 1.0f;
 
 ### Reverse-Z 설정
 
-원근 투영에서 깊이 값은 비선형으로 분포한다. 표준 매핑(near → 0, far → 1)에서는 정밀도가 near 근처에 과도하게 몰리고 far 근처가 성겨, 멀리 있는 두 표면이 같은 깊이로 양자화되어 Z-fighting이 발생한다. 부동소수의 비트 분포가 0 근처에서 촘촘하다는 성질을 이용해, near를 1.0에, far를 0.0에 매핑하면 부동소수 정밀도와 원근 비선형성이 상쇄되어 전 범위에 고른 정밀도를 얻는다. 이를 Reverse-Z라 한다.
+원근 투영에서 깊이 값은 비선형으로 분포한다. 표준 매핑(near → 0, far → 1)에서는 정밀도가 near 근처에 과도하게 몰리고 far 근처가 성겨, 멀리 있는 두 표면이 같은 깊이로 양자화되어 Z-fighting이 발생한다. 부동소수의 비트 분포가 0 근처에서 촘촘하다는 성질을 이용해, near를 1.0에, far를 0.0에 매핑하면 부동소수 정밀도와 원근 비선형성이 상쇄되어 넓은 범위에서 대략 고른 상대 정밀도를 얻는다. 절대 거리 오차는 먼 곳일수록 커진다. 이를 Reverse-Z라 한다.
 
 Reverse-Z는 다섯 가지를 모두 함께 맞춰야 효과가 난다. 하나라도 어긋나면 화면이 깨지거나 정밀도 이득이 사라진다.
 
@@ -502,11 +500,11 @@ proj[3][2] = (nearZ * farZ) / (farZ - nearZ);
 
 둘째, `depthCompareOp`를 `VK_COMPARE_OP_GREATER` 또는 `VK_COMPARE_OP_GREATER_OR_EQUAL`로 바꾼다. 가까운 면이 큰 값을 가지므로 비교 방향이 뒤집힌다. 셋째, 깊이 클리어 값을 0.0으로 둔다. 넷째, `loadOp`는 그대로 `CLEAR`를 유지한다. 다섯째, 깊이 포맷은 `VK_FORMAT_D32_SFLOAT`을 권장한다. Reverse-Z의 이득은 부동소수 비트 분포에서 나오므로, 정규화 정수 포맷인 `D24_UNORM`에서는 이득이 거의 없다.
 
-다섯이 모두 맞으면 far plane을 수십 km까지 늘려도 Z-fighting이 사라진다. 표준 24비트 깊이에서 near를 0.1로 두면 수백 m 밖에서 깊이 충돌이 시작되지만, 32비트 Reverse-Z는 같은 near에서 훨씬 먼 거리까지 안정적이다.
+이를 맞추면 넓은 깊이 범위의 Z-fighting을 크게 줄일 수 있지만, 공면 표면이나 변환 오차까지 사라지는 것은 아니다. 표준 24비트 깊이에서 near를 0.1로 두면 수백 m 밖에서 깊이 충돌이 시작되지만, 32비트 Reverse-Z는 같은 near에서 훨씬 먼 거리까지 안정적이다.
 
 ### Viewport의 minDepth와 maxDepth
 
-Vulkan의 NDC 깊이 범위는 `[0, 1]`이다. OpenGL의 `[-1, 1]`과 다르므로, OpenGL용으로 만든 투영 행렬을 그대로 쓰면 깊이가 절반만 매핑되어 가까운 절반이 잘린다. 뷰포트의 `minDepth`와 `maxDepth`는 이 `[0, 1]` 범위 안에서 다시 매핑할 하위 구간을 정하며, 기본값은 전체 구간이다.
+Vulkan의 NDC 깊이 범위는 `[0, 1]`이다. OpenGL의 `[-1, 1]`과 다르므로, OpenGL용으로 만든 투영 행렬을 그대로 쓰면 OpenGL NDC의 z<0인 구간이 잘린다. 원근 깊이는 비선형이므로 이것은 월드 거리로 가까운 절반이 잘린다는 뜻은 아니다. 뷰포트의 `minDepth`와 `maxDepth`는 이 `[0, 1]` 범위 안에서 다시 매핑할 하위 구간을 정하며, 기본값은 전체 구간이다.
 
 ```cpp
 VkViewport vp{};
@@ -517,7 +515,7 @@ vp.minDepth = 0.0f;
 vp.maxDepth = 1.0f;
 ```
 
-또 하나의 컨벤션 차이는 Y축이다. Vulkan의 클립 공간 Y는 아래로 증가해, OpenGL용 셰이더를 그대로 쓰면 화면이 상하로 뒤집힌다. 뷰포트의 높이를 음수로 두고 원점 y를 화면 높이로 올리면 Y가 뒤집혀, OpenGL에서 가져온 셰이더와 정점 데이터가 수정 없이 동작한다. 이 기능은 Vulkan 1.1 코어이거나 `VK_KHR_maintenance1` 확장에서 제공된다.
+또 하나의 컨벤션 차이는 Y축이다. 이 예제의 양수 viewport height에서는 NDC y 증가가 framebuffer의 아래 방향으로 매핑되어 OpenGL용 투영을 그대로 쓰면 화면이 상하로 뒤집힌다. 뷰포트의 높이를 음수로 두고 원점 y를 화면 높이로 올리면 Y가 뒤집혀, Y 방향을 맞출 수 있다. projection y-flip과 동시에 적용하면 두 번 반전하므로 하나만 선택하고, z 범위와 frontFace는 따로 맞춘다. 이 기능은 Vulkan 1.1 코어이거나 `VK_KHR_maintenance1` 확장에서 제공된다.
 
 ```cpp
 vp.y = (float)swapHeight;
@@ -561,7 +559,7 @@ MSAA 표본 수를 늘리면 다중샘플 첨부의 저장량과 일부 래스�
 MSAA를 켜면 화면에 표시되는 단일 샘플 스왑체인 이미지 외에 멀티 샘플 컬러 첨부가 필요하다. Subpass의 resolve attachment를 지정하면 각 픽셀의 여러 color sample을 단일 샘플 이미지로 resolve한다. 정수 포맷이나 depth/stencil resolve는 지원 방식과 연산이 다르므로 color 평균과 같은 계약으로 가정하지 않는다.
 
 ```cpp
-VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_4_BIT;
+VkSampleCountFlagBits samples = PickSampleCount(gpu, VK_SAMPLE_COUNT_4_BIT);
 
 VkImageCreateInfo colorImgInfo{};
 colorImgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -587,7 +585,7 @@ vkCreateImage(device, &colorImgInfo, nullptr, &colorMsaaImage);
 서브패스의 컬러 첨부와 깊이 첨부는 샘플 수가 같아야 한다(resolve 첨부는 반대로 1 샘플이어야 한다). 컬러를 4×로 만들면 깊이도 4×로 다시 만든다.
 
 ```cpp
-VkImageCreateInfo depthImgInfo{};   // 위와 같은 base 설정
+VkImageCreateInfo depthImgInfo = colorImgInfo; // imageType·extent·mipLevels 등 base 설정 복사
 depthImgInfo.format = depthFormat;
 depthImgInfo.samples = samples;     // 컬러와 동일
 depthImgInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
@@ -613,7 +611,7 @@ ms.alphaToCoverageEnable = VK_FALSE;
 ms.alphaToOneEnable = VK_FALSE;
 ```
 
-`rasterizationSamples`가 첨부의 샘플 수와 다르면 파이프라인 생성이 실패한다. 이 상태에서 기본 MSAA는 프래그먼트 셰이더를 픽셀당 한 번만 실행하고, 깊이·스텐실·커버리지만 표본 단위로 평가한다. 셰이더 비용은 늘지 않으면서 기하 가장자리만 부드러워지는 이유다.
+`rasterizationSamples`가 첨부의 샘플 수와 다르면 파이프라인 생성이 실패한다. 이 상태에서 기본 MSAA는 보통 한 primitive가 덮는 픽셀에 하나의 셰이딩 결과를 만들고, 깊이·스텐실·커버리지만 표본 단위로 평가한다. 표본 수만큼 셰이딩을 강제하지 않고 기하 가장자리를 다듬는 이유다. 한 픽셀에 여러 primitive가 겹치거나 helper invocation이 생길 수 있어 실제 호출 수가 픽셀 수와 같다는 보장은 없다.
 
 ## 7. Resolve Attachment 구성
 
@@ -711,11 +709,11 @@ ms.sampleShadingEnable = VK_TRUE;
 ms.minSampleShading = 0.5f;    // 표본의 최소 50% 에서 셰이더 실행
 ```
 
-`minSampleShading`은 한 픽셀에서 *최소* 몇 비율의 표본을 독립 실행할지의 하한이다. 4× MSAA에서 `1.0`이면 최소 4개 표본에서, `0.5`이면 최소 2개 표본에서 셰이더 실행을 요구한다. 표본별로 보간 위치가 달라져 알파 경계 표현이 개선되지만, 이는 비용 상한이 아니다. 구현이 하한보다 더 많은 표본에서 실행할 수 있고, 셰이더 비용이 정확히 두 배(또는 네 배)로 제한된다는 보장은 없다. `0.25`는 4×에서 max(⌈0.25×4⌉, 1) = 1회가 최소라 기본 MSAA와 같은 하한이 되어 이득이 없다. 실제 invocation 수는 sample-qualified 입력과 구현 최적화에 따라 달라지므로 프로파일링으로 확인한다.
+`minSampleShading`은 한 픽셀에서 *최소* 몇 비율의 표본을 독립 실행할지의 하한이다. 4× MSAA에서 `1.0`이면 최소 4개 표본에서, `0.5`이면 최소 2개 표본에서 셰이더 실행을 요구한다. 표본별로 보간 위치가 달라져 알파 경계 표현이 개선되지만, 이는 비용 상한이 아니다. 구현이 하한보다 더 많은 표본에서 실행할 수 있고, 셰이더 비용이 정확히 두 배(또는 네 배)로 제한된다는 보장은 없다. `0.25`는 4×에서 max(⌈0.25×4⌉, 1) = 1회가 최소라 하한만으로 더 촘촘한 셰이딩을 요구하지 못한다. 실제 invocation 수는 sample-qualified 입력과 구현 최적화에 따라 달라지므로 프로파일링으로 확인한다.
 
 ### 셰이더 측
 
-표본 단위 입력을 받으려면 보간 한정자 `sample`을 붙인다. 그러면 같은 픽셀의 표본마다 다른 위치에서 보간된 값을 받는다.
+특정 입력을 표본 위치에서 보간하려면 한정자 `sample`을 붙인다. 이 입력을 실제 사용하는 셰이더는 sample-rate shading을 요구해 위의 0.5 비율보다 강한 조건이 된다. 비율별 비용을 비교하려면 이 한정자를 제거한 셰이더도 별도로 비교해야 한다. 그러면 같은 픽셀의 표본마다 다른 위치에서 보간된 값을 받는다.
 
 ```glsl
 layout(location = 0) sample in vec2 vUv;
@@ -730,7 +728,7 @@ void main() {
 
 ### Alpha to Coverage — 대안
 
-셰이더 비용을 늘리지 않고 알파 경계를 다듬는 다른 방법이 alpha to coverage다. 프래그먼트의 알파 값을 MSAA 커버리지 마스크로 변환해, 알파 1.0이면 모든 표본을 활성화하고 0.5면 절반, 0.0이면 모두 비활성화한다.
+셰이더 비용을 늘리지 않고 알파 경계를 다듬는 다른 방법이 alpha to coverage다. 프래그먼트의 알파 값을 MSAA 커버리지 마스크로 변환해, 알파 1.0이면 모든 표본을 활성화하고 0.0이면 모두 비활성화한다. 중간 값의 표본 선택과 양자화는 구현에 달려 있어 0.5에서 항상 정확히 절반이라고 보장되지는 않는다.
 
 ```cpp
 ms.alphaToCoverageEnable = VK_TRUE;
@@ -745,7 +743,7 @@ ms.alphaToCoverageEnable = VK_TRUE;
 
 여기까지의 코드는 외부 메시가 깊이 정렬된 상태로 부드러운 가장자리를 가지고 그려지는 장면을 만든다. tinyobjloader와 tinygltf로 OBJ와 glTF를 읽고, 해시 맵으로 정점 중복을 제거해 정점 수와 정점 캐시 부하를 함께 낮추고, 깊이 첨부를 렌더 패스에 통합해 가려진 면을 잘라냈다. MSAA 멀티 샘플 첨부와 자동 resolve로 기하 가장자리를 다듬고, 샘플 셰이딩과 alpha to coverage로 셰이더 출력의 가장자리까지 손댈 수 있게 됐다. Vulkan의 명시적 명령 모델 위에 현실적인 메시 렌더링의 토대가 모인 셈이다.
 
-이 글의 트레이드오프는 세 축이다. 첫째, 포맷 선택이다. OBJ는 단순해 원리를 보이기 좋지만 PBR과 애니메이션을 담지 못하고, glTF는 표준이지만 접근자·버퍼 뷰의 간접 참조를 다뤄야 한다. 둘째, 깊이 정밀도다. 24비트 정규화 깊이는 흔하고 호환성이 높지만, 넓은 야외 장면에서는 32비트 부동소수 Reverse-Z가 Z-fighting을 막는다. 셋째, MSAA 비용이다. 타일 기반 GPU에서는 4×의 실효 비용이 즉시 모드보다 낮은 경우가 많지만(구현·workload 의존), 즉시 모드 데스크톱 GPU에서는 첨부 메모리와 대역폭이 그대로 늘어 같은 4×라도 플랫폼에 따라 비용이 다르다.
+이 글의 트레이드오프는 세 축이다. 첫째, 포맷 선택이다. OBJ는 단순해 원리를 보이기 좋지만 PBR과 애니메이션을 담지 못하고, glTF는 표준이지만 접근자·버퍼 뷰의 간접 참조를 다뤄야 한다. 둘째, 깊이 정밀도다. 24비트 정규화 깊이는 흔하고 호환성이 높지만, 넓은 야외 장면에서는 32비트 부동소수 Reverse-Z가 깊이 양자화에 의한 Z-fighting을 줄인다. 셋째, MSAA 비용이다. 타일 기반 GPU에서는 4×의 실효 비용이 즉시 모드보다 낮은 경우가 많지만(구현·workload 의존), 즉시 모드 데스크톱 GPU에서는 첨부 메모리와 대역폭이 그대로 늘어 같은 4×라도 플랫폼에 따라 비용이 다르다.
 
 셰이딩은 텍스처를 그대로 복사하는 수준이라 빛의 방향이나 표면 거칠기를 반영하지 못한다. 물리 기반 재질은 베이스 컬러·금속성·거칠기를 Cook-Torrance BRDF에 연결하고, IBL을 사용한다면 irradiance map, 정반사 prefilter와 BRDF LUT의 생성·수명·descriptor binding을 함께 관리해야 한다. 전처리를 compute queue에 보낼 때도 queue-family ownership, semaphore와 결과 이미지의 layout 전이가 소비 graphics queue의 읽기보다 먼저 완료되어야 한다.
 

@@ -133,11 +133,14 @@ public:
 
 ```cpp
 void AttackAction::Start(Context& ctx) {
-    reserved_ = ctx.weapon->Reserve(ctx.self.id);   // 획득
-    animGeneration_ = ctx.anim.CurrentGeneration(); // 이 재생의 세대 — notify 검증용
-    ctx.anim.Play("attack", /*blend*/0.1f);
+    phase_ = Phase::WindUp;
+    finished_ = false;
     fired_ = false;
     elapsed_ = 0.0f;
+    reserved_ = ctx.weapon->Reserve(ctx.self.id);   // 획득
+    if (!reserved_) { failed_ = true; return; }      // 획득 실패 시 공격을 시작하지 않는다
+    failed_ = false;
+    animGeneration_ = ctx.anim.Play("attack", /*blend*/0.1f); // 이 재생의 토큰
 }
 
 void AttackAction::OnEnd(Context& ctx, ActionStatus, CancelReason) {
@@ -169,6 +172,7 @@ stateDiagram-v2
 
 ```cpp
 ActionStatus AttackAction::Tick(Context& ctx, float dt) {
+    if (failed_) return ActionStatus::Failure;
     elapsed_ += dt;
     switch (phase_) {
     case Phase::WindUp:
@@ -530,21 +534,22 @@ flowchart TB
 히트 판정은 보통 animation notify로 연다. 애니메이션의 특정 프레임에 마커를 박아 두면, 재생이 그 프레임에 닿을 때 이벤트가 발생하고 액션이 받는다. 발사 타이밍이 칼이 가장 멀리 뻗는 시각과 *자동으로 일치* 한다.
 
 ```cpp
-void AttackAction::OnAnimEvent(Context& ctx, AnimEvent e) {
+void AttackAction::OnAnimEvent(Context& ctx, const AnimEvent& e) {
     if (e.generation != animGeneration_) return;   // 취소/교체 후 늦게 온 notify 무시
-    switch (e) {
-    case AnimEvent::HitStart: ctx.weapon->EnableHitbox();  break;
-    case AnimEvent::HitEnd:   ctx.weapon->DisableHitbox(); break;
-    case AnimEvent::Finished: finished_ = true;            break; // Tick 이 읽어 Success 반환
+    switch (e.kind) {
+    case AnimEventKind::HitStart: ctx.weapon->EnableHitbox();  break;
+    case AnimEventKind::HitEnd:   ctx.weapon->DisableHitbox(); break;
+    case AnimEventKind::Finished: finished_ = true;            break; // Tick 이 읽어 Success 반환
     default: break;
     }
 }
 ```
 
-`Finished` 노티파이가 핵심이다. 액션의 `Tick`은 "애니메이션이 끝났다고 알려왔는가"(`finished_`)만 보고 종료를 판정한다 — 시간을 직접 세지 않는다. 단, 노티파이가 *영영 안 올* 위험(애니메이션 블렌드 아웃, 몽타주 중단)에 대비해 *안전 타임아웃* 을 함께 둔다.
+`Finished` 노티파이가 핵심이다. 다음 `Tick`은 2절의 시간 기반 상태 머신을 대체하는 notify 기반 예시다. 애니메이션이 끝났다고 알려왔는지(`finished_`) 보고 종료를 판정하되, 노티파이가 *영영 안 올* 위험에 대비해 *안전 타임아웃* 을 함께 둔다.
 
 ```cpp
 ActionStatus AttackAction::Tick(Context& ctx, float dt) {
+    if (failed_) return ActionStatus::Failure;
     elapsed_ += dt;
     if (finished_) return ActionStatus::Success;
     if (elapsed_ > maxDuration_) {            // notify 유실 대비 안전망
@@ -681,9 +686,11 @@ public:
         return Lease{who, generation_};
     }
 private:
-    // 데이터 owner 만 비우지 않고 기존 액션에 취소/lease 무효화를 통보한다.
+    // 중단 및 공간 비움이 확인될 때만 슬롯을 회수한다.
     void Revoke(CancelReason why) {
-        if (owner_ != kInvalid) NotifyRevoke(owner_, generation_, why);
+        if (owner_ == kInvalid) return;
+        // 멱등 요청: 비동기 중단이 아직 진행 중이면 false; 확인될 때까지 소유 유지.
+        if (!StopAndVacate(owner_, generation_, why)) return;
         owner_ = kInvalid; holdTime_ = 0.0f; ++generation_;
     }
     std::deque<EntityId> waiting_;
@@ -692,7 +699,7 @@ private:
 };
 ```
 
-예제는 중복 없는 FIFO와 *최대 보유 시간(timeout)* 으로 기아와 무한 점유를 막는다. 강제 회수는 `owner_`를 비우는 데 그치지 않고 기존 액션에 revoke를 통보하고 lease 세대를 올려, 늦게 도착한 사용·콜백이 새 점유와 겹치지 않게 한다. 공정성은 *유효한 요청*과 *유한 보유시간* 조건 아래에서만 보장된다 — 취소·회수를 generation/lease token으로 실제 액션에 전달하지 않으면 큐 순서는 지켜도 새 점유와 기존 사용이 겹칠 수 있다. 거리 우선이 더 자연스러운 자원이라면 대기 시간에 따라 우선순위를 올리는 aging을 함께 넣어 먼 NPC도 결국 선택되게 해야 한다. 어느 정책이 맞는지는 게임에 따라 다르지만, 공정성 계약 없이 매 틱 가장 가까운 요청만 고르면 먼 요청은 영원히 굶을 수 있다.
+예제는 중복 없는 FIFO와 *최대 보유 시간(timeout)* 으로 회수를 요청한다. `StopAndVacate`는 취소 요청을 멱등하게 보내고 실제 액션 중단과 공간 비움이 확인되어야 true를 반환하는 의사 API다. 비동기 완료 전에는 슬롯을 계속 보유한다. 취소 요청자는 완료 통지 뒤 다시 회수하고, timeout 경로는 다음 틱에 재확인한다. 세대 변경만으로 공간이 비워지는 것은 아니다. 공정성은 *유효한 요청*과 *유한한 중단 완료 시간* 조건 아래에서만 보장된다. 거리 우선이 더 자연스러운 자원이라면 대기 시간에 따라 우선순위를 올리는 aging을 함께 넣어 먼 NPC도 결국 선택되게 해야 한다. 어느 정책이 맞는지는 게임에 따라 다르지만, 공정성 계약 없이 매 틱 가장 가까운 요청만 고르면 먼 요청은 영원히 굶을 수 있다.
 
 ### 데드락과 다중 자원
 

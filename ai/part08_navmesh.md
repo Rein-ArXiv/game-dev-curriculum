@@ -281,7 +281,7 @@ region이 정해지면 각 region의 *윤곽(contour)* 을 추출한다. region 
 
 그래서 *단순화(simplification)* 한다. Douglas-Peucker 알고리즘으로, 원래 윤곽에서 허용 오차(maxSimplificationError) 안에 드는 중간 정점들을 제거해 폴리라인을 간결하게 만든다.
 
-알고리즘은 재귀적이다. 폴리라인의 양 끝점을 잇는 직선을 긋고, 그 직선에서 가장 멀리 떨어진 중간 정점을 찾는다. 그 거리가 허용 오차보다 크면 그 정점을 유지점으로 확정하고 양쪽 구간을 각각 재귀 처리한다. 작으면 그 사이 모든 정점을 버린다.
+알고리즘은 재귀적이다. 폴리라인의 양 끝점을 잇는 선분을 만들고, 그 선분에서 가장 멀리 떨어진 중간 정점을 찾는다. 그 거리가 허용 오차보다 크면 그 정점을 유지점으로 확정하고 양쪽 구간을 각각 재귀 처리한다. 작으면 그 사이 모든 정점을 버린다.
 
 ```cpp
 // Douglas-Peucker: [lo, hi] 구간을 tol 오차로 단순화, keep에 유지 정점 표시
@@ -290,7 +290,7 @@ void Simplify(const std::vector<Vec2>& pts, int lo, int hi,
     if (hi <= lo + 1) return;
     float maxD = 0; int idx = -1;
     for (int i = lo + 1; i < hi; ++i) {
-        float d = PerpDistance(pts[i], pts[lo], pts[hi]);  // 직선까지 수직 거리
+        float d = DistanceToSegment(pts[i], pts[lo], pts[hi]); // 끝점으로 clamp한 선분 거리
         if (d > maxD) { maxD = d; idx = i; }
     }
     if (maxD > tol) {            // 가장 먼 정점이 오차를 넘으면 유지
@@ -301,7 +301,7 @@ void Simplify(const std::vector<Vec2>& pts, int lo, int hi,
 }
 ```
 
-계단 모양 윤곽이 몇 개의 직선 변으로 줄어든다. 단, region 경계가 *다른 region과 맞닿는 변* (portal이 될 변)은 양쪽 region이 같은 정점을 공유해야 하므로, 그런 변의 단순화는 양쪽에서 일관되게 처리해야 한다 — 한쪽만 정점을 지우면 두 폴리곤 사이에 틈(T-junction)이 생겨 에이전트가 빠진다.
+예제 호출자는 keep을 false로 초기화하고 양 끝점을 true로 유지한다. 닫힌 contour는 같은 점을 양 끝으로 둔 한 구간을 그대로 단순화하기보다, 초기 유지점들 사이의 열린 구간으로 나눠 처리한다. 계단 모양 윤곽이 몇 개의 직선 변으로 줄어든다. 단, region 경계가 *다른 region과 맞닿는 변* (portal이 될 변)은 양쪽 region이 같은 정점을 공유해야 하므로, 그런 변의 단순화는 양쪽에서 일관되게 처리해야 한다 — 한쪽만 정점을 지우면 두 폴리곤 사이에 틈(T-junction)이 생겨 에이전트가 빠진다.
 
 ```mermaid
 flowchart LR
@@ -324,7 +324,7 @@ flowchart LR
 
 ### DetailMesh: 높이 정보 보존
 
-단순화 과정에서 폴리곤은 평평해진다 — 볼록 다각형은 평면을 가정하기 때문이다. 하지만 실제 지형은 폴리곤 내부에서도 기복이 있다(완만한 언덕, 울퉁불퉁한 바닥). 이 높이 정보를 버리면 에이전트가 지형을 뚫거나 공중에 뜬다.
+Recast 폴리곤의 볼록성은 수평 xz 투영 기준이다. 정점마다 y가 달라 완전히 공면일 필요는 없지만, 소수의 경계 정점만으로는 내부의 세부 높이를 보존하지 못한다. 하지만 실제 지형은 폴리곤 내부에서도 기복이 있다(완만한 언덕, 울퉁불퉁한 바닥). 이 높이 정보를 버리면 에이전트가 지형을 뚫거나 공중에 뜬다.
 
 그래서 마지막에 *DetailMesh* 를 만든다. 각 폴리곤에 대해, 원래 heightfield의 실제 높이 샘플을 가져와 폴리곤 내부를 세밀한 삼각형 메시로 다시 채운다. 샘플 거리(detailSampleDist)와 최대 높이 오차(detailSampleMaxError)로 정밀도를 조절한다.
 
@@ -335,7 +335,7 @@ struct PolyDetail {
     uint8_t  vertCount;
     uint8_t  triCount;
 };
-// detail 정점은 폴리곤 평면 위에 실제 지형 높이를 얹은 것
+// detail 정점은 거친 경계 표현에 내부 지형의 높이 샘플을 더한 것
 ```
 
 두 표현을 분리한 설계의 핵심은 *역할 분담* 이다.
@@ -345,7 +345,7 @@ struct PolyDetail {
 | PolyMesh(볼록 폴리곤) | A\* 그래프, Funnel corridor | 거칠다 (소수 정점) |
 | DetailMesh(삼각형) | 에이전트 Y 좌표, 지면 스냅 | 세밀하다 |
 
-경로 계산은 단순 폴리곤으로 빠르게(노드 적음), 실제 에이전트 배치는 DetailMesh의 삼각형 위 높이로 정확하게. 길찾기는 폴리곤이 평면이어도 무방하고(어느 폴리곤을 거치는가만 중요), 렌더링·배치는 실제 높이가 필요하다는 두 요구를 각자에게 맞는 표현으로 푼다.
+경로 계산은 단순 폴리곤으로 빠르게(노드 적음), 실제 에이전트 배치는 DetailMesh의 삼각형 위 높이로 정확하게. 수평 corridor 탐색은 거친 경계 표현으로 처리하고, 렌더링·배치는 실제 높이가 필요하다는 두 요구를 각자에게 맞는 표현으로 푼다.
 
 ## 6. 폴리곤 그래프 위 A*
 
@@ -373,7 +373,8 @@ struct AStarNode {
 
 ```cpp
 // A* 확장: 현재 폴리곤 cur에서 인접 폴리곤들로
-for (int nb : poly[cur.poly].neighbors) {
+for (int e = 0; e < poly[cur.poly].vertCount; ++e) {
+    int nb = poly[cur.poly].neighbors[e];
     if (nb < 0 || closed[nb]) continue;
     Vec3 portalMid = PortalMidpoint(cur.poly, nb);     // 공유 변 중점
     float stepCost = Distance(cur.entryPoint, portalMid)
@@ -381,7 +382,7 @@ for (int nb : poly[cur.poly].neighbors) {
     float g = cur.g + stepCost;
     if (g < gScore[nb]) {
         gScore[nb] = g;
-        float h = Distance(portalMid, goalPos);        // Euclidean 휴리스틱
+        float h = Heuristic(portalMid, goalPos);       // 비용 모델에 맞춘 거리 하한
         open.push({ nb, g, g + h, cur.poly, portalMid });
     }
 }
@@ -425,7 +426,7 @@ flowchart LR
     Start -.->|실제 최단| End
 ```
 
-corridor 안에서 *직선 구간으로 이루어진 측지 최단 경로* 를 뽑는 알고리즘이 Funnel이다. A\*가 폴리곤 corridor를 고르고, Funnel은 그 고정된 corridor 안에서 경로를 당긴다. 전역 최단성은 A\* 상태·간선 비용 모델까지 정확해야 얻을 수 있으며, Funnel만으로 보장되지 않는다.
+평면의 균일 거리 비용 corridor 안에서 *직선 구간으로 이루어진 최단 경로* 를 뽑는 알고리즘이 Funnel이다. 일반적인 xz 투영 Funnel에 지형 높이를 다시 얹은 경로는 굽은 3D 표면의 측지 최단 경로나 영역별 가중 최단을 보장하지 않는다. A\*가 폴리곤 corridor를 고르고, Funnel은 그 고정된 corridor 안에서 경로를 당긴다. 전역 최단성은 A\* 상태·간선 비용 모델까지 정확해야 얻을 수 있으며, Funnel만으로 보장되지 않는다.
 
 ## 7. Funnel 알고리즘과 String Pulling
 
@@ -614,16 +615,20 @@ off-mesh link는 길찾기 그래프에 *추가 간선* 으로 들어간다. A\*
 for (const OffMeshLink& link : LinksOnPoly(cur.poly)) {
     int destPoly = PolyAt(link.end);
     if (closed[destPoly]) continue;
-    float g = cur.g + link.cost;        // 보통 일반 이동보다 큰 고정 비용
+    float approach = Distance(cur.entryPoint, link.start)
+                     * areaCost[poly[cur.poly].area];
+    float g = cur.g + approach + link.cost; // link 시작점까지의 접근도 비용에 포함
     if (g < gScore[destPoly]) {
         gScore[destPoly] = g;
-        open.push({ destPoly, g, g + Distance(link.end, goalPos),
+        open.push({ destPoly, g, g + Heuristic(link.end, goalPos),
                     cur.poly, link.end });
     }
 }
 ```
 
 경로 실행 시 에이전트가 link의 start 지점(반경 안)에 도달하면, `actionType`에 맞는 동작(점프 애니메이션 + 포물선 이동, 사다리 오르기 보간, 낙하)을 트리거하고 link가 끝나면 end 지점에서 일반 NavMesh 추종을 재개한다.
+
+텔레포터처럼 공간상 거리보다 싼 link가 있으면 유클리드 h가 더 이상 하한이 아닐 수 있다. 이 경우 일반 portal과 off-mesh 확장 모두 같은 `Heuristic`을 사용해 h=0이나 link를 반영한 하한으로 바꾼다. 모든 이동 비용이 거리 이상인 앞의 모델에서는 이 함수가 유클리드 거리를 반환한다.
 
 비용 설계가 중요하다. link 비용을 높게 두면 일반 경로가 가능할 때는 점프를 피하고, 지름길 이득이 비용보다 클 때만 link를 쓴다. 절벽 낙하는 단방향(`bidirectional=false`)으로 둬야 한다 — 떨어질 순 있어도 거슬러 올라가지는 못한다. link는 디자이너가 레벨에 수동 배치하거나, 생성 단계에서 폴리곤 가장자리 간 점프 가능성(높이 차·수평 거리가 점프 능력 안)을 자동 탐지해 만든다.
 
@@ -668,8 +673,10 @@ std::vector<int> LabelComponents(const NavMesh& nm) {
         comp[s] = next;
         while (!stack.empty()) {
             int p = stack.back(); stack.pop_back();
-            for (int nb : nm.polys[p].neighbors)
+            for (int e = 0; e < nm.polys[p].vertCount; ++e) {
+                int nb = nm.polys[p].neighbors[e];
                 if (nb >= 0 && comp[nb] == -1) { comp[nb] = next; stack.push_back(nb); }
+            }
         }
         ++next;
     }
@@ -710,7 +717,7 @@ void NavDebugDraw(DebugRenderer& dr, const NavMesh& nm,
 
 NavMesh는 걸을 수 있는 표면을 *볼록 폴리곤* 으로 적응적 분해해, 균일 그리드와 다른 메모리·표현 절충을 택한다. 정적 장애물과 에이전트 여유 공간이 생성 과정에 반영되어 있다면 볼록 폴리곤 내부를 직선으로 연결할 수 있고, 길찾기는 "어느 폴리곤을 거치는가"라는 전역 그래프 문제와 "그 corridor 안에서 어떻게 잇는가"라는 국소 문제로 분리된다. 노드 감소 폭과 성능 이득은 월드 기하, 그리드 해상도와 생성 파라미터에 따라 측정해야 한다.
 
-Recast 파이프라인은 임의의 3D 메시를 복셀로 rasterize해 문제를 국소·이산 검사로 환원하고, walkable 필터로 에이전트의 키·반지름·오르기 능력을 새기며, distance field watershed로 깨끗한 region을 나누고, contour를 Douglas-Peucker로 단순화한 뒤 볼록 폴리곤으로 병합한다. 단순화로 잃은 높이는 DetailMesh로 따로 보존해, 경로는 거친 폴리곤으로 빠르게·배치는 세밀한 삼각형으로 정확하게 푼다. 생성된 폴리곤 그래프 위에서 A\*가 portal 비용으로 corridor를 찾고, Funnel 알고리즘이 좌/우 깔때기를 좁혀 가며 corridor를 코너만 남는 직선 경로로 $O(n)$에 당긴다.
+Recast 파이프라인은 임의의 3D 메시를 복셀로 rasterize해 문제를 국소·이산 검사로 환원하고, walkable 필터로 에이전트의 키·반지름·오르기 능력을 새기며, distance field watershed로 깨끗한 region을 나누고, contour를 Douglas-Peucker로 단순화한 뒤 볼록 폴리곤으로 병합한다. 단순화로 잃은 높이는 DetailMesh로 따로 보존해, 경로는 거친 폴리곤으로 빠르게·배치는 세밀한 삼각형으로 정확하게 푼다. 생성된 폴리곤 그래프 위에서 A\*가 portal 비용으로 corridor를 찾고, Funnel 알고리즘이 좌/우 깔때기를 좁혀 가며 corridor를 코너만 남는 직선 경로로 당긴다. 사슬 기반 구현은 $O(n)$이지만 위 SSF의 최악은 $O(n^2)$다.
 
 대가는 생성 비용과 동적 변경의 부담이다. tile 단위 재생성과 tile cache로 정적 장애물 변경을 다루되, 매 프레임 변하는 에이전트 간 충돌은 NavMesh를 건드리지 않고 국소 회피로 분담한다. 점프·사다리·낙하 같은 비연속 이동은 off-mesh link로 그래프에 간선을 더한다. 생성은 자동이지만 파라미터에 민감하므로, 연결 컴포넌트 검사와 단계별 시각화로 섬·틈·sliver를 출시 전에 잡는 검증 인프라가 함께 가야 한다. NavMesh는 3D 게임 길찾기의 대표 표현이며, 그 위에서 도는 것은 여전히 — 표현만 폴리곤으로 바뀐 — A\*다.
 

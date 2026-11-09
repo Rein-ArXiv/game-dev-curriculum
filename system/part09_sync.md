@@ -39,7 +39,7 @@ typedef struct {
 ```c
 void spin_lock(spinlock_t *lock) {
     while (__sync_lock_test_and_set(&lock->lock, 1)) {
-        while (lock->lock)  // 읽기만 수행 (캐시 친화적)
+        while (READ_ONCE(lock->lock))  // 읽기만 수행 (캐시 친화적)
             cpu_relax();     // PAUSE 명령어
     }
 }
@@ -127,6 +127,8 @@ Ticket Lock의 문제는? 모든 대기 스레드가 **같은 캐시 라인**(`o
 
 MCS(Mellor-Crummey and Scott) Lock은 각 스레드가 **자신의 로컬 변수**를 폴링하게 만든다:
 
+아래는 Linux 커널 메모리 모델의 `xchg`/`cmpxchg`, `READ_ONCE`와 acquire/release 연산을 가정한 개념 코드다. ISO C++의 일반 변수에 이 매크로만 붙여 데이터 경쟁을 해결할 수는 없다. 각 호출자는 자신의 노드를 unlock이 끝날 때까지 유지하고, 같은 노드를 동시에 재사용하지 않는다.
+
 ```c
 struct mcs_lock {
     struct mcs_lock *next;
@@ -140,7 +142,7 @@ void mcs_lock(struct mcs_lock **lock, struct mcs_lock *node) {
     struct mcs_lock *prev = xchg(lock, node);
 
     if (prev != NULL) {
-        prev->next = node;
+        WRITE_ONCE(prev->next, node);
         // 자신의 로컬 플래그를 대기
         while (smp_load_acquire(&node->locked))
             cpu_relax();
@@ -148,15 +150,18 @@ void mcs_lock(struct mcs_lock **lock, struct mcs_lock *node) {
 }
 
 void mcs_unlock(struct mcs_lock **lock, struct mcs_lock *node) {
-    if (node->next == NULL) {
+    struct mcs_lock *next = READ_ONCE(node->next);
+    if (next == NULL) {
         if (cmpxchg(lock, node, NULL) == node)
             return;
-        while (node->next == NULL)
+        while ((next = READ_ONCE(node->next)) == NULL)
             cpu_relax();
     }
-    smp_store_release(&node->next->locked, 0);  // release로 다음 스레드를 깨운다
+    smp_store_release(&next->locked, 0);  // release로 다음 스레드를 깨운다
 }
 ```
+
+선행자의 release와 후속자의 acquire는 보호 데이터를 넘긴다. 후속자가 없는 경우에는 tail의 원자적 교환이 다음 획득과 순서를 이어 준다. 실제 커널 구현은 문맥과 아키텍처별 계약을 포함하므로 제공된 락 API를 사용한다.
 
 각 스레드는 대기 큐에서 **자신의 노드**를 주로 폴링한다. 모든 waiter가 하나의 lock word를 읽고 쓰는 형태보다 공유 캐시 라인 경쟁을 분산하지만, queue tail 교환, predecessor의 `next` 연결과 successor 깨우기에는 여전히 coherence traffic이 생긴다. MCS lock의 장점은 이를 완전히 없애는 것이 아니라 대기자 수가 늘 때 hot spot이 한 캐시 라인에 집중되는 현상을 줄이는 데 있다.
 
@@ -366,7 +371,7 @@ void read_lock(rwlock_t *rw) {
 }
 
 void read_unlock(rwlock_t *rw) {
-    atomic_dec(&rw->cnt);
+    atomic_dec_return_release(&rw->cnt);  // 마지막 reader의 접근을 writer에게 공개
 }
 
 void write_lock(rwlock_t *rw) {
@@ -454,7 +459,7 @@ Futex 값의 의미:
 
 ### 커널 Futex 구현
 
-커널은 **해시 테이블**로 대기 큐를 관리한다:
+커널은 **해시 테이블**로 대기 큐를 관리한다. 다음은 비교와 큐잉의 관계만 나타낸 의사 코드다. 실제 커널은 사용자 포인터를 `*uaddr`처럼 직접 역참조하지 않고 fault 처리와 사용자 메모리 접근 API를 사용한다.
 
 ```c
 struct futex_hash_bucket {
@@ -821,7 +826,7 @@ do {
 } while (read_seqretry(&sl, seq));
 ```
 
-구현:
+개념적 구현 (실제 커널의 seqcount API와 문맥별 선점·IRQ 제약을 대체하지 않는다):
 
 ```c
 static inline unsigned read_seqbegin(seqlock_t *sl) {

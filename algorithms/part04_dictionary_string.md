@@ -221,7 +221,7 @@ Tombstone이 쌓이면 논리 load factor는 낮아도 probe가 길어진다. �
 
 ### Rehash와 상각 비용
 
-용량을 기하급수적으로 늘리면 여러 삽입에 걸친 총 이동량은 $O(n)$이 되어 삽입당 상각 $O(1)$을 얻는다. 그러나 한 번의 rehash는 $O(n)$ 지연과 임시 peak 메모리를 만든다.
+용량을 기하급수적으로 늘리면 여러 삽입에 걸친 총 이동 원소 수는 $O(n)$이다. 해시 분포와 적재율이 재배치 위치를 찾는 기대 비용을 상수로 유지한다는 조건까지 있어야 삽입당 *기대 상각* $O(1)$을 얻는다. 충돌이 몰리면 크기 확장의 상각 분석만으로 긴 chain·probe 비용이 사라지지는 않는다. 이 조건 아래에서도 한 번의 rehash는 $O(n)$ 기대 지연과 임시 peak 메모리를 만든다.
 
 실시간 경로에서는 다음 전략을 검토한다.
 
@@ -342,7 +342,7 @@ Boyer-Moore는 패턴을 오른쪽에서 비교하고 bad-character, good-suffix
 
 패턴이 $p$개일 때 각각 KMP를 실행하면 텍스트를 $p$번 읽는다. Aho-Corasick은 모든 패턴의 trie에 failure link를 추가해 텍스트를 한 번 훑는다.
 
-현재 trie 상태에서 symbol 간선이 없으면 failure link를 따라 “현재 문자열의 suffix이면서 trie prefix인 가장 긴 상태”로 이동한다. 이 상태는 KMP의 prefix fallback을 여러 패턴으로 일반화한 것이다. Failure link는 root에서 proper suffix만 대상으로 하고 root에서는 자기 자신으로 돌아오도록 규약한다. 각 상태의 출력은 그 상태에서 끝나는 패턴뿐 아니라 failure link를 따라 올라가며 만나는 모든 terminal 상태의 패턴을 포함하며, 이 output link(또는 failure chain 순회)를 정의해 suffix로 끝나는 패턴을 빠뜨리지 않는다. 출력 목록을 모든 노드에 복사하지 않아도 되어 전처리·공간이 선형으로 유지된다.
+현재 trie 상태에서 symbol 간선이 없으면 failure link를 따라 “현재 문자열의 suffix이면서 trie prefix인 가장 긴 상태”로 이동한다. 이 상태는 KMP의 prefix fallback을 여러 패턴으로 일반화한 것이다. Failure link는 root에서 proper suffix만 대상으로 하고 root에서는 자기 자신으로 돌아오도록 규약한다. 각 상태의 출력은 그 상태에서 끝나는 패턴뿐 아니라 failure link를 따라 올라가며 만나는 모든 terminal 상태의 패턴을 포함하며, terminal 상태만 잇는 output link를 정의해 suffix로 끝나는 패턴을 빠뜨리지 않는다. 출력 목록을 모든 노드에 복사하지 않아도 되어 전처리·공간이 선형으로 유지된다.
 
 ```mermaid
 flowchart LR
@@ -359,7 +359,7 @@ $$
 O(\text{패턴 총 길이}+\text{텍스트 길이}+\text{출력 수})
 $$
 
-이다. 일치가 매우 많으면 출력 수 자체가 하한이다. 모든 위치에서 수천 패턴이 끝난다면 결과를 기록하는 비용을 없앨 수 없다.
+이다. 이 출력 수에 비례하는 경계는 terminal 상태만 따라가는 output link 같은 구현을 전제로 한다. 매 문자마다 failure chain 전체를 다시 훑어 출력을 확인하면, 패턴이 `aaa...ab`이고 텍스트가 `aaa...a`인 경우 일치가 없어도 긴 chain을 반복 방문한다. 일치가 매우 많으면 출력 수 자체가 하한이다. 모든 위치에서 수천 패턴이 끝난다면 결과를 기록하는 비용을 없앨 수 없다.
 
 채팅 필터, 로그 규칙, 명령 token 탐지에 사용할 수 있지만 Unicode 정규화와 단어 경계 정책을 automaton 입력 전에 고정해야 한다. 패턴 변경이 잦으면 전체 automaton 재구축 비용도 고려한다.
 

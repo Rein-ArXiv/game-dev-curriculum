@@ -63,16 +63,20 @@ struct InfluenceMap {
     }
     // 월드 좌표 → 셀 인덱스. 유한성·cellSize 양수·범위를 검사하고 음수도 올바르게 내림.
     bool WorldToCell(float wx, float wy, int& cx, int& cy) const {
-        if (!std::isfinite(wx) || !std::isfinite(wy) || !(cellSize > 0.f)) {
-            cx = cy = -1;
-            return false;
-        }
-        cx = int(std::floor((wx - originX) / cellSize));   // int() 절삭은 음수를 0으로 당긴다
-        cy = int(std::floor((wy - originY) / cellSize));
-        return InBounds(cx, cy);
+        cx = cy = -1;
+        if (!std::isfinite(wx) || !std::isfinite(wy) ||
+            !std::isfinite(originX) || !std::isfinite(originY) ||
+            !std::isfinite(cellSize) || !(cellSize > 0.f)) return false;
+        double x = std::floor((double(wx) - originX) / cellSize);
+        double y = std::floor((double(wy) - originY) / cellSize);
+        if (!(x >= 0 && x < width && y >= 0 && y < height)) return false;
+        cx = int(x); cy = int(y); // int 범위를 벗어난 float를 변환하기 전에 격자 범위 검사
+        return true;
     }
 };
 ```
+
+이후 격자 코드는 양의 크기와 셀 간격, 크기에 맞는 저장소, `int`로 표현 가능한 선형 인덱스를 전제로 한다.
 
 자료구조는 `std::vector<float>` 한 줄이 본질이다. 2차원 격자를 1차원 배열에 *행 우선* 으로 펴서 담고, `y * width + x`로 인덱싱한다. spread·decay가 행 방향으로 순회하면 연속 접근이라 cache line 활용과 hardware prefetch에 유리하다. 다만 여러 channel을 같은 loop에서 읽는지, stencil이 이웃 행을 얼마나 재사용하는지, map이 매우 희소한지에 따라 AoS/SoA, tile layout 또는 sparse representation이 더 나을 수 있다. dense map의 기본값으로 평면 배열을 택하고 target workload에서 cache miss와 memory bandwidth를 측정한다.
 
@@ -157,10 +161,12 @@ void SpreadIterative(InfluenceMap& m, float decay, int iterations) {
     for (int it = 0; it < iterations; ++it) {
         for (int y = 0; y < m.height; ++y)
         for (int x = 0; x < m.width; ++x) {
+            if (m.IsWall(x, y)) { next.cells[y * m.width + x] = 0.f; continue; }
             float best = m.At(x, y);
             for (auto [dx, dy] : kNeighbors8) {          // 8방향 이웃
                 int nx = x + dx, ny = y + dy;
                 if (!m.InBounds(nx, ny) || m.IsWall(nx, ny)) continue;
+                if (dx && dy && (m.IsWall(x + dx, y) || m.IsWall(x, y + dy))) continue;
                 float incoming = m.At(nx, ny) * decay;   // 감쇠해 들어온 양
                 if (std::abs(incoming) > std::abs(best)) best = incoming;
             }
@@ -170,6 +176,8 @@ void SpreadIterative(InfluenceMap& m, float decay, int iterations) {
     }
 }
 ```
+
+아래 감쇠 거리식은 `0 < decay < 1`과 양의 소스 강도를 전제로 한다. 대각 전파는 양옆 직교 셀이 모두 열려 있을 때만 허용해 벽 모서리를 통과하지 않는다.
 
 감쇠율 `decay`(예: 0.7)와 반복 횟수 `iterations`가 영향력이 퍼지는 *반경* 을 정한다. `decay`가 클수록 멀리 번지고, 반복이 많을수록 넓게 퍼진다. 한 점에서 $n$칸 떨어진 셀의 값은 대략 $\text{strength} \times \text{decay}^n$이 되므로, 영향력이 무시할 수준($\epsilon$)으로 떨어지는 반경은 $n \approx \log_{\text{decay}}(\epsilon/\text{strength})$이다. 이 점이 *벽을 우회* 한다는 게 결정적 장점이다 — `IsWall` 검사로 영향력이 장애물을 통과하지 못하게 하면, 적이 벽 너머에 있을 때 그 위협은 벽을 돌아온 거리만큼만 미친다.
 
@@ -188,7 +196,7 @@ void SpreadIterative(InfluenceMap& m, float decay, int iterations) {
 
 한 행의 표만으로는 대각 방향의 비등방성을 관찰할 수 없다. max-multiply 확산이 *어떤 거리 척도를 암묵적으로 계산하는지* 를 2차원에서 유도하면 결함의 정체와 크기가 드러난다.
 
-한 점 소스(강도 $s$)에서 반복을 충분히 돌린 고정점은
+장애물이 없는 격자에서 한 점 소스(강도 $s$)로 반복을 충분히 돌린 고정점은
 
 $$
 \text{value}(x,y) = s \cdot \text{decay}^{\,d_\infty\!\big((x,y),\text{src}\big)}, \qquad d_\infty(\Delta x,\Delta y)=\max(|\Delta x|,|\Delta y|)
@@ -202,16 +210,16 @@ $$
 
 반대 편향도 같은 틀로 나온다. 4연결(폰 노이만) 이웃을 쓰면 척도는 *맨해튼($L^1$)* 이 되고 등고선은 축을 가리키는 다이아몬드다. $(k,k)$까지 맨해튼 거리는 $2k$, 유클리드는 $\sqrt2\,k$라 대각의 영향력이 $\text{decay}^{(2-\sqrt2)k}$만큼 *지나치게 약해진다* ($(4,4)$에서 $0.0168$ 대 $0.056$). 8연결은 대각 과잉, 4연결은 대각 결핍 — 둘 다 격자의 인공물이다.
 
-해법은 *대각 한 걸음의 비용을 $\sqrt2$로 매기는* 것이다. 거리장 BFS 코드의 `1.41421f` 보정이 바로 이 *chamfer/octile 거리* 이고, 그 잔여 비등방성은 octile 거리가 유클리드를 최대 약 8.24%만 과대평가하는 잘 알려진 상한($\sqrt{4-2\sqrt2}\approx1.0824$, 최악각 22.5°)으로 줄어든다 — 8연결 max의 41.4%에서 한 자릿수로 떨어진다. 완전한 등방성이 필요하면 정확한 *유클리드 거리 변환(EDT)* 을 쓰며, 두 번의 1D 패스로 $O(WH)$에 정확한 유클리드 거리를 준다(Felzenszwalb-Huttenlocher). 비등방성-비용 위계는 다음과 같다.
+해법은 *대각 한 걸음의 비용을 $\sqrt2$로 매기는* 것이다. 거리장 Dijkstra 코드의 `1.41421f` 보정이 바로 이 *chamfer/octile 거리* 이고, 그 잔여 비등방성은 octile 거리가 유클리드를 최대 약 8.24%만 과대평가하는 잘 알려진 상한($\sqrt{4-2\sqrt2}\approx1.0824$, 최악각 22.5°)으로 줄어든다 — 8연결 max의 41.4%에서 한 자릿수로 떨어진다. 완전한 등방성이 필요하면 정확한 *유클리드 거리 변환(EDT)* 을 쓰며, 두 번의 1D 패스로 $O(WH)$에 정확한 유클리드 거리를 준다(Felzenszwalb-Huttenlocher). 이는 장애물을 무시한 직선 거리이며, 벽을 돌아가는 최단 경로 거리를 대신하지는 않는다. 비등방성-비용 위계는 다음과 같다.
 
-| 척도 | 등고선 | 대각 오차(빈 공간) | 비용 |
+| 척도 | 등고선 | 방향별 오차(빈 공간) | 비용 |
 |---|---|---|---|
 | $L^\infty$ (8연결 max) | 정사각형 | $+41.4\%$ 과도 도달 | $O(WH\cdot I)$ |
 | $L^1$ (4연결 max) | 다이아몬드 | 대각 결핍 | $O(WH\cdot I)$ |
 | octile (대각 $\sqrt2$) | 팔각형 | $+8.24\%$ (22.5°) | $O(WH)$ chamfer / $O(WH\log WH)$ wavefront |
 | 정확 EDT | 원 | 0 | $O(WH)$ |
 
-경계 조건 둘에 주의한다. 첫째, chamfer 2패스 래스터는 $O(WH)$로 가장 싸지만 *단조 전파* 를 가정해 오목한(non-convex) 장애물을 돌아가지 못한다 — 벽을 정확히 우회하려면 파면(wavefront) BFS/Dijkstra의 $O(WH\log WH)$가 필요하다(거리장 코드가 우선순위 큐를 쓰는 이유). 둘째, max-multiply는 합이 아니라 *최댓값* 을 취하므로 "가장 강한 단일 소스" 장이다. 약한 유닛 둘이 인접해도 원거리에서 서로를 *보강하지 않는다* — 위협을 "가장 가까운 강한 적까지의 거리"로 읽을 때는 옳지만, 밀집도처럼 *가산적* 영향력이 필요하면 합산 커널(분리 가능 가우시안)을 써야 한다.
+경계 조건 둘에 주의한다. 첫째, chamfer 2패스 래스터는 $O(WH)$로 가장 싸지만 *단조 전파* 를 가정해 오목한(non-convex) 장애물을 돌아가지 못한다 — 벽을 정확히 우회하려면 파면(wavefront) BFS/Dijkstra의 $O(WH\log WH)$가 필요하다(거리장 코드가 우선순위 큐를 쓰는 이유). 둘째, max-multiply는 합이 아니라 *최댓값* 을 취하므로 "가장 강한 stamp 셀" 장이다(같은 셀의 유닛은 stamp 단계에서 이미 합산될 수 있다). 약한 유닛 둘이 인접해도 원거리에서 서로를 *보강하지 않는다* — 위협을 "가장 가까운 강한 적까지의 거리"로 읽을 때는 옳지만, 밀집도처럼 *가산적* 영향력이 필요하면 합산 커널(분리 가능 가우시안)을 써야 한다.
 
 ### 분리 가능 가우시안
 
@@ -220,6 +228,7 @@ $$
 ```cpp
 // 1D 가우시안 가중치를 가로/세로 두 패스로 적용 (장애물 없을 때)
 void SpreadGaussianSeparable(InfluenceMap& m, const std::vector<float>& k) {
+    // k는 비어 있지 않은 홀수 길이의 유한한 비음수 가중치이며 합이 1인 커널이다.
     int r = int(k.size()) / 2;
     InfluenceMap tmp = m;
     // 가로 패스
@@ -245,10 +254,11 @@ void SpreadGaussianSeparable(InfluenceMap& m, const std::vector<float>& k) {
 
 ### 거리장 기반 전파
 
-장애물을 정확히 우회하면서 falloff도 정확하려면, *Dijkstra/BFS로 장애물을 우회한 실제 거리* 를 구해 falloff를 그 거리에 적용한다. 내비게이션의 거리장(integration field)과 같은 발상이다. 여러 소스(유닛)에서 동시에 출발하는 *다중 소스 BFS* 로 각 셀까지의 최단 우회 거리를 구한다.
+장애물을 정확히 우회하면서 falloff도 정확하려면, *Dijkstra/BFS로 장애물을 우회한 실제 거리* 를 구해 falloff를 그 거리에 적용한다. 내비게이션의 거리장(integration field)과 같은 발상이다. 여러 소스(유닛)에서 동시에 출발하는 *다중 소스 Dijkstra*로 각 셀까지의 최단 우회 거리를 구한다(모든 간선 비용이 같을 때만 FIFO BFS로 단순화한다).
 
 ```cpp
-// 다중 소스 BFS: 모든 유닛 셀에서 동시 출발, 각 셀까지 우회 거리 → falloff
+// 다중 소스 Dijkstra: sources는 범위 안의 통행 가능 셀, maxDist는 유한한 양수.
+// 모든 유닛 셀에서 동시 출발, 각 셀까지 우회 거리 → falloff
 void SpreadByDistance(InfluenceMap& m, const std::vector<Cell>& sources,
                       float maxDist) {
     std::vector<float> dist(m.cells.size(), maxDist);
@@ -265,6 +275,7 @@ void SpreadByDistance(InfluenceMap& m, const std::vector<Cell>& sources,
         for (auto [dx, dy] : kNeighbors8) {
             int nx = c.x + dx, ny = c.y + dy;
             if (!m.InBounds(nx, ny) || m.IsWall(nx, ny)) continue;
+            if (dx && dy && (m.IsWall(c.x + dx, c.y) || m.IsWall(c.x, c.y + dy))) continue;
             float step = (dx && dy) ? 1.41421f : 1.0f;   // 대각 보정
             float nd = d + step * m.cellSize;
             int nidx = ny * m.width + nx;
@@ -276,13 +287,13 @@ void SpreadByDistance(InfluenceMap& m, const std::vector<Cell>& sources,
 }
 ```
 
-`Falloff`는 거리를 영향력으로 바꾸는 함수다 — 선형 $\max(0, 1 - d/r)$, 지수 $e^{-d/\sigma}$, 역제곱 $1/(1+d^2)$ 등을 쓴다. 이 거리장은 *가장 가까운 소스* 까지의 거리 하나만 담으므로 source별 강도·부호가 같고 falloff가 거리의 단조 함수일 때만 합산 영향력을 복원한다 — 강도·부호가 다른 이질 소스는 최단거리 하나로 나타낼 수 없으므로 동질 채널로 나누거나 가중 누적 전파를 써야 한다. 이 방식은 대각 $\sqrt 2$ 보정 덕에 비등방성이 octile 잔여분(최대 약 8.24%)으로 줄고(거리는 그래프 위의 진짜 측지 거리), 장애물을 정확히 우회한다. 비용은 우선순위 큐 때문에 $O(WH \log WH)$로 반복 확산보다 무겁지만, 한 번에 정확한 거리를 얻는다. 세 방식의 절충은 다음과 같다.
+`Falloff`는 거리를 영향력으로 바꾸는 함수다 — 선형 $\max(0, 1 - d/r)$, 지수 $e^{-d/\sigma}$, 역제곱 $1/(1+d^2)$ 등을 쓴다. 이 거리장은 *가장 가까운 소스* 까지의 거리 하나만 담으므로 source별 강도·부호가 같고 falloff가 거리에 따라 감소할 때 가장 가까운 소스의 영향력, 곧 개별 영향력의 최댓값을 구한다. 동질 소스라도 여러 소스의 합을 복원하지는 않는다 — 강도·부호가 다른 이질 소스는 최단거리 하나로 나타낼 수 없으므로 동질 채널로 나누거나 가중 누적 전파를 써야 한다. 이 방식은 대각 $\sqrt 2$ 보정 덕에 비등방성이 octile 잔여분(최대 약 8.24%)으로 줄고(거리는 그래프 위의 진짜 측지 거리), 장애물을 정확히 우회한다. 비용은 우선순위 큐 때문에 $O(WH \log WH)$로 반복 확산보다 무겁지만, 한 번에 정확한 거리를 얻는다. 세 방식의 절충은 다음과 같다.
 
 | 방식 | 복잡도 | 장애물 | 등방성 | 적합 |
 |---|---|---|---|---|
 | 반복 확산 (max) | $O(WH \cdot I)$ | 우회함 | 나쁨 (L∞ 사각형 등고선) | 거친 위협 맵, 작은 반경 |
 | 분리 가우시안 | $O(WH \cdot r)$ | 무시 | 좋음 (원형) | 개활지, 밀집도 맵 |
-| 거리장 BFS | $O(WH \log WH)$ | 정확히 우회 | 좋음 | 동질 소스 위협·접근 맵 |
+| 거리장 Dijkstra | $O(WH \log WH)$ | 정확히 우회 | 좋음 | 동질 소스 위협·접근 맵 |
 
 ## 4. Decay와 시간적 감쇠
 
@@ -439,12 +450,15 @@ Vec2 Gradient(const InfluenceMap& m, int x, int y) {
         py = std::clamp(py, 0, m.height - 1);
         return m.At(px, py);
     };
-    float gx = (Sample(x + 1, y) - Sample(x - 1, y)) * 0.5f;
-    float gy = (Sample(x, y + 1) - Sample(x, y - 1)) * 0.5f;
+    int xm = std::max(x - 1, 0), xp = std::min(x + 1, m.width - 1);
+    int ym = std::max(y - 1, 0), yp = std::min(y + 1, m.height - 1);
+    float gx = xp > xm ? (Sample(xp, y) - Sample(xm, y)) / ((xp - xm) * m.cellSize) : 0.f;
+    float gy = yp > ym ? (Sample(x, yp) - Sample(x, ym)) / ((yp - ym) * m.cellSize) : 0.f;
     return {gx, gy};
 }
 // 후퇴: 위협 경사의 반대 방향으로 이동
-Vec2 FleeDir = -Normalize(Gradient(threatMap, cx, cy));
+Vec2 g = Gradient(threatMap, cx, cy);
+Vec2 FleeDir = LengthSq(g) > 1e-12f ? -Normalize(g) : Vec2{0, 0};
 ```
 
 이 지표들은 영향력 맵을 *행동 가능한 정보* 로 바꾼다. AI는 vulnerability가 가장 높은 셀로 증원을 보내(전세 결정), 위협 경사를 따라 안전지대로 부상병을 후퇴시키며(안전 후퇴), choke에 방어 유닛을 배치한다(길목 통제). 개별 유닛 AI(FSM/행동 트리)가 "어디로?"를 물을 때, 영향력 맵의 파생 지표가 그 답을 *공간적으로* 제공한다.

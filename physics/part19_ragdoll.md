@@ -305,7 +305,7 @@ if (angle > coneHalfAngle) {
 }
 ```
 
-limit 계산은 joint-local frame에서 정의한다. 두 body의 world 회전을 joint frame으로 옮겨 상대 회전 $q_{rel} = q_a^{-1} q_b$ 를 만들고, twist 축을 명시한 뒤 swing과 twist로 분해한다. 입력은 (rest frame, twist axis, 상대 회전)이고 출력은 (swing 각, twist 각, 위반 벡터)다. twist가 ±180° 부근이면 분해가 특이해지므로 quaternion 부호($q$ 와 $-q$)를 정규화하고, 특이점 근처의 부호·실패 규약(예: twist를 한계로 clamp하고 경고)을 정한다. 상세 분해는 전용 수학 문서에 위임하며, 이 문서의 limit 코드를 완성된 swing–twist 분해로 간주하지 않는다.
+limit 계산은 joint-local frame에서 정의한다. 두 body의 world 회전을 joint frame으로 옮겨 상대 회전 $q_{rel} = q_a^{-1} q_b$ 를 만들고, twist 축을 명시한 뒤 swing과 twist로 분해한다. 입력은 (rest frame, twist axis, 상대 회전)이고 출력은 (swing 각, twist 각, 위반 벡터)다. 특이점은 단순히 twist 각이 ±180°인 곳이 아니다. $q=(w,\vec v)$에서 twist축 $a$에 투영한 quaternion $(w,a(\vec v\cdot a))$의 norm이 0에 가까울 때, 즉 축을 반대로 뒤집는 180° swing 부근에서 twist가 불확정해진다. 순수한 180° twist는 norm이 1이라 이 특이점이 아니다. $q$와 $-q$의 부호·각도 branch를 연속적으로 선택하고, 특이점에서는 이전 유효 twist를 유지하는 등 fallback을 정한다. 상세 분해는 전용 수학 문서에 위임하며, 이 문서의 limit 코드를 완성된 swing–twist 분해로 간주하지 않는다.
 
 ### 4.2 hinge angle limit
 
@@ -400,7 +400,7 @@ bool ShouldCollide(const Bone& a, const Bone& b) {
 }
 ```
 
-이 group mask는 한 ragdoll 내부의 self-collision 제어용이다. 서로 다른 캐릭터의 같은 부위(예: 두 ragdoll의 LArm)까지 막지 않도록, world collision layer(캐릭터 vs 환경 vs 다른 캐릭터)와 한 ragdoll 내부의 body-pair 예외를 분리한다. self-exclusion은 전역 group 이름이 아니라 ragdoll instance ID + body index, 또는 연결 joint의 고유 body pair로 지정하고, 인스턴스마다 고유 mask를 부여한다.
+이 group mask는 한 ragdoll 내부의 self-collision 제어용이다. 서로 다른 캐릭터의 같은 부위(예: 두 ragdoll의 LArm)까지 막지 않도록, world collision layer(캐릭터 vs 환경 vs 다른 캐릭터)와 한 ragdoll 내부의 body-pair 예외를 분리한다. self-exclusion은 전역 group 이름이 아니라 ragdoll instance ID + body index, 또는 연결 joint의 고유 body pair로 지정한다. 고정 폭 mask에 모든 ragdoll 인스턴스의 고유 bit를 배정하는 방식은 인스턴스 수가 bit 수를 넘으면 확장되지 않는다.
 
 ### 5.3 표준 그룹
 
@@ -455,7 +455,7 @@ joint 가 *본 위치 강제* + 충돌이 *분리 강제* — 두 제약 경합.
 void TransitionToRagdoll(Character& c, vec3 hitImpulse,
                          vec3 hitPoint, int hitBone) {
     for (int i = 0; i < c.bones.size(); ++i) {
-        c.bones[i].body.transform = c.animator.GetBoneTransform(i);
+        c.bones[i].body.transform = c.animator.GetBoneWorldTransform(i);
         // pose history의 유한 차분으로 구한 초기 속도다.
         c.bones[i].body.linearVel  = c.animator.GetBoneVelocity(i);
         c.bones[i].body.angularVel = c.animator.GetBoneAngularVelocity(i);
@@ -475,14 +475,14 @@ void TransitionToRagdoll(Character& c, vec3 hitImpulse,
 // 시각 blend: 물리 body는 그대로 시뮬하고 렌더 skeleton만 혼합한다.
 void BuildRenderPose(float physicsWeight) {
     for (int i = 0; i < bones.size(); ++i) {
-        Transform animPose = animator.GetBoneTransform(i);
+        Transform animPose = animator.GetBoneWorldTransform(i);
         Transform physicsPose = bones[i].body.transform;
         renderPose[i] = BlendTransform(animPose, physicsPose, physicsWeight);
     }
 }
 ```
 
-시각 blend는 초기 자세 차이를 숨기지만 물리 상태를 애니메이션으로 끌지는 않는다. 실제 body를 점진적으로 애니메이션에 맞추려면 body별 pose motor를 켜고 목표 회전과 최대 토크를 서서히 바꾸는 active-ragdoll 방식이 필요하다.
+위 예제는 두 pose를 모두 world 공간에서 혼합한다. 렌더 skeleton이 local pose를 받으면 혼합한 world pose를 부모 world pose의 역변환으로 local로 바꾼다. 시각 blend는 초기 자세 차이를 숨기지만 물리 상태를 애니메이션으로 끌지는 않는다. 실제 body를 점진적으로 애니메이션에 맞추려면 body별 pose motor를 켜고 목표 회전과 최대 토크를 서서히 바꾸는 active-ragdoll 방식이 필요하다.
 
 ### 6.3 ragdoll → animation (역방향)
 

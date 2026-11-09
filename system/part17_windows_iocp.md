@@ -411,6 +411,8 @@ port를 닫아 worker를 깨우는 방식만 사용하면 `GetQueuedCompletionSt
 | `FALSE` | non-null | 실패한 I/O completion을 회수 |
 | `FALSE` | null | timeout 또는 port 자체의 wait 실패 |
 
+`PostQueuedCompletionStatus`로 넣은 사용자 정의 packet은 응용이 정한 key와 포인터를 그대로 돌려준다. 예를 들어 `TRUE`와 null `OVERLAPPED*`도 종료 packet으로 사용할 수 있으므로 위 표는 커널 I/O와 wait 오류를 구분하는 경우다.
+
 ```cpp
 DWORD bytes = 0;
 ULONG_PTR key = 0;
@@ -419,7 +421,9 @@ OVERLAPPED* overlapped = nullptr;
 BOOL ok = GetQueuedCompletionStatus(
     port, &bytes, &key, &overlapped, timeoutMs);
 
-if (overlapped != nullptr) {
+if (ok && key == kShutdownKey && overlapped == nullptr) {
+    StopWorker();
+} else if (overlapped != nullptr) {
     DWORD error = ok ? ERROR_SUCCESS : GetLastError();
     Complete(key, overlapped, bytes, error);
 } else if (!ok && GetLastError() != WAIT_TIMEOUT) {

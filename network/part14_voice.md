@@ -1,6 +1,6 @@
 ## 들어가며
 
-48kHz·16-bit mono PCM의 payload rate는 $48{,}000\times16=768$kbps이고 stereo는 1.536Mbps다. SFU가 $N$명의 stream을 각 발화자를 제외한 $N-1$명에게 전달하면 media egress는 peak에서 $N(N-1)b$다. $N=50$과 mono PCM이면 약 1.88Gbps, 24kbps Opus면 58.8Mbps다. 각 사용자의 평균 active fraction이 $a=0.2$라는 **독립·동일 활동 가정**을 두면 기대 Opus egress는 11.76Mbps다. 실제 대화의 turn-taking과 동시 발화는 상관되어 있으므로 평균 하나만으로 peak를 산정하지 않는다.
+48kHz·16-bit mono PCM의 payload rate는 $48{,}000\times16=768$kbps이고 stereo는 1.536Mbps다. SFU가 $N$명의 stream을 각 발화자를 제외한 $N-1$명에게 전달하면 media egress는 peak에서 $N(N-1)b$다. $N=50$과 mono PCM이면 약 1.88Gbps, 24kbps Opus면 58.8Mbps다. 각 사용자의 평균 active fraction이 $a=0.2$이고 모든 발화를 나머지 전원에게 전달한다면 기대 Opus egress는 11.76Mbps다. 기대값만 계산할 때 발화의 독립성은 필요하지 않다. 실제 대화의 turn-taking과 동시 발화는 상관되어 있으므로 평균 하나만으로 peak를 산정하지 않는다.
 
 압축만으로 끝나지 않는다. *어디서 믹싱하느냐* (P2P / SFU / MCU), *언제 안 보내느냐* (VAD / DTX), *얼마나 기다리느냐* (지터 버퍼), *무엇을 지우느냐* (AEC / NS / AGC) — 각 결정이 *대역폭·지연·CPU·품질* 의 4축 위 한 점을 고른다. 이 글은 그 4축 위에서 *프로덕션 음성 인프라* 가 어떤 점들을 고르는지, *왜 그렇게 고르는지의 코드와 수치 트레이스* 와 함께 정리한다.
 

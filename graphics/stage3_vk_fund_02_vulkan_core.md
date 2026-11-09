@@ -26,7 +26,7 @@ OpenGL의 핵심이 현재 컨텍스트와 전역 상태라면, Vulkan의 핵심
 
 ### 핸들과 디스패치 모델
 
-Vulkan 객체는 모두 *핸들(handle)* 로 다룬다. 핸들은 두 종류다. `VkInstance`, `VkPhysicalDevice`, `VkDevice`, `VkQueue`, `VkCommandBuffer`는 *dispatchable handle* 로, 내부적으로 함수 디스패치 테이블을 가리키는 불투명 포인터다. 나머지 대부분(`VkBuffer`, `VkImage`, `VkSemaphore`, `VkPipeline` 등)은 *non-dispatchable handle* 로, 64비트 정수로 정의된다. 32비트 빌드에서는 non-dispatchable 핸들이 포인터가 아니라 `uint64_t`라서, 핸들을 포인터로 캐스팅하는 코드는 이식성이 깨진다.
+Vulkan 객체는 모두 *핸들(handle)* 로 다룬다. 핸들은 두 종류다. `VkInstance`, `VkPhysicalDevice`, `VkDevice`, `VkQueue`, `VkCommandBuffer`는 *dispatchable handle* 로, 내부적으로 함수 디스패치 테이블을 가리키는 불투명 포인터다. 나머지 대부분(`VkBuffer`, `VkImage`, `VkSemaphore`, `VkPipeline` 등)은 *non-dispatchable handle* 로, 플랫폼 헤더 설정에 따라 64비트 포인터 또는 64비트 정수로 표현된다. 32비트 빌드에서는 non-dispatchable 핸들이 포인터가 아니라 `uint64_t`라서, 핸들을 포인터로 캐스팅하는 코드는 이식성이 깨진다.
 
 이 구분은 함수 호출 비용에 영향을 준다. dispatchable 핸들을 첫 인자로 받는 함수(`vkCmdDraw(cmd,...)`)는 그 핸들 안의 테이블을 거쳐 드라이버 함수로 점프한다. layer가 끼면 이 테이블이 layer 함수를 가리키도록 교체되어, validation layer가 모든 호출을 가로챌 수 있다. 디스패치 한 단계가 추가되므로 layer를 켠 상태는 끈 상태보다 호출 오버헤드가 크다.
 
@@ -76,7 +76,7 @@ VkResult r = vkCreateBuffer(device, &info, nullptr, &buffer);
 if (r != VK_SUCCESS) { /* 오류 처리 */ }
 ```
 
-`{}`로 0 초기화하는 습관이 중요하다. CreateInfo는 멤버가 많고, 초기화하지 않은 멤버에 쓰레기 값이 남으면 드라이버가 정의되지 않은 동작을 한다. `sType`을 빠뜨리면 드라이버가 구조체 종류를 식별하지 못해 즉시 실패한다.
+`{}`로 0 초기화하는 습관이 중요하다. CreateInfo는 멤버가 많고, 초기화하지 않은 멤버에 쓰레기 값이 남으면 드라이버가 정의되지 않은 동작을 한다. `sType`을 빠뜨리면 유효한 API 사용 조건을 어긴다. validation layer가 이를 지적할 수 있지만, 드라이버가 반드시 오류 코드를 반환하며 안전하게 실패한다고 보장되지는 않는다.
 
 ### 반환 코드와 검증
 
@@ -107,7 +107,7 @@ ci.ppEnabledExtensionNames = extensions;
 vkCreateInstance(&ci, nullptr, &instance);
 ```
 
-`apiVersion`은 애플리케이션이 사용할 최고 Vulkan 버전을 선언한다. loader는 이 값보다 낮은 버전만 지원하는 환경에서 `VK_ERROR_INCOMPATIBLE_DRIVER`를 돌려줄 수 있으므로, 가능하면 `vkEnumerateInstanceVersion`으로 사용 가능한 버전을 먼저 조회한다.
+`apiVersion`은 애플리케이션이 사용할 최고 Vulkan 버전을 선언한다. Vulkan 1.0 구현은 1.0보다 높은 요청에 `VK_ERROR_INCOMPATIBLE_DRIVER`를 반환할 수 있지만, 1.1 이상 구현은 이 값이 높다는 이유만으로 그 오류를 반환하지 않는다. `vkEnumerateInstanceVersion`으로 instance 버전을, physical device의 `apiVersion`으로 device 버전을 별도 확인하고 실제 지원 범위 안의 기능만 사용한다. 1.0 loader에서는 `vkGetInstanceProcAddr`로 조회한 `vkEnumerateInstanceVersion`이 null일 수 있다.
 
 ### Instance extension과 layer
 
@@ -208,9 +208,9 @@ Queue family는 GPU 작업의 종류를 나타낸다.
 | Transfer | copy/blit | 리소스 업로드 |
 | Present | swapchain present | 화면 표시 |
 
-명세상 graphics 비트를 가진 family는 transfer 작업도 항상 수행할 수 있고, compute 비트를 가진 family도 마찬가지다. 따라서 graphics queue 하나만으로 draw, copy, dispatch를 전부 처리하는 것이 가장 단순한 구성이다.
+명세상 graphics 비트를 가진 family는 transfer 작업도 항상 수행할 수 있고, compute 비트를 가진 family도 마찬가지다. 따라서 graphics와 compute 비트를 모두 가진 queue 하나로 draw, copy, dispatch를 처리하는 것이 가장 단순한 구성이다. graphics 지원만으로 compute 지원까지 보장되지는 않는다.
 
-한 queue가 여러 기능을 함께 지원할 수 있다. 단순한 앱은 graphics+present가 같은 family인 디바이스를 고르면 구현이 단순해진다. 별도 transfer queue를 쓰면 업로드와 렌더링을 겹쳐 DMA 엔진을 따로 돌릴 수 있지만, 두 queue가 같은 자원을 다룰 때 queue family ownership transfer와 semaphore가 필요해진다. 이른바 dedicated transfer queue(graphics 비트 없이 transfer 비트만 가진 family)는 PCIe 복사 전용 하드웨어 엔진에 매핑되는 경우가 많아, 대용량 텍스처 스트리밍에서 렌더링과 병렬로 업로드를 돌릴 수 있다.
+한 queue가 여러 기능을 함께 지원할 수 있다. 단순한 앱은 graphics+present가 같은 family인 디바이스를 고르면 구현이 단순해진다. 별도 transfer queue를 쓰면 업로드와 렌더링을 겹쳐 DMA 엔진을 따로 돌릴 수 있지만, 서로 다른 family가 `EXCLUSIVE` 자원의 소유권을 넘길 때는 queue family ownership transfer와 실행 의존 관계가 필요하다. 같은 family의 queue 사이에는 ownership transfer가 필요 없고, `CONCURRENT` 자원도 ownership transfer를 생략하지만 읽기·쓰기 의존 관계는 여전히 동기화해야 한다. 이른바 dedicated transfer queue(graphics 비트 없이 transfer 비트만 가진 family)는 PCIe 복사 전용 하드웨어 엔진에 매핑되는 경우가 많아, 대용량 텍스처 스트리밍에서 렌더링과 병렬로 업로드를 돌릴 수 있다.
 
 ## 4. Surface와 Swapchain
 
@@ -250,7 +250,7 @@ vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical, surface, &caps);
 | Present mode | FIFO / MAILBOX / IMMEDIATE | 항상 보장되는 FIFO를 기본 |
 | Image count | minImageCount 이상 | `minImageCount + 1` (트리플 버퍼링 유도) |
 
-`VK_PRESENT_MODE_FIFO_KHR`은 명세가 모든 구현에서 지원을 보장하는 유일한 모드로, OpenGL의 V-Sync에 해당한다. present 요청이 큐에 쌓이고 수직 동기 신호마다 하나씩 표시되어 티어링이 없다. `MAILBOX`는 큐가 가득 차면 대기 중인 image를 최신 것으로 교체해 티어링 없이 지연을 줄이지만 지원이 선택적이다. `IMMEDIATE`는 즉시 표시해 지연이 가장 짧지만 티어링이 생긴다.
+`VK_PRESENT_MODE_FIFO_KHR`은 명세가 모든 구현에서 지원을 보장하는 유일한 모드로, OpenGL의 V-Sync에 해당한다. present 요청이 큐에 쌓이고 수직 동기 신호마다 하나씩 표시되어 티어링이 없다. `MAILBOX`는 큐가 가득 차면 대기 중인 image를 최신 것으로 교체해 티어링 없이 지연을 줄이지만 지원이 선택적이다. `IMMEDIATE`는 수직 동기를 기다리지 않아 티어링이 생길 수 있다. 실제 입력 지연은 이미지 수와 CPU·GPU 대기까지 함께 결정하므로 모드 이름만으로 최저 지연을 보장하지는 않는다.
 
 ### Swapchain 생성
 
@@ -293,7 +293,7 @@ sequenceDiagram
     Note over Queue,Swapchain: fence(graphics 완료)와 present의 wait 소비 완료는 다른 수명
 ```
 
-`vkAcquireNextImageKHR`는 다음에 그릴 image의 인덱스를 돌려주고, 그 image가 표시 가능해지면 신호할 semaphore를 받는다. 윈도우 크기가 바뀌거나 surface가 invalid 상태가 되면 acquire나 present가 `VK_ERROR_OUT_OF_DATE_KHR`를 돌려주는데, 이때 swapchain을 다시 만들어야 한다. `VK_SUBOPTIMAL_KHR`는 표시는 되지만 최적이 아니라는 신호로, 다음 프레임에 재생성하면 된다.
+`vkAcquireNextImageKHR`는 다음에 그릴 image의 인덱스를 돌려주고, 그 image를 애플리케이션이 다시 사용할 수 있게 되면 신호할 semaphore를 받는다. 윈도우 크기가 바뀌거나 surface가 invalid 상태가 되면 acquire나 present가 `VK_ERROR_OUT_OF_DATE_KHR`를 돌려주는데, 이때 swapchain을 다시 만들어야 한다. `VK_SUBOPTIMAL_KHR`는 표시는 되지만 최적이 아니라는 신호로, 다음 프레임에 재생성하면 된다.
 
 재생성 시에는 `vkDeviceWaitIdle`로 GPU가 기존 image 사용을 끝낼 때까지 기다린 뒤, swapchain image view와 framebuffer처럼 swapchain image에 의존하는 객체를 모두 다시 만든다. 재생성을 빠뜨리면 크기가 바뀐 윈도우에 늘어난 화면이 표시되거나 검증 오류가 쏟아진다.
 
@@ -301,7 +301,7 @@ sequenceDiagram
 
 ### 기록과 제출 모델
 
-Vulkan은 즉시 실행 API가 아니다. CPU는 command buffer에 명령을 *기록(record)* 하고, queue submit으로 GPU에 한꺼번에 *제출(submit)* 한다. 기록과 실행이 분리되어 있어서, 한 번 기록한 command buffer를 여러 번 제출하거나 여러 스레드에서 동시에 기록할 수 있다.
+Vulkan은 즉시 실행 API가 아니다. CPU는 command buffer에 명령을 *기록(record)* 하고, queue submit으로 GPU에 한꺼번에 *제출(submit)* 한다. 기록과 실행이 분리되어 있어서, 사용 플래그와 실행 완료 조건을 지키면 기록한 command buffer를 다시 제출할 수 있고, 여러 스레드가 서로 다른 command buffer를 병렬로 기록할 수 있다.
 
 ```cpp
 vkBeginCommandBuffer(cmd, &beginInfo);
@@ -356,7 +356,7 @@ Vulkan은 동기화를 자동으로 해 주지 않는다. GPU 작업은 기본�
 | Semaphore | Queue 간 / GPU 작업 간 | acquire/render/present 연결 |
 | Pipeline Barrier | 한 command stream 내부 | layout 전이, 메모리 가시성 |
 
-Fence는 GPU가 작업을 끝냈는지 CPU가 기다리거나 폴링하는 데 쓴다. Semaphore는 GPU 측에서 한 작업의 완료가 다른 작업의 시작을 풀어 주는 데 쓰며 CPU는 그 값을 직접 보지 않는다. Pipeline barrier는 같은 command buffer 안에서 앞선 명령의 메모리 쓰기가 뒤따르는 명령의 읽기에 보이도록 강제한다.
+Fence는 GPU가 작업을 끝냈는지 CPU가 기다리거나 폴링하는 데 쓴다. 여기서 사용하는 binary semaphore는 GPU 측에서 한 작업의 완료가 다른 작업의 시작을 풀어 주는 데 쓴다. timeline semaphore는 CPU의 값 조회·대기·신호도 지원한다. Pipeline barrier는 같은 queue의 제출 순서 안에서 앞선 명령의 메모리 쓰기가 뒤따르는 명령의 읽기에 보이도록 강제한다.
 
 ### 프레임 루프
 
@@ -397,7 +397,7 @@ vkQueuePresentKHR(presentQueue, &presentInfo);
 
 ### Pipeline Barrier와 Layout 전이
 
-Pipeline barrier는 "이전 단계의 어떤 쓰기가 이후 단계의 어떤 읽기에 보여야 하는가"를 명시한다. 이미지 layout 전이도 barrier로 표현한다. layout은 image 데이터가 메모리에 배치된 방식으로, GPU가 용도에 맞춰 압축이나 타일링을 바꾸기 때문에 attachment로 쓸 때, 샘플링할 때, present할 때 각각 최적 layout이 다르다.
+Pipeline barrier는 "이전 단계의 어떤 쓰기가 이후 단계의 어떤 읽기에 보여야 하는가"를 명시한다. 이미지 layout 전이도 barrier로 표현한다. layout은 image의 접근 방식과 내용 보존에 관한 계약이며, 전이가 구현 내부의 압축 상태 등을 바꿀 수 있다. 생성 시 정하는 image tiling과 같은 개념은 아니다. attachment로 쓸 때, 샘플링할 때, present할 때 각각 최적 layout이 다르다.
 
 ```cpp
 VkImageMemoryBarrier barrier{};
@@ -420,7 +420,7 @@ vkCmdPipelineBarrier(cmd,
     1, &barrier);
 ```
 
-barrier에는 두 축이 있다. *스테이지 마스크*(src/dst stage)는 "어느 파이프라인 단계 사이에 의존이 있는가"를 정하고, *액세스 마스크*(src/dst access)는 "어떤 종류의 메모리 접근 사이에 가시성이 필요한가"를 정한다. `oldLayout`을 `VK_IMAGE_LAYOUT_UNDEFINED`로 두면 기존 내용을 보존하지 않겠다는 뜻이라 전이가 빠르다 — 매 프레임 새로 그리는 attachment에 적합하다.
+barrier에는 두 축이 있다. *스테이지 마스크*(src/dst stage)는 "어느 파이프라인 단계 사이에 의존이 있는가"를 정하고, *액세스 마스크*(src/dst access)는 "어떤 종류의 메모리 접근 사이에 가시성이 필요한가"를 정한다. `oldLayout`을 `VK_IMAGE_LAYOUT_UNDEFINED`로 두면 기존 내용을 보존하지 않아도 된다는 뜻이다 — 매 프레임 새로 그리는 attachment에 적합하다.
 
 동기화 오류는 "가끔 깨짐"으로 나타나는 것이 특징이다. 한 벤더의 GPU에서는 우연히 단계가 겹치지 않아 멀쩡하다가 다른 GPU에서 화면이 찢어지거나 잔상이 남는다. validation layer와 GPU-assisted validation, synchronization validation을 켜면 layout, access mask, queue ownership 문제를 훨씬 빨리 찾을 수 있다.
 
@@ -460,7 +460,7 @@ Memory property는 성능과 접근 방식을 결정한다.
 | `HOST_COHERENT` | flush/invalidate 생략 가능 | 작은 동적 업로드 |
 | `HOST_CACHED` | CPU 읽기 빠름 | readback |
 
-discrete GPU에서 `DEVICE_LOCAL` 힙은 VRAM, `HOST_VISIBLE` 힙은 시스템 RAM에 매핑되는 것이 보통이다. `DEVICE_LOCAL`이면서 `HOST_VISIBLE`인 작은 힙(흔히 256MB 안팎의 BAR 영역)이 있는 경우도 있어, CPU가 직접 쓰면서도 GPU 접근이 빠른 영역으로 활용한다. `HOST_COHERENT`가 없는 host-visible 메모리는 CPU가 쓴 뒤 `vkFlushMappedMemoryRanges`로 명시적 flush를 해야 GPU에 보인다.
+discrete GPU에서 `DEVICE_LOCAL` 힙은 VRAM, `HOST_VISIBLE` 힙은 시스템 RAM에 매핑되는 것이 보통이다. `DEVICE_LOCAL`이면서 `HOST_VISIBLE`인 힙을 CPU에 노출하는 메모리 타입이 있는 경우도 있어(기존 BAR 창은 흔히 256MB 안팎이지만 Resizable BAR에서는 훨씬 클 수 있다), CPU가 직접 쓰면서도 GPU 접근이 빠른 영역으로 활용한다. `HOST_COHERENT`가 없는 host-visible 메모리는 CPU가 쓴 뒤 `vkFlushMappedMemoryRanges`로 명시적 flush를 해야 GPU에 보인다.
 
 ### Staging과 Allocator
 

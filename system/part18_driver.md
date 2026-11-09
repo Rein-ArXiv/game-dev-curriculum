@@ -605,6 +605,9 @@ static int my_device_send_data(struct my_device *dev, void *buffer, size_t len)
         return -ENOMEM;
     }
 
+    /* 이 예는 전송이 직렬화되어 이전 completion 사용자가 없다고 가정한다. */
+    reinit_completion(&dev->dma_complete);
+
     /* DMA 컨트롤러에 물리 주소와 길이 설정 */
     writel(lower_32_bits(dma_handle), dev->regs + DMA_ADDR_LOW);
     writel(upper_32_bits(dma_handle), dev->regs + DMA_ADDR_HIGH);
@@ -1057,7 +1060,7 @@ static int mydev_mmap(struct file *filp, struct vm_area_struct *vma)
 }
 ```
 
-`read`/`write` 없이 직접 메모리 접근으로 고성능 전송이 가능하다. 이 예는 해당 buffer가 사용자 공개용 전용 물리 페이지이고 매핑 수명이 보장되며, 제거 시 매핑을 분리할 때만 성립한다.
+`read`/`write` 없이 직접 메모리 접근으로 고성능 전송이 가능하다. 이 예는 요청 범위가 물리적으로 연속된 사용자 공개용 전용 페이지이고 매핑 수명이 보장되며, 제거 시 매핑을 분리할 때만 성립한다. 불연속 페이지 배열은 첫 PFN에서 연속 범위로 매핑할 수 없다.
 
 ### 플랫폼 드라이버
 
@@ -1125,6 +1128,7 @@ static int my_resume(struct device *dev)
 
     writel(POWER_UP, mydev->regs + POWER_REG);
     my_device_reinit(mydev);
+    enable_irq(mydev->irq);  /* suspend에서 비활성화한 IRQ 복원 */
 
     return 0;
 }

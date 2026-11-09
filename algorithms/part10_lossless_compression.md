@@ -138,7 +138,7 @@ $$
 H(X) \le L < H(X)+1
 $$
 
-을 만족한다. 단, $H(X)\le L<H(X)+1$은 명시한 확률 모델에 대한 기대 길이 명제이며 포맷 헤더와 블록 비용은 포함하지 않는다. 형식이 심볼당 최소 1 bit나 고정 길이를 강제하면, 예를 들어 심볼 하나짜리 alphabet에서 $H=0$이어도 $L=1$이 되어 개별 파일 길이는 이 하한에 묶이지 않는다.
+을 만족한다. 단, $H(X)\le L<H(X)+1$은 명시한 확률 모델에서 최적으로 선택한 코드의 기대 길이에 대한 명제이며 포맷 헤더와 블록 비용은 포함하지 않는다. 심볼 하나짜리 alphabet은 빈 codeword를 허용하면 $H=L=0$이다. 포맷이 최소 1 bit를 강제하면 $L=1$이므로 이 퇴화 경우에는 *엄격한 상한* $L<H+1$이 성립하지 않는다. 엔트로피 하한 $H\le L$이 깨진 것이 아니라 코드 길이에 추가 제약을 둔 경우다.
 
 ### Huffman의 greedy 선택
 
@@ -225,7 +225,7 @@ for (Entry& entry : sortedByLengthThenSymbol) {
 
 ### Huffman의 한계
 
-확률 $0.9$인 심볼도 최소 1 bit가 필요하므로 symbol당 0.469 bit인 엔트로피에 도달할 수 없다. 여러 심볼을 block symbol로 묶으면 차이가 줄지만 alphabet과 model 비용이 폭증한다. Fractional bit에 가까운 평균 길이를 얻기 위해 arithmetic/range/ANS 계열을 사용한다.
+두 심볼의 확률이 $0.9$와 $0.1$인 모델에서 Huffman은 각 심볼에 1 bit를 쓰므로 symbol당 약 0.469 bit인 엔트로피에 도달할 수 없다. 여러 심볼을 block symbol로 묶으면 차이가 줄지만 alphabet과 model 비용이 폭증한다. Fractional bit에 가까운 평균 길이를 얻기 위해 arithmetic/range/ANS 계열을 사용한다.
 
 ## 3. Arithmetic, Range, ANS Coding
 

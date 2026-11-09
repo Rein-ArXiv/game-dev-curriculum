@@ -57,6 +57,10 @@ flowchart LR
 ```cpp
 glViewport(0, 0, kShadowW, kShadowH);
 glBindFramebuffer(GL_FRAMEBUFFER, depthFBO);
+glEnable(GL_DEPTH_TEST);
+glDepthMask(GL_TRUE);
+glDepthFunc(GL_LESS);
+glClearDepth(1.0);
 glClear(GL_DEPTH_BUFFER_BIT);
 
 depthShader.Use();
@@ -86,7 +90,7 @@ void main() {
 // fragment shader (깊이는 자동 기록되므로 본문이 비어도 된다)
 #version 330 core
 void main() {
-    // gl_FragDepth 가 자동 갱신된다
+    // gl_FragDepth를 쓰지 않으면 래스터라이저가 계산한 깊이를 사용한다
 }
 ```
 
@@ -122,7 +126,7 @@ for (auto& obj : sceneObjects) {
 
 ### 두 패스의 비용 구조
 
-Pass 1은 컬러 출력과 셰이딩 계산이 없으므로 정점 처리와 깊이 래스터화가 비용의 대부분이다. 같은 씬을 두 번 그리지만, 깊이 패스는 프래그먼트당 비용이 거의 없어 메인 패스보다 훨씬 가볍다. 대신 드로우 콜은 그대로 두 배가 되므로, 드로우 콜이 많은 씬에서는 CPU 측 오버헤드가 두드러진다. 정적 지오메트리의 섀도 맵을 매 프레임 다시 그리지 않고 광원이 움직일 때만 갱신하는 캐싱이 흔한 최적화다.
+Pass 1은 컬러 출력과 셰이딩 계산이 없으므로 정점 처리와 깊이 래스터화가 비용의 대부분이다. 같은 씬을 두 번 그리지만, 깊이 패스는 프래그먼트당 비용이 거의 없어 메인 패스보다 훨씬 가볍다. 대신 드로우 콜은 그대로 두 배가 되므로, 드로우 콜이 많은 씬에서는 CPU 측 오버헤드가 두드러진다. 정적 지오메트리의 섀도 맵은 광원·caster·light-space 투영이 변하지 않으면 재사용할 수 있다. 카메라를 따라 투영 범위가 바뀌는 CSM은 광원이 정적이어도 갱신이 필요하다.
 
 ## 2. 라이트 공간 행렬
 
@@ -160,7 +164,7 @@ for (int i = 0; i < 8; ++i) {
 glm::mat4 lightProj = glm::ortho(mn.x, mx.x, mn.y, mx.y, -mx.z, -mn.z);
 ```
 
-빛 공간에서 -z가 카메라 정면 방향이다. OpenGL은 오른손 좌표계에 카메라가 -Z를 바라보는 컨벤션을 쓰므로, 빛 공간 좌표의 z는 정면 점일수록 음수다. `glm::ortho`의 near/far는 양수 거리를 기대하므로 `-mx.z`가 가까운 평면, `-mn.z`가 먼 평면으로 들어간다. 부호를 헷갈리면 near/far가 뒤집혀 절두체가 비고, 섀도 맵 전체가 1.0으로 클리어된 그대로 남는다.
+빛 공간에서 -z가 카메라 정면 방향이다. OpenGL은 오른손 좌표계에 카메라가 -Z를 바라보는 컨벤션을 쓰므로, 빛 공간 좌표의 z는 정면 점일수록 음수다. 여기서는 씬이 가상 광원 카메라 앞쪽에 있으므로 near/far에 양수 거리를 넣고, `-mx.z`가 가까운 평면, `-mn.z`가 먼 평면으로 들어간다. 부호를 헷갈리면 near/far가 뒤집혀 절두체가 비고, 섀도 맵 전체가 1.0으로 클리어된 그대로 남는다.
 
 큰 야외 씬에서는 씬 전체를 한 박스로 감싸면 텍셀 밀도가 턱없이 부족하다. 그 경우 카메라 절두체 안에 들어오는 부분만으로 박스를 좁히고, 깊이 구간을 여러 단계로 쪼개 각 단계에 별도 섀도 맵을 두는 CSM으로 확장한다.
 
@@ -211,11 +215,11 @@ glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
 각 설정의 의미를 짚는다.
 
-`GL_DEPTH_COMPONENT24`는 24비트 정규화 깊이 포맷이다. 텍셀당 24비트, 즉 16,777,216 단계로 깊이를 양자화한다. `GL_DEPTH_COMPONENT32F`로 바꾸면 32비트 부동소수점이 되어 정밀도가 올라가는 대신 VRAM이 늘어난다. $1024 \times 1024$ 기준 24비트는 약 4MB(드라이버는 32비트 정렬로 잡는 경우가 많다), 32비트 float도 4MB로 큰 차이가 없으나 $4096 \times 4096$이면 한 장에 64MB로 무시하기 어려운 크기가 된다.
+`GL_DEPTH_COMPONENT24`는 24비트 정규화 깊이 포맷이다. 텍셀당 24비트, 즉 16,777,216 단계로 깊이를 양자화한다. `GL_DEPTH_COMPONENT32F`로 바꾸면 32비트 부동소수점이 된다. 정밀도 이득은 저장 깊이의 분포에 달려 있고, 실제 VRAM 크기도 구현에 따라 달라진다. $1024 \times 1024$ 기준 24비트는 약 4MB(드라이버는 32비트 정렬로 잡는 경우가 많다), 32비트 float도 4MB로 큰 차이가 없으나 $4096 \times 4096$이면 한 장에 64MB로 무시하기 어려운 크기가 된다.
 
 `GL_NEAREST` 필터를 쓰는 이유는 깊이값을 선형 보간하면 안 되기 때문이다. 두 텍셀의 깊이를 평균낸 값은 어떤 실제 표면의 깊이도 아닐 수 있다. PCF는 이 깊이들을 먼저 섞지 않고 주변 텍셀마다 현재 깊이와 비교한 이진 결과를 평균해 가시성 비율을 근사한다.
 
-`GL_CLAMP_TO_BORDER`에 흰색 테두리를 주는 설정이 중요하다. 섀도 맵 바깥의 UV를 샘플하면 테두리 색인 깊이 1.0을 돌려준다. 깊이 1.0은 가장 먼 깊이이므로, 비교에서 어떤 현재 깊이든 그보다 가까워 그림자가 아닌 빛 영역으로 판정된다. 즉 절두체 바깥은 그림자가 없는 것으로 취급된다. `GL_REPEAT`나 `GL_CLAMP_TO_EDGE`를 쓰면 절두체 경계의 깊이가 바깥으로 새어 들어가 엉뚱한 줄무늬 그림자가 생긴다.
+`GL_CLAMP_TO_BORDER`에 흰색 테두리를 주는 설정이 중요하다. 섀도 맵 바깥의 UV를 샘플하면 테두리 색인 깊이 1.0을 돌려준다. 깊이 1.0은 가장 먼 깊이이므로, 현재 깊이가 [0,1] 안이면 그림자가 아닌 빛 영역으로 판정된다. S/T 보더는 near/far 밖의 깊이를 처리하지 않으므로 아래 셰이더에서 별도로 검사한다. `GL_REPEAT`나 `GL_CLAMP_TO_EDGE`를 쓰면 절두체 경계의 깊이가 바깥으로 새어 들어가 엉뚱한 줄무늬 그림자가 생긴다.
 
 `glDrawBuffer(GL_NONE)`과 `glReadBuffer(GL_NONE)`은 이 FBO에 컬러 첨부가 없음을 명시한다. 이 호출이 없으면 기본 draw/read buffer가 존재하지 않는 컬러 첨부 0번을 가리켜 각각 `GL_FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER` 또는 `GL_FRAMEBUFFER_INCOMPLETE_READ_BUFFER`가 될 수 있다. 깊이 이미지가 이미 붙어 있으므로 `GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT`는 아니다. FBO 생성 직후 `glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE`를 확인하는 습관이 디버깅 시간을 줄인다.
 
@@ -290,7 +294,7 @@ float ShadowCalc(vec4 lightSpacePos, vec3 N, vec3 L) {
     // perspective divide (방향광은 w == 1)
     vec3 proj = lightSpacePos.xyz / lightSpacePos.w;
     proj = proj * 0.5 + 0.5;                    // [-1,1] -> [0,1]
-    if (proj.z > 1.0) return 0.0;               // 절두체 far 바깥은 빛 영역
+    if (proj.z < 0.0 || proj.z > 1.0) return 0.0;               // 절두체 far 바깥은 빛 영역
 
     float closestDepth = texture(uShadowMap, proj.xy).r;
     float currentDepth = proj.z;
@@ -314,7 +318,7 @@ void main() {
     vec3 albedo = texture(texture_diffuse1, vUv).rgb;
     vec3 ambient  = 0.15 * albedo;
     vec3 diffuse  = max(dot(N, L), 0.0) * albedo * uLightColor;
-    vec3 specular = pow(max(dot(N, H), 0.0), 32.0) * uLightColor;
+    vec3 specular = (dot(N, L) > 0.0 ? pow(max(dot(N, H), 0.0), 32.0) : 0.0) * uLightColor;
 
     float shadow = ShadowCalc(vLightSpacePos, N, L);
     vec3 lit     = ambient + (1.0 - shadow) * (diffuse + specular);
@@ -326,7 +330,7 @@ void main() {
 
 ### sampler2DShadow와 하드웨어 PCF
 
-OpenGL은 깊이 텍스처에 대해 비교 샘플링을 하드웨어로 지원한다. 텍스처를 비교 모드로 설정하면 샘플러가 깊이값을 돌려주는 대신 *비교 결과* 를 돌려주고, 그 과정에서 2×2 bilinear 필터링을 공짜로 적용한다.
+OpenGL은 깊이 텍스처에 대해 비교 샘플링을 하드웨어로 지원한다. 텍스처를 비교 모드로 설정하면 샘플러가 깊이값을 돌려주는 대신 *비교 결과* 를 돌려주고, 선형 필터를 사용하면 비교 결과들을 결합한다. 흔한 구현은 2×2 bilinear PCF이며 실제 비용과 정확한 필터는 구현에 달려 있다.
 
 ```cpp
 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
@@ -343,7 +347,7 @@ float lit = texture(uShadowMap, vec3(proj.xy, proj.z - bias));
 // lit == 1.0 이면 빛, 0.0 이면 그림자
 ```
 
-부호 규약이 1-tap과 반대라는 점에 주의한다. `sampler2DShadow`는 비교를 *통과* 한 비율, 즉 빛을 받는 비율을 돌려주므로 1.0이 빛이다. 앞의 `ShadowCalc`는 그림자 비율을 돌려주므로 1.0이 그림자였다. 한쪽 규약으로 통일하려면 `1.0 - lit` 같은 변환을 둔다. 비교 모드 텍스처는 `GL_LINEAR` 필터와 결합해야 의미가 있다. `GL_NEAREST`로 두면 하드웨어 PCF의 bilinear 가중이 사라진다.
+부호 규약이 1-tap과 반대라는 점에 주의한다. `sampler2DShadow`는 비교를 *통과* 한 비율, 즉 빛을 받는 비율을 돌려주므로 1.0이 빛이다. 앞의 `ShadowCalc`는 그림자 비율을 돌려주므로 1.0이 그림자였다. 한쪽 규약으로 통일하려면 `1.0 - lit` 같은 변환을 둔다. 비교 모드 텍스처는 `GL_NEAREST`에서도 한 깊이 비교를 수행한다. 부드러운 PCF에는 `GL_LINEAR`를 결합한다. `GL_NEAREST`로 두면 하드웨어 PCF의 bilinear 가중이 사라진다.
 
 ## 5. Shadow Acne와 깊이 바이어스
 
@@ -393,7 +397,7 @@ float shadow = currentDepth - bias > closestDepth ? 1.0 : 0.0;
 float ShadowCalc(vec4 lightSpacePos, vec3 N, vec3 L) {
     vec3 proj = lightSpacePos.xyz / lightSpacePos.w;
     proj = proj * 0.5 + 0.5;
-    if (proj.z > 1.0) return 0.0;
+    if (proj.z < 0.0 || proj.z > 1.0) return 0.0;
 
     float closestDepth = texture(uShadowMap, proj.xy).r;
     float currentDepth = proj.z;
@@ -406,13 +410,13 @@ float ShadowCalc(vec4 lightSpacePos, vec3 N, vec3 L) {
 
 bias의 수치 의미는 섀도 맵 해상도, 절두체 깊이 범위, 깊이 비트에 따라 달라진다. bias는 $[0, 1]$로 정규화된 깊이 공간에서의 값이라, 같은 0.005라도 절두체 깊이 범위가 넓으면 월드 공간에서 더 큰 거리에 해당한다.
 
-| 섀도 맵 | 깊이 범위 (far − near) | 정규화 깊이 1 LSB | 직교 투영의 월드 거리 근사 | 권장 bias |
+| 섀도 맵 | 깊이 범위 (far − near) | 정규화 깊이 1 LSB | 직교 투영의 월드 거리 근사 | 튜닝 예시 bias (범용 권장값 아님) |
 |---|---|---|---|---|
 | 1024², 24bit | 50 | $2^{-24}\approx5.96\times10^{-8}$ | $50/2^{24}\approx3\times10^{-6}$ | 0.005 ~ 0.01 |
 | 2048², 24bit | 100 | $2^{-24}\approx5.96\times10^{-8}$ | $100/2^{24}\approx6\times10^{-6}$ | 0.005 |
 | 4096², 32F | 200 | 값에 따른 부동소수점 간격 | 투영·저장값에 따라 달라짐 | 0.001 ~ 0.005 |
 
-24비트 정규화 깊이의 1 LSB는 항상 $2^{-24}$이고, 표의 월드 거리 값은 선형 직교 섀도 투영에서 여기에 깊이 범위를 곱한 근사다. 셰이더의 normalized-depth bias는 같은 정규화 단위에서 비교해야 한다. bias는 양자화·보간·slope 오차를 덮으면서 Peter-Panning이 보이지 않을 만큼 작아야 하므로, 0부터 키우며 acne가 사라지는 지점과 분리 현상이 시작되는 지점을 함께 측정한다.
+24비트 정규화 깊이의 1 LSB는 정확히 $1/(2^{24}-1)$, 근사적으로 $2^{-24}$이고, 표의 월드 거리 값은 선형 직교 섀도 투영에서 여기에 깊이 범위를 곱한 근사다. 셰이더의 normalized-depth bias는 같은 정규화 단위에서 비교해야 한다. 예를 들어 직교 깊이 범위 50에서 bias 0.005는 월드 거리 0.25에 해당하므로 작은 물체에는 이미 과할 수 있다. bias는 양자화·보간·slope 오차를 덮으면서 Peter-Panning이 보이지 않을 만큼 작아야 하므로, 0부터 키우며 acne가 사라지는 지점과 분리 현상이 시작되는 지점을 함께 측정한다.
 
 또 하나의 함정은 절두체 far를 과하게 크게 잡으면 깊이 정밀도가 분산되어 acne가 심해진다는 점이다. near/far를 씬에 맞게 좁히는 것 자체가 bias 튜닝만큼 중요하다.
 
@@ -449,7 +453,7 @@ glCullFace(GL_FRONT);
 glCullFace(GL_BACK);    // 메인 패스로 복원
 ```
 
-장점은 bias를 0.001 수준으로 줄여도 acne가 없다는 것이다. 단점이 둘 있다. 잎사귀나 종이처럼 얇은 객체는 앞뒤 면이 너무 가까워 깊이 차이가 사실상 없으므로 효과가 없고 그림자가 거의 사라진다. 또 한쪽 면만 있는 열린 메시(open mesh)는 컬링하면 그릴 면이 남지 않아 그림자 자체가 없어진다. 닫힌 단단한 메시에만 안전하게 쓸 수 있다.
+장점은 닫힌 메시의 앞면 self-shadow에 필요한 bias를 줄일 수 있다는 것이다. 두께에 따른 그림자 축소·접촉부 분리는 여전히 확인해야 한다. 단점이 둘 있다. 잎사귀나 종이처럼 얇은 객체는 앞뒤 면이 너무 가까워 깊이 차이가 사실상 없으므로 효과가 없고 그림자가 거의 사라진다. 또 한쪽 면만 있는 열린 메시(open mesh)는 컬링하면 그릴 면이 남지 않아 그림자 자체가 없어진다. 닫힌 단단한 메시에만 안전하게 쓸 수 있다.
 
 ### 대응책 2: 법선 방향 오프셋
 
@@ -471,7 +475,7 @@ vec4 lightSpacePosBiased = uLightSpace * vec4(vFragPos + N * 0.05, 1.0);
 
 1-tap 비교는 섀도 맵 한 텍셀당 그림자/빛을 이분법으로 가른다. 그 결과 그림자 경계가 텍셀 단위로 계단처럼 끊긴 톱니(jagged) 모양이 된다. 경계 픽셀이 0 아니면 1만 가지므로 중간 단계가 없다.
 
-PCF(Percentage-Closer Filtering)는 한 점의 그림자 여부를 주변 여러 텍셀과 비교한 뒤 그 결과를 평균낸다. 9개 중 4개가 그림자면 0.44가 되어, 경계에 부드러운 회색 그라데이션이 생긴다. 깊이를 보간하는 게 아니라 *비교 결과* 를 보간한다는 점이 핵심이다. 깊이 자체를 평균내면 의미 없는 값이 나오지만, 비교 결과(0 또는 1)의 평균은 그림자에 가려진 면적 비율이라는 물리적 의미를 가진다.
+PCF(Percentage-Closer Filtering)는 한 점의 그림자 여부를 주변 여러 텍셀과 비교한 뒤 그 결과를 평균낸다. 9개 중 4개가 그림자면 0.44가 되어, 경계에 부드러운 회색 그라데이션이 생긴다. 깊이를 보간하는 게 아니라 *비교 결과* 를 보간한다는 점이 핵심이다. 깊이 자체를 평균내면 의미 없는 값이 나오지만, 비교 결과(0 또는 1)의 평균은 선택한 필터 footprint 안의 가시성 비율을 근사한다. 고정 PCF 커널이 실제 면광원의 크기·blocker 거리로 정해지는 물리적 반그림자를 재현하는 것은 아니다.
 
 ### 3x3 PCF
 
@@ -479,7 +483,7 @@ PCF(Percentage-Closer Filtering)는 한 점의 그림자 여부를 주변 여러
 float ShadowPCF(vec4 lightSpacePos, vec3 N, vec3 L) {
     vec3 proj = lightSpacePos.xyz / lightSpacePos.w;
     proj = proj * 0.5 + 0.5;
-    if (proj.z > 1.0) return 0.0;
+    if (proj.z < 0.0 || proj.z > 1.0) return 0.0;
 
     float bias = max(0.05 * (1.0 - dot(N, L)), 0.005);
     float currentDepth = proj.z;
@@ -508,23 +512,23 @@ float ShadowPCF(vec4 lightSpacePos, vec3 N, vec3 L) {
 
 ### 비교
 
-| 방식 | tap 수 | 경계 | 상대 비용 (모형) |
+| 방식 | 개념적 비교 표본 수 | 경계 | 비용 결정 요인 |
 |---|---:|---|---:|
-| 1-tap (단순) | 1 | jagged | ×1 |
-| 2×2 hardware PCF | 4 | 약간 부드러움 | ×1 (GPU 내장) |
-| 3×3 manual PCF | 9 | 부드러움 | ×2.5 |
-| 5×5 manual PCF | 25 | 매우 부드러움 | ×6 |
-| Poisson Disk 16 | 16 | 자연스러움, banding 적음 | ×4 |
+| 1-tap (단순) | 1 | jagged | 한 번의 깊이 fetch·비교 |
+| 2×2 hardware PCF | 보통 4 | 약간 부드러움 | 한 번의 비교 샘플러 호출, 구현 의존 |
+| 3×3 manual PCF | 9 | 부드러움 | 9번의 fetch·비교와 캐시 |
+| 5×5 manual PCF | 25 | 매우 부드러움 | 25번의 fetch·비교와 캐시 |
+| Poisson Disk 16 | 16 | 자연스러움, banding 적음 | 표본 배치·캐시·패턴 회전 |
 
-위 배율은 탭 수를 기준으로 한 *개념적 비용 모형* 이며, 실제 shader 호출·cache·wall time과 일치한다는 보장은 없다.
+표본 수가 실행 시간 배율을 직접 정하지는 않는다. 실제 비용은 대상 GPU에서 같은 장면과 품질 조건으로 측정한다.
 
-하드웨어 2×2 PCF는 비교 모드 텍스처에서 bilinear 필터로 공짜로 얻는다. 4절의 `sampler2DShadow`가 이것이다. 이를 3×3 매뉴얼 PCF의 각 탭에 결합하면 적은 샘플로 더 부드러운 결과를 얻는다. 탭 간격이 1텍셀이라 인접 탭의 2×2 풋프린트가 겹치므로, 9탭이 실질적으로 4×4 = 16개 텍셀의 가중 평균이 되는 셈이다.
+하드웨어 PCF는 비교 모드 텍스처에 선형 필터를 설정해 이용한다. 4절의 `sampler2DShadow`가 이것이다. 이를 3×3 매뉴얼 PCF의 각 탭에 결합하면 적은 샘플로 더 부드러운 결과를 얻는다. 탭 간격이 1텍셀이라 인접 탭의 2×2 풋프린트가 겹치므로, 9탭이 실질적으로 4×4 = 16개 텍셀의 가중 평균이 되는 셈이다.
 
 Poisson Disk 샘플링은 격자 대신 원판에 분산된 고정 패턴으로 샘플해 규칙적인 격자 무늬(banding)를 줄인다. 같은 탭 수로 더 자연스러운 경계를 얻지만 패턴이 회전 없이 고정되면 다른 종류의 잡음이 보이므로, 화면 위치 기반 회전을 추가하기도 한다.
 
 ### 고급 옵션
 
-- **VSM(Variance Shadow Maps)**: 섀도 맵에 깊이와 깊이 제곱 두 채널을 저장하고 Chebyshev 부등식으로 가려질 확률을 추정한다. 깊이가 아니라 통계량을 저장하므로 일반 블러를 자유롭게 걸 수 있어 부드러운 경계가 거의 공짜다. 단점은 두 표면의 깊이 차가 클 때 빛이 새는 light bleeding이다.
+- **VSM(Variance Shadow Maps)**: 섀도 맵에 깊이와 깊이 제곱 두 채널을 저장하고 Chebyshev 부등식으로 가려질 확률을 추정한다. 깊이가 아니라 통계량을 저장하므로 일반 블러를 자유롭게 걸 수 있어 일반 필터를 이용해 넓은 커널을 구현하기 쉽지만, 모멘트 렌더링·블러·저장 비용은 든다. 단점은 두 표면의 깊이 차가 클 때 빛이 새는 light bleeding이다.
 - **PCSS(Percentage-Closer Soft Shadows)**: 먼저 blocker search로 가린 표면의 평균 깊이를 찾고, 그 깊이와 광원 크기로 penumbra 폭을 추정해 PCF 커널 크기를 동적으로 조절한다. 접촉부는 날카롭고 멀어질수록 부드러운, 물리적으로 그럴듯한 그림자를 만든다. blocker search 비용이 크다.
 - **CSM(Cascaded Shadow Maps)**: 카메라 절두체를 깊이 방향으로 3~4단계로 분할하고 각 단계에 별도 섀도 맵을 둔다. 가까운 단계는 좁은 절두체에 높은 텍셀 밀도, 먼 단계는 넓은 절두체에 낮은 밀도를 배정해 화면 전체에서 균일한 그림자 품질을 얻는다.
 

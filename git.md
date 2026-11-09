@@ -1,6 +1,6 @@
 ## 들어가며
 
-Git은 분산 버전 관리 시스템이다. 모든 개발자가 전체 저장소의 사본을 가지며, 네트워크 없이도 커밋, 브랜치 생성, 히스토리 조회가 가능하다. 중앙 집중식인 SVN과 달리 단일 실패점이 없다.
+Git은 분산 버전 관리 시스템이다. 일반적인 전체 clone은 각 개발자가 저장소의 히스토리와 객체 사본을 가지며, 네트워크 없이도 커밋, 브랜치 생성, 히스토리 조회가 가능하다. 중앙 서버 장애 중에도 로컬 작업을 계속할 수 있다. 다만 특정 원격의 이슈·권한·CI·LFS 저장소까지 clone에 복제되는 것은 아니다.
 
 Git의 본질은 스냅샷의 연결이다. 각 커밋은 변경 사항의 차이(diff)가 아니라 그 시점의 파일 트리 전체에 대한 포인터를 저장한다. 변경되지 않은 파일은 이전 스냅샷을 그대로 참조한다. 이 구조 덕분에 브랜치 전환과 히스토리 탐색이 빠르다.
 
@@ -36,7 +36,7 @@ flowchart LR
     C -->|git push| D[Remote Repository<br/>원격 저장소]
     D -->|git fetch / pull| C
     C -->|git checkout| A
-    B -->|git restore --staged| A
+    C -->|git restore --staged: HEAD로 인덱스 복원| B
 ```
 
 - Working Directory: 현재 체크아웃된 파일들이 있는 작업 공간이다.
@@ -46,7 +46,7 @@ flowchart LR
 
 ### .git 폴더의 내부 구조
 
-`.git` 폴더는 Git의 모든 데이터를 담는다. 이 폴더가 있어야 Git 저장소다.
+일반 작업 저장소의 `.git` 디렉토리는 Git 메타데이터를 담는다. linked worktree나 submodule에서는 `.git`이 실제 위치를 가리키는 파일일 수 있고, bare 저장소는 작업 트리 없이 저장소 디렉토리 자체에 메타데이터를 둔다.
 
 ```
 .git/
@@ -63,7 +63,7 @@ flowchart LR
 
 ### 4종류의 객체
 
-Git은 모든 데이터를 4종류의 객체로 저장한다. 각 객체는 SHA-1 해시로 식별된다.
+Git은 모든 데이터를 4종류의 객체로 저장한다. 각 객체는 저장소의 object format에 따른 해시로 식별된다. 기본 SHA-1 외에 SHA-256 형식도 있으므로 식별자를 항상 40자리로 가정하지 않는다.
 
 ```mermaid
 flowchart TD
@@ -78,7 +78,7 @@ flowchart TD
 - Blob: 파일 내용 자체를 담는다. 파일명은 포함하지 않는다.
 - Tree: 디렉토리 구조를 표현한다. blob과 다른 tree에 대한 참조를 가진다.
 - Commit: 시점을 표현한다. tree, 부모 commit, 작성자, 메시지를 담는다.
-- Tag: 특정 커밋에 이름을 붙인다. annotated tag는 별도 객체로 저장된다.
+- Tag: 주로 특정 커밋에 이름을 붙인다. annotated tag 객체는 다른 Git 객체도 가리킬 수 있고, lightweight tag는 별도 tag 객체 없이 ref만 둔다.
 
 ### 커밋 그래프
 
@@ -176,7 +176,7 @@ flowchart TD
 
 ### 브랜치는 포인터다
 
-브랜치는 단순히 커밋을 가리키는 가벼운 포인터다. 새 브랜치를 만드는 비용은 사실상 41바이트 파일 하나(SHA-1 해시 + 개행)를 추가하는 것뿐이다. 따라서 브랜치를 자주, 작게 만들어도 무방하다.
+브랜치는 단순히 커밋을 가리키는 가벼운 포인터다. 새 브랜치는 파일 트리를 복사하지 않고 ref를 추가하므로 가볍다. 실제 41바이트 파일인지 여부는 해시 및 files/packed-refs/reftable 저장 형식에 따라 다르다. 따라서 브랜치를 자주, 작게 만들어도 무방하다.
 
 ### 브랜치 명령어
 
@@ -210,7 +210,7 @@ gitGraph
     merge feature id: "Merge"
 ```
 
-Merge는 양쪽 히스토리를 보존하며 머지 커밋을 만든다.
+Merge는 양쪽 히스토리를 연결한다. 분기된 히스토리는 머지 커밋으로 통합하고, fast-forward가 가능하면 기본적으로 ref만 이동한다.
 
 ```mermaid
 gitGraph
@@ -224,9 +224,9 @@ gitGraph
 Rebase는 feature 브랜치의 커밋들을 main 끝에 다시 적용한다. 히스토리가 직선이 된다.
 
 ```bash
-# Merge: 머지 커밋 생성
+# Merge: fast-forward 가능 여부와 무관하게 머지 커밋 생성
 git switch main
-git merge feature
+git merge --no-ff feature
 
 # Fast-forward (분기 없으면 포인터만 이동)
 git merge feature
@@ -297,7 +297,7 @@ flowchart LR
     Local[로컬 브랜치<br/>main] -->|push| Remote[원격 저장소의<br/>main]
     Remote -->|fetch| Tracking[원격 추적 브랜치<br/>origin/main]
     Tracking -->|merge / rebase| Local
-    Remote -->|pull = fetch + merge| Local
+    Remote -->|pull = fetch + 설정한 통합 방식| Local
 ```
 
 ```bash
@@ -305,7 +305,8 @@ git fetch                       # 원격 변경 가져오기 (병합 안 함)
 git fetch --all                 # 모든 원격 가져오기
 git fetch --prune               # 삭제된 원격 브랜치 정리
 
-git pull                        # fetch + merge
+git pull --ff-only              # fetch 후 fast-forward만 허용 (분기 시 중단)
+git pull --no-rebase            # fetch + merge 방식 명시
 git pull --rebase               # fetch + rebase (선형 히스토리)
 
 git push                        # 현재 브랜치 푸시
@@ -317,7 +318,7 @@ git push origin --delete <br>   # 원격 브랜치 삭제
 
 ### --force vs --force-with-lease
 
-`--force`는 원격 상태와 무관하게 덮어쓴다. 다른 사람이 그 사이 푸시한 커밋이 있으면 사라진다. `--force-with-lease`는 마지막으로 fetch한 시점과 원격 상태가 같을 때만 푸시를 허용한다. 협업 환경에서는 항상 `--force-with-lease`를 사용한다.
+`--force`는 원격 상태와 무관하게 덮어쓴다. 다른 사람이 그 사이 푸시한 커밋이 있으면 사라진다. `--force-with-lease`는 마지막으로 fetch한 시점과 원격 상태가 같을 때만 푸시를 허용한다. 강제 갱신이 합의된 경우에도 `--force-with-lease`를 사용한다. 다만 인자 없는 lease는 로컬 remote-tracking ref를 기준으로 하므로 편집기의 자동 fetch가 그 ref를 갱신하면 검토하지 않은 원격 변경을 덮어쓸 수 있다. `--force-with-lease=refs/heads/<branch>:<expected-commit>`처럼 확인한 기준 커밋을 명시하면 그 값과 원격이 같을 때만 갱신된다.
 
 ### 추적 브랜치
 
@@ -353,6 +354,7 @@ gitGraph
     merge release/1.0 tag: "v1.0"
     checkout develop
     merge release/1.0
+    checkout main
     branch hotfix/bug
     commit id: "h1"
     checkout main
@@ -499,7 +501,7 @@ drop   mno7890 다섯 번째 커밋 # 삭제
 - squash: 이전 커밋과 합친다. 메시지는 합쳐서 편집한다.
 - fixup: squash와 같지만 메시지를 버린다.
 - drop: 커밋을 삭제한다.
-- reorder: 줄 순서를 바꾸면 커밋 순서가 바뀐다.
+- 순서 변경: 줄 자체를 옮긴다. `reorder`라는 todo 명령을 쓰는 것은 아니다.
 
 이미 푸시된 커밋에 대해 rebase를 하면 강제 푸시가 필요하므로, 공유 브랜치에서는 사용하지 않는다.
 
@@ -587,7 +589,7 @@ git filter-repo --path big-file.zip --invert-paths
 bfg --delete-files big-file.zip
 ```
 
-히스토리를 다시 쓰는 작업이므로 강제 푸시가 필요하고, 모든 협업자가 다시 클론해야 한다.
+공유된 히스토리를 다시 쓰면 조율된 강제 갱신과 다른 clone의 정리가 필요하다. 재클론이 흔한 복구 방법이며, 기존 clone을 유지하려면 이전 객체·브랜치를 다시 밀어 넣지 않도록 공식 이전 절차에 맞춰 정리한다.
 
 ### 커밋 안에 비밀번호/API 키를 푸시한 경우
 
@@ -617,7 +619,7 @@ git revert -m 1 <merge-commit>
 # -m 1: 첫 번째 부모(머지를 수행했던 브랜치, mainline)를 기준으로 되돌림
 ```
 
-머지 커밋의 첫 번째 부모는 머지를 실행한 쪽 브랜치다. revert해도 히스토리상 "머지했다"는 사실 자체는 남으므로, 같은 브랜치를 나중에 다시 머지하려면 revert 커밋을 한 번 더 revert해야 한다([revert-a-faulty-merge 문서](https://git-scm.com/docs/howto/revert-a-faulty-merge)).
+머지 커밋의 첫 번째 부모는 머지를 실행한 쪽 브랜치다. revert해도 히스토리상 "머지했다"는 사실 자체는 남으므로, 그때 제거한 변경을 다시 포함하려면 revert 커밋을 다시 revert하거나 원래 변경을 새로운 커밋으로 재작성해야 한다. 이후 새 커밋만 merge하는 것은 가능하지만 이전에 merge했다가 취소한 변경은 자동으로 재적용되지 않는다([revert-a-faulty-merge 문서](https://git-scm.com/docs/howto/revert-a-faulty-merge)).
 
 ### detached HEAD 상태에서 커밋한 경우
 
@@ -695,6 +697,8 @@ git config --local user.name      # 로컬 값
 git config --list --show-origin   # 어디서 온 설정인지 함께 표시
 ```
 
+이 `user.name`/`user.email`은 커밋 작성자 메타데이터다. 원격 로그인 계정이나 접근 권한을 바꾸지 않는다. HTTPS credential과 SSH 키는 별도로 선택한다.
+
 ### Remote URL 변경
 
 ```bash
@@ -729,11 +733,13 @@ Host github-personal
     HostName github.com
     User git
     IdentityFile ~/.ssh/id_rsa_personal
+    IdentitiesOnly yes
 
 Host github-work
     HostName github.com
     User git
     IdentityFile ~/.ssh/id_rsa_work
+    IdentitiesOnly yes
 ```
 
 이후 remote URL은 호스트 별칭을 사용한다.
@@ -791,7 +797,7 @@ git stash push -m "메시지"          # 메시지와 함께
 git stash -u                       # untracked 파일 포함
 git stash list                     # 목록
 git stash show -p stash@{0}        # 상세
-git stash pop                      # 가장 최근 stash 적용 + 삭제
+git stash pop                      # 적용 성공 시 삭제. 충돌하면 stash는 남음
 git stash apply stash@{2}          # 특정 stash 적용 (보존)
 git stash drop stash@{1}           # 특정 stash 삭제
 git stash clear                    # 모든 stash 삭제
@@ -1025,15 +1031,18 @@ GitHub의 [github/gitignore](https://github.com/github/gitignore) 저장소에 �
 
 ## 게임 개발과 Git: 대용량 바이너리 에셋
 
-Git의 객체 모델은 텍스트에 최적화되어 있다. 바이너리 에셋(텍스처, 메시, 오디오, `.uasset`/`.unity` 등)은 세 가지 문제를 일으킨다. 첫째, 델타 압축이 거의 안 먹혀 수정할 때마다 파일 전체 크기만큼 히스토리가 자란다(한번 커밋된 객체는 영구 보존되므로 저장소가 단조 증가한다). 둘째, diff/merge가 불가능해 두 사람이 같은 에셋을 고치면 한쪽 작업은 반드시 버려진다. 셋째, clone이 모든 히스토리를 받으므로 수십 GB 저장소는 첫 클론부터 고통이다.
+대용량 게임 에셋은 객체 저장·전송과 병합에서 부담을 만든다. 압축된 텍스처·오디오는 델타 압축 효율이 낮을 수 있지만 모든 바이너리 변경이 항상 파일 전체 크기만큼 늘어나는 것은 아니다. 도달 가능한 과거 객체는 유지되지만 unreachable 객체는 GC로 정리될 수 있으므로 저장소 크기가 영구히 단조 증가하는 것도 아니다.
+
+텍스트인 Unity `.unity` 장면도 있고 전용 diff/merge 도구를 쓸 수 있는 형식도 있다. 반면 일반 텍스트 병합이 의미 없는 바이너리는 편집 충돌을 자동 결합하기 어려워 잠금이나 작업 분담이 중요하다. 일반 전체 clone은 히스토리를 받으므로 에셋 이력이 커지면 초기 전송 부담도 커진다.
 
 ### Git LFS
 
 [Git LFS](https://git-lfs.com/)는 대용량 파일을 저장소 밖 별도 스토리지에 두고, 저장소에는 해시와 크기만 적힌 작은 포인터 파일을 커밋한다. checkout 시점에 실제 파일을 받아온다.
 
 ```bash
-git lfs install                      # 저장소당 1회 (smudge/clean 필터 등록)
-git lfs track "*.png" "*.uasset"     # .gitattributes 에 filter=lfs 규칙 기록
+git lfs install                      # 기본: 사용자 필터 설정 + 현재 저장소 pre-push hook
+# 저장소 설정에만 필터를 둘 때: git lfs install --local
+git lfs track "*.png" "*.uasset" "*.umap"     # .gitattributes 에 filter=lfs 규칙 기록
 git add .gitattributes               # 추적 규칙 자체도 커밋
 git add Texture.png && git commit    # 이후는 평소처럼
 ```
@@ -1043,9 +1052,10 @@ git add Texture.png && git commit    # 이후는 평소처럼
 ```text
 *.png  filter=lfs diff=lfs merge=lfs -text
 *.uasset filter=lfs diff=lfs merge=lfs -text lockable
+*.umap filter=lfs diff=lfs merge=lfs -text lockable
 ```
 
-`lockable`을 붙이면 `git lfs lock Maps/Level01.umap`으로 파일 잠금을 선언할 수 있다. merge가 불가능한 바이너리에서는 "충돌을 해결"하는 대신 "충돌을 예방"하는 것이 유일한 전략이고, 잠금이 그 수단이다(잠그지 않은 파일은 읽기 전용으로 체크아웃된다).
+`lockable`을 붙이면 `git lfs lock Maps/Level01.umap`으로 파일 잠금을 선언할 수 있다. 의미 있는 자동 병합이 어려운 에셋에서는 작업 분담과 잠금으로 동시 편집 충돌을 줄일 수 있다(잠그지 않은 파일은 읽기 전용으로 체크아웃된다).
 
 주의할 점: LFS 추적을 시작해도 이미 일반 객체로 커밋된 과거 히스토리는 그대로다. 기존 저장소를 이전하려면 `git lfs migrate import --include="*.png"`로 히스토리를 다시 써야 하며, 이는 공유 브랜치 히스토리 재작성이므로 팀 전체 조율이 필요하다.
 
@@ -1057,7 +1067,7 @@ git add Texture.png && git commit    # 이후는 평소처럼
 
 ## 결론
 
-Git의 강점은 분산 구조와 가벼운 브랜치다. 모든 개발자가 전체 히스토리를 가지므로 단일 실패점이 없고, 브랜치 생성 비용이 사실상 0이므로 작은 단위로 자주 분기할 수 있다. 이 두 특성이 GitHub Flow나 Trunk-Based Development 같은 현대적 워크플로우의 기반이 된다.
+Git의 강점은 분산 구조와 가벼운 브랜치다. 일반적인 전체 clone은 히스토리를 복제하므로 서버 장애 중에도 기록과 탐색이 가능하고, 브랜치 생성 비용이 사실상 0이므로 작은 단위로 자주 분기할 수 있다. 이 두 특성이 GitHub Flow나 Trunk-Based Development 같은 현대적 워크플로우의 기반이 된다.
 
 명령어는 다양하지만 4개 영역(Working Directory, Staging, Local, Remote)과 4종류 객체(blob, tree, commit, tag), 그리고 브랜치는 포인터라는 사실을 이해하면 모든 동작이 일관되게 보인다. add는 Working Dir에서 Staging으로 이동시키고, commit은 Staging의 스냅샷으로 새 commit 객체를 만들며, push는 로컬 ref가 가리키는 객체들을 원격에 보낸다.
 
